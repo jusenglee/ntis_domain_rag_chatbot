@@ -42,6 +42,21 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
+FOLLOWUP_HINTS = (
+    "그 연구자",
+    "그 과제",
+    "그 연구",
+    "해당",
+    "이전",
+    "앞서",
+    "방금",
+    "저번",
+    "위 질문",
+    "앞의",
+    "상기",
+    "이어서",
+)
+
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -338,11 +353,18 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
     title_only = len(state.context) > 2
     prev_context_str = refine_documents_rule_based(state.prev_context, title_only=False)
+    question_text = state.messages[-1].content
+    is_followup = any(hint in question_text for hint in FOLLOWUP_HINTS)
+    if not is_followup:
+        history_str = "없음"
+        prev_context_str = "없음"
 
     system_prompt = (
         "당신은 지식 충분성 판단 전문가입니다.\n"
         "이 시스템에서 사용되는 용어는 모두 국가 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
-        "[대화 이력]과 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
+        "[대화 이력]과 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n"
+        "현재 질문에 명시되지 않은 연구자, 기관, 과제명은 검색 쿼리에 포함하지 않습니다.\n"
+        "다만 질문에 '해당/이전/앞서/그 연구자' 등으로 명시적인 후속 참조가 있으면 예외로 허용합니다.\n\n"
         "판단 기준:\n"
         "1. requires_new_knowledge:\n"
         "   - low: [참고 문서] 만으로 충분히 답변 가능\n"
