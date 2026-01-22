@@ -17,11 +17,29 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .constants import (
+    RARE_TOKEN_RE,
+    TAG_PJT_INFO,
+    TAG_PJT_MP,
+    TAG_PJT_ORG,
+    PROJECT_TAGS,
+    PERF_TAGS,
+    TAG_RI_PAPER,
+    TAG_RI_IPR,
+    TAG_RI_RSCH_RPT,
+    TAG_RI_FCLT_EQUIP,
+    TAG_RI_TECH_INFO,
+    TAG_RI_SW,
+    TAG_RI_NVR,
+    TAG_RI_COMPOUND,
+    TAG_RI_ORGSM_INFO,
+    TAG_RI_ORGSM_RES,
+)
+
 # -----------------------------
 # Regex
 # -----------------------------
 _YEAR_RE = re.compile(r"(19\d{2}|20\d{2})")
-_RARE_TOKEN_RE = re.compile(r"[0-9]|[-_:]")
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 _ISSN_RE = re.compile(r"\b\d{4}-\d{3}[\dXx]\b")
@@ -64,7 +82,7 @@ def _is_rare_token(tok: str) -> bool:
     if not t:
         return False
     tl = t.lower()
-    if _RARE_TOKEN_RE.search(tl):
+    if RARE_TOKEN_RE.search(tl):
         return True
     has_alpha = any("a" <= ch <= "z" for ch in tl)
     has_digit = any(ch.isdigit() for ch in tl)
@@ -126,33 +144,6 @@ TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", 
 COUNT_CUES = ["건수", "몇건", "통계", "count", "총 몇", "총몇", "몇 개", "몇개"]
 DETAIL_CUES = ["상세", "세부", "자세히", "정보", "내용", "설명", "프로필"]
 LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘"]
-
-
-# -----------------------------
-# Tag constants (payload.tag)
-# -----------------------------
-# project tags
-TAG_PJT_INFO = "IRD_NAI_PJT_INFO"
-TAG_PJT_MP   = "IRD_NAI_PJT_MP"
-TAG_PJT_ORG  = "IRD_NAI_PJT_ORG"
-PROJECT_TAGS = {TAG_PJT_INFO, TAG_PJT_MP, TAG_PJT_ORG}
-
-# perf tags
-TAG_RI_PAPER        = "IRD_NAI_RI_PAPER"
-TAG_RI_IPR          = "IRD_NAI_RI_IPR"
-TAG_RI_SW           = "IRD_NAI_RI_SW"
-TAG_RI_NVR          = "IRD_NAI_RI_NVR"
-TAG_RI_ORGSM_INFO   = "IRD_NAI_RI_ORGSM_INFO"
-TAG_RI_ORGSM_RES    = "IRD_NAI_RI_ORGSM_RESOURCE"
-TAG_RI_COMPOUND     = "IRD_NAI_RI_COMPOUND"
-TAG_RI_RSCH_RPT     = "IRD_NAI_RI_RSCH_RPT"
-TAG_RI_FCLT_EQUIP   = "IRD_NAI_RI_FCLT_EQUIP"
-TAG_RI_TECH_INFO    = "IRD_NAI_RI_TECH_INFO"
-
-PERF_TAGS = {
-    TAG_RI_PAPER, TAG_RI_IPR, TAG_RI_SW, TAG_RI_NVR, TAG_RI_ORGSM_INFO, TAG_RI_ORGSM_RES,
-    TAG_RI_COMPOUND, TAG_RI_RSCH_RPT, TAG_RI_FCLT_EQUIP, TAG_RI_TECH_INFO
-}
 
 
 def pick_perf_tag_filters(q: str) -> List[str]:
