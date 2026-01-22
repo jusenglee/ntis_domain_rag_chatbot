@@ -479,13 +479,33 @@ def _to_text(v: object) -> str:
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
 
+def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
+    title = _to_text(pl.get("title") or "")
+    meta_title = _to_text(
+        meta.get("국문과제명")
+        or meta.get("성과명")
+        or meta.get("논문명")
+        or meta.get("title")
+        or ""
+    )
+    if not title:
+        return meta_title
+    pjt_id = _to_text(pl.get("pjt_id") or meta.get("PJT_ID") or "")
+    if meta_title and (
+        title.isdigit()
+        or title.lower().startswith("ntis:")
+        or (pjt_id and title == pjt_id)
+    ):
+        return meta_title
+    return title or meta_title
+
 def _payload_text_bundle(p: Any) -> Dict[str, str]:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         pl = {}
     meta = _get_meta(pl)
 
-    title = _to_text(pl.get("title") or meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명"))
+    title = _prefer_meta_title(pl, meta)
     meta_flat = _to_text(pl.get("meta_flat") or meta.get("meta_flat") or "")
     answer_public = _to_text(pl.get("answer_public") or pl.get("content") or meta.get("answer_public") or "")
 
@@ -576,6 +596,16 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
     for ot in org_terms[:4]:
         if ot.lower() in hay:
             sc += 60.0
+        elif strict_ids:
+            sc -= 10.0
+
+    # people
+    people_terms = [t.strip() for t in (it.people_terms or []) if t.strip()]
+    for pt in people_terms[:4]:
+        if pt.lower() in hay:
+            sc += 70.0
+        elif strict_ids:
+            sc -= 15.0
 
     # perf tag filters (exact) - base_route와 무관하게 적용
     if it.perf_tag_filters:
@@ -628,6 +658,13 @@ def _final_rerank(
 ) -> List[Any]:
     if not cands:
         return []
+
+    if mode in ("search", "lookup") and it.people_terms and base_route == "people":
+        terms = [t.strip() for t in (it.people_terms or []) if t.strip()][:2]
+        if terms:
+            cands = [p for p in cands if _must_contain_terms(p, terms)]
+            if not cands:
+                return []
 
     # mode별 가중치 (경험적으로 튜닝 가능)
     if mode == "lookup":
@@ -1187,7 +1224,7 @@ def _run_rag_with_vectors(
                 # head term 강제 포함(people/org head일 때만, 옵션)
                 head_terms: List[str] = []
                 if hop1_kind == "people":
-                    head_terms = _extract_quoted_terms(q)
+                    head_terms = _extract_quoted_terms(q) or list(it.people_terms or [])
                     if not head_terms:
                         m = re.search(r"([가-힣]{2,4})\s*(?:이|가|은|는)?\s*(?:참여인력|참여연구|연구자|연구원)", q)
                         if m:
