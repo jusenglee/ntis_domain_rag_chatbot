@@ -588,6 +588,18 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
                 sc += 90.0
                 break
 
+    # project tag filters (exact) - base_route와 무관하게 적용
+    if it.project_tag_filters:
+        pl = getattr(p, "payload", None) or {}
+        if not isinstance(pl, dict):
+            pl = {}
+        meta = _get_meta(pl)
+        tag = str(pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or "")
+        for t in list(it.project_tag_filters)[:8]:
+            if str(t) == tag:
+                sc += 80.0
+                break
+
     return float(sc)
 
 def _family_bonus(p: Any, base_route: str) -> float:
