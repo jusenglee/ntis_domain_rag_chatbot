@@ -1218,7 +1218,7 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(join_ids, q)
+                hop2_filter = build_perf_filter(q, join_ids)
             else:
                 hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
 
