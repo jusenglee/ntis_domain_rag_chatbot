@@ -1126,6 +1126,8 @@ def _run_rag_with_vectors(
                 log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_pjt_ids", join_ids=join_ids[:10])
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+                if hop1_kind == "org" and org_filter:
+                    hop1_filter = _and_filter(hop1_filter, org_filter)
 
                 log_kv(
                     "RAG.JOIN.HOP1",
@@ -1234,7 +1236,7 @@ def _run_rag_with_vectors(
                 hop2_filter = build_perf_filter(q, join_ids)
             else:
                 hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
-                if hop2_kind == "project" and org_filter:
+                if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
             log_kv(
