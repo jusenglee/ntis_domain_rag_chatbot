@@ -9,9 +9,9 @@ import re
 # -----------------------------
 KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name_norm").strip() or "org_name_norm")
 
-COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "NTIS_PROJECT").strip() or "NTIS_PROJECT")
-COL_PERF = (os.getenv("RAG_COL_PERF", "NTIS_PREF").strip() or "NTIS_PREF")
-COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "NTIS_SUPPORTS").strip() or "NTIS_SUPPORTS")
+COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project").strip() or "ntis_project")
+COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf").strip() or "ntis_perf")
+COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_supports").strip() or "ntis_supports")
 
 # -----------------------------
 # Regex
