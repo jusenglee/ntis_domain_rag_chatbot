@@ -39,6 +39,29 @@ def log_section(title, content):
     footer = f"\033[96m{'='*30}\033[0m\n"
     logger.info(f"{header}\n{content}\n{footer}")
 
+def format_rag_search_details(query, hint, docs, conversation_id, question):
+    doc_details = []
+    for i, doc in enumerate(docs, 1):
+        ref = doc.metadata.get("ref", {})
+        doc_details.append({
+            "rank": i,
+            "tag": ref.get("tag"),
+            "id": ref.get("source_pk"),
+            "title": ref.get("title"),
+            "score": ref.get("score"),
+            "project": doc.metadata.get("국문과제명", ref.get("title")),
+            "researcher": doc.metadata.get("인물명", ""),
+            "institute": doc.metadata.get("소속기관명", ""),
+        })
+
+    payload = {
+        "coq": f"{conversation_id}{question}",
+        "query": query,
+        "hint": hint,
+        "documents": doc_details,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
@@ -503,10 +526,15 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             )
 
         log_section("RAG SEARCH",
-                    f"coq: {state.conversation_id}{state.question}"
+                    f"coq: {state.conversation_id}{state.question}\n"
                     f"Query: {query}\n"
                     f"Found: {len(docs)} docs\n"
                     f"{'─'*40}\n" + "\n".join(doc_previews))
+
+        log_section(
+            "RAG SEARCH DETAILS",
+            format_rag_search_details(query, hint, docs, state.conversation_id, state.question)
+        )
 
         return {"context": docs}
 
