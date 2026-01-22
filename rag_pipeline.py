@@ -20,6 +20,8 @@ import os
 import re
 import time
 import inspect
+import json
+from pprint import pformat
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,9 +72,146 @@ from rag_parts.filters import (
     build_perf_filter as build_perf_filter,
 )
 
+# =====================================================================
+# Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
+# =====================================================================
+
+def _rag_debug_on() -> bool:
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in ("1", "true", "yes", "y")
+
+def _rag_color_on() -> bool:
+    # 파일 로깅이면 ANSI가 지저분할 수 있으니 기본 OFF
+    return str(os.getenv("RAG_LOG_COLOR", "0")).strip().lower() in ("1", "true", "yes", "y")
+
+def _clip_text(s: str, max_chars: int) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    if max_chars > 0 and len(s) > max_chars:
+        return s[: max_chars - 1] + "…(trunc)"
+    return s
+
+def _safe_json(obj: object) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        return pformat(obj, width=120, compact=True)
+
+def log_section(title: str, content: object = None, *, level: str = "info", max_chars: int = None) -> None:
+    """
+    RAG_DEBUG=1 일 때만 출력.
+    - content: str/dict/list/anything
+    - max_chars: 환경변수 RAG_LOG_MAX_CHARS(기본 6000)로 제한
+    """
+    if not _rag_debug_on():
+        return
+
+    lvl = (level or "info").lower().strip()
+    log_fn = getattr(logger, lvl, logger.info)
+
+    max_chars = int(max_chars) if max_chars is not None else int(os.getenv("RAG_LOG_MAX_CHARS", "6000"))
+
+    if content is None:
+        body = ""
+    elif isinstance(content, str):
+        body = content
+    else:
+        body = _safe_json(content)
+
+    body = _clip_text(body, max_chars)
+
+    if _rag_color_on():
+        header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
+        footer = f"\033[96m{'='*36}\033[0m\n"
+    else:
+        header = f"\n{'='*10} [{title}] {'='*10}"
+        footer = f"{'='*36}\n"
+
+    log_fn(f"{header}\n{body}\n{footer}")
+
+def log_kv(title: str, *, level: str = "info", **kwargs) -> None:
+    """key=value를 한 섹션으로 예쁘게."""
+    if not _rag_debug_on():
+        return
+    payload = {}
+    for k, v in kwargs.items():
+        if isinstance(v, str):
+            payload[k] = _clip_text(v, int(os.getenv("RAG_LOG_KV_STR_MAX", "240")))
+        else:
+            payload[k] = v
+    log_section(title, payload, level=level)
+
+def _point_summary(p: Any) -> Dict[str, Any]:
+    pl = getattr(p, "payload", None) or {}
+    if not isinstance(pl, dict):
+        pl = {}
+    meta = pl.get("meta") if isinstance(pl.get("meta"), dict) else {}
+
+    def pick(*vals):
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s:
+                return s
+        return ""
+
+    title = pick(
+        pl.get("title"),
+        meta.get("국문과제명"), meta.get("과제명"),
+        meta.get("성과명"), meta.get("논문명"),
+        meta.get("title"),
+    )
+
+    tag = pick(pl.get("tag"), meta.get("doc_type"), meta.get("source_table"))
+    doc_id = pick(pl.get("doc_id"), getattr(p, "id", None))
+    col = pick(pl.get("_collection"))
+
+    sc = getattr(p, "score", None)
+    try:
+        sc = float(sc) if sc is not None else None
+    except Exception:
+        sc = None
+
+    return {
+        "col": col,
+        "doc_id": doc_id,
+        "tag": tag,
+        "score": sc,
+        "_rrf": pl.get("_rrf"),
+        "_final_total": pl.get("_final_total"),
+        "_final_rrf": pl.get("_final_rrf"),
+        "_final_kw": pl.get("_final_kw"),
+        "_final_f": pl.get("_final_f"),
+        "title": _clip_text(title, int(os.getenv("RAG_LOG_TITLE_MAX", "180"))),
+    }
+
+def log_top_points(title: str, points: List[Any], *, topn: int = None, level: str = "info") -> None:
+    """후보/리랭크 결과 TopN 요약."""
+    if not _rag_debug_on():
+        return
+    topn = int(topn) if topn is not None else int(os.getenv("RAG_LOG_TOPN", "8"))
+    arr = []
+    for p in (points or [])[: max(0, topn)]:
+        arr.append(_point_summary(p))
+    log_section(title, arr, level=level)
+
+# =====================================================================
+
 # -------------------------
 # Lightweight list/stats context
 # -------------------------
+def _classify_query_compat(q: str, kws: List[str], *, domain_hint: Optional[str], hint: Optional[Dict[str, Any]] = None) -> "QueryIntent":
+    """query_intent.classify_query signature 호환 래퍼."""
+    try:
+        sig = inspect.signature(_classify_query)
+        if hint is not None and "hint" in sig.parameters:
+            return _classify_query(q, kws, domain_hint=domain_hint, hint=hint)
+        return _classify_query(q, kws, domain_hint=domain_hint)
+    except Exception:
+        return _classify_query(q, kws, domain_hint=domain_hint)
+
+
 def _clean_one_line(s: object, max_len: int = 160) -> str:
     if s is None:
         return ""
@@ -148,7 +287,7 @@ def build_context_list_light(
             continue
 
         if kind == "people":
-            name = _pick_first(meta.get("참여연구자명"), meta.get("연구자명"), meta.get("성명"), meta.get("이름"), meta.get("NAME"), meta.get("name"))
+            name = _pick_first(meta.get("인물명"), meta.get("참여연구자명"), meta.get("연구자명"), meta.get("성명"), meta.get("이름"), meta.get("NAME"), meta.get("name"))
             role = _pick_first(meta.get("역할"), meta.get("참여구분"), meta.get("참여유형"), meta.get("역할명"))
             org = _pick_first(meta.get("소속기관명"), meta.get("소속"), meta.get("기관명"), meta.get("참여기관명"))
             pjt_id = _pjt_id(meta, pl)
@@ -380,6 +519,33 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         sc += 0.4 * min(_count_term_hits(tb["meta_kv"], kw), 2)
     return float(sc)
 
+def _flatten_ids_from_intent(it: Any) -> List[str]:
+    # ids_flat 우선, 없으면 ids_map/ids(dict) 평탄화
+    flat = getattr(it, "ids_flat", None)
+    if isinstance(flat, list) and flat:
+        out = []
+        for x in flat:
+            s = str(x).strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+
+    m = getattr(it, "ids_map", None)
+    if not isinstance(m, dict):
+        m = getattr(it, "ids", None)
+    if not isinstance(m, dict):
+        return []
+
+    out = []
+    for _, lst in m.items():
+        if not isinstance(lst, list):
+            continue
+        for x in lst:
+            s = str(x).strip()
+            if s and s not in out:
+                out.append(s)
+    return out
+
 def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title"], tb["meta_flat"], tb["meta_kv"], tb["answer_public"]]).lower()
@@ -387,7 +553,7 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
     sc = 0.0
 
     # IDs
-    flat_ids = _flatten_ids(it.ids)
+    flat_ids = _flatten_ids_from_intent(it)
     for _id in flat_ids[:10]:
         if _id.lower() in hay:
             sc += 120.0
@@ -406,8 +572,8 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
         if ot.lower() in hay:
             sc += 60.0
 
-    # perf tag filters (exact)
-    if base_route == "perf" and it.perf_tag_filters:
+    # perf tag filters (exact) - base_route와 무관하게 적용
+    if it.perf_tag_filters:
         pl = getattr(p, "payload", None) or {}
         if not isinstance(pl, dict):
             pl = {}
@@ -416,6 +582,7 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
         for t in list(it.perf_tag_filters)[:8]:
             if str(t) == tag:
                 sc += 90.0
+                break
 
     return float(sc)
 
@@ -491,7 +658,17 @@ class QueryPlan:
     filters: Dict[str, Any]
 
 def _has_any_ids(it: QueryIntent) -> bool:
-    return bool(it.ids) and any((v for v in (it.ids or {}).values()))
+    ids_map = getattr(it, "ids_map", None)
+    if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
+        return True
+    ids_flat = getattr(it, "ids_flat", None)
+    if isinstance(ids_flat, list) and len(ids_flat) > 0:
+        return True
+    # backward compat
+    legacy = getattr(it, "ids", None)
+    if isinstance(legacy, dict) and any(v for v in legacy.values() if v):
+        return True
+    return False
 
 def _build_plan(it: QueryIntent) -> QueryPlan:
     action = it.action
@@ -527,21 +704,12 @@ def _build_plan(it: QueryIntent) -> QueryPlan:
         filters={},
     )
 
-def _flatten_ids(ids: Dict[str, List[str]]) -> List[str]:
-    out: List[str] = []
-    for _, lst in (ids or {}).items():
-        for x in (lst or []):
-            s = str(x).strip()
-            if s and s not in out:
-                out.append(s)
-    return out
 # -------------------------
-# 2-hop JOIN
+# 2-hop JOIN helpers
 # -------------------------
 def _extract_quoted_terms(q: str) -> List[str]:
     if not q:
         return []
-    # "..." 또는 '...' 내부
     out = re.findall(r'"([^"]+)"', q) + re.findall(r"'([^']+)'", q)
     return [t.strip() for t in out if t.strip()]
 
@@ -572,7 +740,10 @@ def _run_rag_with_vectors(
 
     q = normalize_query(query)
     if not q:
-        return RagResult(stack=stack, keywords=[], hits=[], reranked_hits=[], context="", refs=[], timings={"total": 0.0, "fallback_chat": 1.0, "fallback_reason": "empty_query"})
+        return RagResult(
+            stack=stack, keywords=[], hits=[], reranked_hits=[], context="", refs=[],
+            timings={"total": 0.0, "fallback_chat": 1.0, "fallback_reason": "empty_query"}
+        )
 
     # shared objects
     t0 = time.time()
@@ -590,16 +761,21 @@ def _run_rag_with_vectors(
         return getattr(obj, name, default)
 
     def _category_to_base_route(cats: List[Any]) -> str:
-        s = {str(c) for c in (cats or [])}
-        if s == {"PROJECT"}:
+        norm = set()
+        for c in (cats or []):
+            s = str(c)
+            s = s.replace("ContentCategory.", "").strip().lower()
+            norm.add(s)
+
+        if norm == {"project"}:
             return "project"
-        if s == {"PERFORMANCE"}:
+        if norm == {"performance"}:
             return "perf"
-        if s == {"RESEARCHER"}:
+        if norm == {"researcher"}:
             return "people"
-        if s == {"QNA"}:
+        if norm in ({"qna"}, {"qnt"}, {"qna "}, {"q&a"}):
             return "support"
-        # 복수면 SEARCH로 넓게
+
         return "mixed"
 
     def _coerce_int(x: Any, default: int) -> int:
@@ -608,27 +784,7 @@ def _run_rag_with_vectors(
         except Exception:
             return default
 
-    # --- hint 적용 ---
-    qa = hint
-    qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
-
-    if qa and qa_conf >= float(os.getenv("RAG_HINT_MIN_CONF", "0.55")):
-        # 1) 검색에 쓸 텍스트는 retrieval_query 우선
-        hinted_q = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or normalize_query(query)
-
-        # 2) base_route는 category로 강제(여기서 “분석” 대부분 끝)
-        hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
-
-        # 3) limit은 topK/ctx를 직접 제한하는데 사용
-        hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
-
-        # 4) keywords는 raw query가 아니라 retrieval_query에서 뽑는 게 더 안정적
-        q_for_retrieval = hinted_q
-    else:
-        q_for_retrieval = normalize_query(query)
-        hinted_base = None
-        hinted_limit = 0
-
+    # --- hint 적용 (single-pass) ---
     qa = hint
     qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
 
@@ -642,8 +798,23 @@ def _run_rag_with_vectors(
     else:
         q_for_retrieval = q
 
-    # ✅ 여기서부터는 q_for_retrieval을 표준 q로 쓰자
+    # ✅ 표준 q 확정
     q = q_for_retrieval
+
+    # -------------------------
+    # ids_map / ids_flat 안전 접근 유틸
+    # -------------------------
+    log_kv(
+        "RAG.INPUT",
+        raw_query=query,
+        normalized=q,
+        hint_conf=qa_conf,
+        hinted_base=hinted_base,
+        hinted_limit=hinted_limit,
+        model_name=model_name,
+        stack=stack,
+        vector_names=vector_names,
+    )
 
     # keywords
     t0 = time.time()
@@ -651,7 +822,8 @@ def _run_rag_with_vectors(
     timings["kw_det"] = time.time() - t0
 
     # intent (hint는 query_intent에서 흡수)
-    it = _classify_query(q, kws, domain_hint=(hinted_base if hinted_base not in (None, "mixed") else None), hint=hint)
+    domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support") else None
+    it = _classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -665,12 +837,42 @@ def _run_rag_with_vectors(
     lexical_fields_eff = list(lexical_fields) if lexical_fields is not None else list(preset.lexical_fields)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
 
+    if hinted_limit > 0:
+        preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
+        preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
+        preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
     # org terms/filter (필요 시)
     org_terms = list(it.org_terms or []) or _extract_org_terms(q, kws) or []
     org_filter = _build_org_filter(org_terms) if org_terms else None
 
     # perf tag filter (필요 시)
     tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
+
+    # -------------------------
+    # 상세 로그: INTENT / PRESET / KEYWORDS
+    # -------------------------
+    log_section("RAG.KEYWORDS", kws)
+    log_kv(
+        "RAG.INTENT",
+        action=action,
+        base_route=base_route,
+        relation=relation,
+        domain_hint=domain_hint,
+        is_id_query=getattr(it, "is_id_query", None),
+        years=getattr(it, "years", None),
+        org_terms=list(getattr(it, "org_terms", []) or []),
+        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        ids_flat=_flatten_ids_from_intent(it)[:20],
+    )
+    log_kv(
+        "RAG.PRESET/PLAN.PRE",
+        top_k_dense=int(preset.top_k_dense),
+        top_k_lex_cand=int(preset.top_k_lex_cand),
+        top_k_lex=int(preset.top_k_lex),
+        w_lex=float(preset.w_lex),
+        max_ctx_items=int(preset.max_ctx_items),
+        ctx_budget=int(ctx_budget),
+    )
 
     # precompute embedding cache
     pre_vecs_cache: Dict[str, Dict[str, _PrecomputedEmbedding]] = {}
@@ -705,12 +907,22 @@ def _run_rag_with_vectors(
     # plan
     plan = _build_plan(it)
 
+    log_kv(
+        "RAG.PRESET/PLAN.POST",
+        mode=plan.mode,
+        base_route=plan.base_route,
+        action=plan.action,
+        relation=plan.relation,
+        target_cols=plan.target_collections,
+    )
+
     # -------------------------
     # JOIN mode (2-hop)
     # -------------------------
     if plan.mode == "join" and relation:
         t_hop0 = time.time()
-        pjt_ids: List[str] = [str(x).strip() for x in (it.ids or {}).get("pjt_id", []) if str(x).strip()]
+        pjt_ids = (getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}).get("pjt_id") or []
+
 
 
         # relation mapping
@@ -735,6 +947,22 @@ def _run_rag_with_vectors(
             hop1_kind, hop2_kind = "project", "org"
             hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], [TAG_PJT_ORG]
             hop2_label = "참여기관 목록"
+        elif relation == ("people", "perf"):
+            # people -> perf (연구자/참여인력의 성과)
+            hop1_col, hop2_col = COL_PROJECT, COL_PERF
+            hop1_kind, hop2_kind = "people", "perf"
+            hop1_tag_filters = [TAG_PJT_MP]
+            hop2_tag_filters = []  # perf 유형은 build_perf_filter에서 q 기반으로 결정
+            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
+
+        elif relation == ("org", "perf"):
+            # org -> perf (기관의 성과)
+            hop1_col, hop2_col = COL_PROJECT, COL_PERF
+            hop1_kind, hop2_kind = "org", "perf"
+            hop1_tag_filters = [TAG_PJT_ORG]
+            hop2_tag_filters = []
+            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
+
         elif relation == ("perf", "project"):
             hop1_col, hop2_col = COL_PERF, COL_PROJECT
             hop1_kind, hop2_kind = "perf", "project"
@@ -773,7 +1001,11 @@ def _run_rag_with_vectors(
             # Hop1 query sanitize (people/org head에서 잡음 제거)
             hop1_q = q
             if hop1_kind in ("people", "org"):
-                hop1_q = _sanitize_query_by_terms(q, remove_terms=list(it.remove_terms_for_head or [])) if hasattr(it, "remove_terms_for_head") else hop1_q
+                remove_terms = list(getattr(it, 'remove_terms_for_head', []) or [])
+                if remove_terms:
+                    hop1_q2 = _sanitize_query_by_terms(q, remove_terms=remove_terms)
+                    if hop1_q2:
+                        hop1_q = hop1_q2
 
             hop2_q = q
 
@@ -783,8 +1015,18 @@ def _run_rag_with_vectors(
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
             if pjt_ids:
                 join_ids = pjt_ids[:]
+                log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_pjt_ids", join_ids=join_ids[:10])
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+
+                log_kv(
+                    "RAG.JOIN.HOP1",
+                    hop1_col=hop1_col, hop1_kind=hop1_kind, hop1_q=hop1_q,
+                    hop1_tag_filters=hop1_tag_filters,
+                    hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    hop1_k_base=hop1_k_base,
+                    hop1_keep=hop1_keep,
+                )
 
                 vec_avail = _named_vectors_in_collection(qdr, hop1_col)
                 use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
@@ -849,6 +1091,13 @@ def _run_rag_with_vectors(
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
 
+                log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
+                log_section("RAG.JOIN.JOIN_IDS", join_ids[: min(len(join_ids), 30)])
+                log_kv(
+                    "RAG.JOIN.HOP1.TIMINGS",
+                    **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
+                )
+
             # Hop1 context
             hop1_ctx, hop1_refs = ("", [])
             if hop1_top:
@@ -870,10 +1119,20 @@ def _run_rag_with_vectors(
                 return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=hop1_refs, timings=timings)
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
-            if relation == ("project", "perf"):
+            if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(join_ids, q)
             else:
                 hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
+
+            log_kv(
+                "RAG.JOIN.HOP2",
+                hop2_col=hop2_col, hop2_kind=hop2_kind, hop2_q=hop2_q,
+                hop2_tag_filters=hop2_tag_filters,
+                hop2_filter=str(hop2_filter) if hop2_filter is not None else None,
+                hop2_k_base=hop2_k_base,
+                hop2_keep=hop2_keep,
+                join_ids_preview=join_ids[:10],
+            )
 
             vec_avail2 = _named_vectors_in_collection(qdr, hop2_col)
             use_vecs_h2 = [v for v in vector_names if (not isinstance(vec_avail2, set) or v in vec_avail2)]
@@ -922,6 +1181,12 @@ def _run_rag_with_vectors(
             )
             hop2_reranked = _dedup_by_doc_id(hop2_reranked)
             hop2_top = hop2_reranked[: max(1, hop2_keep)]
+
+            log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")))
+            log_kv(
+                "RAG.JOIN.HOP2.TIMINGS",
+                **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
+            )
 
             # Hop2 context
             if action in ("list", "stats", "download"):
@@ -981,21 +1246,33 @@ def _run_rag_with_vectors(
         if plan.mode != "lookup":
             return None
 
-    ids_map = getattr(it, "ids_map", {}) or {}
-    pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-    if pjt_ids:
-        # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-        return build_join_filter(pjt_ids, tag_filters=None)
+        ids_map = getattr(it, "ids_map", {}) or {}
+        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
+        if pjt_ids:
+            # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
+            return build_join_filter(pjt_ids, tag_filters=None)
 
-    # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
-    if col == COL_PERF and tag_filter:
-        return tag_filter
+        # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
+        if col == COL_PERF and tag_filter:
+            return tag_filter
 
-    # (선택) org_filter는 project 컬렉션에서만
-    if col == COL_PROJECT and org_filter:
-        return org_filter
+        # (선택) org_filter는 project 컬렉션에서만
+        if col == COL_PROJECT and org_filter:
+            return org_filter
 
-    return None
+        # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
+        if col == COL_PROJECT:
+            if base_route == "people":
+                return _build_tag_only_filter([TAG_PJT_MP])
+            if base_route == "org":
+                return _build_tag_only_filter([TAG_PJT_ORG])
+            if base_route == "project":
+                # 프로젝트 목록/상세 조회면 INFO로 제한
+                return _build_tag_only_filter([TAG_PJT_INFO])
+
+        if col == COL_PERF and base_route == "perf" and tag_filter:
+            return tag_filter
+        return None
 
 
     # retrieve each collection
@@ -1008,6 +1285,19 @@ def _run_rag_with_vectors(
 
         lf, lw = _lex_params_for_collection(col)
         qfilter = _server_filter_for_col(col)
+
+        log_kv(
+            "RAG.COL.RETRIEVE",
+            col=col,
+            mode=plan.mode,
+            use_dense_k=use_dense_k,
+            topk_lex_cand=topk_lex_cand,
+            topk_lex=topk_lex,
+            qfilter=str(qfilter) if qfilter is not None else None,
+            lex_fields=lf,
+            lex_w_preview={k: float(lw.get(k)) for k in list(lw.keys())[:8]},
+            dense_vecs=list(emb_map_col.keys()),
+        )
 
         local_timings: Dict[str, float] = {}
         sr = _call_dense_retrieve_hybrid_multi(
@@ -1050,6 +1340,15 @@ def _run_rag_with_vectors(
             "total": float(local_timings.get("total", 0.0)),
         }
 
+        log_kv(
+            "RAG.COL.STATS",
+            col=col,
+            dense_hits=int(d_hit),
+            lex_hits=int(l_hit),
+            best_dense=float(best_dense) if best_dense is not None else -1.0,
+            timings=local_timings,
+        )
+
     timings["dense_search"] = time.time() - t0
 
     # federated RRF merge sources
@@ -1058,6 +1357,8 @@ def _run_rag_with_vectors(
         for vname, lst in (sr.get("dense") or {}).items():
             sources.append(_RankSource(name=f"{col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
         sources.append(_RankSource(name=f"{col}:lex", weight=float(preset.w_lex), points=sr.get("lexical") or []))
+
+    log_section("RAG.PER_COL_STATS", per_col_stats)
 
     t0 = time.time()
     merged_rrf = _rrf_merge(
@@ -1068,7 +1369,9 @@ def _run_rag_with_vectors(
     merged_rrf = _dedup_by_doc_id(merged_rrf)
     timings["rrf_merge"] = time.time() - t0
 
-    # final rerank (mode = search / lookup)
+    log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
+
+    # final rerank
     t0 = time.time()
     final_keep = int(os.getenv("RAG_RERANK_K", "80"))
     reranked = _final_rerank(
@@ -1082,6 +1385,8 @@ def _run_rag_with_vectors(
     )
     reranked = _dedup_by_doc_id(reranked)
     timings["final_rerank"] = time.time() - t0
+
+    log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
     # fallback policy
     fallback_chat = False
@@ -1104,6 +1409,14 @@ def _run_rag_with_vectors(
 
     timings["build_context"] = time.time() - t0
     timings["total"] = time.time() - t_all0
+
+    log_kv(
+        "RAG.CTX",
+        ctx_len=len(context or ""),
+        refs=len(refs or []),
+        max_items=int(preset.max_ctx_items),
+        fallback_chat=fallback_chat,
+    )
 
     # merged raw hits (for trace)
     merged_hits: List[Any] = []
@@ -1153,6 +1466,6 @@ def run_rag_once(query: str, model_name: str = DEFAULT_MODEL_NAME, hint: Any = N
         lexical_field_weights=None,
     )
 
-def run_rag_ab_compare(query: str, model_name: str = DEFAULT_MODEL_NAME) -> Dict[str, RagResult]:
-    res_m = run_rag_once(query=query, model_name=model_name)
+def run_rag_ab_compare(query: str, model_name: str = DEFAULT_MODEL_NAME, hint: Any = None) -> Dict[str, RagResult]:
+    res_m = run_rag_once(query=query, model_name=model_name, hint=hint)
     return {"M": res_m}

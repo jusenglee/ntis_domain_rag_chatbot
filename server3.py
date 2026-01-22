@@ -85,7 +85,7 @@ class ContentCategory(str, Enum):
     PROJECT = "project"          # 과제/연구개발
     RESEARCHER = "researcher"    # 연구자
     PERFORMANCE = "performance"  # 성과
-    QNA = "qnt"                  # 질의응답/매뉴얼
+    QNA = "qna"                  # 질의응답/매뉴얼
     ETC = "etc"                  # 기타
 
 class Researcher(BaseModel):
@@ -403,14 +403,15 @@ class CustomRAGRetriever(BaseModel):
     """RAG Pipeline을 Tool로 래핑"""
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
-    route_override: Optional[str] = None
+
+    hint: Optional[Dict[str, Any]] = None
 
     class Config:
         arbitrary_types_allowed = True
 
     def retrieve(self, query: str) -> List[Document]:
         """동기 검색 함수"""
-        res_map = run_rag_ab_compare(query=query, model_name=self.model_name, route_override=self.route_override)
+        res_map = run_rag_ab_compare(query=query, model_name=self.model_name, hint=self.hint)
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
         hits = getattr(res_m, "reranked_hits", []) or []
@@ -463,83 +464,26 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
     try:
 
-        query = ks.retrieval_query
-        search_num = qa.limit
+        query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or state.question
+        search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
 
-        # category 기반 라우팅 힌트 -> rag_pipeline으로 전달 (컬렉션만 강제)
-        route_override: Optional[str] = None
-        cat = (getattr(qa, "category", "") or "") if qa is not None else ""
-        q_for_route = (query or (state.messages[-1].content if getattr(state, "messages", None) else "") or "").strip()
+        hint = {
+            "coq": f"{state.conversation_id}{state.question}",
+            "category": [c.value if hasattr(c, "value") else str(c) for c in (qa.category or [])] if qa else [],
+            "researchers": [
+                {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
+            ] if qa else [],
+            "limit": int(search_num),
+            "history_summary": (qa.history_summary if qa else ""),
+            "retrieval_query": query,
+            "confidence": float(qa.confidence if qa else 0.0),
+        }
 
-        if "과제" in cat:
-            route_override = "project"
-        elif "성과" in cat:
-            route_override = "perf"
-        elif ("질의" in cat) or ("응대" in cat) or ("QNA" in cat) or ("manual" in cat) or ("메뉴얼" in cat):
-            route_override = "support"
-
-        # 과제/성과 카테고리에서 관계(2-hop) 질의면 rag_pipeline에 힌트 전달
-        tl = q_for_route.lower()
-
-        if route_override == "project":
-            # project -> perf
-            perf_cues = [
-                "성과", "논문", "특허", "연구보고서", "보고서", "시설", "장비",
-                "소프트웨어", "신품종", "생명정보", "생물자원", "화합물", "기술요약"
-            ]
-            if any(c.lower() in tl for c in perf_cues):
-                route_override = "project_perf"
-            else:
-                # project -> people/org
-                people_cues = [
-                    "연구자", "연구원", "참여인력", "참여 인력",
-                    "참여연구원", "참여 연구원", "연구책임자", "연구 책임자",
-                    "책임자", "연구진"
-                ]
-                org_cues = [
-                    "참여기관", "참여 기관", "주관기관", "주관 기관",
-                    "수행기관", "수행 기관", "기관정보", "기관 정보",
-                    "소속기관", "소속 기관"
-                ]
-                if any(c.lower() in tl for c in people_cues):
-                    route_override = "project_people"
-                elif any(c.lower() in tl for c in org_cues):
-                    route_override = "project_org"
-
-        if route_override == "perf":
-            # perf -> project (예: "이 논문이 어떤 과제에 속해?")
-            perf_to_project_cues = [
-                "어느 과제", "어떤 과제", "관련 과제", "소속 과제",
-                "과제 정보", "pjt_id", "pjt id", "project id",
-            ]
-            import re
-            has_pjt_id = bool(re.search(r"\b\d{8,12}\b", tl))
-            wants_perf = any(x in tl for x in ["논문","paper","특허","patent","성과","보고서","연구보고서","장비","시설","소프트웨어","sw","기술요약"])
-            # 과제번호(PJT_ID) + 성과 키워드 => project -> perf
-            if has_pjt_id and wants_perf:
-                route_override = "project_perf"
-            # PJT_ID 없이 "어느 과제?" 류 => perf -> project
-            elif any(c.lower() in tl for c in perf_to_project_cues):
-                route_override = "perf_project"
-            else:
-                # perf -> people/org (PJT_ID join)
-                people_cues = [
-                    "연구자", "연구원", "참여인력", "참여 인력",
-                    "참여연구원", "참여 연구원", "연구책임자", "연구 책임자",
-                    "책임자", "연구진"
-                ]
-                org_cues = [
-                    "참여기관", "참여 기관", "주관기관", "주관 기관",
-                    "수행기관", "수행 기관", "기관정보", "기관 정보",
-                    "소속기관", "소속 기관"
-                ]
-                if any(c.lower() in tl for c in people_cues):
-                    route_override = "perf_people"
-                elif any(c.lower() in tl for c in org_cues):
-                    route_override = "perf_org"
-
-        log_section(f"route_override" , {route_override})
-        retriever = CustomRAGRetriever(top_k=search_num, route_override=route_override)
+        retriever = CustomRAGRetriever(
+            top_k=search_num,
+            model_name="gemma_vllm_0",
+            hint=hint,
+        )
 
         rag_tool = Tool(
             name="RAG_Search",

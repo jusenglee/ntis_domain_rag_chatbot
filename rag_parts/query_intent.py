@@ -441,6 +441,13 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if has_org and not (has_project or has_perf):
         return "org"
 
+    # 사람/기관 + 성과(논문/특허...) 요청이면 people/org를 head로 두고 join으로 처리하기 쉬움
+    # (예: "이한조 연구자의 논문", "KAIST 특허")
+    if has_people and has_perf and not has_project:
+        return "people"
+    if has_org and has_perf and not has_project:
+        return "org"
+
     if has_perf and not has_project:
         return "perf"
     if has_project:
@@ -465,13 +472,19 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
     wants_org = has_org or any(c in t for c in REL_ORG_CUES)
 
     if base_route == "people":
+        # 사람 → 과제/성과
         if has_project or ("과제" in t) or ("pjt" in t) or ("참여" in t):
             return ("people", "project")
+        if has_perf:
+            return ("people", "perf")
         return None
 
     if base_route == "org":
+        # 기관 → 과제/성과
         if has_project or ("과제" in t) or ("pjt" in t) or ("참여" in t):
             return ("org", "project")
+        if has_perf:
+            return ("org", "perf")
         return None
 
     if base_route == "project":

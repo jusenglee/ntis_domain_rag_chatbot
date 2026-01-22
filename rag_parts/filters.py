@@ -130,48 +130,84 @@ def pick_perf_tag_filters(q: str) -> List[str]:
 
     return tags
 
-def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] = None) -> Optional[Any]:
-    """Build a hard filter for joining by project id.
+def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] = None) -> "qmodels.Filter":
+    """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 
-    IMPORTANT:
-    - In Qdrant, `should` conditions may behave as a soft preference when `must` exists.
-      That can cause cross-project leakage (tag matches, but PJT_ID doesn't).
-    - Therefore we enforce PJT_ID as a MUST on the canonical key.
+    누락 방지를 위해 PJT_ID 키 변형(meta.PJT_ID / meta.pjt_id / PJT_ID / pjt_id 등)을 OR로 묶습니다.
     """
     if qmodels is None:
-        return None
+        raise RuntimeError("qdrant_client is required for build_join_filter()")
+
+    join_ids = [str(x).strip() for x in (join_ids or []) if str(x).strip()]
     if not join_ids:
-        return None
+        return qmodels.Filter(must=[])
 
-    key_pjt_id = (os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID").strip() or "meta.PJT_ID")
-    key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
+    primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
+    key_cands = []
+    for k in [primary, "meta.PJT_ID", "meta.pjt_id", "PJT_ID", "pjt_id", "meta.pjtId", "pjtId"]:
+        if k and k not in key_cands:
+            key_cands.append(k)
 
-    must_conds: List[Any] = [
-        qmodels.FieldCondition(key=key_pjt_id, match=make_match_any(join_ids))
-    ]
+    join_any = qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(
+                key=k,
+                match=qmodels.MatchAny(any=join_ids),
+            )
+            for k in key_cands
+        ]
+    )
+
+    must: List["qmodels.Condition"] = [join_any]
 
     if tag_filters:
-        must_conds.append(qmodels.FieldCondition(key=key_tag, match=make_match_any(tag_filters)))
+        must.append(
+            qmodels.FieldCondition(
+                key="tag",
+                match=qmodels.MatchAny(any=tag_filters),
+            )
+        )
 
-    return qmodels.Filter(must=must_conds or None)
+    return qmodels.Filter(must=must)
 
-def build_perf_filter(pjt_ids: List[str], query: str) -> Optional[Any]:
-    """Perf-side filter: constrain by PJT_ID + optional performance tags."""
+def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmodels.Filter":
+    """성과(perf) 컬렉션에서 LOOKUP/JOIN 시 사용할 서버단 필터입니다.
+
+    - join_ids가 있으면 PJT_ID 기반으로 후보군을 강제 제한 (키 변형 OR)
+    - query에서 감지한 성과 하위 유형(논문/특허/보고서/소프트웨어 등)이 있으면 tag로 추가 제한
+    """
     if qmodels is None:
-        return None
-    if not pjt_ids:
-        return None
+        raise RuntimeError("qdrant_client is required for build_perf_filter()")
 
-    key_pjt_id = (os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID").strip() or "meta.PJT_ID")
-    key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
+    must: List["qmodels.Condition"] = []
+    must_not: List["qmodels.Condition"] = []
 
-    must_conds: List[Any] = [
-        qmodels.FieldCondition(key=key_pjt_id, match=make_match_any(pjt_ids))
-    ]
+    join_ids = [str(x).strip() for x in (join_ids or []) if str(x).strip()]
+    if join_ids:
+        primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
+        key_cands = []
+        for k in [primary, "meta.PJT_ID", "meta.pjt_id", "PJT_ID", "pjt_id", "meta.pjtId", "pjtId"]:
+            if k and k not in key_cands:
+                key_cands.append(k)
+
+        join_any = qmodels.Filter(
+            should=[
+                qmodels.FieldCondition(
+                    key=k,
+                    match=qmodels.MatchAny(any=join_ids),
+                )
+                for k in key_cands
+            ]
+        )
+        must.append(join_any)
 
     tag_filters = pick_perf_tag_filters(query)
     if tag_filters:
-        must_conds.append(qmodels.FieldCondition(key=key_tag, match=make_match_any(tag_filters)))
+        must.append(
+            qmodels.FieldCondition(
+                key=KEY_TAG,
+                match=qmodels.MatchAny(any=tag_filters),
+            )
+        )
 
-    return qmodels.Filter(must=must_conds or None)
-
+    return qmodels.Filter(must=must, must_not=must_not)
