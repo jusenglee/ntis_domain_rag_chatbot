@@ -480,9 +480,18 @@ class CustomRAGRetriever(BaseModel):
                 hit_data = getattr(hit, "__dict__", {})
                 score = 0.0
 
-            content = hit_data.get("answer_public") or ""
+            meta = hit_data.get("meta", {}) if isinstance(hit_data.get("meta"), dict) else {}
+            content = hit_data.get("answer_public") or hit_data.get("content") or meta.get("answer_public") or ""
+            if not content:
+                title = hit_data.get("title") or meta.get("국문과제명") or ""
+                org_name = hit_data.get("org_name_norm") or meta.get("소속기관명") or ""
+                meta_flat = hit_data.get("meta_flat") or ""
+                content_parts = [p for p in [title, org_name] if p]
+                if meta_flat:
+                    content_parts.append(meta_flat)
+                content = "\n".join(content_parts)
 
-            metadata = hit_data.get("meta", {})
+            metadata = dict(meta)
             ref = hit_data.get("ref", {})
 
             metadata.update({
