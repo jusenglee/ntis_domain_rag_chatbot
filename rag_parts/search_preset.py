@@ -20,9 +20,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .constants import KEY_ORG_NORM
 from .query_intent import QueryIntent
-
-KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name_norm").strip() or "org_name_norm")
 
 @dataclass
 class SearchPreset:
