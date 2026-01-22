@@ -30,8 +30,8 @@
       flex-direction:column;
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Pretendard, Roboto, "Noto Sans KR", Arial, sans-serif;
       background: radial-gradient(1200px 600px at 20% -10%, rgba(16,163,127,.12), transparent 60%),
-                  radial-gradient(1000px 600px at 110% 10%, rgba(99,102,241,.10), transparent 60%),
-                  var(--bg);
+      radial-gradient(1000px 600px at 110% 10%, rgba(99,102,241,.10), transparent 60%),
+      var(--bg);
       color:var(--text);
     }
 
@@ -306,69 +306,70 @@
 </head>
 
 <body>
-  <div class="topbar">
-    <div class="topbar-inner">
-      <div class="brand">
-        <div class="logo"></div>
-        <div>
-          <h1>NTIS QnA · Compare</h1>
-          <div class="sub">A/B 모델 비교 · 응답 raw 출력</div>
-        </div>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>NTIS QnA · Compare</h1>
+        <div class="sub">A/B 모델 비교 · 응답 raw 출력</div>
       </div>
+    </div>
 
-      <div class="controls">
-        <select id="modelA" title="모델 A">
-          <option value="gpt">GPT-OSS (gpt_oss_0)</option>
-          <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
-        </select>
-        <select id="modelB" title="모델 B">
-          <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
-          <option value="gpt">GPT-OSS (gpt_oss_0)</option>
-        </select>
+    <div class="controls">
+      <select id="modelA" title="모델 A">
+        <option value="gpt">GPT-OSS (gpt_oss_0)</option>
+        <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
+      </select>
+      <select id="modelB" title="모델 B">
+        <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
+        <option value="gpt">GPT-OSS (gpt_oss_0)</option>
+      </select>
 
-        <span id="convChip" class="chip" title="conversation_id">conv: (none)</span>
-        <button class="btn ghost" id="btnNew">새 대화</button>
-        <button class="btn ghost" id="btnStop" disabled>중단</button>
-      </div>
+      <span id="convChip" class="chip" title="conversation_id">conv: (none)</span>
+      <button class="btn ghost" id="btnNew">새 대화</button>
+      <button class="btn ghost" id="btnStop" disabled>중단</button>
     </div>
   </div>
+</div>
 
-  <div class="wrap">
-    <div class="debug-wrap">
-      <details class="debug">
-        <summary>
-          <span>📜 로그/컨텍스트 (디버그)</span>
-          <span style="font-size:12px;color:var(--muted);font-weight:800;">열기/닫기</span>
-        </summary>
-        <div class="debug-content">
-          <div id="stream-log"></div>
-        </div>
-      </details>
-    </div>
+<div class="wrap">
+  <div class="debug-wrap">
+    <details class="debug">
+      <summary>
+        <span>📜 로그/컨텍스트 (디버그)</span>
+        <span style="font-size:12px;color:var(--muted);font-weight:800;">열기/닫기</span>
+      </summary>
+      <div class="debug-content">
+        <div id="stream-log"></div>
+      </div>
+    </details>
+  </div>
 
-    <div class="chat" id="chat">
-      <div class="chat-inner" id="chatInner">
-        <div class="row assistant">
-          <div class="avatar">AI</div>
-          <div style="width:100%;">
-            <div class="bubble" style="background:rgba(255,255,255,.86);">
-              모델 A/B 비교 전용 화면입니다. 답변은 후처리 없이 raw 텍스트 그대로 출력됩니다.
-            </div>
-            <div class="meta">
-              <span>system</span><span class="dot"></span><span>ready</span>
-            </div>
+  <div class="chat" id="chat">
+    <div class="chat-inner" id="chatInner">
+      <div class="row assistant">
+        <div class="avatar">AI</div>
+        <div style="width:100%;">
+          <div class="bubble" style="background:rgba(255,255,255,.86);">
+            모델 A/B 비교 전용 화면입니다. 답변은 후처리 없이 raw 텍스트 그대로 출력됩니다.
+          </div>
+          <div class="meta">
+            <span>system</span><span class="dot"></span><span>ready</span>
           </div>
         </div>
       </div>
     </div>
+  </div>
 
-    <div class="inputbar">
-      <div class="inputbar-inner">
-        <textarea id="question" placeholder="질문 입력 (Enter 전송 / Shift+Enter 줄바꿈)" rows="1"></textarea>
-        <button class="btn primary" id="btnSend">전송</button>
-      </div>
+  <div class="inputbar">
+    <div class="inputbar-inner">
+      <textarea id="question" placeholder="질문 입력 (Enter 전송 / Shift+Enter 줄바꿈)" rows="1"></textarea>
+      <button class="btn primary" id="btnSend">전송</button>
+      <button class="btn" id="debug">디벅</button>
     </div>
   </div>
+</div>
 
 <script>
   const chat = document.getElementById("chat");
@@ -380,6 +381,7 @@
 
   const textarea = document.getElementById("question");
   const btnSend = document.getElementById("btnSend");
+  const btnDebug = document.getElementById("debug");
   const btnStop = document.getElementById("btnStop");
   const btnNew  = document.getElementById("btnNew");
   const convChip = document.getElementById("convChip");
@@ -508,6 +510,8 @@
   btnSend.addEventListener("click", (e) => { e.preventDefault(); onSend(); });
   btnStop.addEventListener("click", (e) => { e.preventDefault(); stopStream("⛔ 사용자 중단"); });
 
+  btnDebug.addEventListener("click", (e) => { e.preventDefault(); onDebug(); });
+
   btnNew.addEventListener("click", (e) => {
     e.preventDefault();
     stopStream();
@@ -530,7 +534,27 @@
     scrollToBottom();
   });
 
-  function onSend(){
+  async function onDebug(){
+    const q = (textarea.value || "").trim();
+    if (!q || streaming) return;
+
+
+    const payload = {
+      question: q,
+      conversation_id: conversationId || null
+    };
+
+    const res = await fetch("/query/debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    alert(data.toString());
+  }
+
+  async function onSend() {
     const q = (textarea.value || "").trim();
     if (!q || streaming) return;
 
@@ -557,103 +581,102 @@
     let rawB = "";
     lastCompareTarget = "A";
 
-    let url = "/query/stream"
-      + "?model=" + encodeURIComponent(aKey)
-      + "&question=" + encodeURIComponent(q)
-      + "&compare=true"
-      + "&other_model=" + encodeURIComponent(bKey);
+    const payload = {
+      model: aKey,
+      question: q,
+      compare: true,
+      other_model: bKey,
+      conversation_id: conversationId || null
+    };
 
-    if (conversationId){
-      url += "&conversation_id=" + encodeURIComponent(conversationId);
-    }
+    const res = await fetch("/query/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
-    const es = new EventSource(url);
-    eventSource = es;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
 
-    es.onmessage = (ev) => {
-      const lines = String(ev.data ?? "").split("\n");
+    let buffer = "";
+    let done = false;
 
-      for (const line of lines){
-        // conv id update
-        if (line.startsWith("[CONV]")){
-          const m = line.match(/conversation_id\s*=\s*([A-Za-z0-9_\-]+)/i);
-          if (m){
-            conversationId = m[1];
-            localStorage.setItem(CONV_KEY, conversationId);
-            setConvChip();
-          }
-          logBox.textContent += line + "\n";
-          logBox.scrollTop = logBox.scrollHeight;
+    while (!done) {
+      const { value, done: streamDone } = await reader.read();
+      done = streamDone;
+      if (!value) continue;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 이벤트는 빈 줄로 끝남
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const event = buffer.slice(0, idx).trim();
+
+        console.log(buffer);
+        buffer = buffer.slice(idx + 2);
+
+        if (!event.startsWith("data:")) continue;
+
+        const jsonStr = event.replace(/^data:\s*/, "");
+        let json;
+        try {
+          json = JSON.parse(jsonStr);
+        } catch (e) {
+          console.error("JSON parse error:", jsonStr);
+          done = true;
           continue;
         }
 
-        // end
-        if (line === "[END]"){
-          es.close();
-          eventSource = null;
+        // === 여기부터 기존 로직 ===
+        if (json.conversationId) {
+          localStorage.setItem(CONV_KEY, json.conversationId);
+          conversationId = json.conversationId;
+          setConvChip();
+          continue;
+        }
+
+        if (json.status && json.status === 'done') {
+          done = true;
           setStreaming(false);
           logBox.textContent += "[END]\n";
-          logBox.scrollTop = logBox.scrollHeight;
           scrollToBottom();
           return;
         }
 
-        // debug lines
-        const isLogLine =
-          line.startsWith("[STEP") ||
-          line.startsWith("[MODEL-A]") ||
-          line.startsWith("[MODEL-B]") ||
-          line.startsWith("[DONE-") ||
-          line.startsWith("[EXPAND]") ||
-          line.startsWith("[HITS-") ||
-          line.startsWith("[MODE]") ||
-          line.startsWith("[GATE]") ||
-          line.startsWith("===") ||
-          line.startsWith("⚠️") ||
-          line.startsWith("ERR");
-
-        if (isLogLine){
-          logBox.textContent += line + "\n";
-          logBox.scrollTop = logBox.scrollHeight;
-          continue;
+        // MODEL_A / MODEL_B 처리
+        if(json.model === "GPT") {
+          rawA += json.content;
+          bubbles.bodyA.textContent = rawA;
+        } else if (json.model === "GEMMA") {
+          rawB += json.content;
+          bubbles.bodyB.textContent = rawB;
         }
 
-        // preserve empty line
-        if (line === ""){
-          if (lastCompareTarget === "A") rawA += "\n";
-          else rawB += "\n";
-          bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
-          bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
-          scrollToBottom();
-          continue;
+
+
+        if (json.error){
+          stopStream("❗ SSE fetch 오류");
         }
 
-        // compare tagged chunks
-        if (line.startsWith("[A]")){
-          lastCompareTarget = "A";
-          rawA += line.replace(/^\[A\]\s?/, "");
-        } else if (line.startsWith("[B]")){
-          lastCompareTarget = "B";
-          rawB += line.replace(/^\[B\]\s?/, "");
-        } else {
-          // untagged chunk -> attach to last
-          if (lastCompareTarget === "A") rawA += line;
-          else rawB += line;
-        }
 
         bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
         bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
         scrollToBottom();
       }
-    };
+    }
 
-    es.onerror = (err) => {
-      console.error("SSE error:", err);
-      stopStream("❗ SSE 오류");
-      bubbles.bodyA.textContent = rawA || "(SSE 오류)";
-      bubbles.bodyB.textContent = rawB || "(SSE 오류)";
+    // catch network/stream errors
+    try {
+      await reader.closed;
+    } catch (err) {
+      console.error("Streaming fetch error:", err);
+      stopStream("❗ SSE fetch 오류");
+      bubbles.bodyA.textContent = rawA || "(fetch 오류)";
+      bubbles.bodyB.textContent = rawB || "(fetch 오류)";
+      done = true;
       scrollToBottom();
-    };
+    }
   }
 
   // init
