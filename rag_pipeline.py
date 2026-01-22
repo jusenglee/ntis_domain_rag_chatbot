@@ -70,6 +70,7 @@ from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
+    and_filter as _and_filter,
 )
 
 try:
@@ -1233,6 +1234,8 @@ def _run_rag_with_vectors(
                 hop2_filter = build_perf_filter(q, join_ids)
             else:
                 hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
+                if hop2_kind == "project" and org_filter:
+                    hop2_filter = _and_filter(hop2_filter, org_filter)
 
             log_kv(
                 "RAG.JOIN.HOP2",
