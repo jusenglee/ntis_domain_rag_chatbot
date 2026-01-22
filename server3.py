@@ -4,6 +4,7 @@ import uuid
 import json
 import time
 import os
+import re
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,6 +39,17 @@ def log_section(title, content):
     header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
     footer = f"\033[96m{'='*30}\033[0m\n"
     logger.info(f"{header}\n{content}\n{footer}")
+
+def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
+    if key in meta and meta.get(key):
+        return str(meta.get(key))
+    if not meta_flat:
+        return ""
+    pattern = rf"{re.escape(key)}\s*[:：]\s*([^;]+)"
+    match = re.search(pattern, meta_flat)
+    if not match:
+        return ""
+    return match.group(1).strip()
 
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
@@ -503,6 +515,13 @@ class CustomRAGRetriever(BaseModel):
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
+            meta_flat = hit_data.get("meta_flat") or meta.get("meta_flat") or ""
+            researcher = _extract_meta_field(metadata, meta_flat, "인물명")
+            institute = _extract_meta_field(metadata, meta_flat, "소속기관명")
+            if researcher and not metadata.get("인물명"):
+                metadata["인물명"] = researcher
+            if institute and not metadata.get("소속기관명"):
+                metadata["소속기관명"] = institute
 
             metadata.update({
                 "ref" : {
