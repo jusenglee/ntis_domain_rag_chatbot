@@ -85,6 +85,47 @@ _ID_RST_RE = re.compile(r"\b[A-Za-z]{2,5}-\d{2,6}-\d{6,}\b")
 _DOI_URL_PREFIX_RE = re.compile(r"^https?://(dx\.)?doi\.org/", re.IGNORECASE)
 
 
+
+# =========================
+# Payload selector (min/full)
+# =========================
+_PAYLOAD_MODE_DENSE = os.getenv("RAG_PAYLOAD_MODE_DENSE", "min").strip().lower()  # min|full|true
+_PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()    # min|full|true
+
+# 후보 단계에 필요한 최소 키들(메타/본문 제외)
+_PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
+    "RAG_PAYLOAD_MIN_FIELDS",
+    "doc_id,title,tag,meta_flat,org_name_norm,pjt_id,urls,systems"
+).split(",") if s.strip()]
+
+# 최종 컨텍스트용(필요하면 meta/answer_public 포함)
+_PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
+    "RAG_PAYLOAD_FULL_FIELDS",
+    "doc_id,title,tag,meta,meta_flat,answer_public,org_name_norm,pjt_id,urls,systems"
+).split(",") if s.strip()]
+
+def _with_payload_selector(mode: str, fields: List[str]):
+    """
+    Qdrant with_payload:
+      - True/False 가능
+      - 또는 PayloadSelectorInclude 가능
+    """
+    m = (mode or "min").lower().strip()
+    if m in ("true", "1", "yes", "y"):
+        return True
+    if m in ("full",):
+        try:
+            return models.PayloadSelectorInclude(include=list(fields))
+        except Exception:
+            return True
+    # default: min
+    try:
+        return models.PayloadSelectorInclude(include=list(fields))
+    except Exception:
+        return True
+
+
+
 def _extract_id_tokens(q: str, *, cap: int = 8) -> List[str]:
     """Extract ID-like tokens from query text for exact matching.
 
@@ -580,6 +621,7 @@ def dense_retrieve_hybrid_multi(
             continue
 
         t0 = time.perf_counter()
+        with_payload_dense = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
         try:
             try:
                 res = client.query_points(
@@ -587,7 +629,7 @@ def dense_retrieve_hybrid_multi(
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
-                    with_payload=True,
+                    with_payload=with_payload_dense,
                     with_vectors=False,
                     query_filter=query_filter,
                     timeout=_DEFAULT_QDRANT_TIMEOUT,
@@ -598,7 +640,7 @@ def dense_retrieve_hybrid_multi(
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
-                    with_payload=True,
+                    with_payload=with_payload_dense,
                     with_vectors=False,
                     query_filter=query_filter,
                 )
@@ -668,14 +710,14 @@ def dense_retrieve_hybrid_multi(
 
         lex_filter = models.Filter(should=should_conds)
         final_filter = _combine_filters(query_filter, lex_filter)
-
+        with_payload_lex = _with_payload_selector(_PAYLOAD_MODE_LEX, _PAYLOAD_MIN_FIELDS)
         try:
             try:
                 scroll_res, _ = client.scroll(
                     collection_name=collection_name,
                     scroll_filter=final_filter,
                     limit=int(top_k_lexical_candidates_eff),
-                    with_payload=True,
+                    with_payload=with_payload_lex,
                     with_vectors=False,
                     timeout=_DEFAULT_QDRANT_TIMEOUT,
                 )
@@ -684,7 +726,7 @@ def dense_retrieve_hybrid_multi(
                     collection_name=collection_name,
                     scroll_filter=final_filter,
                     limit=int(top_k_lexical_candidates_eff),
-                    with_payload=True,
+                    with_payload=with_payload_lex,
                     with_vectors=False,
                 )
             cand = list(scroll_res or [])

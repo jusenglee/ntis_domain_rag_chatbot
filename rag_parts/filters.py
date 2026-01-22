@@ -205,7 +205,7 @@ def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmod
     if tag_filters:
         must.append(
             qmodels.FieldCondition(
-                key=KEY_TAG,
+                key="tag",
                 match=qmodels.MatchAny(any=tag_filters),
             )
         )

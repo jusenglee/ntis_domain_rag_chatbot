@@ -8,7 +8,6 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from settings import (
     QDRANT_HOST,
     QDRANT_PORT,
-    COLLECTION,
     EMBED_MODEL,      # e5-large-instruct
     EMBED_MODEL_B,    # e5-large
     logger,
@@ -34,7 +33,6 @@ def build_rag_objects_dual() -> Tuple[
     if _qdr and _emb_e5i and _emb_e5:
         return _qdr, _emb_e5i, None, _qdr, _emb_e5, None
 
-    logger.info(f"[rag_store] init Qdrant(single) host={QDRANT_HOST}:{QDRANT_PORT} collection={COLLECTION}")
 
     _qdr = QdrantClient(
         host=QDRANT_HOST,
@@ -45,7 +43,7 @@ def build_rag_objects_dual() -> Tuple[
     # e5-large-instruct (e5i_qa)
     _emb_e5i = HuggingFaceEmbedding(
         model_name=EMBED_MODEL,
-        device="cuda:0",
+        device="cuda",
         embed_batch_size=32,
         trust_remote_code=True,
         query_instruction=(
@@ -63,7 +61,7 @@ def build_rag_objects_dual() -> Tuple[
     # e5-large (e5_qa)
     _emb_e5 = HuggingFaceEmbedding(
         model_name=EMBED_MODEL_B,
-        device="cuda:1",              # 필요 시 조정
+        device="cuda",              # 필요 시 조정
         embed_batch_size=32,
         trust_remote_code=True,
         query_instruction="query: ntis ",

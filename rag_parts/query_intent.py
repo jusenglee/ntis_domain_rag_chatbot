@@ -570,6 +570,35 @@ class QueryIntent:
             "wants_detail": self.wants_detail,
         }
 
+def normalize_categories(cat) -> list[str]:
+    if cat is None:
+        return []
+    xs = cat if isinstance(cat, (list, tuple, set)) else [cat]
+    out = []
+    for x in xs:
+        if hasattr(x, "value"):  # Enum
+            s = str(x.value)
+        else:
+            s = str(x)
+        s = s.strip().lower()
+        if s:
+            out.append(s)
+    return out
+
+def pick_domain_hint_from_categories(cats: list[str]) -> str | None:
+    # 너 시스템 기준: researcher -> people
+    if any(c in ("researcher", "people") for c in cats):
+        return "people"
+    if any(c in ("org", "organization") for c in cats):
+        return "org"
+    if "project" in cats:
+        return "project"
+    if any(c in ("performance", "perf") for c in cats):
+        return "perf"
+    if "support" in cats:
+        return "support"
+    return None
+
 
 def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None) -> QueryIntent:
     q = (q or "").strip()

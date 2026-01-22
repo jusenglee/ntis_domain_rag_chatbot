@@ -72,6 +72,10 @@ from rag_parts.filters import (
     build_perf_filter as build_perf_filter,
 )
 
+try:
+    from qdrant_client.http import models as qmodels
+except Exception:
+    qmodels = None
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -721,9 +725,100 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
             return False
     return True
 
+
 # -------------------------
 # Main
 # -------------------------
+def _hydrate_points_payload(
+        qdr: Any,
+        points: List[Any],
+        *,
+        include_fields: Optional[List[str]] = None,
+        chunk_size: int = 128,
+) -> None:
+    """
+    points의 (collection, id) 기준으로 Qdrant retrieve를 돌려 payload를 갱신.
+    - 후보 단계에서는 meta/answer_public을 빼고,
+      최종 topN에서만 meta/answer_public을 채우는 용도.
+    """
+    if not points:
+        return
+    if qmodels is None or not hasattr(qdr, "retrieve"):
+        return
+
+    include_fields = include_fields or [
+        "doc_id", "title", "tag",
+        "meta", "meta_flat", "answer_public",
+        "org_name_norm", "pjt_id",
+        "urls", "systems",
+    ]
+    selector = qmodels.PayloadSelectorInclude(include=include_fields)
+
+    # group by collection
+    by_col: Dict[str, List[Any]] = {}
+    for p in points:
+        pl = getattr(p, "payload", None)
+        if not isinstance(pl, dict):
+            continue
+        col = str(pl.get("_collection") or "")
+        if not col:
+            continue
+        by_col.setdefault(col, []).append(p)
+
+    for col, pts in by_col.items():
+        # ids chunk
+        ids = []
+        for p in pts:
+            pid = getattr(p, "id", None)
+            if pid is None:
+                continue
+            ids.append(pid)
+
+        t0 = time.perf_counter()
+        for i in range(0, len(ids), int(chunk_size)):
+            sub = ids[i:i+int(chunk_size)]
+            try:
+                recs = qdr.retrieve(
+                    collection_name=col,
+                    ids=sub,
+                    with_payload=selector,
+                    with_vectors=False,
+                )
+            except TypeError:
+                recs = qdr.retrieve(
+                    collection_name=col,
+                    ids=sub,
+                    with_payload=selector,
+                    with_vectors=False,
+                )
+
+            # id -> payload
+            mp: Dict[str, Dict[str, Any]] = {}
+            for r in (recs or []):
+                rid = getattr(r, "id", None)
+                rpl = getattr(r, "payload", None)
+                if rid is None or not isinstance(rpl, dict):
+                    continue
+                mp[str(rid)] = rpl
+
+            for p in pts:
+                pid = getattr(p, "id", None)
+                if pid is None:
+                    continue
+                upd = mp.get(str(pid))
+                if not upd:
+                    continue
+                pl = getattr(p, "payload", None)
+                if isinstance(pl, dict):
+                    # 기존 _collection/_rrf/_final_* 등은 유지되게 update만
+                    keep_col = pl.get("_collection")
+                    pl.update(upd)
+                    pl["_collection"] = keep_col or col
+
+        dt = time.perf_counter() - t0
+        log_kv("RAG.HYDRATE", col=col, n=len(pts), seconds=dt, fields=include_fields[:10])
+
+
 def _run_rag_with_vectors(
         *,
         query: str,
@@ -1089,6 +1184,9 @@ def _run_rag_with_vectors(
                     hop1_reranked = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
+                # ✅ hop1 상위만 join키 추출을 위해 meta 포함 payload 보강
+                _hydrate_points_payload(qdr, hop1_reranked[: max(20, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")))])
+
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
 
                 log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
@@ -1395,6 +1493,13 @@ def _run_rag_with_vectors(
         timings["fallback_reason"] = "no_reranked"
 
     timings["fallback_chat"] = 1.0 if fallback_chat else 0.0
+
+    # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
+    if not fallback_chat:
+        max_items = int(preset.max_ctx_items)
+        _hydrate_points_payload(qdr, reranked[: max(1, max_items)], include_fields=[
+            "doc_id","title","tag","meta","meta_flat","answer_public","org_name_norm","pjt_id","urls","systems"
+        ])
 
     # build context
     t0 = time.time()
