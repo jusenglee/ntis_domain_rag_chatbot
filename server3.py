@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -832,12 +832,8 @@ class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
 
-@app.post("/query/stream")
-async def query_stream(payload: QueryRequest):
-    """스트리밍 응답 엔드포인트 (두 모델 비교)"""
-
-    question = payload.question
-    conversation_id = payload.conversation_id or str(uuid.uuid4())
+def build_stream_response(question: str, conversation_id: Optional[str]) -> StreamingResponse:
+    conversation_id = conversation_id or str(uuid.uuid4())
 
     inputs = {
         "conversation_id": conversation_id,
@@ -912,6 +908,25 @@ async def query_stream(payload: QueryRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+@app.post("/query/stream")
+async def query_stream(payload: QueryRequest):
+    """스트리밍 응답 엔드포인트 (두 모델 비교)"""
+
+    question = payload.question
+    return build_stream_response(question, payload.conversation_id)
+
+@app.get("/query/stream")
+async def query_stream_get(
+    question: str = Query(..., description="사용자 질문"),
+    conversation_id: Optional[str] = Query(default=None, description="대화 ID"),
+):
+    """EventSource용 스트리밍 응답 엔드포인트 (GET)."""
+
+    if not question.strip():
+        raise HTTPException(status_code=400, detail="question is required")
+
+    return build_stream_response(question, conversation_id)
 
 @app.post("/query/debug")
 async def query_debug(payload: QueryRequest):
