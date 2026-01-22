@@ -479,13 +479,33 @@ def _to_text(v: object) -> str:
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
 
+def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
+    title = _to_text(pl.get("title") or "")
+    meta_title = _to_text(
+        meta.get("국문과제명")
+        or meta.get("성과명")
+        or meta.get("논문명")
+        or meta.get("title")
+        or ""
+    )
+    if not title:
+        return meta_title
+    pjt_id = _to_text(pl.get("pjt_id") or meta.get("PJT_ID") or "")
+    if meta_title and (
+        title.isdigit()
+        or title.lower().startswith("ntis:")
+        or (pjt_id and title == pjt_id)
+    ):
+        return meta_title
+    return title or meta_title
+
 def _payload_text_bundle(p: Any) -> Dict[str, str]:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         pl = {}
     meta = _get_meta(pl)
 
-    title = _to_text(pl.get("title") or meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명"))
+    title = _prefer_meta_title(pl, meta)
     meta_flat = _to_text(pl.get("meta_flat") or meta.get("meta_flat") or "")
     answer_public = _to_text(pl.get("answer_public") or pl.get("content") or meta.get("answer_public") or "")
 

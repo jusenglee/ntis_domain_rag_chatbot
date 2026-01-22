@@ -483,7 +483,17 @@ class CustomRAGRetriever(BaseModel):
             meta = hit_data.get("meta", {}) if isinstance(hit_data.get("meta"), dict) else {}
             content = hit_data.get("answer_public") or hit_data.get("content") or meta.get("answer_public") or ""
             if not content:
-                title = hit_data.get("title") or meta.get("국문과제명") or ""
+                title = hit_data.get("title") or ""
+                meta_title = meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명") or ""
+                pjt_id = str(hit_data.get("pjt_id") or meta.get("PJT_ID") or "")
+                if meta_title and (
+                    title.isdigit()
+                    or title.lower().startswith("ntis:")
+                    or (pjt_id and title == pjt_id)
+                ):
+                    title = meta_title
+                elif not title:
+                    title = meta_title
                 org_name = hit_data.get("org_name_norm") or meta.get("소속기관명") or ""
                 meta_flat = hit_data.get("meta_flat") or ""
                 content_parts = [p for p in [title, org_name] if p]
