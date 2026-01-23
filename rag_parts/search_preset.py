@@ -34,6 +34,7 @@ class SearchPreset:
     # lexical config
     lexical_fields: List[str] = field(default_factory=list)
     lexical_field_weights: Dict[str, float] = field(default_factory=dict)
+    lexical_scoring_mode: str = "bm25"
 
     # fallback / threshold
     use_dense_threshold: bool = True
@@ -62,6 +63,7 @@ class SearchPreset:
             "w_lex": self.w_lex,
             "lexical_fields": self.lexical_fields,
             "lexical_field_weights": self.lexical_field_weights,
+            "lexical_scoring_mode": self.lexical_scoring_mode,
             "use_dense_threshold": int(self.use_dense_threshold),
             "min_dense_score": self.min_dense_score,
             "min_reranked": self.min_reranked,
@@ -94,6 +96,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_title_w = _f("RAG_W_TITLE", 2.2)
     default_ans_w = _f("RAG_W_ANSWER_PUBLIC", 1.2)
     default_meta_flat_w = _f("RAG_W_META_FLAT", 0.35)
+    default_lex_mode = os.getenv("RAG_LEXICAL_SCORING_MODE", "bm25").strip().lower()
 
     # base lexical fields
     base_fields = ["title", "answer_public"]
@@ -123,6 +126,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_SUPPORT", _f("RAG_W_LEX", 0.25)),
             lexical_fields=base_fields,
             lexical_field_weights=weights,
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_SUPPORT", "0") == "1"),
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_SUPPORT", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_SUPPORT", _i("RAG_MIN_RERANKED", 4)),
@@ -139,6 +143,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_REL", 0.65),
             lexical_fields=base_fields,
             lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.8)},
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,  # 조인/필터 계열은 dense threshold 오탐 가능
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_REL", 4),
@@ -157,6 +162,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_ID_EXACT", 0.78),
             lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),  # meta_flat 강제
             lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 1.0)},
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_ID_EXACT", 2),
@@ -175,6 +181,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_ID", 0.60),
             lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),
             lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.7)},
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_ID", 3),
@@ -193,6 +200,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_FILTER", 0.65),
             lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),
             lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.8)},
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_FILTER", 4),
@@ -221,6 +229,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             w_lex=_f("RAG_W_LEX_TOPIC", 0.22),
             lexical_fields=base_fields,
             lexical_field_weights=weights,
+            lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_TOPIC", "1") == "1"),
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_TOPIC", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_TOPIC", 4),
@@ -239,6 +248,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         w_lex=_f("RAG_W_LEX", 0.25),
         lexical_fields=base_fields,
         lexical_field_weights=weights,
+        lexical_scoring_mode=default_lex_mode,
         use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD", "1") == "1"),
         min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
         min_reranked=_i("RAG_MIN_RERANKED", 4),

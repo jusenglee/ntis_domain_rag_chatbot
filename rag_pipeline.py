@@ -368,6 +368,7 @@ def _call_dense_retrieve_hybrid_multi(
         collection: str,
         lexical_fields: List[str],
         lexical_field_weights: Dict[str, float],
+        lexical_scoring_mode: str,
         top_k_dense: int,
         top_k_lex_cand: int,
         top_k_lex: int,
@@ -385,6 +386,7 @@ def _call_dense_retrieve_hybrid_multi(
             collection_name=collection,
             lexical_fields=lexical_fields,
             lexical_field_weights=lexical_field_weights,
+            lexical_scoring_mode=lexical_scoring_mode,
             top_k_dense=top_k_dense,
             top_k_lexical_candidates=top_k_lex_cand,
             top_k_lexical=top_k_lex,
@@ -401,6 +403,7 @@ def _call_dense_retrieve_hybrid_multi(
             emb_map=emb_map,
             lexical_fields=lexical_fields,
             lexical_field_weights=lexical_field_weights,
+            lexical_scoring_mode=lexical_scoring_mode,
             top_k_dense=top_k_dense,
             top_k_lexical_candidates=top_k_lex_cand,
             top_k_lexical=top_k_lex,
@@ -417,6 +420,7 @@ def _call_dense_retrieve_hybrid_multi(
         collection_name=collection,
         lexical_fields=lexical_fields,
         lexical_field_weights=lexical_field_weights,
+        lexical_scoring_mode=lexical_scoring_mode,
         top_k_dense=top_k_dense,
         top_k_lexical_candidates=top_k_lex_cand,
         top_k_lexical=top_k_lex,
@@ -882,6 +886,7 @@ def _run_rag_with_vectors(
         w_dense_map: Dict[str, float],
         lexical_fields: Optional[List[str]] = None,
         lexical_field_weights: Optional[Dict[str, float]] = None,
+        lexical_scoring_mode: Optional[str] = None,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, float] = {}
@@ -984,6 +989,7 @@ def _run_rag_with_vectors(
     preset: _SearchPreset = _build_search_preset(it)
     lexical_fields_eff = list(lexical_fields) if lexical_fields is not None else list(preset.lexical_fields)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
+    lex_scoring_mode_eff = (lexical_scoring_mode or preset.lexical_scoring_mode or "bm25").strip().lower()
 
     if hinted_limit > 0:
         preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
@@ -1024,6 +1030,7 @@ def _run_rag_with_vectors(
         top_k_lex=int(preset.top_k_lex),
         w_lex=float(preset.w_lex),
         max_ctx_items=int(preset.max_ctx_items),
+        lexical_scoring_mode=lex_scoring_mode_eff,
         ctx_budget=int(ctx_budget),
     )
 
@@ -1203,6 +1210,7 @@ def _run_rag_with_vectors(
                     collection=hop1_col,
                     lexical_fields=lexical_fields_eff,
                     lexical_field_weights=lex_w_eff,
+                    lexical_scoring_mode=lex_scoring_mode_eff,
                     top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
@@ -1318,6 +1326,7 @@ def _run_rag_with_vectors(
                 collection=hop2_col,
                 lexical_fields=lexical_fields_eff,
                 lexical_field_weights=lex_w_eff,
+                lexical_scoring_mode=lex_scoring_mode_eff,
                 top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
@@ -1475,6 +1484,7 @@ def _run_rag_with_vectors(
             collection=col,
             lexical_fields=lf,
             lexical_field_weights=lw,
+            lexical_scoring_mode=lex_scoring_mode_eff,
             top_k_dense=use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,

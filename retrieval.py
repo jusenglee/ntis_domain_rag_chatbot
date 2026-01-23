@@ -24,6 +24,7 @@ NTIS/일반 문서형 RAG 검색 모듈.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -465,6 +466,15 @@ def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
 # Lexical scoring
 # =========================
 
+_TOKEN_RE = re.compile(r"[A-Za-z]+|[0-9]+|[가-힣]+", re.UNICODE)
+
+
+def _tokenize_simple(text: str) -> List[str]:
+    if not text:
+        return []
+    return [m.group(0).lower() for m in _TOKEN_RE.finditer(text)]
+
+
 def _fuzzy_ratio(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
@@ -484,6 +494,7 @@ def lexical_score_weighted(
         weights: Dict[str, float],
         *,
         systems_hint: Optional[Sequence[str]] = None,
+        lexical_scoring_mode: str = "bm25",
 ) -> float:
     """Compute a weighted lexical score.
 
@@ -511,14 +522,80 @@ def lexical_score_weighted(
         # ✅ ID 질의인데 exact=0이면 fuzzy로 내려가지 않는다.
         return 0.0
 
-    # non-ID queries: fuzzy + weights
-    base = 0.0
+    mode = (lexical_scoring_mode or "bm25").strip().lower()
+    query_tokens = _tokenize_simple(qt)
+    if not query_tokens:
+        return 0.0
+
+    field_tokens: Dict[str, List[str]] = {}
+    field_counts: Dict[str, Dict[str, int]] = {}
     for f in fields:
         txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-        if not txt:
+        tokens = _tokenize_simple(txt)
+        if not tokens:
+            continue
+        field_tokens[f] = tokens
+        counts: Dict[str, int] = {}
+        for t in tokens:
+            counts[t] = counts.get(t, 0) + 1
+        field_counts[f] = counts
+
+    if not field_tokens:
+        return 0.0
+
+    # BM25-like (field-level) scoring
+    num_fields = len(field_tokens)
+    avg_dl = sum(len(toks) for toks in field_tokens.values()) / float(max(1, num_fields))
+    df: Dict[str, int] = {}
+    for t in set(query_tokens):
+        df[t] = sum(1 for toks in field_tokens.values() if t in toks)
+
+    k1 = 1.2
+    b = 0.75
+
+    bm25_score = 0.0
+    qtf: Dict[str, int] = {}
+    for t in query_tokens:
+        qtf[t] = qtf.get(t, 0) + 1
+
+    for f, counts in field_counts.items():
+        dl = float(len(field_tokens.get(f, [])))
+        if dl <= 0:
             continue
         w = float(weights.get(f, 1.0))
-        base += w * _fuzzy_ratio(qt, txt)
+        denom_norm = k1 * (1.0 - b + b * (dl / max(1.0, avg_dl)))
+        for t, qt_count in qtf.items():
+            tf = float(counts.get(t, 0))
+            if tf <= 0:
+                continue
+            df_t = float(df.get(t, 0))
+            idf = math.log(1.0 + (num_fields - df_t + 0.5) / (df_t + 0.5))
+            bm25_score += w * idf * ((tf * (k1 + 1.0)) / (tf + denom_norm)) * float(qt_count)
+
+    base = 0.0
+    if mode in ("bm25", "bm25_only"):
+        base = bm25_score
+    elif mode in ("mix", "hybrid", "bm25_fuzzy"):
+        fuzzy_score = 0.0
+        total_w = 0.0
+        for f in fields:
+            txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
+            if not txt:
+                continue
+            w = float(weights.get(f, 1.0))
+            total_w += w
+            fuzzy_score += w * _fuzzy_ratio(qt, txt)
+        fuzzy_norm = fuzzy_score / max(1.0, total_w)
+        bm25_norm = bm25_score / (1.0 + bm25_score)
+        base = (0.65 * bm25_norm) + (0.35 * fuzzy_norm)
+    else:
+        # fallback: fuzzy only
+        for f in fields:
+            txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
+            if not txt:
+                continue
+            w = float(weights.get(f, 1.0))
+            base += w * _fuzzy_ratio(qt, txt)
 
     if systems_hint:
         ql = qt.lower()
@@ -583,6 +660,7 @@ def dense_retrieve_hybrid_multi(
         collection_name: str,
         lexical_fields: Optional[List[str]] = None,
         lexical_field_weights: Optional[Dict[str, float]] = None,
+        lexical_scoring_mode: str = "bm25",
         top_k_dense: int = _DEFAULT_TOPK_DENSE,
         top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
         top_k_lexical: int = _DEFAULT_TOPK_LEX,
@@ -754,7 +832,12 @@ def dense_retrieve_hybrid_multi(
             if not pl:
                 continue
             s = lexical_score_weighted(
-                q, pl, lexical_fields_eff, lexical_weights_eff, systems_hint=systems_hint
+                q,
+                pl,
+                lexical_fields_eff,
+                lexical_weights_eff,
+                systems_hint=systems_hint,
+                lexical_scoring_mode=lexical_scoring_mode,
             )
             if s <= 0:
                 continue
