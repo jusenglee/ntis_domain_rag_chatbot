@@ -1,0 +1,32 @@
+[
+  {
+    "id": "org-001",
+    "category": "기관",
+    "query": "한국과학기술연구원 기관 정보",
+    "expected_doc_id": "ORG-0001"
+  },
+  {
+    "id": "project-001",
+    "category": "과제",
+    "query": "차세대 배터리 소재 개발 과제 정보",
+    "expected_doc_id": "PJT-2021-000123"
+  },
+  {
+    "id": "perf-001",
+    "category": "성과",
+    "query": "딥러닝 의료영상 논문 성과",
+    "expected_doc_id": "PERF-PAPER-2019-00456"
+  },
+  {
+    "id": "people-001",
+    "category": "인물",
+    "query": "김철수 연구자 과제 참여 이력",
+    "expected_doc_id": "PJT-MP-000078"
+  },
+  {
+    "id": "id-001",
+    "category": "ID",
+    "query": "PJT_ID 2021000123",
+    "expected_doc_id": "2021000123"
+  }
+]
