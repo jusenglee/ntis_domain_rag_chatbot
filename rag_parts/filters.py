@@ -61,10 +61,16 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         "meta.과제수행기관명",
         "meta.참여연구기관명",
         "meta.발행기관명",
+        "meta.등록기관명",
+        "meta.기탁기관명",
     ]
     should: List["qmodels.Condition"] = []
     for key in keys:
+        if not key:
+            continue
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+    if not should:
+        return None
     return qmodels.Filter(should=should)
 
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
