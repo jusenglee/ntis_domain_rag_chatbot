@@ -53,6 +53,15 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
         return ""
     return match.group(1).strip()
 
+def _clip_text(text: str, max_chars: int = 2000) -> str:
+    if not text:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\n{2,}", "\n", normalized).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars]
+
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
     for i, doc in enumerate(docs, 1):
@@ -563,6 +572,7 @@ class CustomRAGRetriever(BaseModel):
                 if meta_flat:
                     content_parts.append(meta_flat)
                 content = "\n".join(content_parts)
+            content = _clip_text(content)
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
