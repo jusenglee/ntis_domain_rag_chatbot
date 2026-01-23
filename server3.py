@@ -9,6 +9,7 @@ from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -35,6 +36,7 @@ from triton_llm import TritonChatModel
 from triton_client import get_tokenizer_for_model
 from settings import MODEL_MAX_CONTEXT, MODEL_MAX_OUTPUT_TOKENS, MAX_TOKENS
 from rag_pipeline import run_rag_ab_compare
+from retrieval import build_context_mixed
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -52,6 +54,15 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
     if not match:
         return ""
     return match.group(1).strip()
+
+def _clip_text(text: str, max_chars: int = 2000) -> str:
+    if not text:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\n{2,}", "\n", normalized).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars]
 
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
@@ -314,6 +325,49 @@ class AgentState(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
+def _resolve_context_max_items(state: AgentState) -> int:
+    qa_limit = state.question_analysis.limit if state.question_analysis else CONTEXT_MAX_ITEMS
+    return max(1, min(qa_limit, CONTEXT_MAX_ITEMS))
+
+
+def _documents_to_points(docs: List[Document]) -> List[Any]:
+    points: List[Any] = []
+    for doc in docs or []:
+        metadata = doc.metadata or {}
+        ref = metadata.get("ref") or {}
+        payload = {
+            "title": ref.get("title") or metadata.get("국문과제명") or "",
+            "doc_id": ref.get("source_pk") or metadata.get("source_pk") or "",
+            "answer_public": doc.page_content or "",
+            "meta": metadata,
+            "urls": ref.get("urls") or metadata.get("urls") or [],
+            "systems": ref.get("systems") or metadata.get("systems") or [],
+        }
+        points.append(SimpleNamespace(payload=payload, score=ref.get("score")))
+    return points
+
+
+def build_context_from_documents(
+    docs: List[Document],
+    *,
+    query_text: str = "",
+    max_items: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    per_doc_char_budget: Optional[int] = None,
+) -> str:
+    if not docs:
+        return ""
+    points = _documents_to_points(docs)
+    context, _ = build_context_mixed(
+        points,
+        max_items=max_items if max_items is not None else CONTEXT_MAX_ITEMS,
+        query_text=query_text,
+        token_budget=token_budget if token_budget is not None else CONTEXT_TOKEN_BUDGET,
+        per_doc_char_budget=per_doc_char_budget if per_doc_char_budget is not None else CONTEXT_PER_DOC_CHARS,
+    )
+    return context
+
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
     """노드 실행 시간 측정 데코레이터"""
@@ -520,6 +574,11 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         max_meta_items=PROMPT_META_LINE_LIMIT,
     )
     question_text = state.messages[-1].content
+    prev_context_str = build_context_from_documents(
+        state.prev_context,
+        query_text=question_text,
+        max_items=_resolve_context_max_items(state),
+    )
     is_followup = any(hint in question_text for hint in FOLLOWUP_HINTS)
     if not is_followup:
         history_str = "없음"
@@ -663,6 +722,7 @@ class CustomRAGRetriever(BaseModel):
                 if meta_flat:
                     content_parts.append(meta_flat)
                 content = "\n".join(content_parts)
+            content = _clip_text(content)
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
@@ -1078,6 +1138,9 @@ def format_metadata(
         if value is None:
             continue
 
+    def _summarize_value(value: Any) -> str:
+        if value is None:
+            return ""
         if isinstance(value, list):
             value = ", ".join(map(str, value))
         elif isinstance(value, dict):
