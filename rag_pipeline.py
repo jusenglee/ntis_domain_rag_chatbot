@@ -59,6 +59,7 @@ from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_c
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
     norm_tag_from_payload as _norm_tag_from_payload,
+    tag_match_bonus as _tag_match_bonus,
 )
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
@@ -660,6 +661,8 @@ def _final_rerank(
         base_route: str,
         mode: str,
         keep: int,
+        tag_boost: float = 0.0,
+        tag_mismatch_penalty: float = 0.0,
 ) -> List[Any]:
     if not cands:
         return []
@@ -691,12 +694,19 @@ def _final_rerank(
         kw_sc = _keyword_score(p, kws, lex_w)
         f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids)
         fam = _family_bonus(p, base_route)
-        tot = (w_rrf * rrf_sc) + (w_kw * kw_sc) + (w_f * f_sc) + fam
+        tag_sc = _tag_match_bonus(
+            p,
+            tag_filters=getattr(it, "tag_filters", None),
+            boost=tag_boost,
+            mismatch_penalty=tag_mismatch_penalty,
+        )
+        tot = (w_rrf * rrf_sc) + (w_kw * kw_sc) + (w_f * f_sc) + fam + tag_sc
 
         if isinstance(pl, dict):
             pl["_final_rrf"] = rrf_sc
             pl["_final_kw"] = kw_sc
             pl["_final_f"] = f_sc
+            pl["_final_tag"] = tag_sc
             pl["_final_total"] = tot
 
         scored.append((-tot, idx, p))
@@ -1021,6 +1031,7 @@ def _run_rag_with_vectors(
         years=getattr(it, "years", None),
         org_terms=list(getattr(it, "org_terms", []) or []),
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        tag_filters=list(getattr(it, "tag_filters", []) or []),
         ids_flat=_flatten_ids_from_intent(it)[:20],
     )
     log_kv(
@@ -1029,6 +1040,8 @@ def _run_rag_with_vectors(
         top_k_lex_cand=int(preset.top_k_lex_cand),
         top_k_lex=int(preset.top_k_lex),
         w_lex=float(preset.w_lex),
+        tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+        tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
         max_ctx_items=int(preset.max_ctx_items),
         lexical_scoring_mode=lex_scoring_mode_eff,
         ctx_budget=int(ctx_budget),
@@ -1237,6 +1250,8 @@ def _run_rag_with_vectors(
                     base_route=("perf" if hop1_kind == "perf" else base_route),
                     mode="search",
                     keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
+                    tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+                    tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
                 )
 
                 # head term 강제 포함(people/org head일 때만, 옵션)
@@ -1353,6 +1368,8 @@ def _run_rag_with_vectors(
                 base_route=("perf" if hop2_kind == "perf" else base_route),
                 mode="join",
                 keep=int(os.getenv("RAG_HOP2_FINAL_KEEP", "80")),
+                tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+                tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
             )
             hop2_reranked = _dedup_by_doc_id(hop2_reranked)
             hop2_top = hop2_reranked[: max(1, hop2_keep)]
@@ -1559,6 +1576,8 @@ def _run_rag_with_vectors(
         base_route=base_route,
         mode=plan.mode,
         keep=final_keep,
+        tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+        tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
     )
     reranked = _dedup_by_doc_id(reranked)
     timings["final_rerank"] = time.time() - t0

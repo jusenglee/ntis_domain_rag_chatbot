@@ -55,6 +55,10 @@ class SearchPreset:
     early_stop_dense_score: float = 0.0
     early_stop_min_hits: int = 0
 
+    # tag match bonus (post-rerank)
+    tag_boost: float = 0.0
+    tag_mismatch_penalty: float = 0.0
+
     def as_debug(self) -> Dict[str, object]:
         return {
             "top_k_dense": self.top_k_dense,
@@ -72,6 +76,8 @@ class SearchPreset:
             "org_lex_boost": int(self.org_lex_boost),
             "prefer_lex_only": int(self.prefer_lex_only),
             "stop_if_top1_confident": int(self.stop_if_top1_confident),
+            "tag_boost": self.tag_boost,
+            "tag_mismatch_penalty": self.tag_mismatch_penalty,
         }
 
 
@@ -131,6 +137,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_SUPPORT", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_SUPPORT", _i("RAG_MIN_RERANKED", 4)),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_SUPPORT", _i("RAG_MAX_CONTEXT_ITEMS", 12)),
+            tag_boost=_f("RAG_TAG_BOOST_SUPPORT", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_SUPPORT", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         return preset
 
@@ -148,6 +156,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_REL", 4),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_REL", 12),
+            tag_boost=_f("RAG_TAG_BOOST_REL", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_REL", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         return preset
 
@@ -169,6 +179,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_ID_EXACT", 3),
             prefer_lex_only=prefer_lex_only,
             stop_if_top1_confident=True,
+            tag_boost=_f("RAG_TAG_BOOST_ID_EXACT", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID_EXACT", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         return preset
 
@@ -186,6 +198,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_ID", 3),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_ID", 6),
+            tag_boost=_f("RAG_TAG_BOOST_ID", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         return preset
 
@@ -206,6 +220,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_reranked=_i("RAG_MIN_RERANKED_FILTER", 4),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_FILTER", 10),
             prefer_lex_only=prefer_lex_only,
+            tag_boost=_f("RAG_TAG_BOOST_FILTER", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_FILTER", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         if intent.base_route == "people":
             preset.top_k_lex_cand = max(preset.top_k_lex_cand, _i("RAG_TOPK_LEX_CAND_PEOPLE", 1200))
@@ -234,6 +250,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_TOPIC", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_TOPIC", 4),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_TOPIC", 12),
+            tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.0)),
+            tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
         # topic에서는 meta_flat을 보수적으로
         if os.getenv("RAG_TOPIC_USE_META_FLAT", "0") != "1" and "meta_flat" in preset.lexical_fields:
@@ -253,5 +271,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
         min_reranked=_i("RAG_MIN_RERANKED", 4),
         max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS", 30),
+        tag_boost=_f("RAG_TAG_BOOST", 0.0),
+        tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.0),
     )
     return preset
