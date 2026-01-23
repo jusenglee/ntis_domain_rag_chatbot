@@ -105,23 +105,28 @@ _PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
     "doc_id,title,tag,meta,meta_flat,answer_public,org_name_norm,pjt_id,urls,systems"
 ).split(",") if s.strip()]
 
-def _with_payload_selector(mode: str, fields: List[str]):
+def _with_payload_selector(
+    mode: str,
+    fields: List[str],
+    extra_fields: Optional[List[str]] = None,
+):
     """
     Qdrant with_payload:
       - True/False 가능
       - 또는 PayloadSelectorInclude 가능
     """
     m = (mode or "min").lower().strip()
+    merged_fields = list(dict.fromkeys(list(fields or []) + list(extra_fields or [])))
     if m in ("true", "1", "yes", "y"):
         return True
     if m in ("full",):
         try:
-            return models.PayloadSelectorInclude(include=list(fields))
+            return models.PayloadSelectorInclude(include=merged_fields)
         except Exception:
             return True
     # default: min
     try:
-        return models.PayloadSelectorInclude(include=list(fields))
+        return models.PayloadSelectorInclude(include=merged_fields)
     except Exception:
         return True
 
@@ -788,7 +793,12 @@ def dense_retrieve_hybrid_multi(
 
         lex_filter = models.Filter(should=should_conds)
         final_filter = _combine_filters(query_filter, lex_filter)
-        with_payload_lex = _with_payload_selector(_PAYLOAD_MODE_LEX, _PAYLOAD_MIN_FIELDS)
+        lex_base_fields = _PAYLOAD_FULL_FIELDS if _PAYLOAD_MODE_LEX == "full" else _PAYLOAD_MIN_FIELDS
+        with_payload_lex = _with_payload_selector(
+            _PAYLOAD_MODE_LEX,
+            lex_base_fields,
+            lexical_fields_eff,
+        )
         try:
             try:
                 scroll_res, _ = client.scroll(
