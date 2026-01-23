@@ -55,9 +55,17 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
 def build_org_filter(org_terms: List[str]) -> Optional[Any]:
     if qmodels is None or not org_terms:
         return None
-    return qmodels.Filter(
-        must=[qmodels.FieldCondition(key=KEY_ORG_NORM, match=make_match_any(org_terms))]
-    )
+    keys = [
+        KEY_ORG_NORM,
+        "org_name_raw",
+        "meta.과제수행기관명",
+        "meta.참여연구기관명",
+        "meta.발행기관명",
+    ]
+    should: List["qmodels.Condition"] = []
+    for key in keys:
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+    return qmodels.Filter(should=should)
 
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     if qmodels is None:
@@ -78,6 +86,7 @@ def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]]
 
     if terms:
         name_keys = [
+            "meta_flat",
             "meta.인물명",
             "meta.참여연구자명",
             "meta.연구자명",
@@ -89,6 +98,7 @@ def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]]
 
     if ids:
         id_keys = [
+            "meta_flat",
             "meta.국가연구자번호",
             "meta.과학기술인등록번호",
             "meta.인물ID",
