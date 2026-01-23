@@ -9,6 +9,7 @@ from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -33,6 +34,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
+from retrieval import build_context_mixed
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -127,6 +129,9 @@ REDIS_TTL = 3600
 redis_client: Optional[redis.Redis] = None
 
 MAX_TOP_K_SIZE = 20
+CONTEXT_MAX_ITEMS = int(os.getenv("RAG_MAX_CONTEXT_ITEMS", "10"))
+CONTEXT_TOKEN_BUDGET = int(os.getenv("CTX_TOKEN_BUDGET", "8192"))
+CONTEXT_PER_DOC_CHARS = int(os.getenv("RAG_CTX_PER_DOC_MAX_CHARS", "1200"))
 
 class ContentCategory(str, Enum):
 
@@ -199,6 +204,49 @@ class AgentState(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+def _resolve_context_max_items(state: AgentState) -> int:
+    qa_limit = state.question_analysis.limit if state.question_analysis else CONTEXT_MAX_ITEMS
+    return max(1, min(qa_limit, CONTEXT_MAX_ITEMS))
+
+
+def _documents_to_points(docs: List[Document]) -> List[Any]:
+    points: List[Any] = []
+    for doc in docs or []:
+        metadata = doc.metadata or {}
+        ref = metadata.get("ref") or {}
+        payload = {
+            "title": ref.get("title") or metadata.get("국문과제명") or "",
+            "doc_id": ref.get("source_pk") or metadata.get("source_pk") or "",
+            "answer_public": doc.page_content or "",
+            "meta": metadata,
+            "urls": ref.get("urls") or metadata.get("urls") or [],
+            "systems": ref.get("systems") or metadata.get("systems") or [],
+        }
+        points.append(SimpleNamespace(payload=payload, score=ref.get("score")))
+    return points
+
+
+def build_context_from_documents(
+    docs: List[Document],
+    *,
+    query_text: str = "",
+    max_items: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    per_doc_char_budget: Optional[int] = None,
+) -> str:
+    if not docs:
+        return ""
+    points = _documents_to_points(docs)
+    context, _ = build_context_mixed(
+        points,
+        max_items=max_items if max_items is not None else CONTEXT_MAX_ITEMS,
+        query_text=query_text,
+        token_budget=token_budget if token_budget is not None else CONTEXT_TOKEN_BUDGET,
+        per_doc_char_budget=per_doc_char_budget if per_doc_char_budget is not None else CONTEXT_PER_DOC_CHARS,
+    )
+    return context
 
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
@@ -386,9 +434,12 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    title_only = len(state.context) > 2
-    prev_context_str = refine_documents_rule_based(state.prev_context, title_only=False)
     question_text = state.messages[-1].content
+    prev_context_str = build_context_from_documents(
+        state.prev_context,
+        query_text=question_text,
+        max_items=_resolve_context_max_items(state),
+    )
     is_followup = any(hint in question_text for hint in FOLLOWUP_HINTS)
     if not is_followup:
         history_str = "없음"
@@ -632,7 +683,12 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    context_text = refine_documents_rule_based(state.context, title_only=False)
+    query_text = qa.retrieval_query if qa else state.question
+    context_text = build_context_from_documents(
+        state.context,
+        query_text=query_text,
+        max_items=_resolve_context_max_items(state),
+    )
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
