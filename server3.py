@@ -54,7 +54,7 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
     for i, doc in enumerate(docs, 1):
-        ref = doc.metadata.get("ref", {})
+        ref = doc.metadata.get("ref") or {}
         doc_details.append({
             "rank": i,
             "tag": ref.get("tag"),
@@ -577,11 +577,13 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         doc_previews = []
         for i, doc in enumerate(docs, 1):
             meta = doc.metadata
-            title = meta.get("국문과제명", meta.get("ref").get("title"))
-            score = meta.get("ref").get("score")
+            ref = meta.get("ref") or {}
+            title = meta.get("국문과제명", ref.get("title"))
+            score = ref.get("score")
             content = doc.page_content.replace("\n", " ")[:100]
+            score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "N/A"
             doc_previews.append(
-                f"[{i}] 📌 {title} | Score: {score:.4f}\n"
+                f"[{i}] 📌 {title} | Score: {score_str}\n"
                 f"      📝 {content}..."
             )
 
@@ -831,7 +833,8 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
 
     for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
-        title = metadata.get("ref").get("title", "").strip()
+        ref = metadata.get("ref") or {}
+        title = ref.get("title", "").strip()
         if title_only:
             if not title:
                 continue

@@ -100,6 +100,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     if intent.is_id_query or intent.intent in ("id", "filter"):
         # 구조 질의는 meta_flat이 효율적인 경우가 많음
         base_fields = base_fields + ["meta_flat"]
+    if intent.people_terms or (intent.ids_map or {}).get("person_no"):
+        if "meta_flat" not in base_fields:
+            base_fields = base_fields + ["meta_flat"]
 
     weights = {"title": default_title_w, "answer_public": default_ans_w, "meta_flat": default_meta_flat_w}
 
@@ -196,6 +199,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_FILTER", 10),
             prefer_lex_only=prefer_lex_only,
         )
+        if intent.base_route == "people":
+            preset.top_k_lex_cand = max(preset.top_k_lex_cand, _i("RAG_TOPK_LEX_CAND_PEOPLE", 1200))
+            preset.top_k_lex = max(preset.top_k_lex, _i("RAG_TOPK_LEX_PEOPLE", 240))
         # org_query: project + org_terms 있을 때
         if intent.base_route == "project" and intent.org_terms:
             preset.use_org_filter = True

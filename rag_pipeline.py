@@ -67,6 +67,7 @@ from rag_parts.join import (
 from rag_parts.filters import (
     extract_org_terms as _extract_org_terms,
     build_org_filter as _build_org_filter,
+    build_people_filter as _build_people_filter,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
@@ -662,9 +663,11 @@ def _final_rerank(
     if mode in ("search", "lookup") and it.people_terms and base_route == "people":
         terms = [t.strip() for t in (it.people_terms or []) if t.strip()][:2]
         if terms:
-            cands = [p for p in cands if _must_contain_terms(p, terms)]
-            if not cands:
-                return []
+            matched = [p for p in cands if _must_contain_terms(p, terms)]
+            if matched:
+                min_keep = max(2, min(int(keep), 5))
+                if len(matched) >= min_keep:
+                    cands = matched
 
     # mode별 가중치 (경험적으로 튜닝 가능)
     if mode == "lookup":
@@ -990,6 +993,11 @@ def _run_rag_with_vectors(
     org_terms = list(it.org_terms or []) or _extract_org_terms(q, kws) or []
     org_filter = _build_org_filter(org_terms) if org_terms else None
 
+    # people terms/filter (필요 시)
+    people_terms = list(it.people_terms or [])
+    people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
+    people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
+
     # perf tag filter (필요 시)
     tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
@@ -1163,6 +1171,8 @@ def _run_rag_with_vectors(
                 log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_pjt_ids", join_ids=join_ids[:10])
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+                if hop1_kind == "people" and people_filter:
+                    hop1_filter = _and_filter(hop1_filter, people_filter)
                 if hop1_kind == "org" and org_filter:
                     hop1_filter = _and_filter(hop1_filter, org_filter)
 
@@ -1233,7 +1243,11 @@ def _run_rag_with_vectors(
                     head_terms = (org_terms or [])[:2]
 
                 if head_terms:
-                    hop1_reranked = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
+                    head_filtered = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
+                    if head_filtered:
+                        min_keep = max(2, min(int(hop1_keep), 5))
+                        if len(head_filtered) >= min_keep:
+                            hop1_reranked = head_filtered
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
                 # ✅ hop1 상위만 join키 추출을 위해 meta 포함 payload 보강
@@ -1415,7 +1429,8 @@ def _run_rag_with_vectors(
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
-                return _build_tag_only_filter([TAG_PJT_MP])
+                tag_filter = _build_tag_only_filter([TAG_PJT_MP])
+                return _and_filter(tag_filter, people_filter) if people_filter else tag_filter
             if base_route == "org":
                 return _build_tag_only_filter([TAG_PJT_ORG])
             if base_route == "project":
