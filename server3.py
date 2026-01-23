@@ -927,22 +927,52 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
     return "\n\n".join(context_chunks)
 
 def format_metadata(metadata: Dict[str, Any]) -> str:
-    """metadata dict → bullet list 텍스트 변환"""
-    lines = []
+    """metadata dict → bullet list 텍스트 변환 (화이트리스트 + 길이 제한)"""
+    allowed_keys = {
+        "title",
+        "PJT_ID",
+        "기관명",
+        "연도",
+        "성과유형",
+        "doc_type",
+        "source_table",
+    }
+    max_len = 250
 
-    for key, value in metadata.items():
-        ignore_keys = ['ref', 'source_pk', 'meta_raw', 'update_date', 'update_at', 'updated_at']
-        if key in ignore_keys:
-            continue
+    def _truncate(text: str) -> str:
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 1].rstrip() + "…"
+
+    def _summarize_value(value: Any) -> str:
         if value is None:
-            continue
-
+            return ""
         if isinstance(value, list):
-            value = ", ".join(map(str, value))
-        elif isinstance(value, dict):
-            value = json.dumps(value, ensure_ascii=False)
+            preview = ", ".join(_truncate(str(item)) for item in value[:5])
+            summary = preview if preview else f"list({len(value)})"
+            return _truncate(summary)
+        if isinstance(value, dict):
+            items = []
+            for idx, (k, v) in enumerate(value.items()):
+                if idx >= 5:
+                    break
+                items.append(f"{k}: {_truncate(str(v))}")
+            summary = "; ".join(items) if items else f"dict({len(value)})"
+            return _truncate(summary)
+        return _truncate(str(value))
 
-        lines.append(f"- {key}: {value}")
+    lines: List[str] = []
+    ref = metadata.get("ref") or {}
+    for key in allowed_keys:
+        if key in metadata:
+            value = metadata.get(key)
+        else:
+            value = ref.get(key)
+        if value is None or value == "":
+            continue
+        summarized = _summarize_value(value)
+        if summarized:
+            lines.append(f"- {key}: {summarized}")
 
     return "\n".join(lines) if lines else "- 없음"
 
