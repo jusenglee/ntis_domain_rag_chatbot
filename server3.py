@@ -32,6 +32,8 @@ from langgraph.graph.message import add_messages
 # --- User Modules ---
 from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
+from triton_client import get_tokenizer_for_model
+from settings import MODEL_MAX_CONTEXT, MODEL_MAX_OUTPUT_TOKENS, MAX_TOKENS
 from rag_pipeline import run_rag_ab_compare
 
 # --- Logging Setup ---
@@ -127,6 +129,11 @@ REDIS_TTL = 3600
 redis_client: Optional[redis.Redis] = None
 
 MAX_TOP_K_SIZE = 20
+PROMPT_CTX_TOKEN_BUDGET = int(os.getenv("PROMPT_CTX_TOKEN_BUDGET", "3000"))
+PROMPT_HISTORY_TOKEN_BUDGET = int(os.getenv("PROMPT_HISTORY_TOKEN_BUDGET", "800"))
+PROMPT_DOC_CHAR_BUDGET = int(os.getenv("PROMPT_DOC_CHAR_BUDGET", "1200"))
+PROMPT_META_LINE_LIMIT = int(os.getenv("PROMPT_META_LINE_LIMIT", "20"))
+PROMPT_CTX_SAFETY_MARGIN = int(os.getenv("PROMPT_CTX_SAFETY_MARGIN", "256"))
 
 class ContentCategory(str, Enum):
 
@@ -135,6 +142,113 @@ class ContentCategory(str, Enum):
     PERFORMANCE = "performance"  # 성과
     QNA = "qna"                  # 질의응답/매뉴얼
     ETC = "etc"                  # 기타
+
+def _approx_token_len(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 2)
+
+def _count_text_tokens(model_name: str, text: str) -> int:
+    if not text:
+        return 0
+    try:
+        tok = get_tokenizer_for_model(model_name)
+        ids = tok.encode(text, add_special_tokens=False)
+        return len(ids)
+    except Exception:
+        return _approx_token_len(text)
+
+def _count_message_tokens(model_name: str, messages: List[BaseMessage]) -> int:
+    try:
+        tok = get_tokenizer_for_model(model_name)
+        chat_format = []
+        for m in messages:
+            role = "user"
+            if isinstance(m, SystemMessage):
+                role = "system"
+            elif isinstance(m, AIMessage):
+                role = "assistant"
+            chat_format.append({"role": role, "content": m.content})
+        try:
+            prompt = tok.apply_chat_template(chat_format, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            prompt = ""
+            for m in chat_format:
+                prompt += f"<|{m['role']}|>\n{m['content']}\n"
+            prompt += "<|assistant|>\n"
+        return _count_text_tokens(model_name, prompt)
+    except Exception:
+        return sum(_approx_token_len(m.content) for m in messages)
+
+def _get_prompt_token_budget(model_name: str, max_output_tokens: int | None = None) -> int:
+    model_ctx = MODEL_MAX_CONTEXT.get(model_name) or int(os.getenv("DEFAULT_MAX_MODEL_LEN", "8192"))
+    max_out = max_output_tokens or MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS)
+    return max(512, int(model_ctx) - int(max_out) - PROMPT_CTX_SAFETY_MARGIN)
+
+def _truncate_text_by_tokens(text: str, max_tokens: int, *, keep_tail: bool = False) -> str:
+    if not text:
+        return text
+    if max_tokens <= 0:
+        return ""
+    approx_tokens = _approx_token_len(text)
+    if approx_tokens <= max_tokens:
+        return text
+    max_chars = max_tokens * 2
+    if max_chars <= 0:
+        return ""
+    return text[-max_chars:] if keep_tail else text[:max_chars]
+
+def _trim_text_to_token_limit(
+    model_name: str,
+    text: str,
+    max_tokens: int,
+    *,
+    keep_tail: bool = False,
+) -> str:
+    if not text or max_tokens <= 0:
+        return ""
+    try:
+        tok = get_tokenizer_for_model(model_name)
+        ids = tok.encode(text, add_special_tokens=False)
+        if len(ids) <= max_tokens:
+            return text
+        ids = ids[-max_tokens:] if keep_tail else ids[:max_tokens]
+        return tok.decode(ids, skip_special_tokens=True)
+    except Exception:
+        return _truncate_text_by_tokens(text, max_tokens, keep_tail=keep_tail)
+
+def _format_history(history: List[BaseMessage], *, token_budget: int) -> str:
+    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
+    return _truncate_text_by_tokens(history_str, token_budget, keep_tail=True) or "없음"
+
+def _fit_prompt_segment(
+    model_name: str,
+    *,
+    system_prompt: str,
+    human_template: str,
+    segment_key: str,
+    segment_text: str,
+    replacements: Dict[str, str],
+    keep_tail: bool = False,
+) -> str:
+    budget = _get_prompt_token_budget(model_name)
+    base_human = human_template.format(**{segment_key: "", **replacements})
+    base_messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=base_human),
+    ]
+    base_tokens = _count_message_tokens(model_name, base_messages)
+    available = budget - base_tokens
+    if available <= 0:
+        return ""
+    return _trim_text_to_token_limit(model_name, segment_text, available, keep_tail=keep_tail)
+
+def _build_answer_human_prompt(context_text: str, summary: str, question: str) -> str:
+    return (
+        f"[제공된 정보]\n{context_text or '없음'}\n\n"
+        f"[질문 요약]\n{summary}\n\n"
+        f"[원본 질문]\n{question}"
+    )
 
 class Researcher(BaseModel):
     name: str | None = None
@@ -300,7 +414,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = state.chat_history[-6:]
-    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
+    history_str = _format_history(history, token_budget=PROMPT_HISTORY_TOKEN_BUDGET)
 
     system_prompt = (
         "당신은 질문 분석 전문가입니다.\n"
@@ -335,16 +449,27 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     )
 
 
+    human_template = "[대화 이력]\n{history}\n\n[현재 질문]\n{question}"
+    history_str = _fit_prompt_segment(
+        "gpt_oss_0",
+        system_prompt=system_prompt,
+        human_template=human_template,
+        segment_key="history",
+        segment_text=history_str,
+        replacements={"question": state.messages[-1].content},
+        keep_tail=True,
+    ) or "없음"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", "[대화 이력]\n{history}\n\n[현재 질문]\n{question}")
+        ("human", human_template)
     ])
 
     try:
         chain = prompt | llm | sanitize_llm_json | parser
         result: QuestionAnalysis = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
-            "history": history_str or '없음',
+            "history": history_str,
             "question": state.messages[-1].content
         })
 
@@ -384,10 +509,16 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
 
     history = state.chat_history[-6:]
-    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
+    history_str = _format_history(history, token_budget=PROMPT_HISTORY_TOKEN_BUDGET)
 
     title_only = len(state.context) > 2
-    prev_context_str = refine_documents_rule_based(state.prev_context, title_only=False)
+    prev_context_str = refine_documents_rule_based(
+        state.prev_context,
+        title_only=False,
+        token_budget=PROMPT_CTX_TOKEN_BUDGET,
+        per_doc_char_budget=PROMPT_DOC_CHAR_BUDGET,
+        max_meta_items=PROMPT_META_LINE_LIMIT,
+    )
     question_text = state.messages[-1].content
     is_followup = any(hint in question_text for hint in FOLLOWUP_HINTS)
     if not is_followup:
@@ -415,19 +546,39 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "{format_instructions}"
     )
 
+    human_template = (
+        "[대화 이력]\n{history}\n\n"
+        "[참고 문서]\n{prev_context}\n\n"
+        "[현재 질문]\n{question}"
+    )
+    history_str = _fit_prompt_segment(
+        "gemma_vllm_0",
+        system_prompt=system_prompt,
+        human_template=human_template,
+        segment_key="history",
+        segment_text=history_str,
+        replacements={"prev_context": prev_context_str, "question": state.messages[-1].content},
+        keep_tail=True,
+    ) or "없음"
+    prev_context_str = _fit_prompt_segment(
+        "gemma_vllm_0",
+        system_prompt=system_prompt,
+        human_template=human_template,
+        segment_key="prev_context",
+        segment_text=prev_context_str,
+        replacements={"history": history_str, "question": state.messages[-1].content},
+    ) or "없음"
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human",
-         "[대화 이력]\n{history}\n\n"
-         "[참고 문서]\n{prev_context}\n\n"
-         "[현재 질문]\n{question}")
+        ("human", human_template)
     ])
 
     try:
         chain = prompt | llm | sanitize_llm_json | parser
         result: KnowledgeSufficiency = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
-            "history": history_str or '없음',
+            "history": history_str,
             "prev_context": prev_context_str or "없음",
             "question": state.messages[-1].content
         })
@@ -632,15 +783,37 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    context_text = refine_documents_rule_based(state.context, title_only=False)
+    context_text = refine_documents_rule_based(
+        state.context,
+        title_only=False,
+        token_budget=PROMPT_CTX_TOKEN_BUDGET,
+        per_doc_char_budget=PROMPT_DOC_CHAR_BUDGET,
+        max_meta_items=PROMPT_META_LINE_LIMIT,
+    )
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    human_prompt = (
-        f"[제공된 정보]\n{context_text or '없음'}\n\n"
-        f"[질문 요약]\n{qa.history_summary}\n\n"
-        f"[원본 질문]\n{state.messages[-1].content}"
+    human_template = (
+        "[제공된 정보]\n{context}\n\n"
+        "[질문 요약]\n{summary}\n\n"
+        "[원본 질문]\n{question}"
+    )
+    context_text = _fit_prompt_segment(
+        model_name,
+        system_prompt=system_prompt,
+        human_template=human_template,
+        segment_key="context",
+        segment_text=context_text,
+        replacements={
+            "summary": qa.history_summary,
+            "question": state.messages[-1].content,
+        },
+    ) or "없음"
+    human_prompt = _build_answer_human_prompt(
+        context_text,
+        qa.history_summary,
+        state.messages[-1].content,
     )
 
     messages = [
@@ -827,9 +1000,17 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], title_only: bool = False) -> str:
+def refine_documents_rule_based(
+    docs: List[Document],
+    title_only: bool = False,
+    *,
+    token_budget: int | None = None,
+    per_doc_char_budget: int = PROMPT_DOC_CHAR_BUDGET,
+    max_meta_items: int = PROMPT_META_LINE_LIMIT,
+) -> str:
     """문서 정제 유틸"""
     context_chunks: List[str] = []
+    total_tokens = 0
 
     for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
@@ -838,13 +1019,20 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
         if title_only:
             if not title:
                 continue
-            context_chunks.append(f"## 문서 {idx}. {title}\n")
+            chunk = f"## 문서 {idx}. {title}\n"
+            if token_budget:
+                chunk_tokens = _approx_token_len(chunk)
+                if total_tokens + chunk_tokens > token_budget:
+                    break
+                total_tokens += chunk_tokens
+            context_chunks.append(chunk)
             continue
 
-        # 기존 full mode
         content = (doc.page_content or "").strip()
+        if per_doc_char_budget > 0:
+            content = content[:per_doc_char_budget]
 
-        formatted_metadata = format_metadata(metadata)
+        formatted_metadata = format_metadata(metadata, max_items=max_meta_items)
 
         refined_text = (
             "내용:\n"
@@ -853,18 +1041,37 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
             f"{formatted_metadata}"
         )
 
-        context_chunks.append(
+        chunk = (
             f"## 출처 {idx}. {title}\n"
             f"{refined_text}\n"
         )
 
-    return "\n\n".join(context_chunks)
+        if token_budget:
+            chunk_tokens = _approx_token_len(chunk)
+            if total_tokens + chunk_tokens > token_budget:
+                available_tokens = max(0, token_budget - total_tokens)
+                compact_chunk = _truncate_text_by_tokens(chunk, available_tokens)
+                if compact_chunk:
+                    context_chunks.append(compact_chunk)
+                break
+            total_tokens += chunk_tokens
 
-def format_metadata(metadata: Dict[str, Any]) -> str:
+        context_chunks.append(chunk)
+
+    return "\n\n".join(context_chunks).strip()
+
+def format_metadata(
+    metadata: Dict[str, Any],
+    *,
+    max_items: int = PROMPT_META_LINE_LIMIT,
+    max_value_chars: int = 200,
+) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
 
     for key, value in metadata.items():
+        if len(lines) >= max_items:
+            break
         ignore_keys = ['ref', 'source_pk', 'meta_raw', 'update_date', 'update_at', 'updated_at']
         if key in ignore_keys:
             continue
@@ -876,7 +1083,11 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
         elif isinstance(value, dict):
             value = json.dumps(value, ensure_ascii=False)
 
-        lines.append(f"- {key}: {value}")
+        value_str = str(value)
+        if max_value_chars > 0:
+            value_str = value_str[:max_value_chars]
+
+        lines.append(f"- {key}: {value_str}")
 
     return "\n".join(lines) if lines else "- 없음"
 
