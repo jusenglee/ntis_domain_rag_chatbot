@@ -977,16 +977,24 @@ async def query_stream(payload: QueryRequest):
                     docs = data.get("output", {}).get("context", [])
                     documents_used.extend(docs)
 
-            ref_docs = [
-                {
-                    "tag": d.metadata["ref"]["tag"],
-                    "id": d.metadata["ref"]["source_pk"],
-                    "title": d.metadata["ref"]["title"],
-                    "project": d.metadata.get("국문과제명", d.metadata["ref"]["title"]),
-                    "researcher": d.metadata.get("인물명", ""),
-                    "institute": d.metadata.get("소속기관명", "")
-                } for d in documents_used
-            ]
+            ref_docs = []
+            for doc in documents_used:
+                ref_meta = doc.metadata.get("ref") or {}
+                title = ref_meta.get("title") or doc.metadata.get("title", "")
+                ref_docs.append(
+                    {
+                        "tag": ref_meta.get("tag") or doc.metadata.get("tag", ""),
+                        "id": (
+                            ref_meta.get("source_pk")
+                            or doc.metadata.get("source_pk")
+                            or doc.metadata.get("id", "")
+                        ),
+                        "title": title,
+                        "project": doc.metadata.get("국문과제명") or title,
+                        "researcher": doc.metadata.get("인물명", ""),
+                        "institute": doc.metadata.get("소속기관명", "")
+                    }
+                )
             log_section("REF PUSH", f"coq: {conversation_id}{question}\n{ref_docs}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
