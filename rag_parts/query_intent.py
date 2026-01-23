@@ -535,6 +535,7 @@ class QueryIntent:
     # tag filters
     project_tag_filters: List[str] = field(default_factory=list)
     perf_tag_filters: List[str] = field(default_factory=list)
+    tag_filters: List[str] = field(default_factory=list)
     # user ask signals
     wants_count: bool = False
     wants_list: bool = False
@@ -556,6 +557,7 @@ class QueryIntent:
             "ids_flat": self.ids_flat,
             "project_tag_filters": self.project_tag_filters,
             "perf_tag_filters": self.perf_tag_filters,
+            "tag_filters": self.tag_filters,
             "wants_count": self.wants_count,
             "wants_list": self.wants_list,
             "wants_detail": self.wants_detail,
@@ -694,6 +696,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
         perf_tag_filters=perf_tag_filters,
+        tag_filters=list(dict.fromkeys([*project_tag_filters, *perf_tag_filters])),
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
