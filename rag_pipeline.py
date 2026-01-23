@@ -1006,11 +1006,13 @@ def _run_rag_with_vectors(
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
     # org terms/filter (필요 시)
-    org_terms = list(it.org_terms or []) or _extract_org_terms(q, kws) or []
+    org_terms = [t.strip() for t in (list(it.org_terms or []) or _extract_org_terms(q, kws) or []) if str(t).strip()]
+    it.org_terms = org_terms
     org_filter = _build_org_filter(org_terms) if org_terms else None
 
     # people terms/filter (필요 시)
-    people_terms = list(it.people_terms or [])
+    people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
+    it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
     people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
 
@@ -1029,6 +1031,7 @@ def _run_rag_with_vectors(
         domain_hint=domain_hint,
         is_id_query=getattr(it, "is_id_query", None),
         years=getattr(it, "years", None),
+        people_terms=list(getattr(it, "people_terms", []) or []),
         org_terms=list(getattr(it, "org_terms", []) or []),
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),
