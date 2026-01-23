@@ -67,6 +67,45 @@ def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
     return qmodels.Filter(must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(tags))])
 
+def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]] = None) -> Optional[Any]:
+    if qmodels is None:
+        return None
+
+    terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
+    ids = [str(v).strip() for v in (person_ids or []) if str(v).strip()]
+
+    should: List["qmodels.Condition"] = []
+
+    if terms:
+        name_keys = [
+            "meta.인물명",
+            "meta.참여연구자명",
+            "meta.연구자명",
+            "meta.성명",
+            "인물명",
+        ]
+        for key in name_keys:
+            should.append(qmodels.FieldCondition(key=key, match=make_match_any(terms)))
+
+    if ids:
+        id_keys = [
+            "meta.국가연구자번호",
+            "meta.과학기술인등록번호",
+            "meta.인물ID",
+            "meta.참여인력일련번호",
+            "국가연구자번호",
+            "과학기술인등록번호",
+            "인물ID",
+            "참여인력일련번호",
+        ]
+        for key in id_keys:
+            should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
+
+    if not should:
+        return None
+
+    return qmodels.Filter(should=should)
+
 def and_filter(a: Any, b: Any) -> Any:
     if qmodels is None:
         return a or b

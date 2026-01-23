@@ -4,6 +4,7 @@ import uuid
 import json
 import time
 import os
+import re
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,10 +40,21 @@ def log_section(title, content):
     footer = f"\033[96m{'='*30}\033[0m\n"
     logger.info(f"{header}\n{content}\n{footer}")
 
+def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
+    if key in meta and meta.get(key):
+        return str(meta.get(key))
+    if not meta_flat:
+        return ""
+    pattern = rf"{re.escape(key)}\s*[:：]\s*([^;]+)"
+    match = re.search(pattern, meta_flat)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
     for i, doc in enumerate(docs, 1):
-        ref = doc.metadata.get("ref", {})
+        ref = doc.metadata.get("ref") or {}
         doc_details.append({
             "rank": i,
             "tag": ref.get("tag"),
@@ -483,7 +495,17 @@ class CustomRAGRetriever(BaseModel):
             meta = hit_data.get("meta", {}) if isinstance(hit_data.get("meta"), dict) else {}
             content = hit_data.get("answer_public") or hit_data.get("content") or meta.get("answer_public") or ""
             if not content:
-                title = hit_data.get("title") or meta.get("국문과제명") or ""
+                title = hit_data.get("title") or ""
+                meta_title = meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명") or ""
+                pjt_id = str(hit_data.get("pjt_id") or meta.get("PJT_ID") or "")
+                if meta_title and (
+                    title.isdigit()
+                    or title.lower().startswith("ntis:")
+                    or (pjt_id and title == pjt_id)
+                ):
+                    title = meta_title
+                elif not title:
+                    title = meta_title
                 org_name = hit_data.get("org_name_norm") or meta.get("소속기관명") or ""
                 meta_flat = hit_data.get("meta_flat") or ""
                 content_parts = [p for p in [title, org_name] if p]
@@ -493,6 +515,13 @@ class CustomRAGRetriever(BaseModel):
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
+            meta_flat = hit_data.get("meta_flat") or meta.get("meta_flat") or ""
+            researcher = _extract_meta_field(metadata, meta_flat, "인물명")
+            institute = _extract_meta_field(metadata, meta_flat, "소속기관명")
+            if researcher and not metadata.get("인물명"):
+                metadata["인물명"] = researcher
+            if institute and not metadata.get("소속기관명"):
+                metadata["소속기관명"] = institute
 
             metadata.update({
                 "ref" : {
@@ -548,11 +577,13 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         doc_previews = []
         for i, doc in enumerate(docs, 1):
             meta = doc.metadata
-            title = meta.get("국문과제명", meta.get("ref").get("title"))
-            score = meta.get("ref").get("score")
+            ref = meta.get("ref") or {}
+            title = meta.get("국문과제명", ref.get("title"))
+            score = ref.get("score")
             content = doc.page_content.replace("\n", " ")[:100]
+            score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "N/A"
             doc_previews.append(
-                f"[{i}] 📌 {title} | Score: {score:.4f}\n"
+                f"[{i}] 📌 {title} | Score: {score_str}\n"
                 f"      📝 {content}..."
             )
 
@@ -802,7 +833,8 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
 
     for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
-        title = metadata.get("ref").get("title", "").strip()
+        ref = metadata.get("ref") or {}
+        title = ref.get("title", "").strip()
         if title_only:
             if not title:
                 continue

@@ -67,6 +67,7 @@ from rag_parts.join import (
 from rag_parts.filters import (
     extract_org_terms as _extract_org_terms,
     build_org_filter as _build_org_filter,
+    build_people_filter as _build_people_filter,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
@@ -479,13 +480,33 @@ def _to_text(v: object) -> str:
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
 
+def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
+    title = _to_text(pl.get("title") or "")
+    meta_title = _to_text(
+        meta.get("국문과제명")
+        or meta.get("성과명")
+        or meta.get("논문명")
+        or meta.get("title")
+        or ""
+    )
+    if not title:
+        return meta_title
+    pjt_id = _to_text(pl.get("pjt_id") or meta.get("PJT_ID") or "")
+    if meta_title and (
+        title.isdigit()
+        or title.lower().startswith("ntis:")
+        or (pjt_id and title == pjt_id)
+    ):
+        return meta_title
+    return title or meta_title
+
 def _payload_text_bundle(p: Any) -> Dict[str, str]:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         pl = {}
     meta = _get_meta(pl)
 
-    title = _to_text(pl.get("title") or meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명"))
+    title = _prefer_meta_title(pl, meta)
     meta_flat = _to_text(pl.get("meta_flat") or meta.get("meta_flat") or "")
     answer_public = _to_text(pl.get("answer_public") or pl.get("content") or meta.get("answer_public") or "")
 
@@ -576,6 +597,16 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
     for ot in org_terms[:4]:
         if ot.lower() in hay:
             sc += 60.0
+        elif strict_ids:
+            sc -= 10.0
+
+    # people
+    people_terms = [t.strip() for t in (it.people_terms or []) if t.strip()]
+    for pt in people_terms[:4]:
+        if pt.lower() in hay:
+            sc += 70.0
+        elif strict_ids:
+            sc -= 15.0
 
     # perf tag filters (exact) - base_route와 무관하게 적용
     if it.perf_tag_filters:
@@ -628,6 +659,15 @@ def _final_rerank(
 ) -> List[Any]:
     if not cands:
         return []
+
+    if mode in ("search", "lookup") and it.people_terms and base_route == "people":
+        terms = [t.strip() for t in (it.people_terms or []) if t.strip()][:2]
+        if terms:
+            matched = [p for p in cands if _must_contain_terms(p, terms)]
+            if matched:
+                min_keep = max(2, min(int(keep), 5))
+                if len(matched) >= min_keep:
+                    cands = matched
 
     # mode별 가중치 (경험적으로 튜닝 가능)
     if mode == "lookup":
@@ -953,6 +993,11 @@ def _run_rag_with_vectors(
     org_terms = list(it.org_terms or []) or _extract_org_terms(q, kws) or []
     org_filter = _build_org_filter(org_terms) if org_terms else None
 
+    # people terms/filter (필요 시)
+    people_terms = list(it.people_terms or [])
+    people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
+    people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
+
     # perf tag filter (필요 시)
     tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
@@ -1126,6 +1171,8 @@ def _run_rag_with_vectors(
                 log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_pjt_ids", join_ids=join_ids[:10])
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+                if hop1_kind == "people" and people_filter:
+                    hop1_filter = _and_filter(hop1_filter, people_filter)
                 if hop1_kind == "org" and org_filter:
                     hop1_filter = _and_filter(hop1_filter, org_filter)
 
@@ -1187,7 +1234,7 @@ def _run_rag_with_vectors(
                 # head term 강제 포함(people/org head일 때만, 옵션)
                 head_terms: List[str] = []
                 if hop1_kind == "people":
-                    head_terms = _extract_quoted_terms(q)
+                    head_terms = _extract_quoted_terms(q) or list(it.people_terms or [])
                     if not head_terms:
                         m = re.search(r"([가-힣]{2,4})\s*(?:이|가|은|는)?\s*(?:참여인력|참여연구|연구자|연구원)", q)
                         if m:
@@ -1196,7 +1243,11 @@ def _run_rag_with_vectors(
                     head_terms = (org_terms or [])[:2]
 
                 if head_terms:
-                    hop1_reranked = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
+                    head_filtered = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
+                    if head_filtered:
+                        min_keep = max(2, min(int(hop1_keep), 5))
+                        if len(head_filtered) >= min_keep:
+                            hop1_reranked = head_filtered
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
                 # ✅ hop1 상위만 join키 추출을 위해 meta 포함 payload 보강
@@ -1378,7 +1429,8 @@ def _run_rag_with_vectors(
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
-                return _build_tag_only_filter([TAG_PJT_MP])
+                tag_filter = _build_tag_only_filter([TAG_PJT_MP])
+                return _and_filter(tag_filter, people_filter) if people_filter else tag_filter
             if base_route == "org":
                 return _build_tag_only_filter([TAG_PJT_ORG])
             if base_route == "project":
