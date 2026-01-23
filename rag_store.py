@@ -26,16 +26,16 @@ _emb_e5i: Optional[HuggingFaceEmbedding] = None
 _emb_e5: Optional[HuggingFaceEmbedding] = None
 
 
-def _ensure_payload_indexes(client: QdrantClient) -> None:
+def _ensure_payload_indexes(client: QdrantClient, *, wait: bool = False) -> None:
     collections = [COL_PROJECT, COL_PERF, COL_SUPPORT]
     text_fields = ["title", "answer_public", "meta_flat"]
     keyword_fields = ["tag", KEY_ORG_NORM, "doc_id", "PJT_ID", "pjt_id", "meta.PJT_ID", "meta.pjt_id"]
 
     for collection in collections:
         for field in text_fields:
-            ensure_text_index(client, collection, field)
+            ensure_text_index(client, collection, field, wait=wait)
         for field in keyword_fields:
-            ensure_keyword_index(client, collection, field)
+            ensure_keyword_index(client, collection, field, wait=wait)
 
 def build_rag_objects_dual() -> Tuple[
     QdrantClient, HuggingFaceEmbedding, Any,
@@ -58,7 +58,9 @@ def build_rag_objects_dual() -> Tuple[
         grpc_port=QDRANT_PORT,
         prefer_grpc=True,
     )
-    _ensure_payload_indexes(_qdr)
+
+    # Ensure payload indexes (best-effort)
+    _ensure_payload_indexes(_qdr, wait=False)
 
     # e5-large-instruct (e5i_qa)
     _emb_e5i = HuggingFaceEmbedding(
