@@ -53,14 +53,19 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
         return ""
     return match.group(1).strip()
 
-def _clip_text(text: str, max_chars: int = 2000) -> str:
+def _clip_text(text: str, max_chars: int = 2000, *, ellipsis: bool = True) -> str:
     if not text:
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = re.sub(r"\n{2,}", "\n", normalized).strip()
     if len(normalized) <= max_chars:
         return normalized
-    return normalized[:max_chars]
+    if max_chars <= 0:
+        return ""
+    clipped = normalized[:max_chars]
+    if ellipsis and max_chars > 1:
+        return clipped[: max_chars - 1] + "…"
+    return clipped
 
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
@@ -572,7 +577,7 @@ class CustomRAGRetriever(BaseModel):
                 if meta_flat:
                     content_parts.append(meta_flat)
                 content = "\n".join(content_parts)
-            content = _clip_text(content)
+            content = _clip_text(content, int(os.getenv("RAG_RETRIEVER_CONTENT_MAX", "1800")))
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
@@ -896,8 +901,9 @@ def build_advanced_workflow():
 def refine_documents_rule_based(docs: List[Document], title_only: bool = False) -> str:
     """문서 정제 유틸"""
     context_chunks: List[str] = []
+    max_docs = int(os.getenv("RAG_REFINE_MAX_DOCS", "6"))
 
-    for idx, doc in enumerate(docs, start=1):
+    for idx, doc in enumerate((docs or [])[: max(0, max_docs)], start=1):
         metadata = doc.metadata or {}
         ref = metadata.get("ref") or {}
         title = ref.get("title", "").strip()
@@ -908,7 +914,7 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
             continue
 
         # 기존 full mode
-        content = (doc.page_content or "").strip()
+        content = _clip_text(doc.page_content or "", int(os.getenv("RAG_REFINE_CONTENT_MAX", "1200")))
 
         formatted_metadata = format_metadata(metadata)
 
@@ -931,42 +937,52 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
     allowed_keys = {
         "title",
         "PJT_ID",
+        "pjt_id",
+        "과제명",
+        "국문과제명",
+        "성과명",
+        "논문명",
         "기관명",
+        "주관기관명",
+        "과제수행기관명",
+        "소속기관명",
         "연도",
+        "성과연도",
+        "발행년도",
         "성과유형",
         "doc_type",
         "source_table",
+        "저널명",
+        "학술지명",
     }
-    max_len = 250
-
-    def _truncate(text: str) -> str:
-        if len(text) <= max_len:
-            return text
-        return text[: max_len - 1].rstrip() + "…"
+    max_len = int(os.getenv("RAG_REFINE_META_MAX", "200"))
 
     def _summarize_value(value: Any) -> str:
         if value is None:
             return ""
         if isinstance(value, list):
-            preview = ", ".join(_truncate(str(item)) for item in value[:5])
+            preview = ", ".join(_clip_text(str(item), max_len) for item in value[:5])
             summary = preview if preview else f"list({len(value)})"
-            return _truncate(summary)
+            return _clip_text(summary, max_len)
         if isinstance(value, dict):
             items = []
             for idx, (k, v) in enumerate(value.items()):
                 if idx >= 5:
                     break
-                items.append(f"{k}: {_truncate(str(v))}")
+                items.append(f"{k}: {_clip_text(str(v), max_len)}")
             summary = "; ".join(items) if items else f"dict({len(value)})"
-            return _truncate(summary)
-        return _truncate(str(value))
+            return _clip_text(summary, max_len)
+        return _clip_text(str(value), max_len)
 
     lines: List[str] = []
     ref = metadata.get("ref") or {}
+    ignore_keys = {"ref", "source_pk", "meta_raw", "update_date", "update_at", "updated_at"}
+
     for key in allowed_keys:
-        if key in metadata:
-            value = metadata.get(key)
-        else:
+        if key in ignore_keys:
+            continue
+        value = metadata.get(key)
+        if value is None or value == "":
             value = ref.get(key)
         if value is None or value == "":
             continue
