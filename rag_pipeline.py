@@ -1124,6 +1124,7 @@ def _run_rag_with_vectors(
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
+    gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
@@ -1140,7 +1141,7 @@ def _run_rag_with_vectors(
         people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
-    people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
+    people_filter = _build_people_filter(people_terms, people_ids, gender_terms) if (people_terms or people_ids or gender_terms) else None
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
@@ -1158,6 +1159,7 @@ def _run_rag_with_vectors(
         is_id_query=getattr(it, "is_id_query", None),
         years=getattr(it, "years", None),
         people_terms=list(getattr(it, "people_terms", []) or []),
+        gender_terms=list(getattr(it, "gender_terms", []) or []),
         org_terms=list(getattr(it, "org_terms", []) or []),
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),

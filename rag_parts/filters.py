@@ -83,12 +83,54 @@ def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
     return qmodels.Filter(must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(tags))])
 
-def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]] = None) -> Optional[Any]:
+def _build_prtcp_mp_nested_filter(
+    *,
+    people_terms: List[str],
+    person_ids: List[str],
+    gender_terms: List[str],
+) -> Optional[Any]:
+    if qmodels is None:
+        return None
+    nested_cls = getattr(qmodels, "NestedCondition", None)
+    if nested_cls is None:
+        return None
+
+    name_cond = (
+        qmodels.FieldCondition(key="hm_nm", match=make_match_any(people_terms))
+        if people_terms
+        else None
+    )
+    id_cond = (
+        qmodels.FieldCondition(key="hm_id", match=make_match_any(person_ids))
+        if person_ids
+        else None
+    )
+    base_must = [c for c in (name_cond, id_cond) if c is not None]
+    if not base_must and not gender_terms:
+        return None
+
+    if gender_terms:
+        nested_should: List["qmodels.Condition"] = []
+        for key in ("gender_slct", "gender_slct_nm"):
+            must = list(base_must)
+            must.append(qmodels.FieldCondition(key=key, match=make_match_any(gender_terms)))
+            nested_should.append(nested_cls(key="prtcp_mp", filter=qmodels.Filter(must=must)))
+        return qmodels.Filter(should=nested_should)
+
+    return nested_cls(key="prtcp_mp", filter=qmodels.Filter(must=base_must))
+
+
+def build_people_filter(
+    people_terms: List[str],
+    person_ids: Optional[List[str]] = None,
+    gender_terms: Optional[List[str]] = None,
+) -> Optional[Any]:
     if qmodels is None:
         return None
 
     terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
     ids = [str(v).strip() for v in (person_ids or []) if str(v).strip()]
+    genders = [str(g).strip() for g in (gender_terms or []) if str(g).strip()]
 
     should: List["qmodels.Condition"] = []
 
@@ -124,6 +166,21 @@ def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]]
         ]
         for key in id_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
+
+    nested_filter = _build_prtcp_mp_nested_filter(
+        people_terms=terms,
+        person_ids=ids,
+        gender_terms=genders,
+    )
+    if genders and nested_filter is not None:
+        return qmodels.Filter(must=[nested_filter])
+
+    if genders:
+        for key in ["flat_text", "meta_flat", "gender_slct", "gender_slct_nm"]:
+            should.append(qmodels.FieldCondition(key=key, match=make_match_any(genders)))
+
+    if nested_filter is not None:
+        should.append(nested_filter)
 
     if not should:
         return None
