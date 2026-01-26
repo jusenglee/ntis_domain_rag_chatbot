@@ -100,12 +100,15 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     """
     # common defaults (기존과 호환)
     default_title_w = _f("RAG_W_TITLE", 2.2)
+    default_content_w = _f("RAG_W_CONTENT", _f("RAG_W_ANSWER_PUBLIC", 1.2))
+    default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 0.8)
+    default_flat_w = _f("RAG_W_FLAT_TEXT", 0.35)
     default_ans_w = _f("RAG_W_ANSWER_PUBLIC", 1.2)
     default_meta_flat_w = _f("RAG_W_META_FLAT", 0.35)
     default_lex_mode = os.getenv("RAG_LEXICAL_SCORING_MODE", "bm25").strip().lower()
 
     # base lexical fields
-    base_fields = ["title", "answer_public"]
+    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public"]
     if intent.is_id_query or intent.intent in ("id", "filter"):
         # 구조 질의는 meta_flat이 효율적인 경우가 많음
         base_fields = base_fields + ["meta_flat"]
@@ -113,7 +116,15 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         if "meta_flat" not in base_fields:
             base_fields = base_fields + ["meta_flat"]
 
-    weights = {"title": default_title_w, "answer_public": default_ans_w, "meta_flat": default_meta_flat_w}
+    weights = {
+        "title_text": default_title_w,
+        "content_text": default_content_w,
+        "keyword_text": default_keyword_w,
+        "flat_text": default_flat_w,
+        "title": default_title_w,
+        "answer_public": default_ans_w,
+        "meta_flat": default_meta_flat_w,
+    }
 
     # route별 meta_flat 보수 옵션
     if intent.base_route == "support" and ("meta_flat" in base_fields):
@@ -232,8 +243,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             preset.org_lex_boost = True
             # org_name_norm을 lexical에 포함(가중치 부여)
             if KEY_ORG_NORM not in preset.lexical_fields:
-                preset.lexical_fields = ["title", "answer_public", KEY_ORG_NORM, "meta_flat"]
+                preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public", KEY_ORG_NORM, "org_nm", "meta_flat"]
             preset.lexical_field_weights[KEY_ORG_NORM] = _f("RAG_W_ORG_NORM", 3.0)
+            preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights[KEY_ORG_NORM])
         return preset
 
     # 6) Topic summary

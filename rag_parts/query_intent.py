@@ -127,6 +127,7 @@ PEOPLE_CUES = [
     "연구자", "연구원", "참여인력", "참여 인력", "참여연구원", "참여 연구원",
     "연구책임자", "연구 책임자", "책임자", "참여자", "인력", "연구진", "인물",
     "국가연구자번호", "과학기술인등록번호", "인물id", "인물 id", "참여인력일련번호",
+    "성별", "남자", "여자", "남성", "여성",
 ]
 ORG_CUES = [
     "기관", "소속기관", "소속 기관", "주관기관", "주관 기관", "수행기관", "수행 기관",
@@ -251,6 +252,30 @@ def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 2) -> List[
                     break
 
     return cands[:max_terms]
+
+
+def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
+    text = " ".join([q or ""] + list(kws or []))
+    t = text.lower()
+    if not t.strip():
+        return []
+
+    male = any(x in t for x in ["남자", "남성", "male", "m "]) or "남" in t
+    female = any(x in t for x in ["여자", "여성", "female", "f "]) or "여" in t
+
+    out: List[str] = []
+    if male:
+        out.extend(["남", "남자", "남성", "M", "male"])
+    if female:
+        out.extend(["여", "여자", "여성", "F", "female"])
+
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for v in out:
+        if v not in seen:
+            seen.add(v)
+            deduped.append(v)
+    return deduped
 
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
@@ -528,6 +553,7 @@ class QueryIntent:
     rare_ratio: float
     # extracted entities
     people_terms: List[str] = field(default_factory=list)
+    gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     years: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
@@ -551,6 +577,7 @@ class QueryIntent:
             "long": int(self.long_query),
             "rare_ratio": round(float(self.rare_ratio), 4),
             "people_terms": self.people_terms,
+            "gender_terms": self.gender_terms,
             "org_terms": self.org_terms,
             "years": self.years,
             "ids_map": self.ids_map,
@@ -616,6 +643,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
 
     # entities
     people_terms = extract_people_terms(q, kws)
+    gender_terms = extract_gender_terms(q, kws)
     org_terms = extract_org_terms(q, kws)
     years = extract_years(q)
 
@@ -690,6 +718,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
         long_query=long_query,
         rare_ratio=float(rare_ratio),
         people_terms=people_terms,
+        gender_terms=gender_terms,
         org_terms=org_terms,
         years=years,
         ids_map=ids_map,
