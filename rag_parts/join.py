@@ -25,10 +25,11 @@ _PJT_ID_KEYS = (
     "과제번호",
     "pjtId",
     "PJTID",
+    "PJT_NO",
 )
 
 # 흔한 중첩 경로 후보 (payload 안의 meta dict)
-_META_KEYS = ("meta", "metadata")
+_META_KEYS = ("meta", "metadata", "meta_basic", "meta_detail")
 
 
 def _as_dict(x: Any) -> Optional[Dict[str, Any]]:
@@ -52,11 +53,12 @@ def _get_payload(point: Any) -> Optional[Dict[str, Any]]:
 
 
 def _get_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
     for mk in _META_KEYS:
         v = payload.get(mk)
         if isinstance(v, dict):
-            return v
-    return {}
+            merged.update(v)
+    return merged
 
 
 def _normalize_pjt_id(v: Any) -> Optional[str]:

@@ -96,13 +96,13 @@ _PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()  
 # 후보 단계에 필요한 최소 키들(메타/본문 제외)
 _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_MIN_FIELDS",
-    "doc_id,title,tag,meta_flat,org_name_norm,pjt_id,urls,systems"
+    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,cetegory,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,meta_flat,urls,systems"
 ).split(",") if s.strip()]
 
 # 최종 컨텍스트용(필요하면 meta/answer_public 포함)
 _PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_FULL_FIELDS",
-    "doc_id,title,tag,meta,meta_flat,answer_public,org_name_norm,pjt_id,urls,systems"
+    "doc_id,tag,title_text,title,title1,title2,content_text,content1,content2,keyword_text,keyword1,keyword2,flat_text,category,cetegory,meta,meta_basic,meta_detail,meta_flat,answer_public,org_nm,org_name_norm,pjt_id,stan_yr,start_dt,end_dt,dt1,dt2,urls,systems"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
@@ -758,8 +758,21 @@ def dense_retrieve_hybrid_multi(
     t_lex0 = time.perf_counter()
     lex_points: List[models.ScoredPoint] = []
 
-    lexical_fields_eff = list(lexical_fields or ["title", "answer_public", "meta_flat"])
-    lexical_weights_eff = dict(lexical_field_weights or {"title": 2.2, "answer_public": 1.2, "meta_flat": 0.35})
+    lexical_fields_eff = list(
+        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public", "meta_flat"]
+    )
+    lexical_weights_eff = dict(
+        lexical_field_weights
+        or {
+            "title_text": 2.2,
+            "content_text": 1.2,
+            "keyword_text": 0.8,
+            "flat_text": 0.35,
+            "title": 2.2,
+            "answer_public": 1.2,
+            "meta_flat": 0.35,
+        }
+    )
 
     t_scroll = 0.0
     t_score = 0.0
@@ -942,16 +955,53 @@ def rrf_rerank_multi(
 # =========================
 
 _META_CORE_KEYS = [
-    "pjt_id", "PJT_ID", "과제번호", "source_pk", "source_table", "doc_type", "기준년도",
-    "국문과제명", "영문과제명",
-    "과제수행기관명", "연구수행주체",
-    "총연구기간시작일", "총연구기간종료일",
+    "pjt_id",
+    "PJT_ID",
+    "PJT_NO",
+    "과제번호",
+    "source_pk",
+    "source_table",
+    "doc_type",
+    "기준년도",
+    "STAN_YR",
+    "org_nm",
+    "KOR_PJT_NM",
+    "ENG_PJT_NM",
+    "국문과제명",
+    "영문과제명",
+    "PJT_PRFRM_ORG_NM",
+    "과제수행기관명",
+    "연구수행주체",
+    "TOT_RSCH_START_DT",
+    "TOT_RSCH_END_DT",
+    "start_dt",
+    "end_dt",
+    "dt1",
+    "dt2",
+    "총연구기간시작일",
+    "총연구기간종료일",
     "연구비합계금액",
-    "연구개발단계", "국가중점과학기술", "6T관련기술",
-    "RST_ID", "등록번호", "성과명", "논문명", "발명의명칭",
+    "연구개발단계",
+    "국가중점과학기술",
+    "6T관련기술",
+    "keyword_text",
+    "RST_ID",
+    "등록번호",
+    "성과명",
+    "논문명",
+    "발명의명칭",
 ]
 
-_META_LONG_KEYS = {"연구내용요약", "연구목표요약", "내용", "요약"}
+_META_LONG_KEYS = {"연구내용요약", "연구목표요약", "내용", "요약", "RSCH_ABSTRACT", "RSCH_GOAL_ABSTRACT"}
+
+
+def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for key in ("meta", "metadata", "meta_basic", "meta_detail"):
+        v = payload.get(key)
+        if isinstance(v, dict):
+            merged.update(v)
+    return merged
 
 
 def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
@@ -971,17 +1021,24 @@ def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
     if any(x in ql for x in ["기간", "시작", "종료", "언제"]):
         _add("총연구기간시작일")
         _add("총연구기간종료일")
+        _add("TOT_RSCH_START_DT")
+        _add("TOT_RSCH_END_DT")
+        _add("start_dt")
+        _add("end_dt")
     if any(x in ql for x in ["금액", "연구비", "예산", "비용"]):
         _add("연구비합계금액")
     if any(x in ql for x in ["기관", "대학", "출연", "주관"]):
         _add("과제수행기관명")
         _add("연구수행주체")
+        _add("PJT_PRFRM_ORG_NM")
+        _add("org_nm")
     if any(x in ql for x in ["분야", "기술", "6t", "중점"]):
         _add("국가중점과학기술")
         _add("6T관련기술")
     if any(x in ql for x in ["키워드", "keyword"]):
         _add("한글키워드")
         _add("영문키워드")
+        _add("keyword_text")
 
     if _CTX_INCLUDE_META_LONG:
         for k in list(meta.keys()):
@@ -1024,15 +1081,34 @@ def build_context_docstyle(
         if not pl:
             continue
 
-        title = _safe_str(pl.get("title") or pl.get("meta", {}).get("국문과제명") or "", max_chars=200)
+        meta = _merge_meta(pl)
+        title = _safe_str(
+            pl.get("title_text")
+            or pl.get("title")
+            or pl.get("title1")
+            or meta.get("KOR_PJT_NM")
+            or meta.get("국문과제명")
+            or "",
+            max_chars=200,
+        )
         doc_id = _safe_str(pl.get("doc_id") or "", max_chars=160)
         systems = pl.get("systems") if isinstance(pl.get("systems"), list) else []
         urls = pl.get("urls") if isinstance(pl.get("urls"), list) else []
 
-        answer_public = _safe_str(pl.get("answer_public") or "", max_chars=per_doc_char_budget)
-        meta = pl.get("meta") if isinstance(pl.get("meta"), dict) else {}
-        meta_keys = _select_meta_fields(meta, query_text=query_text)
-        meta_lines = _format_meta_lines(meta, meta_keys)
+        answer_public = _safe_str(
+            pl.get("content_text")
+            or pl.get("content1")
+            or pl.get("content2")
+            or pl.get("answer_public")
+            or "",
+            max_chars=per_doc_char_budget,
+        )
+        meta_full = dict(meta)
+        for key in ("category", "cetegory", "org_nm", "stan_yr", "start_dt", "end_dt", "dt1", "dt2", "keyword_text"):
+            if key not in meta_full and key in pl and pl.get(key) not in (None, ""):
+                meta_full[key] = pl.get(key)
+        meta_keys = _select_meta_fields(meta_full, query_text=query_text)
+        meta_lines = _format_meta_lines(meta_full, meta_keys)
 
         chunk_parts: List[str] = []
         header = f"[DOC] {title}" if title else "[DOC]"
@@ -1077,7 +1153,7 @@ def build_context_docstyle(
                 "score": float(getattr(p, "score", 0.0) or 0.0),
                 "urls": urls,
                 "systems": systems,
-                "source_table": _payload_get(pl, "meta.source_table", ""),
+                "source_table": _payload_get(pl, "meta.source_table", "") or _payload_get(pl, "meta_basic.source_table", ""),
             }
         )
 

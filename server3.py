@@ -345,8 +345,10 @@ def _documents_to_points(docs: List[Document]) -> List[Any]:
         metadata = doc.metadata or {}
         ref = metadata.get("ref") or {}
         payload = {
+            "title_text": ref.get("title") or metadata.get("국문과제명") or "",
             "title": ref.get("title") or metadata.get("국문과제명") or "",
             "doc_id": ref.get("source_pk") or metadata.get("source_pk") or "",
+            "content_text": doc.page_content or "",
             "answer_public": doc.page_content or "",
             "meta": metadata,
             "urls": ref.get("urls") or metadata.get("urls") or [],
