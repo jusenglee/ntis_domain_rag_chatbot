@@ -55,14 +55,19 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
         return ""
     return match.group(1).strip()
 
-def _clip_text(text: str, max_chars: int = 2000) -> str:
+def _clip_text(text: str, max_chars: int = 2000, *, ellipsis: bool = True) -> str:
     if not text:
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = re.sub(r"\n{2,}", "\n", normalized).strip()
     if len(normalized) <= max_chars:
         return normalized
-    return normalized[:max_chars]
+    if max_chars <= 0:
+        return ""
+    clipped = normalized[:max_chars]
+    if ellipsis and max_chars > 1:
+        return clipped[: max_chars - 1] + "…"
+    return clipped
 
 def format_rag_search_details(query, hint, docs, conversation_id, question):
     doc_details = []
@@ -722,7 +727,7 @@ class CustomRAGRetriever(BaseModel):
                 if meta_flat:
                     content_parts.append(meta_flat)
                 content = "\n".join(content_parts)
-            content = _clip_text(content)
+            content = _clip_text(content, int(os.getenv("RAG_RETRIEVER_CONTENT_MAX", "1800")))
 
             metadata = dict(meta)
             ref = hit_data.get("ref", {})
@@ -1072,7 +1077,7 @@ def refine_documents_rule_based(
     context_chunks: List[str] = []
     total_tokens = 0
 
-    for idx, doc in enumerate(docs, start=1):
+    for idx, doc in enumerate((docs or [])[: max(0, max_docs)], start=1):
         metadata = doc.metadata or {}
         ref = metadata.get("ref") or {}
         title = ref.get("title", "").strip()

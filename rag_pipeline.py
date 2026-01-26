@@ -1017,7 +1017,7 @@ def _run_rag_with_vectors(
     people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
 
     # perf tag filter (필요 시)
-    tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
+    perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
@@ -1448,8 +1448,8 @@ def _run_rag_with_vectors(
             return build_join_filter(pjt_ids, tag_filters=None)
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
-        if col == COL_PERF and tag_filter:
-            return tag_filter
+        if col == COL_PERF and perf_tag_filter:
+            return perf_tag_filter
 
         # (선택) org_filter는 project 컬렉션에서만
         if col == COL_PROJECT and org_filter:
@@ -1458,16 +1458,16 @@ def _run_rag_with_vectors(
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
-                tag_filter = _build_tag_only_filter([TAG_PJT_MP])
-                return _and_filter(tag_filter, people_filter) if people_filter else tag_filter
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_MP])
+                return _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
             if base_route == "org":
                 return _build_tag_only_filter([TAG_PJT_ORG])
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 return _build_tag_only_filter([TAG_PJT_INFO])
 
-        if col == COL_PERF and base_route == "perf" and tag_filter:
-            return tag_filter
+        if col == COL_PERF and base_route == "perf" and perf_tag_filter:
+            return perf_tag_filter
         return None
 
 
