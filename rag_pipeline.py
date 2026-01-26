@@ -1012,6 +1012,20 @@ def _run_rag_with_vectors(
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
+    qa_researchers = _get_attr(qa, "researchers", None) or []
+    if isinstance(qa_researchers, str):
+        qa_researchers = [qa_researchers]
+    hint_people_terms = [str(t).strip() for t in (qa_researchers or []) if str(t).strip()]
+    if hint_people_terms:
+        merged_people = people_terms + hint_people_terms
+        deduped_people: List[str] = []
+        seen_people: set[str] = set()
+        for term in merged_people:
+            if term in seen_people:
+                continue
+            seen_people.add(term)
+            deduped_people.append(term)
+        people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
     people_filter = _build_people_filter(people_terms, people_ids) if (people_terms or people_ids) else None
