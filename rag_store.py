@@ -28,8 +28,30 @@ _emb_e5: Optional[HuggingFaceEmbedding] = None
 
 def _ensure_payload_indexes(client: QdrantClient, *, wait: bool = False) -> None:
     collections = [COL_PROJECT, COL_PERF, COL_SUPPORT]
-    text_fields = ["title", "answer_public", "meta_flat"]
-    keyword_fields = ["tag", KEY_ORG_NORM, "doc_id", "PJT_ID", "pjt_id", "meta.PJT_ID", "meta.pjt_id"]
+    text_fields = [
+        "title_text",
+        "content_text",
+        "keyword_text",
+        "flat_text",
+        "category",
+        "cetegory",
+        "title",
+        "answer_public",
+        "meta_flat",
+    ]
+    keyword_fields = [
+        "tag",
+        KEY_ORG_NORM,
+        "org_nm",
+        "doc_id",
+        "pjt_id",
+        "PJT_ID",
+        "meta.PJT_ID",
+        "meta.pjt_id",
+        "meta_basic.PJT_ID",
+        "meta_basic.PJT_NO",
+        "meta_basic.PJT_PRFRM_ORG_NM",
+    ]
 
     for collection in collections:
         for field in text_fields:

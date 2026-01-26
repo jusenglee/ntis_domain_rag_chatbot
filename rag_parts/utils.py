@@ -33,16 +33,18 @@ def point_brief(p: Any) -> Dict[str, Any]:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         pl = {}
-    meta = pl.get("meta") or {}
-    if not isinstance(meta, dict):
-        meta = {}
+    meta = {}
+    for key in ("meta", "metadata", "meta_basic", "meta_detail"):
+        v = pl.get(key)
+        if isinstance(v, dict):
+            meta.update(v)
 
     score = getattr(p, "score", None)
-    title = pl.get("title") or ""
+    title = pl.get("title_text") or pl.get("title") or pl.get("title1") or ""
     doc_id = pl.get("doc_id") or ""
     col = pl.get("_collection") or ""
     st = meta.get("source_table") or meta.get("sourceTable") or ""
-    tag = pl.get("tag") or meta.get("doc_type") or ""
+    tag = pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or ""
     return {
         "score": float(score) if score is not None else None,
         "col": str(col),

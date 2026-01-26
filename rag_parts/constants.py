@@ -7,7 +7,7 @@ import re
 # -----------------------------
 # Common keys / collections
 # -----------------------------
-KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name_norm").strip() or "org_name_norm")
+KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_nm").strip() or "org_nm")
 
 COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project").strip() or "ntis_project")
 COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf").strip() or "ntis_perf")

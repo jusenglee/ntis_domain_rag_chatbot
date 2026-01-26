@@ -57,12 +57,14 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         return None
     keys = [
         KEY_ORG_NORM,
+        "org_nm",
         "org_name_raw",
         "meta.과제수행기관명",
         "meta.참여연구기관명",
         "meta.발행기관명",
         "meta.등록기관명",
         "meta.기탁기관명",
+        "meta_basic.PJT_PRFRM_ORG_NM",
     ]
     should: List["qmodels.Condition"] = []
     for key in keys:
@@ -92,18 +94,22 @@ def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]]
 
     if terms:
         name_keys = [
+            "flat_text",
             "meta_flat",
             "meta.인물명",
             "meta.참여연구자명",
             "meta.연구자명",
             "meta.성명",
             "인물명",
+            "hm_nm",
+            "prtcp_mp.hm_nm",
         ]
         for key in name_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(terms)))
 
     if ids:
         id_keys = [
+            "flat_text",
             "meta_flat",
             "meta.국가연구자번호",
             "meta.과학기술인등록번호",
@@ -113,6 +119,8 @@ def build_people_filter(people_terms: List[str], person_ids: Optional[List[str]]
             "과학기술인등록번호",
             "인물ID",
             "참여인력일련번호",
+            "hm_id",
+            "prtcp_mp.hm_id",
         ]
         for key in id_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
@@ -199,7 +207,17 @@ def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] =
 
     primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
     key_cands = []
-    for k in [primary, "meta.PJT_ID", "meta.pjt_id", "PJT_ID", "pjt_id", "meta.pjtId", "pjtId"]:
+    for k in [
+        primary,
+        "meta.PJT_ID",
+        "meta.pjt_id",
+        "meta_basic.PJT_ID",
+        "meta_basic.pjt_id",
+        "PJT_ID",
+        "pjt_id",
+        "meta.pjtId",
+        "pjtId",
+    ]:
         if k and k not in key_cands:
             key_cands.append(k)
 
@@ -241,7 +259,17 @@ def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmod
     if join_ids:
         primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
         key_cands = []
-        for k in [primary, "meta.PJT_ID", "meta.pjt_id", "PJT_ID", "pjt_id", "meta.pjtId", "pjtId"]:
+        for k in [
+            primary,
+            "meta.PJT_ID",
+            "meta.pjt_id",
+            "meta_basic.PJT_ID",
+            "meta_basic.pjt_id",
+            "PJT_ID",
+            "pjt_id",
+            "meta.pjtId",
+            "pjtId",
+        ]:
             if k and k not in key_cands:
                 key_cands.append(k)
 
