@@ -30,6 +30,9 @@ from settings import (
     MAX_TOKENS,
     TEMPERATURE,
     TOP_P,
+    CTX_SAFETY_MARGIN,
+    DEFAULT_MAX_MODEL_LEN,
+    MODEL_MAX_CONTEXT,
 )
 from settings import logger  # 공용 logger
 
@@ -107,22 +110,23 @@ def _compute_max_new_tokens(
     """
     prompt_tokens = _get_prompt_tokens(model_name, prompt)
 
-    try:
-        tok = get_tokenizer_for_model(model_name)
-        max_seq_len = getattr(tok, "model_max_length", 8192)
-        # HF 쪽에서 종종 엄청 큰 값(1e30 같은) 넣어두는 경우 방어
-        if max_seq_len is None or max_seq_len > 100_000:
-            max_seq_len = 8192
-    except Exception:
-        max_seq_len = 8192
+    max_seq_len = MODEL_MAX_CONTEXT.get(model_name)
+    if not max_seq_len:
+        try:
+            tok = get_tokenizer_for_model(model_name)
+            max_seq_len = getattr(tok, "model_max_length", DEFAULT_MAX_MODEL_LEN)
+            # HF 쪽에서 종종 엄청 큰 값(1e30 같은) 넣어두는 경우 방어
+            if max_seq_len is None or max_seq_len > 100_000:
+                max_seq_len = DEFAULT_MAX_MODEL_LEN
+        except Exception:
+            max_seq_len = DEFAULT_MAX_MODEL_LEN
 
-    SAFETY_MARGIN = 256      # 여유 버퍼
     MIN_NEW_TOKENS = 64      # 최소 생성 토큰
 
     # settings.MAX_TOKENS 를 기본 상한으로, 인자로 들어오면 그것으로 override
     cap = int(max_tokens_hint) if max_tokens_hint is not None else int(MAX_TOKENS)
 
-    available = max_seq_len - prompt_tokens - SAFETY_MARGIN
+    available = max_seq_len - prompt_tokens - CTX_SAFETY_MARGIN
     if available <= 0:
         logger.warning(
             f"[TRITON] prompt가 이미 max_seq_len을 거의 다 쓴 상태입니다: "
