@@ -53,6 +53,9 @@ def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
         return ""
     return match.group(1).strip()
 
+def _normalize_person_name(name: str) -> str:
+    return re.sub(r"\s+", "", (name or "")).lower()
+
 def _clip_text(text: str, max_chars: int = 2000, *, ellipsis: bool = True) -> str:
     if not text:
         return ""
@@ -599,6 +602,23 @@ class CustomRAGRetriever(BaseModel):
             })
 
             documents.append(Document(page_content=content, metadata=metadata))
+
+        hint = self.hint or {}
+        researcher_hints = hint.get("researchers") if isinstance(hint, dict) else None
+        target_names = {
+            _normalize_person_name(r.get("name"))
+            for r in (researcher_hints or [])
+            if isinstance(r, dict) and r.get("name")
+        }
+        if target_names:
+            matched_docs = []
+            for doc in documents:
+                meta = doc.metadata or {}
+                doc_name = meta.get("인물명", "")
+                if doc_name and _normalize_person_name(doc_name) in target_names:
+                    matched_docs.append(doc)
+            if matched_docs:
+                documents = matched_docs
 
         return documents
 
