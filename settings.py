@@ -10,22 +10,22 @@ if not logger.handlers:
     logger = logging.getLogger("RAG_Pipeline")
 
 # Qdrant / Embedding (A)
-QDRANT_HOST  = os.getenv("QDRANT_HOST", "203.250.234.159")
-QDRANT_PORT  = int(os.getenv("QDRANT_PORT", 8005))
-EMBED_MODEL  = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large-instruct")
+QDRANT_HOST  = os.getenv("QDRANT_HOST", "qdrant-ntis3")
+QDRANT_PORT  = int(os.getenv("QDRANT_PORT", 6334))
+EMBED_MODEL  = os.getenv("EMBEDDING_MODEL", "../../Models/multilingual-e5-large-instruct")
 
 # Qdrant / Embedding (B)
 QDRANT_HOST_B  = os.getenv("QDRANT_HOST_B", QDRANT_HOST)
 QDRANT_PORT_B  = int(os.getenv("QDRANT_PORT_B", QDRANT_PORT))
-EMBED_MODEL_B  = os.getenv("EMBEDDING_MODEL_B", "intfloat/multilingual-e5-large")
+EMBED_MODEL_B  = os.getenv("EMBEDDING_MODEL_B", "../../Models/multilingual-e5-large")
 
 
 # Triton
-TRITON_URL         = os.getenv("TRITON_URL", "http://203.250.234.159:8001")
+TRITON_URL         = os.getenv("TRITON_URL", "triton_ntis3:8001")
 DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "gemma_vllm_0")
 TOKENIZER_MAP = {
-    # "gpt_oss_0": "../../Models/gpt-oss-120b",
-    # "gemma_vllm_0": "../../Models/gemma-3-27b-it",
+    "gpt_oss_0": "../../Models/gpt-oss-120b",
+    "gemma_vllm_0": "../../Models/gemma-3-27b-it",
 }
 
 # 하이퍼파라미터
