@@ -92,6 +92,7 @@ def _build_prtcp_mp_nested_filter(
     if qmodels is None:
         return None
     nested_cls = getattr(qmodels, "NestedCondition", None)
+    nested_filter_cls = getattr(qmodels, "NestedFilter", None)
     if nested_cls is None:
         return None
 
@@ -114,10 +115,24 @@ def _build_prtcp_mp_nested_filter(
         for key in ("gender_slct", "gender_slct_nm"):
             must = list(base_must)
             must.append(qmodels.FieldCondition(key=key, match=make_match_any(gender_terms)))
-            nested_should.append(nested_cls(key="prtcp_mp", filter=qmodels.Filter(must=must)))
-        return qmodels.Filter(should=nested_should)
+            nested_cond = _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", qmodels.Filter(must=must))
+            if nested_cond is not None:
+                nested_should.append(nested_cond)
+        return qmodels.Filter(should=nested_should) if nested_should else None
 
-    return nested_cls(key="prtcp_mp", filter=qmodels.Filter(must=base_must))
+    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", qmodels.Filter(must=base_must))
+
+
+def _make_nested_condition(nested_cls, nested_filter_cls, key: str, flt):
+    if nested_filter_cls is not None:
+        try:
+            return nested_cls(nested=nested_filter_cls(key=key, filter=flt))
+        except Exception:
+            return None
+    try:
+        return nested_cls(key=key, filter=flt)
+    except Exception:
+        return None
 
 
 def build_people_filter(
