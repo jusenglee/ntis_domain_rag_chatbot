@@ -79,6 +79,7 @@ def build_rag_objects_dual() -> Tuple[
         host=QDRANT_HOST,
         grpc_port=QDRANT_PORT,
         prefer_grpc=True,
+        timeout=6000
     )
 
     # Ensure payload indexes (best-effort)

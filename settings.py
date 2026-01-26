@@ -18,7 +18,7 @@ EMBED_MODEL  = os.getenv("EMBEDDING_MODEL", "../../Models/multilingual-e5-large-
 QDRANT_HOST_B  = os.getenv("QDRANT_HOST_B", QDRANT_HOST)
 QDRANT_PORT_B  = int(os.getenv("QDRANT_PORT_B", QDRANT_PORT))
 EMBED_MODEL_B  = os.getenv("EMBEDDING_MODEL_B", "../../Models/multilingual-e5-large")
-
+RAG_COLLECTION_ALLOWLIST = ["ntis_project_v2"]
 
 # Triton
 TRITON_URL         = os.getenv("TRITON_URL", "triton_ntis3:8001")

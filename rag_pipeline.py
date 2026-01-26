@@ -25,7 +25,7 @@ from pprint import pformat
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget
+from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget, RAG_COLLECTION_ALLOWLIST
 from rag_types import RagResult
 from rag_store import build_rag_objects_dual
 from retrieval import (
@@ -739,6 +739,12 @@ def _family_bonus(p: Any, base_route: str) -> float:
     if base_route == "perf" and col == COL_PERF:
         return 4.0
     return 0.0
+
+def _pick_collections(all_cols: list[str]) -> list[str]:
+    if not RAG_COLLECTION_ALLOWLIST:
+        return all_cols  # 제한 없음
+    allow = set(RAG_COLLECTION_ALLOWLIST)
+    return [c for c in all_cols if c in allow]
 
 def _final_rerank(
         cands: List[Any],

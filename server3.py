@@ -4,12 +4,10 @@ import uuid
 import json
 import time
 import os
-import re
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -33,10 +31,7 @@ from langgraph.graph.message import add_messages
 # --- User Modules ---
 from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
-from triton_client import get_tokenizer_for_model
-from settings import MODEL_MAX_CONTEXT, MODEL_MAX_OUTPUT_TOKENS, MAX_TOKENS
 from rag_pipeline import run_rag_ab_compare
-from retrieval import build_context_mixed
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -44,74 +39,8 @@ def log_section(title, content):
     footer = f"\033[96m{'='*30}\033[0m\n"
     logger.info(f"{header}\n{content}\n{footer}")
 
-def _extract_meta_field(meta: Dict[str, Any], meta_flat: str, key: str) -> str:
-    if key in meta and meta.get(key):
-        return str(meta.get(key))
-    if not meta_flat:
-        return ""
-    pattern = rf"{re.escape(key)}\s*[:：]\s*([^;]+)"
-    match = re.search(pattern, meta_flat)
-    if not match:
-        return ""
-    return match.group(1).strip()
-
-def _normalize_person_name(name: str) -> str:
-    return re.sub(r"\s+", "", (name or "")).lower()
-
-def _clip_text(text: str, max_chars: int = 2000, *, ellipsis: bool = True) -> str:
-    if not text:
-        return ""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = re.sub(r"\n{2,}", "\n", normalized).strip()
-    if len(normalized) <= max_chars:
-        return normalized
-    if max_chars <= 0:
-        return ""
-    clipped = normalized[:max_chars]
-    if ellipsis and max_chars > 1:
-        return clipped[: max_chars - 1] + "…"
-    return clipped
-
-def format_rag_search_details(query, hint, docs, conversation_id, question):
-    doc_details = []
-    for i, doc in enumerate(docs, 1):
-        ref = doc.metadata.get("ref") or {}
-        doc_details.append({
-            "rank": i,
-            "tag": ref.get("tag"),
-            "id": ref.get("source_pk"),
-            "title": ref.get("title"),
-            "score": ref.get("score"),
-            "project": doc.metadata.get("국문과제명", ref.get("title")),
-            "researcher": doc.metadata.get("인물명", ""),
-            "institute": doc.metadata.get("소속기관명", ""),
-        })
-
-    payload = {
-        "coq": f"{conversation_id}{question}",
-        "query": query,
-        "hint": hint,
-        "documents": doc_details,
-    }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
-
-FOLLOWUP_HINTS = (
-    "그 연구자",
-    "그 과제",
-    "그 연구",
-    "해당",
-    "이전",
-    "앞서",
-    "방금",
-    "저번",
-    "위 질문",
-    "앞의",
-    "상기",
-    "이어서",
-)
 
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -148,11 +77,6 @@ REDIS_TTL = 3600
 redis_client: Optional[redis.Redis] = None
 
 MAX_TOP_K_SIZE = 20
-PROMPT_CTX_TOKEN_BUDGET = int(os.getenv("PROMPT_CTX_TOKEN_BUDGET", "3000"))
-PROMPT_HISTORY_TOKEN_BUDGET = int(os.getenv("PROMPT_HISTORY_TOKEN_BUDGET", "800"))
-PROMPT_DOC_CHAR_BUDGET = int(os.getenv("PROMPT_DOC_CHAR_BUDGET", "1200"))
-PROMPT_META_LINE_LIMIT = int(os.getenv("PROMPT_META_LINE_LIMIT", "20"))
-PROMPT_CTX_SAFETY_MARGIN = int(os.getenv("PROMPT_CTX_SAFETY_MARGIN", "256"))
 
 class ContentCategory(str, Enum):
 
@@ -161,113 +85,6 @@ class ContentCategory(str, Enum):
     PERFORMANCE = "performance"  # 성과
     QNA = "qna"                  # 질의응답/매뉴얼
     ETC = "etc"                  # 기타
-
-def _approx_token_len(text: str) -> int:
-    if not text:
-        return 0
-    return max(1, len(text) // 2)
-
-def _count_text_tokens(model_name: str, text: str) -> int:
-    if not text:
-        return 0
-    try:
-        tok = get_tokenizer_for_model(model_name)
-        ids = tok.encode(text, add_special_tokens=False)
-        return len(ids)
-    except Exception:
-        return _approx_token_len(text)
-
-def _count_message_tokens(model_name: str, messages: List[BaseMessage]) -> int:
-    try:
-        tok = get_tokenizer_for_model(model_name)
-        chat_format = []
-        for m in messages:
-            role = "user"
-            if isinstance(m, SystemMessage):
-                role = "system"
-            elif isinstance(m, AIMessage):
-                role = "assistant"
-            chat_format.append({"role": role, "content": m.content})
-        try:
-            prompt = tok.apply_chat_template(chat_format, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            prompt = ""
-            for m in chat_format:
-                prompt += f"<|{m['role']}|>\n{m['content']}\n"
-            prompt += "<|assistant|>\n"
-        return _count_text_tokens(model_name, prompt)
-    except Exception:
-        return sum(_approx_token_len(m.content) for m in messages)
-
-def _get_prompt_token_budget(model_name: str, max_output_tokens: int | None = None) -> int:
-    model_ctx = MODEL_MAX_CONTEXT.get(model_name) or int(os.getenv("DEFAULT_MAX_MODEL_LEN", "8192"))
-    max_out = max_output_tokens or MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS)
-    return max(512, int(model_ctx) - int(max_out) - PROMPT_CTX_SAFETY_MARGIN)
-
-def _truncate_text_by_tokens(text: str, max_tokens: int, *, keep_tail: bool = False) -> str:
-    if not text:
-        return text
-    if max_tokens <= 0:
-        return ""
-    approx_tokens = _approx_token_len(text)
-    if approx_tokens <= max_tokens:
-        return text
-    max_chars = max_tokens * 2
-    if max_chars <= 0:
-        return ""
-    return text[-max_chars:] if keep_tail else text[:max_chars]
-
-def _trim_text_to_token_limit(
-    model_name: str,
-    text: str,
-    max_tokens: int,
-    *,
-    keep_tail: bool = False,
-) -> str:
-    if not text or max_tokens <= 0:
-        return ""
-    try:
-        tok = get_tokenizer_for_model(model_name)
-        ids = tok.encode(text, add_special_tokens=False)
-        if len(ids) <= max_tokens:
-            return text
-        ids = ids[-max_tokens:] if keep_tail else ids[:max_tokens]
-        return tok.decode(ids, skip_special_tokens=True)
-    except Exception:
-        return _truncate_text_by_tokens(text, max_tokens, keep_tail=keep_tail)
-
-def _format_history(history: List[BaseMessage], *, token_budget: int) -> str:
-    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
-    return _truncate_text_by_tokens(history_str, token_budget, keep_tail=True) or "없음"
-
-def _fit_prompt_segment(
-    model_name: str,
-    *,
-    system_prompt: str,
-    human_template: str,
-    segment_key: str,
-    segment_text: str,
-    replacements: Dict[str, str],
-    keep_tail: bool = False,
-) -> str:
-    budget = _get_prompt_token_budget(model_name)
-    base_human = human_template.format(**{segment_key: "", **replacements})
-    base_messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=base_human),
-    ]
-    base_tokens = _count_message_tokens(model_name, base_messages)
-    available = budget - base_tokens
-    if available <= 0:
-        return ""
-    return _trim_text_to_token_limit(model_name, segment_text, available, keep_tail=keep_tail)
-
-def _build_answer_human_prompt(context_text: str, summary: str, question: str) -> str:
-    return (
-        f"[제공된 정보]\n{context_text or '없음'}\n\n"
-        f"[질문 요약]\n{summary}\n\n"
-        f"[원본 질문]\n{question}"
-    )
 
 class Researcher(BaseModel):
     name: str | None = None
@@ -332,51 +149,6 @@ class AgentState(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
-
-
-def _resolve_context_max_items(state: AgentState) -> int:
-    qa_limit = state.question_analysis.limit if state.question_analysis else CONTEXT_MAX_ITEMS
-    return max(1, min(qa_limit, CONTEXT_MAX_ITEMS))
-
-
-def _documents_to_points(docs: List[Document]) -> List[Any]:
-    points: List[Any] = []
-    for doc in docs or []:
-        metadata = doc.metadata or {}
-        ref = metadata.get("ref") or {}
-        payload = {
-            "title_text": ref.get("title") or metadata.get("국문과제명") or "",
-            "title": ref.get("title") or metadata.get("국문과제명") or "",
-            "doc_id": ref.get("source_pk") or metadata.get("source_pk") or "",
-            "content_text": doc.page_content or "",
-            "answer_public": doc.page_content or "",
-            "meta": metadata,
-            "urls": ref.get("urls") or metadata.get("urls") or [],
-            "systems": ref.get("systems") or metadata.get("systems") or [],
-        }
-        points.append(SimpleNamespace(payload=payload, score=ref.get("score")))
-    return points
-
-
-def build_context_from_documents(
-    docs: List[Document],
-    *,
-    query_text: str = "",
-    max_items: Optional[int] = None,
-    token_budget: Optional[int] = None,
-    per_doc_char_budget: Optional[int] = None,
-) -> str:
-    if not docs:
-        return ""
-    points = _documents_to_points(docs)
-    context, _ = build_context_mixed(
-        points,
-        max_items=max_items if max_items is not None else CONTEXT_MAX_ITEMS,
-        query_text=query_text,
-        token_budget=token_budget if token_budget is not None else CONTEXT_TOKEN_BUDGET,
-        per_doc_char_budget=per_doc_char_budget if per_doc_char_budget is not None else CONTEXT_PER_DOC_CHARS,
-    )
-    return context
 
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
@@ -478,7 +250,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = state.chat_history[-6:]
-    history_str = _format_history(history, token_budget=PROMPT_HISTORY_TOKEN_BUDGET)
+    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
     system_prompt = (
         "당신은 질문 분석 전문가입니다.\n"
@@ -513,27 +285,16 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     )
 
 
-    human_template = "[대화 이력]\n{history}\n\n[현재 질문]\n{question}"
-    history_str = _fit_prompt_segment(
-        "gpt_oss_0",
-        system_prompt=system_prompt,
-        human_template=human_template,
-        segment_key="history",
-        segment_text=history_str,
-        replacements={"question": state.messages[-1].content},
-        keep_tail=True,
-    ) or "없음"
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", human_template)
+        ("human", "[대화 이력]\n{history}\n\n[현재 질문]\n{question}")
     ])
 
     try:
         chain = prompt | llm | sanitize_llm_json | parser
         result: QuestionAnalysis = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
-            "history": history_str,
+            "history": history_str or '없음',
             "question": state.messages[-1].content
         })
 
@@ -573,33 +334,15 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
 
     history = state.chat_history[-6:]
-    history_str = _format_history(history, token_budget=PROMPT_HISTORY_TOKEN_BUDGET)
+    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
     title_only = len(state.context) > 2
-    prev_context_str = refine_documents_rule_based(
-        state.prev_context,
-        title_only=False,
-        token_budget=PROMPT_CTX_TOKEN_BUDGET,
-        per_doc_char_budget=PROMPT_DOC_CHAR_BUDGET,
-        max_meta_items=PROMPT_META_LINE_LIMIT,
-    )
-    question_text = state.messages[-1].content
-    prev_context_str = build_context_from_documents(
-        state.prev_context,
-        query_text=question_text,
-        max_items=_resolve_context_max_items(state),
-    )
-    is_followup = any(hint in question_text for hint in FOLLOWUP_HINTS)
-    if not is_followup:
-        history_str = "없음"
-        prev_context_str = "없음"
+    prev_context_str = refine_documents_rule_based(state.prev_context, title_only=False)
 
     system_prompt = (
         "당신은 지식 충분성 판단 전문가입니다.\n"
         "이 시스템에서 사용되는 용어는 모두 국가 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
-        "[대화 이력]과 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n"
-        "현재 질문에 명시되지 않은 연구자, 기관, 과제명은 검색 쿼리에 포함하지 않습니다.\n"
-        "다만 질문에 '해당/이전/앞서/그 연구자' 등으로 명시적인 후속 참조가 있으면 예외로 허용합니다.\n\n"
+        "[대화 이력]과 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
         "판단 기준:\n"
         "1. requires_new_knowledge:\n"
         "   - low: [참고 문서] 만으로 충분히 답변 가능\n"
@@ -615,39 +358,19 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "{format_instructions}"
     )
 
-    human_template = (
-        "[대화 이력]\n{history}\n\n"
-        "[참고 문서]\n{prev_context}\n\n"
-        "[현재 질문]\n{question}"
-    )
-    history_str = _fit_prompt_segment(
-        "gemma_vllm_0",
-        system_prompt=system_prompt,
-        human_template=human_template,
-        segment_key="history",
-        segment_text=history_str,
-        replacements={"prev_context": prev_context_str, "question": state.messages[-1].content},
-        keep_tail=True,
-    ) or "없음"
-    prev_context_str = _fit_prompt_segment(
-        "gemma_vllm_0",
-        system_prompt=system_prompt,
-        human_template=human_template,
-        segment_key="prev_context",
-        segment_text=prev_context_str,
-        replacements={"history": history_str, "question": state.messages[-1].content},
-    ) or "없음"
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", human_template)
+        ("human",
+         "[대화 이력]\n{history}\n\n"
+         "[참고 문서]\n{prev_context}\n\n"
+         "[현재 질문]\n{question}")
     ])
 
     try:
         chain = prompt | llm | sanitize_llm_json | parser
         result: KnowledgeSufficiency = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
-            "history": history_str,
+            "history": history_str or '없음',
             "prev_context": prev_context_str or "없음",
             "question": state.messages[-1].content
         })
@@ -712,37 +435,10 @@ class CustomRAGRetriever(BaseModel):
                 hit_data = getattr(hit, "__dict__", {})
                 score = 0.0
 
-            meta = hit_data.get("meta", {}) if isinstance(hit_data.get("meta"), dict) else {}
-            content = hit_data.get("answer_public") or hit_data.get("content") or meta.get("answer_public") or ""
-            if not content:
-                title = hit_data.get("title") or ""
-                meta_title = meta.get("국문과제명") or meta.get("성과명") or meta.get("논문명") or ""
-                pjt_id = str(hit_data.get("pjt_id") or meta.get("PJT_ID") or "")
-                if meta_title and (
-                    title.isdigit()
-                    or title.lower().startswith("ntis:")
-                    or (pjt_id and title == pjt_id)
-                ):
-                    title = meta_title
-                elif not title:
-                    title = meta_title
-                org_name = hit_data.get("org_name_norm") or meta.get("소속기관명") or ""
-                meta_flat = hit_data.get("meta_flat") or ""
-                content_parts = [p for p in [title, org_name] if p]
-                if meta_flat:
-                    content_parts.append(meta_flat)
-                content = "\n".join(content_parts)
-            content = _clip_text(content, int(os.getenv("RAG_RETRIEVER_CONTENT_MAX", "1800")))
+            content = hit_data.get("answer_public") or ""
 
-            metadata = dict(meta)
+            metadata = hit_data.get("meta", {})
             ref = hit_data.get("ref", {})
-            meta_flat = hit_data.get("meta_flat") or meta.get("meta_flat") or ""
-            researcher = _extract_meta_field(metadata, meta_flat, "인물명")
-            institute = _extract_meta_field(metadata, meta_flat, "소속기관명")
-            if researcher and not metadata.get("인물명"):
-                metadata["인물명"] = researcher
-            if institute and not metadata.get("소속기관명"):
-                metadata["소속기관명"] = institute
 
             metadata.update({
                 "ref" : {
@@ -754,23 +450,6 @@ class CustomRAGRetriever(BaseModel):
             })
 
             documents.append(Document(page_content=content, metadata=metadata))
-
-        hint = self.hint or {}
-        researcher_hints = hint.get("researchers") if isinstance(hint, dict) else None
-        target_names = {
-            _normalize_person_name(r.get("name"))
-            for r in (researcher_hints or [])
-            if isinstance(r, dict) and r.get("name")
-        }
-        if target_names:
-            matched_docs = []
-            for doc in documents:
-                meta = doc.metadata or {}
-                doc_name = meta.get("인물명", "")
-                if doc_name and _normalize_person_name(doc_name) in target_names:
-                    matched_docs.append(doc)
-            if matched_docs:
-                documents = matched_docs
 
         return documents
 
@@ -831,11 +510,6 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                     f"Found: {len(docs)} docs\n"
                     f"{'─'*40}\n" + "\n".join(doc_previews))
 
-        log_section(
-            "RAG SEARCH DETAILS",
-            format_rag_search_details(query, hint, docs, state.conversation_id, state.question)
-        )
-
         return {"context": docs}
 
     except Exception as e:
@@ -870,37 +544,15 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    context_text = refine_documents_rule_based(
-        state.context,
-        title_only=False,
-        token_budget=PROMPT_CTX_TOKEN_BUDGET,
-        per_doc_char_budget=PROMPT_DOC_CHAR_BUDGET,
-        max_meta_items=PROMPT_META_LINE_LIMIT,
-    )
+    context_text = refine_documents_rule_based(state.context, title_only=False)
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    human_template = (
-        "[제공된 정보]\n{context}\n\n"
-        "[질문 요약]\n{summary}\n\n"
-        "[원본 질문]\n{question}"
-    )
-    context_text = _fit_prompt_segment(
-        model_name,
-        system_prompt=system_prompt,
-        human_template=human_template,
-        segment_key="context",
-        segment_text=context_text,
-        replacements={
-            "summary": qa.history_summary,
-            "question": state.messages[-1].content,
-        },
-    ) or "없음"
-    human_prompt = _build_answer_human_prompt(
-        context_text,
-        qa.history_summary,
-        state.messages[-1].content,
+    human_prompt = (
+        f"[제공된 정보]\n{context_text or '없음'}\n\n"
+        f"[질문 요약]\n{qa.history_summary}\n\n"
+        f"[원본 질문]\n{state.messages[-1].content}"
     )
 
     messages = [
@@ -1087,39 +739,23 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(
-    docs: List[Document],
-    title_only: bool = False,
-    *,
-    token_budget: int | None = None,
-    per_doc_char_budget: int = PROMPT_DOC_CHAR_BUDGET,
-    max_meta_items: int = PROMPT_META_LINE_LIMIT,
-) -> str:
+def refine_documents_rule_based(docs: List[Document], title_only: bool = False) -> str:
     """문서 정제 유틸"""
     context_chunks: List[str] = []
-    total_tokens = 0
 
-    for idx, doc in enumerate((docs or [])[: max(0, max_docs)], start=1):
+    for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
-        ref = metadata.get("ref") or {}
-        title = ref.get("title", "").strip()
+        title = metadata.get("ref").get("title", "").strip()
         if title_only:
             if not title:
                 continue
-            chunk = f"## 문서 {idx}. {title}\n"
-            if token_budget:
-                chunk_tokens = _approx_token_len(chunk)
-                if total_tokens + chunk_tokens > token_budget:
-                    break
-                total_tokens += chunk_tokens
-            context_chunks.append(chunk)
+            context_chunks.append(f"## 문서 {idx}. {title}\n")
             continue
 
+        # 기존 full mode
         content = (doc.page_content or "").strip()
-        if per_doc_char_budget > 0:
-            content = content[:per_doc_char_budget]
 
-        formatted_metadata = format_metadata(metadata, max_items=max_meta_items)
+        formatted_metadata = format_metadata(metadata)
 
         refined_text = (
             "내용:\n"
@@ -1128,56 +764,30 @@ def refine_documents_rule_based(
             f"{formatted_metadata}"
         )
 
-        chunk = (
+        context_chunks.append(
             f"## 출처 {idx}. {title}\n"
             f"{refined_text}\n"
         )
 
-        if token_budget:
-            chunk_tokens = _approx_token_len(chunk)
-            if total_tokens + chunk_tokens > token_budget:
-                available_tokens = max(0, token_budget - total_tokens)
-                compact_chunk = _truncate_text_by_tokens(chunk, available_tokens)
-                if compact_chunk:
-                    context_chunks.append(compact_chunk)
-                break
-            total_tokens += chunk_tokens
+    return "\n\n".join(context_chunks)
 
-        context_chunks.append(chunk)
-
-    return "\n\n".join(context_chunks).strip()
-
-def format_metadata(
-    metadata: Dict[str, Any],
-    *,
-    max_items: int = PROMPT_META_LINE_LIMIT,
-    max_value_chars: int = 200,
-) -> str:
+def format_metadata(metadata: Dict[str, Any]) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
 
     for key, value in metadata.items():
-        if len(lines) >= max_items:
-            break
         ignore_keys = ['ref', 'source_pk', 'meta_raw', 'update_date', 'update_at', 'updated_at']
         if key in ignore_keys:
             continue
         if value is None:
             continue
 
-    def _summarize_value(value: Any) -> str:
-        if value is None:
-            return ""
         if isinstance(value, list):
             value = ", ".join(map(str, value))
         elif isinstance(value, dict):
             value = json.dumps(value, ensure_ascii=False)
 
-        value_str = str(value)
-        if max_value_chars > 0:
-            value_str = value_str[:max_value_chars]
-
-        lines.append(f"- {key}: {value_str}")
+        lines.append(f"- {key}: {value}")
 
     return "\n".join(lines) if lines else "- 없음"
 
@@ -1278,24 +888,16 @@ async def query_stream(payload: QueryRequest):
                     docs = data.get("output", {}).get("context", [])
                     documents_used.extend(docs)
 
-            ref_docs = []
-            for doc in documents_used:
-                ref_meta = doc.metadata.get("ref") or {}
-                title = ref_meta.get("title") or doc.metadata.get("title", "")
-                ref_docs.append(
-                    {
-                        "tag": ref_meta.get("tag") or doc.metadata.get("tag", ""),
-                        "id": (
-                            ref_meta.get("source_pk")
-                            or doc.metadata.get("source_pk")
-                            or doc.metadata.get("id", "")
-                        ),
-                        "title": title,
-                        "project": doc.metadata.get("국문과제명") or title,
-                        "researcher": doc.metadata.get("인물명", ""),
-                        "institute": doc.metadata.get("소속기관명", "")
-                    }
-                )
+            ref_docs = [
+                {
+                    "tag": d.metadata["ref"]["tag"],
+                    "id": d.metadata["ref"]["source_pk"],
+                    "title": d.metadata["ref"]["title"],
+                    "project": d.metadata.get("국문과제명", d.metadata["ref"]["title"]),
+                    "researcher": d.metadata.get("인물명", ""),
+                    "institute": d.metadata.get("소속기관명", "")
+                } for d in documents_used
+            ]
             log_section("REF PUSH", f"coq: {conversation_id}{question}\n{ref_docs}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
