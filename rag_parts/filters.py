@@ -2,6 +2,7 @@ import os
 import re
 # -*- coding: utf-8 -*-
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .constants import (
@@ -92,8 +93,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
 
     return cands[:max_terms]
 
-def build_org_filter(org_terms: List[str]) -> Optional[Any]:
-    if qmodels is None or not org_terms:
+def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
+    if qmodels is None or not spec.terms:
         return None
     keys = [
         KEY_ORG_NORM,
@@ -106,13 +107,13 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
     for key in keys:
         if not key:
             continue
-        should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(spec.terms)))
     if not should:
         return None
     return qmodels.Filter(should=should)
 
-def build_prtcp_org_nested_filter(org_terms: List[str]) -> Optional[Any]:
-    if qmodels is None or not org_terms:
+def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
+    if qmodels is None or not spec.terms:
         return None
     nested_cls = getattr(qmodels, "NestedCondition", None)
     nested_filter_cls = getattr(qmodels, "NestedFilter", None)
@@ -129,7 +130,7 @@ def build_prtcp_org_nested_filter(org_terms: List[str]) -> Optional[Any]:
     for key in nested_keys:
         if not key:
             continue
-        should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(spec.terms)))
     if not should:
         return None
     nested_filter = qmodels.Filter(should=should)
@@ -201,19 +202,14 @@ def _make_nested_condition(nested_cls, nested_filter_cls, key: str, flt):
         return None
 
 
-def build_people_filter(
-    people_terms: List[str],
-    person_ids: Optional[List[str]] = None,
-    gender_terms: Optional[List[str]] = None,
-    org_terms: Optional[List[str]] = None,
-) -> Optional[Any]:
+def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if qmodels is None:
         return None
 
-    terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
-    ids = [str(v).strip() for v in (person_ids or []) if str(v).strip()]
-    genders = [str(g).strip() for g in (gender_terms or []) if str(g).strip()]
-    orgs = [str(o).strip() for o in (org_terms or []) if str(o).strip()]
+    terms = list(spec.people_terms)
+    ids = list(spec.person_ids)
+    genders = list(spec.gender_terms)
+    orgs = list(spec.org_terms)
 
     should: List["qmodels.Condition"] = []
 
@@ -326,7 +322,7 @@ def pick_perf_tag_filters(q: str) -> List[str]:
 
     return tags
 
-def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] = None) -> "qmodels.Filter":
+def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 
     누락 방지를 위해 PJT_ID 키 변형(meta_basic/payload)을 OR로 묶습니다.
@@ -334,7 +330,7 @@ def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] =
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for build_join_filter()")
 
-    join_ids = [str(x).strip() for x in (join_ids or []) if str(x).strip()]
+    join_ids = list(spec.join_ids)
     if not join_ids:
         return qmodels.Filter(must=[])
 
@@ -361,17 +357,17 @@ def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] =
 
     must: List["qmodels.Condition"] = [join_any]
 
-    if tag_filters:
+    if spec.tag_filters:
         must.append(
             qmodels.FieldCondition(
                 key="tag",
-                match=qmodels.MatchAny(any=tag_filters),
+                match=qmodels.MatchAny(any=spec.tag_filters),
             )
         )
 
     return qmodels.Filter(must=must)
 
-def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmodels.Filter":
+def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
     """성과(perf) 컬렉션에서 LOOKUP/JOIN 시 사용할 서버단 필터입니다.
 
     - join_ids가 있으면 PJT_ID 기반으로 후보군을 강제 제한 (키 변형 OR)
@@ -383,7 +379,7 @@ def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmod
     must: List["qmodels.Condition"] = []
     must_not: List["qmodels.Condition"] = []
 
-    join_ids = [str(x).strip() for x in (join_ids or []) if str(x).strip()]
+    join_ids = list(spec.join_ids)
     if join_ids:
         primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
         key_cands = []
@@ -407,7 +403,7 @@ def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmod
         )
         must.append(join_any)
 
-    tag_filters = pick_perf_tag_filters(query)
+    tag_filters = pick_perf_tag_filters(spec.query)
     if tag_filters:
         must.append(
             qmodels.FieldCondition(
