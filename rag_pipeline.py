@@ -292,6 +292,18 @@ def build_context_list_light(
     """목록/통계형 질의용 경량 컨텍스트."""
     items: List[str] = []
     kind = (kind or "").lower().strip() or "project"
+    date_year_pattern = re.compile(r"^(\d{4})-\d{2}-\d{2}$")
+
+    def _normalize_year(value: Any) -> Any:
+        if value is None:
+            return value
+        s = str(value).strip()
+        if not s:
+            return value
+        match = date_year_pattern.match(s)
+        if match:
+            return match.group(1)
+        return value
 
     def _pjt_id(meta, pl):
         return _pick_first(pl.get("pjt_id"), meta.get("PJT_ID"), meta.get("pjt_id"), meta.get("pjtId"), meta.get("PJTID"))
@@ -335,6 +347,7 @@ def build_context_list_light(
                 meta.get("수행기관"),
             )
             year = _pick_first(pl.get("stan_yr"), meta.get("STAN_YR"), meta.get("연구개발기간시작년도"), meta.get("연도"), meta.get("시작년도"))
+            year = _normalize_year(year)
             line = f"- {_clean_one_line(title, 180)}"
             extra: List[str] = []
             if pjt_id: extra.append(f"PJT_ID={pjt_id}")
