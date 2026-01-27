@@ -58,6 +58,7 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
     keys = [
         KEY_ORG_NORM,
         "org_nm",
+        "prtcp_org.org_nm",
         "prfrm_org_nm",
         "org_name_raw",
         "meta.과제수행기관명",
@@ -77,6 +78,30 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
     if not should:
         return None
     return qmodels.Filter(should=should)
+
+def build_prtcp_org_nested_filter(org_terms: List[str]) -> Optional[Any]:
+    if qmodels is None or not org_terms:
+        return None
+    nested_cls = getattr(qmodels, "NestedCondition", None)
+    nested_filter_cls = getattr(qmodels, "NestedFilter", None)
+    if nested_cls is None:
+        return None
+
+    nested_keys = [
+        "org_nm",
+        KEY_ORG_NORM,
+        "org_name",
+        "org_name_raw",
+    ]
+    should: List["qmodels.Condition"] = []
+    for key in nested_keys:
+        if not key:
+            continue
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+    if not should:
+        return None
+    nested_filter = qmodels.Filter(should=should)
+    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_org", nested_filter)
 
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     if qmodels is None:

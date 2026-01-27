@@ -68,6 +68,7 @@ from rag_parts.join import (
 from rag_parts.filters import (
     extract_org_terms as _extract_org_terms,
     build_org_filter as _build_org_filter,
+    build_prtcp_org_nested_filter as _build_prtcp_org_nested_filter,
     build_people_filter as _build_people_filter,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
@@ -1206,6 +1207,8 @@ def _run_rag_with_vectors(
     org_terms = [t.strip() for t in (list(it.org_terms or []) or _extract_org_terms(q, kws) or []) if str(t).strip()]
     it.org_terms = org_terms
     org_filter = _build_org_filter(org_terms) if org_terms else None
+    org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+    participant_org_filter = _build_prtcp_org_nested_filter(org_terms) if org_terms else None
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
@@ -1246,6 +1249,7 @@ def _run_rag_with_vectors(
         people_terms=list(getattr(it, "people_terms", []) or []),
         gender_terms=list(getattr(it, "gender_terms", []) or []),
         org_terms=list(getattr(it, "org_terms", []) or []),
+        org_role=org_role,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         ids_flat=_flatten_ids_from_intent(it)[:20],
@@ -1691,8 +1695,11 @@ def _run_rag_with_vectors(
             return perf_tag_filter
 
         # (선택) org_filter는 project 컬렉션에서만
-        if col == COL_PROJECT and org_filter:
-            return org_filter
+        if col == COL_PROJECT and org_terms:
+            if org_role == "participant":
+                return participant_org_filter or org_filter
+            if org_filter:
+                return org_filter
 
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
