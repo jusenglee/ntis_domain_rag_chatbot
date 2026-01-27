@@ -1042,9 +1042,28 @@ def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
     ql = (query_text or "").lower()
     out: List[str] = []
 
+    def _normalize_year_value(value: Any) -> Any:
+        if value is None:
+            return value
+        s = str(value).strip()
+        if not s:
+            return value
+        match = re.match(r"^(\d{4})-\d{2}-\d{2}$", s)
+        if match:
+            return match.group(1)
+        return value
+
     def _add(k: str) -> None:
         if k in meta and k not in out:
             out.append(k)
+
+    if "stan_yr" in meta:
+        normalized_year = _normalize_year_value(meta.get("stan_yr"))
+        meta["stan_yr"] = normalized_year
+        if normalized_year not in (None, "") and not meta.get("STAN_YR"):
+            meta["STAN_YR"] = normalized_year
+    if "STAN_YR" in meta:
+        meta["STAN_YR"] = _normalize_year_value(meta.get("STAN_YR"))
 
     for k in _META_CORE_KEYS:
         _add(k)
