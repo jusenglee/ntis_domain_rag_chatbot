@@ -134,6 +134,7 @@ class AgentState(BaseModel):
     conversation_id: str = ""
 
     question: str = ""
+    target_collections: Optional[List[str]] = None
 
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
@@ -475,6 +476,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             "history_summary": (qa.history_summary if qa else ""),
             "retrieval_query": query,
             "confidence": float(qa.confidence if qa else 0.0),
+            "target_collections": list(state.target_collections or []),
         }
 
         retriever = CustomRAGRetriever(
@@ -834,6 +836,7 @@ async def home(request: Request):
 class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
+    target_collections: Optional[List[str]] = None
 
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
@@ -845,6 +848,7 @@ async def query_stream(payload: QueryRequest):
     inputs = {
         "conversation_id": conversation_id,
         "messages": [HumanMessage(content=question)],
+        "target_collections": payload.target_collections,
     }
 
     graph = app.state.graph
@@ -931,6 +935,7 @@ async def query_debug(payload: QueryRequest):
     inputs = {
         "conversation_id": conversation_id,
         "messages": [HumanMessage(content=question)],
+        "target_collections": payload.target_collections,
     }
 
     graph = app.state.graph

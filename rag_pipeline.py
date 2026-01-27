@@ -1090,6 +1090,47 @@ def _run_rag_with_vectors(
 
         return "mixed"
 
+    def _normalize_target_collections(raw: Any) -> List[str]:
+        if raw is None:
+            return []
+        items = raw
+        if isinstance(items, str):
+            items = [x.strip() for x in items.split(",") if x.strip()] or [items]
+        if not isinstance(items, (list, tuple, set)):
+            items = [items]
+
+        col_map = {
+            "project": COL_PROJECT,
+            "projects": COL_PROJECT,
+            "perf": COL_PERF,
+            "performance": COL_PERF,
+            "support": COL_SUPPORT,
+            "supports": COL_SUPPORT,
+        }
+
+        out: List[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if hasattr(item, "value"):
+                item = item.value
+            key = str(item).strip()
+            if not key:
+                continue
+            key_lower = key.lower()
+            col = None
+            if key_lower in col_map:
+                col = col_map[key_lower]
+            elif key_lower == COL_PROJECT.lower():
+                col = COL_PROJECT
+            elif key_lower == COL_PERF.lower():
+                col = COL_PERF
+            elif key_lower == COL_SUPPORT.lower():
+                col = COL_SUPPORT
+            if col and col not in seen:
+                seen.add(col)
+                out.append(col)
+        return out
+
     def _coerce_int(x: Any, default: int) -> int:
         try:
             return int(x)
@@ -1102,6 +1143,9 @@ def _run_rag_with_vectors(
 
     hinted_base = None
     hinted_limit = 0
+    hinted_cols: List[str] = _normalize_target_collections(
+        _get_attr(qa, "target_collections", None) or _get_attr(qa, "collections", None)
+    )
 
     if qa and qa_conf >= float(os.getenv("RAG_HINT_MIN_CONF", "0.55")):
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
@@ -1113,6 +1157,8 @@ def _run_rag_with_vectors(
     # ✅ 표준 q 확정
     q = q_for_retrieval
 
+    allow_cols = _normalize_target_collections(RAG_COLLECTION_ALLOWLIST)
+
     # -------------------------
     # ids_map / ids_flat 안전 접근 유틸
     # -------------------------
@@ -1123,6 +1169,8 @@ def _run_rag_with_vectors(
         hint_conf=qa_conf,
         hinted_base=hinted_base,
         hinted_limit=hinted_limit,
+        hinted_cols=hinted_cols,
+        allow_cols=allow_cols,
         model_name=model_name,
         stack=stack,
         vector_names=vector_names,
@@ -1247,6 +1295,12 @@ def _run_rag_with_vectors(
 
     # plan
     plan = _build_plan(it)
+    if hinted_cols:
+        plan.target_collections = hinted_cols
+
+    if allow_cols:
+        filtered = [c for c in (plan.target_collections or []) if c in allow_cols]
+        plan.target_collections = filtered if filtered else list(allow_cols)
 
     log_kv(
         "RAG.PRESET/PLAN.POST",
@@ -1332,6 +1386,18 @@ def _run_rag_with_vectors(
         else:
             # unknown relation -> fall back to base SEARCH
             relation = None
+
+        if relation:
+            allowed_cols = set(plan.target_collections or [])
+            if allowed_cols and (hop1_col not in allowed_cols or hop2_col not in allowed_cols):
+                log_kv(
+                    "RAG.JOIN.SKIP",
+                    reason="target_collections",
+                    target_cols=list(plan.target_collections or []),
+                    hop1_col=hop1_col,
+                    hop2_col=hop2_col,
+                )
+                relation = None
 
         if relation:
             hop1_keep = int(os.getenv("RAG_HOP1_KEEP", "5"))
@@ -1573,7 +1639,7 @@ def _run_rag_with_vectors(
     t0 = time.time()
 
     # collection list
-    target_cols = [COL_PROJECT, COL_PERF, COL_SUPPORT]
+    target_cols = list(plan.target_collections or [COL_PROJECT, COL_PERF, COL_SUPPORT])
 
     # topK caps
     topk_dense = int(preset.top_k_dense)
