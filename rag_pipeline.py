@@ -1226,7 +1226,13 @@ def _run_rag_with_vectors(
         people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
-    people_filter = _build_people_filter(people_terms, people_ids, gender_terms) if (people_terms or people_ids or gender_terms) else None
+    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    people_org_terms = org_terms if org_role == "affiliation" else []
+    people_filter = (
+        _build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
+        if (people_terms or people_ids or gender_terms or people_org_terms)
+        else None
+    )
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
