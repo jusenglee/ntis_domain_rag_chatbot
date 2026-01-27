@@ -779,6 +779,13 @@ def dense_retrieve_hybrid_multi(
     lex_cand = 0
     lex_scored = 0
 
+    if not keywords:
+        fallback_tokens = _tokenize_simple(q)
+        if fallback_tokens:
+            keywords = fallback_tokens[:8]
+        else:
+            keywords = [q]
+
     if keywords:
         t0 = time.perf_counter()
 
