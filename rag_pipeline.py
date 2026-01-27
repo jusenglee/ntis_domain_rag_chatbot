@@ -47,9 +47,12 @@ from rag_parts.constants import (
     TAG_PJT_MP,
     TAG_PJT_ORG,
 )
-from rag_parts.query_intent import (
-    QueryIntent,
-    classify_query as _classify_query,
+from rag_parts.pipeline_steps import (
+    NormalizedIntent,
+    classify_query_compat,
+    normalize_intent,
+    build_filter_bundle,
+    resolve_join_hops,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -66,10 +69,8 @@ from rag_parts.join import (
     sanitize_query_by_terms as _sanitize_query_by_terms,
 )
 from rag_parts.filters import (
-    extract_org_terms as _extract_org_terms,
-    build_org_filter as _build_org_filter,
-    build_prtcp_org_nested_filter as _build_prtcp_org_nested_filter,
-    build_people_filter as _build_people_filter,
+    JoinFilterInput,
+    PerfFilterInput,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
@@ -211,17 +212,6 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
 # -------------------------
 # Lightweight list/stats context
 # -------------------------
-def _classify_query_compat(q: str, kws: List[str], *, domain_hint: Optional[str], hint: Optional[Dict[str, Any]] = None) -> "QueryIntent":
-    """query_intent.classify_query signature 호환 래퍼."""
-    try:
-        sig = inspect.signature(_classify_query)
-        if hint is not None and "hint" in sig.parameters:
-            return _classify_query(q, kws, domain_hint=domain_hint, hint=hint)
-        return _classify_query(q, kws, domain_hint=domain_hint)
-    except Exception:
-        return _classify_query(q, kws, domain_hint=domain_hint)
-
-
 def _clean_one_line(s: object, max_len: int = 160) -> str:
     if s is None:
         return ""
@@ -661,7 +651,7 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
                 out.append(s)
     return out
 
-def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool) -> float:
+def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: bool) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
 
@@ -744,7 +734,7 @@ def _pick_collections(all_cols: list[str], allow: Optional[Iterable[str]] = None
 def _final_rerank(
         cands: List[Any],
         *,
-        it: QueryIntent,
+        it: NormalizedIntent,
         kws: List[str],
         lex_w: Dict[str, float],
         base_route: str,
@@ -817,7 +807,7 @@ class QueryPlan:
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
 
-def _has_any_ids(it: QueryIntent) -> bool:
+def _has_any_ids(it: NormalizedIntent) -> bool:
     ids_map = getattr(it, "ids_map", None)
     if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
         return True
@@ -830,7 +820,7 @@ def _has_any_ids(it: QueryIntent) -> bool:
         return True
     return False
 
-def _build_plan(it: QueryIntent) -> QueryPlan:
+def _build_plan(it: NormalizedIntent) -> QueryPlan:
     action = it.action
     base_route = it.base_route
     rel = it.relation
@@ -1144,7 +1134,20 @@ def _run_rag_with_vectors(
 
     # intent (hint는 query_intent에서 흡수)
     domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support") else None
-    it = _classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+    raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+    qa_researchers = _get_attr(qa, "researchers", None) or []
+    if isinstance(qa_researchers, str):
+        qa_researchers = [qa_researchers]
+    hint_people_terms = [str(t).strip() for t in (qa_researchers or []) if str(t).strip()]
+    hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+
+    it = normalize_intent(
+        raw_intent,
+        query=q,
+        keywords=kws,
+        hint_people_terms=hint_people_terms,
+        hint_org_role=hint_org_role,
+    )
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1344,72 +1347,17 @@ def _run_rag_with_vectors(
 
 
 
-        # relation mapping
-        hop1_col = hop2_col = ""
-        hop1_kind = hop2_kind = "project"
-        hop1_tag_filters: Optional[List[str]] = None
-        hop2_tag_filters: Optional[List[str]] = None
-        hop2_label = ""
-
-        if relation == ("project", "perf"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "project", "perf"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], None
-            hop2_label = "성과(논문/특허/보고서 등) 목록"
-        elif relation == ("project", "people"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "project", "people"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], [TAG_PJT_MP]
-            hop2_label = "참여인력 목록"
-        elif relation == ("project", "org"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "project", "org"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], [TAG_PJT_ORG]
-            hop2_label = "참여기관 목록"
-        elif relation == ("people", "perf"):
-            # people -> perf (연구자/참여인력의 성과)
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "people", "perf"
-            hop1_tag_filters = [TAG_PJT_MP]
-            hop2_tag_filters = []  # perf 유형은 build_perf_filter에서 q 기반으로 결정
-            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
-
-        elif relation == ("org", "perf"):
-            # org -> perf (기관의 성과)
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "org", "perf"
-            hop1_tag_filters = [TAG_PJT_ORG]
-            hop2_tag_filters = []
-            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
-
-        elif relation == ("perf", "project"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "project"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_INFO]
-            hop2_label = "연관 과제(프로젝트) 정보"
-        elif relation == ("perf", "people"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "people"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_MP]
-            hop2_label = "연관 과제의 참여인력 목록"
-        elif relation == ("perf", "org"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "org"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_ORG]
-            hop2_label = "연관 과제의 참여기관 목록"
-        elif relation == ("people", "project"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "people", "project"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_MP], [TAG_PJT_INFO]
-            hop2_label = "참여 과제(프로젝트) 목록"
-        elif relation == ("org", "project"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "org", "project"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_ORG], [TAG_PJT_INFO]
-            hop2_label = "참여 과제(프로젝트) 목록"
-        else:
-            # unknown relation -> fall back to base SEARCH
+        hop_plan = resolve_join_hops(relation)
+        if hop_plan is None:
             relation = None
+        else:
+            hop1_col = hop_plan.hop1_col
+            hop2_col = hop_plan.hop2_col
+            hop1_kind = hop_plan.hop1_kind
+            hop2_kind = hop_plan.hop2_kind
+            hop1_tag_filters = hop_plan.hop1_tag_filters
+            hop2_tag_filters = hop_plan.hop2_tag_filters
+            hop2_label = hop_plan.hop2_label
 
         if relation:
             allowed_cols = set(plan.target_collections or [])
@@ -1565,9 +1513,9 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(q, join_ids)
+                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
-                hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
+                hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
@@ -1707,7 +1655,7 @@ def _run_rag_with_vectors(
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         if pjt_ids:
             # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-            return build_join_filter(pjt_ids, tag_filters=None)
+            return build_join_filter(JoinFilterInput(join_ids=pjt_ids, tag_filters=None))
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
