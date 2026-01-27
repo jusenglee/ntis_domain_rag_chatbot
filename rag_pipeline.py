@@ -25,6 +25,7 @@ from pprint import pformat
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget, RAG_COLLECTION_ALLOWLIST
 from rag_types import RagResult
 from rag_store import build_rag_objects_dual
@@ -51,7 +52,7 @@ from rag_parts.query_intent import (
     QueryIntent,
     classify_query as _classify_query,
     get_relation_route,
-    relation_target_collections,
+    relation_target_collections, extract_org_terms,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -68,12 +69,10 @@ from rag_parts.join import (
     sanitize_query_by_terms as _sanitize_query_by_terms,
 )
 from rag_parts.filters import (
-    JoinFilterInput,
-    PerfFilterInput,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
-    and_filter as _and_filter,
+    and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
 )
 
 try:
@@ -1167,11 +1166,11 @@ def _run_rag_with_vectors(
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(it.org_terms or []) or _extract_org_terms(q, kws) or []) if str(t).strip()]
+    org_terms = [t.strip() for t in (list(it.org_terms or []) or extract_org_terms(q, kws) or []) if str(t).strip()]
     it.org_terms = org_terms
-    org_filter = _build_org_filter(org_terms) if org_terms else None
+    org_filter = build_org_filter(org_terms) if org_terms else None
     org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
-    participant_org_filter = _build_prtcp_org_nested_filter(org_terms) if org_terms else None
+    participant_org_filter = build_prtcp_org_nested_filter(org_terms) if org_terms else None
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
@@ -1224,7 +1223,7 @@ def _run_rag_with_vectors(
     org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_filter = (
-        _build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
+        build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
         if (people_terms or people_ids or gender_terms or people_org_terms)
         else None
     )
@@ -1528,7 +1527,7 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
+                hop2_filter = build_perf_filter(PerfFilterI nput(query=q, join_ids=join_ids))
             else:
                 hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
                 if hop2_kind in ("project", "org") and org_filter:
