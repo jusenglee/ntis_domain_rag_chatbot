@@ -50,6 +50,8 @@ from rag_parts.constants import (
 from rag_parts.query_intent import (
     QueryIntent,
     classify_query as _classify_query,
+    get_relation_route,
+    relation_target_collections,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -836,12 +838,13 @@ def _build_plan(it: QueryIntent) -> QueryPlan:
     rel = it.relation
 
     if rel:
+        target_cols = relation_target_collections(rel)
         return QueryPlan(
             mode="join",
             base_route=base_route,
             action=action,
             relation=rel,
-            target_collections=[COL_PROJECT, COL_PERF, COL_SUPPORT],
+            target_collections=target_cols if target_cols else [COL_PROJECT, COL_PERF, COL_SUPPORT],
             filters={},
         )
 
@@ -1326,65 +1329,15 @@ def _run_rag_with_vectors(
         hop2_tag_filters: Optional[List[str]] = None
         hop2_label = ""
 
-        if relation == ("project", "perf"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "project", "perf"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], None
-            hop2_label = "성과(논문/특허/보고서 등) 목록"
-        elif relation == ("project", "people"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "project", "people"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], [TAG_PJT_MP]
-            hop2_label = "참여인력 목록"
-        elif relation == ("project", "org"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "project", "org"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_INFO], [TAG_PJT_ORG]
-            hop2_label = "참여기관 목록"
-        elif relation == ("people", "perf"):
-            # people -> perf (연구자/참여인력의 성과)
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "people", "perf"
-            hop1_tag_filters = [TAG_PJT_MP]
-            hop2_tag_filters = []  # perf 유형은 build_perf_filter에서 q 기반으로 결정
-            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
-
-        elif relation == ("org", "perf"):
-            # org -> perf (기관의 성과)
-            hop1_col, hop2_col = COL_PROJECT, COL_PERF
-            hop1_kind, hop2_kind = "org", "perf"
-            hop1_tag_filters = [TAG_PJT_ORG]
-            hop2_tag_filters = []
-            hop2_label = "연관 성과(논문/특허/보고서 등) 목록"
-
-        elif relation == ("perf", "project"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "project"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_INFO]
-            hop2_label = "연관 과제(프로젝트) 정보"
-        elif relation == ("perf", "people"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "people"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_MP]
-            hop2_label = "연관 과제의 참여인력 목록"
-        elif relation == ("perf", "org"):
-            hop1_col, hop2_col = COL_PERF, COL_PROJECT
-            hop1_kind, hop2_kind = "perf", "org"
-            hop1_tag_filters, hop2_tag_filters = None, [TAG_PJT_ORG]
-            hop2_label = "연관 과제의 참여기관 목록"
-        elif relation == ("people", "project"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "people", "project"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_MP], [TAG_PJT_INFO]
-            hop2_label = "참여 과제(프로젝트) 목록"
-        elif relation == ("org", "project"):
-            hop1_col, hop2_col = COL_PROJECT, COL_PROJECT
-            hop1_kind, hop2_kind = "org", "project"
-            hop1_tag_filters, hop2_tag_filters = [TAG_PJT_ORG], [TAG_PJT_INFO]
-            hop2_label = "참여 과제(프로젝트) 목록"
-        else:
+        route = get_relation_route(relation)
+        if route is None:
             # unknown relation -> fall back to base SEARCH
             relation = None
+        else:
+            hop1_col, hop2_col = route.hop1_col, route.hop2_col
+            hop1_kind, hop2_kind = route.hop1_kind, route.hop2_kind
+            hop1_tag_filters, hop2_tag_filters = route.hop1_tag_filters, route.hop2_tag_filters
+            hop2_label = route.hop2_label
 
         if relation:
             allowed_cols = set(plan.target_collections or [])

@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .constants import (
     RARE_TOKEN_RE,
+    COL_PROJECT,
+    COL_PERF,
     TAG_PJT_INFO,
     TAG_PJT_MP,
     TAG_PJT_ORG,
@@ -687,6 +689,136 @@ def pick_domain_hint_from_categories(cats: list[str]) -> str | None:
     if "support" in cats:
         return "support"
     return None
+
+
+@dataclass(frozen=True)
+class RelationRoute:
+    relation: Tuple[str, str]
+    hop1_col: str
+    hop2_col: str
+    hop1_kind: str
+    hop2_kind: str
+    hop1_tag_filters: Optional[List[str]]
+    hop2_tag_filters: Optional[List[str]]
+    hop2_label: str
+
+    def target_collections(self) -> List[str]:
+        return list(dict.fromkeys([self.hop1_col, self.hop2_col]))
+
+
+RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
+    ("project", "perf"): RelationRoute(
+        relation=("project", "perf"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PERF,
+        hop1_kind="project",
+        hop2_kind="perf",
+        hop1_tag_filters=[TAG_PJT_INFO],
+        hop2_tag_filters=None,
+        hop2_label="성과(논문/특허/보고서 등) 목록",
+    ),
+    ("project", "people"): RelationRoute(
+        relation=("project", "people"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PROJECT,
+        hop1_kind="project",
+        hop2_kind="people",
+        hop1_tag_filters=[TAG_PJT_INFO],
+        hop2_tag_filters=[TAG_PJT_MP],
+        hop2_label="참여인력 목록",
+    ),
+    ("project", "org"): RelationRoute(
+        relation=("project", "org"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PROJECT,
+        hop1_kind="project",
+        hop2_kind="org",
+        hop1_tag_filters=[TAG_PJT_INFO],
+        hop2_tag_filters=[TAG_PJT_ORG],
+        hop2_label="참여기관 목록",
+    ),
+    ("people", "perf"): RelationRoute(
+        relation=("people", "perf"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PERF,
+        hop1_kind="people",
+        hop2_kind="perf",
+        hop1_tag_filters=[TAG_PJT_MP],
+        hop2_tag_filters=[],
+        hop2_label="연관 성과(논문/특허/보고서 등) 목록",
+    ),
+    ("org", "perf"): RelationRoute(
+        relation=("org", "perf"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PERF,
+        hop1_kind="org",
+        hop2_kind="perf",
+        hop1_tag_filters=[TAG_PJT_ORG],
+        hop2_tag_filters=[],
+        hop2_label="연관 성과(논문/특허/보고서 등) 목록",
+    ),
+    ("perf", "project"): RelationRoute(
+        relation=("perf", "project"),
+        hop1_col=COL_PERF,
+        hop2_col=COL_PROJECT,
+        hop1_kind="perf",
+        hop2_kind="project",
+        hop1_tag_filters=None,
+        hop2_tag_filters=[TAG_PJT_INFO],
+        hop2_label="연관 과제(프로젝트) 정보",
+    ),
+    ("perf", "people"): RelationRoute(
+        relation=("perf", "people"),
+        hop1_col=COL_PERF,
+        hop2_col=COL_PROJECT,
+        hop1_kind="perf",
+        hop2_kind="people",
+        hop1_tag_filters=None,
+        hop2_tag_filters=[TAG_PJT_MP],
+        hop2_label="연관 과제의 참여인력 목록",
+    ),
+    ("perf", "org"): RelationRoute(
+        relation=("perf", "org"),
+        hop1_col=COL_PERF,
+        hop2_col=COL_PROJECT,
+        hop1_kind="perf",
+        hop2_kind="org",
+        hop1_tag_filters=None,
+        hop2_tag_filters=[TAG_PJT_ORG],
+        hop2_label="연관 과제의 참여기관 목록",
+    ),
+    ("people", "project"): RelationRoute(
+        relation=("people", "project"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PROJECT,
+        hop1_kind="people",
+        hop2_kind="project",
+        hop1_tag_filters=[TAG_PJT_MP],
+        hop2_tag_filters=[TAG_PJT_INFO],
+        hop2_label="참여 과제(프로젝트) 목록",
+    ),
+    ("org", "project"): RelationRoute(
+        relation=("org", "project"),
+        hop1_col=COL_PROJECT,
+        hop2_col=COL_PROJECT,
+        hop1_kind="org",
+        hop2_kind="project",
+        hop1_tag_filters=[TAG_PJT_ORG],
+        hop2_tag_filters=[TAG_PJT_INFO],
+        hop2_label="참여 과제(프로젝트) 목록",
+    ),
+}
+
+
+def get_relation_route(relation: Optional[Tuple[str, str]]) -> Optional[RelationRoute]:
+    if not relation:
+        return None
+    return RELATION_ROUTE_TABLES.get(tuple(relation))
+
+
+def relation_target_collections(relation: Optional[Tuple[str, str]]) -> List[str]:
+    route = get_relation_route(relation)
+    return route.target_collections() if route else []
 
 
 def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None) -> QueryIntent:
