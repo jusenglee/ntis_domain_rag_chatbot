@@ -74,7 +74,7 @@ from rag_parts.filters import (
     build_perf_filter as build_perf_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     JoinFilterInput,
-    PerfFilterInput,
+    PerfFilterInput, PeopleFilterInput,
 )
 
 try:
@@ -1224,8 +1224,14 @@ def _run_rag_with_vectors(
         people_ids = deduped_ids
     org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
     people_org_terms = org_terms if org_role == "affiliation" else []
+    peopleaaa= PeopleFilterInput(
+        people_terms,
+        people_ids,
+        gender_terms,
+        people_org_terms,
+    )
     people_filter = (
-        build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
+        build_people_filter(peopleaaa)
         if (people_terms or people_ids or gender_terms or people_org_terms)
         else None
     )
