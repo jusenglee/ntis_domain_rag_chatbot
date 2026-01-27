@@ -5,7 +5,7 @@ Search preset builder
 - QueryIntent(action/intent/route/엔티티)에 따라:
   - 검색 파라미터(top_k_dense/top_k_lex_cand/top_k_lex)
   - 가중치(w_lex, field weights)
-  - meta_flat / org_name_norm 사용 여부
+  - flat_text / org_name_norm 사용 여부
   - dense threshold 사용 여부
   - 컨텍스트 아이템 수/조기 종료 조건
 를 결정한다.
@@ -99,37 +99,24 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     action 별로 파라미터를 더 극단적으로 조정한다(초기 제안값이며 튜닝 전제).
     """
     # common defaults (기존과 호환)
-    default_title_w = _f("RAG_W_TITLE", 2.2)
-    default_content_w = _f("RAG_W_CONTENT", _f("RAG_W_ANSWER_PUBLIC", 1.2))
-    default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 0.8)
-    default_flat_w = _f("RAG_W_FLAT_TEXT", 0.35)
-    default_ans_w = _f("RAG_W_ANSWER_PUBLIC", 1.2)
-    default_meta_flat_w = _f("RAG_W_META_FLAT", 0.35)
+    default_title_w = _f("RAG_W_TITLE", 5.0)
+    default_content_w = _f("RAG_W_CONTENT", 3.0)
+    default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
+    default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
+    default_cetegory_w = _f("RAG_W_CETEGORY", 5.0)
     default_lex_mode = os.getenv("RAG_LEXICAL_SCORING_MODE", "bm25").strip().lower()
 
     # base lexical fields
-    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public"]
-    if intent.is_id_query or intent.intent in ("id", "filter"):
-        # 구조 질의는 meta_flat이 효율적인 경우가 많음
-        base_fields = base_fields + ["meta_flat"]
-    if intent.people_terms or (intent.ids_map or {}).get("person_no"):
-        if "meta_flat" not in base_fields:
-            base_fields = base_fields + ["meta_flat"]
+    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
 
     weights = {
         "title_text": default_title_w,
         "content_text": default_content_w,
         "keyword_text": default_keyword_w,
         "flat_text": default_flat_w,
+        "cetegory": default_cetegory_w,
         "title": default_title_w,
-        "answer_public": default_ans_w,
-        "meta_flat": default_meta_flat_w,
     }
-
-    # route별 meta_flat 보수 옵션
-    if intent.base_route == "support" and ("meta_flat" in base_fields):
-        if os.getenv("RAG_SUPPORT_USE_META_FLAT", "0") != "1":
-            base_fields = [f for f in base_fields if f != "meta_flat"]
 
     # ---- action presets ----
     action = intent.action
@@ -161,7 +148,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             top_k_lex=_i("RAG_TOPK_LEX_REL", 180),
             w_lex=_f("RAG_W_LEX_REL", 0.65),
             lexical_fields=base_fields,
-            lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.8)},
+            lexical_field_weights=weights,
             lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,  # 조인/필터 계열은 dense threshold 오탐 가능
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
@@ -174,15 +161,15 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 3) Exact ID lookup
     if action == "id_exact":
-        # 추측입니다: exact id는 dense보다 lex/meta_flat이 더 안정적일 때가 많음
+        # 추측입니다: exact id는 dense보다 lex가 더 안정적일 때가 많음
         prefer_lex_only = os.getenv("RAG_ID_EXACT_LEX_ONLY", "1") == "1"
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_ID_EXACT", 8),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_ID_EXACT", 1200),
             top_k_lex=_i("RAG_TOPK_LEX_ID_EXACT", 160),
             w_lex=_f("RAG_W_LEX_ID_EXACT", 0.78),
-            lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),  # meta_flat 강제
-            lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 1.0)},
+            lexical_fields=base_fields,
+            lexical_field_weights=weights,
             lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
@@ -202,8 +189,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_ID", 600),
             top_k_lex=_i("RAG_TOPK_LEX_ID", 120),
             w_lex=_f("RAG_W_LEX_ID", 0.60),
-            lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),
-            lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.7)},
+            lexical_fields=base_fields,
+            lexical_field_weights=weights,
             lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
@@ -216,15 +203,15 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 5) List/filter
     if action in ("list", "download", "stats"):
-        # list/filter/stats/download는 구조 키워드 비중이 높아 lex/meta_flat이 유리한 경우가 많음(추측입니다)
+        # list/filter/stats/download는 구조 키워드 비중이 높아 lex가 유리한 경우가 많음(추측입니다)
         prefer_lex_only = os.getenv("RAG_LIST_LEX_ONLY", "0") == "1"
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_FILTER", 16),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_FILTER", 900),
             top_k_lex=_i("RAG_TOPK_LEX_FILTER", 180),
             w_lex=_f("RAG_W_LEX_FILTER", 0.65),
-            lexical_fields=list(dict.fromkeys(base_fields + ["meta_flat"])),
-            lexical_field_weights={**weights, "meta_flat": max(weights.get("meta_flat", 0.35), 0.8)},
+            lexical_fields=base_fields,
+            lexical_field_weights=weights,
             lexical_scoring_mode=default_lex_mode,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
@@ -243,7 +230,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             preset.org_lex_boost = True
             # org_name_norm을 lexical에 포함(가중치 부여)
             if KEY_ORG_NORM not in preset.lexical_fields:
-                preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public", KEY_ORG_NORM, "org_nm", "meta_flat"]
+                preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title", KEY_ORG_NORM, "org_nm"]
             preset.lexical_field_weights[KEY_ORG_NORM] = _f("RAG_W_ORG_NORM", 3.0)
             preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights[KEY_ORG_NORM])
         return preset
@@ -265,9 +252,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.6)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.1)),
         )
-        # topic에서는 meta_flat을 보수적으로
-        if os.getenv("RAG_TOPIC_USE_META_FLAT", "0") != "1" and "meta_flat" in preset.lexical_fields:
-            preset.lexical_fields = [f for f in preset.lexical_fields if f != "meta_flat"]
         return preset
 
     # 7) Detail/content (default)

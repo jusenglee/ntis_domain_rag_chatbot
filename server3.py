@@ -436,7 +436,12 @@ class CustomRAGRetriever(BaseModel):
                 hit_data = getattr(hit, "__dict__", {})
                 score = 0.0
 
-            content = hit_data.get("answer_public") or ""
+            content = (
+                hit_data.get("content_text")
+                or hit_data.get("content1")
+                or hit_data.get("content2")
+                or ""
+            )
 
             metadata = hit_data.get("meta", {})
             ref = hit_data.get("ref", {})
@@ -497,7 +502,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         for i, doc in enumerate(docs, 1):
             meta = doc.metadata
             ref = meta.get("ref") or {}
-            title = meta.get("국문과제명", ref.get("title"))
+            title = ref.get("title") or meta.get("kor_pjt_nm") or meta.get("eng_pjt_nm") or "문서"
             score = ref.get("score")
             content = doc.page_content.replace("\n", " ")[:100]
             score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "N/A"
