@@ -34,7 +34,7 @@ def point_brief(p: Any) -> Dict[str, Any]:
     if not isinstance(pl, dict):
         pl = {}
     meta = {}
-    for key in ("meta", "metadata", "meta_basic", "meta_detail"):
+    for key in ("meta_basic", "meta_detail"):
         v = pl.get(key)
         if isinstance(v, dict):
             meta.update(v)
@@ -46,13 +46,12 @@ def point_brief(p: Any) -> Dict[str, Any]:
         or pl.get("title1")
         or pl.get("title2")
         or meta.get("kor_pjt_nm")
-        or meta.get("KOR_PJT_NM")
         or ""
     )
     doc_id = pl.get("doc_id") or ""
     col = pl.get("_collection") or ""
-    st = meta.get("source_table") or meta.get("sourceTable") or ""
-    tag = pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or ""
+    st = ""
+    tag = pl.get("tag") or ""
     return {
         "score": float(score) if score is not None else None,
         "col": str(col),

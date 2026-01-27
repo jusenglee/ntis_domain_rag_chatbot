@@ -36,8 +36,6 @@ def _ensure_payload_indexes(client: QdrantClient, *, wait: bool = False) -> None
         "category",
         "cetegory",
         "title",
-        "answer_public",
-        "meta_flat",
     ]
     keyword_fields = [
         "tag",
@@ -45,12 +43,9 @@ def _ensure_payload_indexes(client: QdrantClient, *, wait: bool = False) -> None
         "org_nm",
         "doc_id",
         "pjt_id",
-        "PJT_ID",
-        "meta.PJT_ID",
-        "meta.pjt_id",
-        "meta_basic.PJT_ID",
-        "meta_basic.PJT_NO",
-        "meta_basic.PJT_PRFRM_ORG_NM",
+        "meta_basic.pjt_id",
+        "meta_basic.pjt_no",
+        "meta_basic.pjt_prfrm_org_nm",
     ]
 
     for collection in collections:

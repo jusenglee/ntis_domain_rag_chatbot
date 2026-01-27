@@ -59,19 +59,8 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         KEY_ORG_NORM,
         "org_nm",
         "prtcp_org.org_nm",
-        "prfrm_org_nm",
-        "org_name_raw",
-        "blng_org_nm",
-        "prtcp_org.org_nm",
-        "meta.과제수행기관명",
-        "meta.참여연구기관명",
-        "meta.발행기관명",
-        "meta.등록기관명",
-        "meta.기탁기관명",
-        "meta.소속기관명",
-        "meta_basic.PJT_PRFRM_ORG_NM",
-        "meta_basic.prfrm_org_nm",
-        "meta_basic.org_name",
+        "prtcp_mp.blng_org_nm",
+        "meta_basic.pjt_prfrm_org_nm",
     ]
     should: List["qmodels.Condition"] = []
     for key in keys:
@@ -191,13 +180,6 @@ def build_people_filter(
     if terms:
         name_keys = [
             "flat_text",
-            "meta_flat",
-            "meta.인물명",
-            "meta.참여연구자명",
-            "meta.연구자명",
-            "meta.성명",
-            "인물명",
-            "hm_nm",
             "prtcp_mp.hm_nm",
         ]
         for key in name_keys:
@@ -206,16 +188,6 @@ def build_people_filter(
     if ids:
         id_keys = [
             "flat_text",
-            "meta_flat",
-            "meta.국가연구자번호",
-            "meta.과학기술인등록번호",
-            "meta.인물ID",
-            "meta.참여인력일련번호",
-            "국가연구자번호",
-            "과학기술인등록번호",
-            "인물ID",
-            "참여인력일련번호",
-            "hm_id",
             "prtcp_mp.hm_id",
         ]
         for key in id_keys:
@@ -225,10 +197,6 @@ def build_people_filter(
         org_keys = [
             KEY_ORG_NORM,
             "org_nm",
-            "blng_org_nm",
-            "meta.소속기관명",
-            "meta.소속",
-            "meta.기관명",
             "prtcp_mp.blng_org_nm",
         ]
         for key in org_keys:
@@ -244,7 +212,7 @@ def build_people_filter(
         return qmodels.Filter(must=[nested_filter])
 
     if genders:
-        for key in ["flat_text", "meta_flat", "gender_slct", "gender_slct_nm"]:
+        for key in ["flat_text", "gender_slct", "gender_slct_nm"]:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(genders)))
 
     if nested_filter is not None:
@@ -321,7 +289,7 @@ def pick_perf_tag_filters(q: str) -> List[str]:
 def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] = None) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 
-    누락 방지를 위해 PJT_ID 키 변형(meta.PJT_ID / meta.pjt_id / PJT_ID / pjt_id 등)을 OR로 묶습니다.
+    누락 방지를 위해 PJT_ID 키 변형(meta_basic/payload)을 OR로 묶습니다.
     """
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for build_join_filter()")
@@ -330,18 +298,13 @@ def build_join_filter(join_ids: List[str], *, tag_filters: Optional[List[str]] =
     if not join_ids:
         return qmodels.Filter(must=[])
 
-    primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
+    primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     key_cands = []
     for k in [
         primary,
-        "meta.PJT_ID",
-        "meta.pjt_id",
-        "meta_basic.PJT_ID",
         "meta_basic.pjt_id",
-        "PJT_ID",
+        "meta_basic.pjt_no",
         "pjt_id",
-        "meta.pjtId",
-        "pjtId",
     ]:
         if k and k not in key_cands:
             key_cands.append(k)
@@ -382,18 +345,13 @@ def build_perf_filter(query: str, join_ids: Optional[List[str]] = None) -> "qmod
 
     join_ids = [str(x).strip() for x in (join_ids or []) if str(x).strip()]
     if join_ids:
-        primary = os.getenv("RAG_KEY_PJT_ID", "meta.PJT_ID")
+        primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
         key_cands = []
         for k in [
             primary,
-            "meta.PJT_ID",
-            "meta.pjt_id",
-            "meta_basic.PJT_ID",
             "meta_basic.pjt_id",
-            "PJT_ID",
+            "meta_basic.pjt_no",
             "pjt_id",
-            "meta.pjtId",
-            "pjtId",
         ]:
             if k and k not in key_cands:
                 key_cands.append(k)

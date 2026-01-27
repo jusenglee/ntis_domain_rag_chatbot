@@ -4,8 +4,7 @@ from __future__ import annotations
 from typing import Any, Iterable, List, Optional, Tuple
 
 def norm_tag_from_payload(pl: dict) -> str:
-    meta = pl.get("meta") if isinstance(pl.get("meta"), dict) else {}
-    t = (pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or meta.get("sourceTable") or "")
+    t = (pl.get("tag") or "")
     t = str(t).strip().upper()
     return t[4:] if t.startswith("IRD_") else t
 

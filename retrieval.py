@@ -60,7 +60,7 @@ _CTX_MAX_ITEMS = int(os.getenv("RAG_MAX_CONTEXT_ITEMS", "10"))
 _CTX_PER_DOC_CHARS = int(os.getenv("RAG_CTX_PER_DOC_MAX_CHARS", "1200"))
 _CTX_META_MAX_FIELDS = int(os.getenv("RAG_CTX_META_MAX_FIELDS", "12"))
 
-# 0이면 meta의 긴 텍스트(요약류)를 기본적으로 제외
+# 0이면 meta_basic/meta_detail의 긴 텍스트(요약류)를 기본적으로 제외
 _CTX_INCLUDE_META_LONG = os.getenv("RAG_CTX_INCLUDE_META_LONG", "0") == "1"
 
 # Qdrant call timeout (seconds)
@@ -96,13 +96,13 @@ _PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()  
 # 후보 단계에 필요한 최소 키들(메타/본문 제외)
 _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_MIN_FIELDS",
-    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,cetegory,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,meta_flat,urls,systems"
+    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,cetegory,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,urls,systems"
 ).split(",") if s.strip()]
 
-# 최종 컨텍스트용(필요하면 meta/answer_public 포함)
+# 최종 컨텍스트용(필요하면 meta/content 포함)
 _PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_FULL_FIELDS",
-    "doc_id,tag,title_text,title,title1,title2,content_text,content1,content2,keyword_text,keyword1,keyword2,flat_text,category,cetegory,meta,meta_basic,meta_detail,meta_flat,answer_public,org_nm,org_name_norm,pjt_id,stan_yr,start_dt,end_dt,dt1,dt2,urls,systems"
+    "doc_id,tag,title_text,title,title1,title2,content_text,content1,content2,keyword_text,keyword1,keyword2,flat_text,category,cetegory,meta_basic,meta_detail,org_nm,org_name_norm,pjt_id,stan_yr,start_dt,end_dt,dt1,dt2,urls,systems"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
@@ -135,7 +135,7 @@ def _with_payload_selector(
 def _extract_id_tokens(q: str, *, cap: int = 8) -> List[str]:
     """Extract ID-like tokens from query text for exact matching.
 
-    - 필드 열거 없이(meta_flat 등) 동작하도록 토큰 기반으로 설계.
+    - 필드 열거 없이(flat_text 등) 동작하도록 토큰 기반으로 설계.
     - ISSN 하이픈/무하이픈, DOI URL/코어형을 같이 인식합니다.
     """
     q = (q or "").strip()
@@ -184,8 +184,7 @@ def _extract_id_tokens(q: str, *, cap: int = 8) -> List[str]:
             continue
         seen.add(key)
         out.append(t)
-        # ISSN normalization: meta_flat이 표준형(하이픈 포함)을 가진다는 전제라면,
-        # 무하이픈 변형을 추가로 넣지 않는다(오탐/확장 방지).
+        # ISSN normalization: 하이픈 포함/미포함 변형을 동시에 넣지 않는다(오탐 방지).
 
         # DOI normalization: add url form? (not needed for exact; we normalize text too)
         if _ID_DOI_RE.fullmatch(t):
@@ -253,7 +252,7 @@ def _safe_str(x: Any, *, max_chars: Optional[int] = None) -> str:
 
 
 def _payload_get(pl: Dict[str, Any], key: str, default: Any = "") -> Any:
-    """Get nested payload value. (meta.xxx 지원)"""
+    """Get nested payload value. (meta_basic/meta_detail 지원)"""
     if not isinstance(pl, dict):
         return default
     if "." not in key:
@@ -274,7 +273,7 @@ def _id_exact_score(
         fields: Sequence[str],
         weights: Dict[str, float],
 ) -> float:
-    """Exact-match score for ID-like queries using only payload fields (meta_flat etc.).
+    """Exact-match score for ID-like queries using only payload fields (flat_text etc.).
 
     로직(중요):
     - ID 토큰이 존재하는 질의는 *fuzzy*로 내려가면 오염(허위 양성)이 급증함.
@@ -774,26 +773,19 @@ def dense_retrieve_hybrid_multi(
     lex_points: List[models.ScoredPoint] = []
 
     lexical_fields_eff = list(
-        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "title", "answer_public", "meta_flat"]
+        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
     )
     lexical_weights_eff = dict(
         lexical_field_weights
         or {
-            "title_text": 2.2,
-            "content_text": 1.2,
-            "keyword_text": 0.8,
-            "flat_text": 0.35,
-            "title": 2.2,
-            "answer_public": 1.2,
-            "meta_flat": 0.35,
+            "title_text": 5.0,
+            "content_text": 3.0,
+            "keyword_text": 3.0,
+            "flat_text": 2.0,
+            "cetegory": 5.0,
+            "title": 5.0,
         }
     )
-    id_toks = _extract_id_tokens(q)
-    if id_toks:
-        if "meta_flat" not in lexical_fields_eff:
-            lexical_fields_eff.append("meta_flat")
-        if float(lexical_weights_eff.get("meta_flat", 0.0)) < 0.8:
-            lexical_weights_eff["meta_flat"] = 0.9
 
     t_scroll = 0.0
     t_score = 0.0
@@ -987,54 +979,27 @@ def rrf_rerank_multi(
 
 _META_CORE_KEYS = [
     "pjt_id",
-    "PJT_ID",
-    "PJT_NO",
-    "과제번호",
-    "source_pk",
-    "source_table",
-    "doc_type",
-    "기준년도",
-    "STAN_YR",
+    "pjt_no",
+    "stan_yr",
     "org_nm",
-    "org_name",
-    "KOR_PJT_NM",
     "kor_pjt_nm",
-    "ENG_PJT_NM",
     "eng_pjt_nm",
-    "국문과제명",
-    "영문과제명",
-    "PJT_PRFRM_ORG_NM",
-    "과제수행기관명",
-    "연구수행주체",
-    "TOT_RSCH_START_DT",
-    "TOT_RSCH_END_DT",
+    "pjt_prfrm_org_nm",
+    "tot_rsch_start_dt",
+    "tot_rsch_end_dt",
     "start_dt",
     "end_dt",
     "dt1",
     "dt2",
-    "총연구기간시작일",
-    "총연구기간종료일",
-    "연구비합계금액",
-    "연구개발단계",
-    "국가중점과학기술",
-    "6T관련기술",
+    "rndco_tot_amt",
     "keyword_text",
+    "kor_kywd",
+    "eng_kywd",
     "rsch_abstract",
     "rsch_goal_abstract",
-    "RST_ID",
-    "등록번호",
-    "성과명",
-    "논문명",
-    "발명의명칭",
 ]
 
 _META_LONG_KEYS = {
-    "연구내용요약",
-    "연구목표요약",
-    "내용",
-    "요약",
-    "RSCH_ABSTRACT",
-    "RSCH_GOAL_ABSTRACT",
     "rsch_abstract",
     "rsch_goal_abstract",
 }
@@ -1042,7 +1007,7 @@ _META_LONG_KEYS = {
 
 def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
-    for key in ("meta", "metadata", "meta_basic", "meta_detail"):
+    for key in ("meta_basic", "meta_detail"):
         v = payload.get(key)
         if isinstance(v, dict):
             merged.update(v)
@@ -1072,36 +1037,24 @@ def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
             out.append(k)
 
     if "stan_yr" in meta:
-        normalized_year = _normalize_year_value(meta.get("stan_yr"))
-        meta["stan_yr"] = normalized_year
-        if normalized_year not in (None, "") and not meta.get("STAN_YR"):
-            meta["STAN_YR"] = normalized_year
-    if "STAN_YR" in meta:
-        meta["STAN_YR"] = _normalize_year_value(meta.get("STAN_YR"))
+        meta["stan_yr"] = _normalize_year_value(meta.get("stan_yr"))
 
     for k in _META_CORE_KEYS:
         _add(k)
 
     if any(x in ql for x in ["기간", "시작", "종료", "언제"]):
-        _add("총연구기간시작일")
-        _add("총연구기간종료일")
-        _add("TOT_RSCH_START_DT")
-        _add("TOT_RSCH_END_DT")
+        _add("tot_rsch_start_dt")
+        _add("tot_rsch_end_dt")
         _add("start_dt")
         _add("end_dt")
     if any(x in ql for x in ["금액", "연구비", "예산", "비용"]):
-        _add("연구비합계금액")
+        _add("rndco_tot_amt")
     if any(x in ql for x in ["기관", "대학", "출연", "주관"]):
-        _add("과제수행기관명")
-        _add("연구수행주체")
-        _add("PJT_PRFRM_ORG_NM")
+        _add("pjt_prfrm_org_nm")
         _add("org_nm")
-    if any(x in ql for x in ["분야", "기술", "6t", "중점"]):
-        _add("국가중점과학기술")
-        _add("6T관련기술")
     if any(x in ql for x in ["키워드", "keyword"]):
-        _add("한글키워드")
-        _add("영문키워드")
+        _add("kor_kywd")
+        _add("eng_kywd")
         _add("keyword_text")
 
     if _CTX_INCLUDE_META_LONG:
@@ -1150,8 +1103,9 @@ def build_context_docstyle(
             pl.get("title_text")
             or pl.get("title")
             or pl.get("title1")
-            or meta.get("KOR_PJT_NM")
-            or meta.get("국문과제명")
+            or pl.get("title2")
+            or meta.get("kor_pjt_nm")
+            or meta.get("eng_pjt_nm")
             or "",
             max_chars=200,
         )
@@ -1159,11 +1113,10 @@ def build_context_docstyle(
         systems = pl.get("systems") if isinstance(pl.get("systems"), list) else []
         urls = pl.get("urls") if isinstance(pl.get("urls"), list) else []
 
-        answer_public = _safe_str(
+        content_text = _safe_str(
             pl.get("content_text")
             or pl.get("content1")
             or pl.get("content2")
-            or pl.get("answer_public")
             or "",
             max_chars=per_doc_char_budget,
         )
@@ -1181,8 +1134,8 @@ def build_context_docstyle(
         chunk_parts.append(header)
         if meta_lines:
             chunk_parts.append(meta_lines)
-        if answer_public:
-            chunk_parts.append(f"[CONTENT]\n{answer_public}")
+        if content_text:
+            chunk_parts.append(f"[CONTENT]\n{content_text}")
 
         chunk = "\n".join(chunk_parts).strip()
         if not chunk:
@@ -1190,12 +1143,12 @@ def build_context_docstyle(
 
         tok = _approx_token_len(chunk)
         if total_tok + tok > int(token_budget):
-            if answer_public and len(answer_public) > 200:
-                answer_public2 = _safe_str(answer_public, max_chars=200)
+            if content_text and len(content_text) > 200:
+                content_text2 = _safe_str(content_text, max_chars=200)
                 chunk_parts2 = [header]
                 if meta_lines:
                     chunk_parts2.append(meta_lines)
-                chunk_parts2.append(f"[CONTENT]\n{answer_public2}")
+                chunk_parts2.append(f"[CONTENT]\n{content_text2}")
                 chunk2 = "\n".join(chunk_parts2).strip()
                 tok2 = _approx_token_len(chunk2)
                 if total_tok + tok2 <= int(token_budget):
@@ -1217,7 +1170,7 @@ def build_context_docstyle(
                 "score": float(getattr(p, "score", 0.0) or 0.0),
                 "urls": urls,
                 "systems": systems,
-                "source_table": _payload_get(pl, "meta.source_table", "") or _payload_get(pl, "meta_basic.source_table", ""),
+                "source_table": str(pl.get("tag") or ""),
             }
         )
 

@@ -9,7 +9,7 @@ JOIN(2-hop)에서 Hop1 결과(예: 과제/참여인력/기관 등)로부터 join
 - sanitize_query_by_terms(q, remove_terms): 제거 대상 용어를 질의에서 제거(공백 정리)
 
 주의:
-- PJT_ID는 저장 스키마에 따라 meta.PJT_ID / meta.pjt_id / payload.PJT_ID 등으로 달라질 수 있어
+- PJT_ID는 저장 스키마에 따라 payload/meta_basic에 여러 키 변형으로 존재할 수 있어
   여러 키 변형을 모두 확인합니다.
 """
 
@@ -20,16 +20,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 _PJT_ID_KEYS = (
-    "PJT_ID",
     "pjt_id",
-    "과제번호",
-    "pjtId",
-    "PJTID",
-    "PJT_NO",
+    "pjt_no",
 )
 
-# 흔한 중첩 경로 후보 (payload 안의 meta dict)
-_META_KEYS = ("meta", "metadata", "meta_basic", "meta_detail")
+# 흔한 중첩 경로 후보 (payload 안의 meta_basic/meta_detail dict)
+_META_KEYS = ("meta_basic", "meta_detail")
 
 
 def _as_dict(x: Any) -> Optional[Dict[str, Any]]:

@@ -168,13 +168,12 @@ def _point_summary(p: Any) -> Dict[str, Any]:
         pl.get("title_text"),
         pl.get("title"),
         pl.get("title1"),
-        meta.get("KOR_PJT_NM"),
-        meta.get("국문과제명"), meta.get("과제명"),
-        meta.get("성과명"), meta.get("논문명"),
-        meta.get("title"),
+        pl.get("title2"),
+        meta.get("kor_pjt_nm"),
+        meta.get("eng_pjt_nm"),
     )
 
-    tag = pick(pl.get("tag"), meta.get("doc_type"), meta.get("source_table"))
+    tag = pick(pl.get("tag"))
     doc_id = pick(pl.get("doc_id"), getattr(p, "id", None))
     col = pick(pl.get("_collection"))
 
@@ -234,7 +233,7 @@ def _clean_one_line(s: object, max_len: int = 160) -> str:
 
 def _get_meta(pl: dict) -> dict:
     merged: Dict[str, Any] = {}
-    for key in ("meta", "metadata", "meta_basic", "meta_detail"):
+    for key in ("meta_basic", "meta_detail"):
         v = pl.get(key)
         if isinstance(v, dict):
             merged.update(v)
@@ -249,38 +248,34 @@ def _pick_first(*vals: object) -> str:
             return sv
     return ""
 
+def _pick_nested_first(pl: Dict[str, Any], list_key: str, field_key: str) -> str:
+    items = pl.get(list_key)
+    if not isinstance(items, list):
+        return ""
+    for item in items:
+        if isinstance(item, dict):
+            v = item.get(field_key)
+            if v not in (None, ""):
+                return str(v).strip()
+    return ""
+
 def _payload_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     return _pick_first(
         pl.get("title_text"),
         pl.get("title"),
         pl.get("title1"),
         pl.get("title2"),
-        meta.get("KOR_PJT_NM"),
         meta.get("kor_pjt_nm"),
-        meta.get("국문과제명"),
-        meta.get("과제명"),
-        meta.get("성과명"),
-        meta.get("논문명"),
         meta.get("eng_pjt_nm"),
-        meta.get("title"),
     )
 
 def _payload_content(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     return _pick_first(
         pl.get("content_text"),
-        pl.get("content"),
         pl.get("content1"),
         pl.get("content2"),
-        pl.get("answer_public"),
-        meta.get("RSCH_ABSTRACT"),
         meta.get("rsch_abstract"),
-        meta.get("RSCH_GOAL_ABSTRACT"),
         meta.get("rsch_goal_abstract"),
-        meta.get("연구내용요약"),
-        meta.get("연구목표요약"),
-        meta.get("내용"),
-        meta.get("요약"),
-        meta.get("org_name"),
     )
 
 def build_context_list_light(
@@ -307,7 +302,7 @@ def build_context_list_light(
         return value
 
     def _pjt_id(meta, pl):
-        return _pick_first(pl.get("pjt_id"), meta.get("PJT_ID"), meta.get("pjt_id"), meta.get("pjtId"), meta.get("PJTID"))
+        return _pick_first(pl.get("pjt_id"), meta.get("pjt_id"), meta.get("pjt_no"))
 
     def _refs(points: List[Any]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -316,12 +311,12 @@ def build_context_list_light(
             if not isinstance(pl, dict):
                 pl = {}
             meta = _get_meta(pl)
-            urls = pl.get("urls") or meta.get("urls") or []
+            urls = pl.get("urls") or []
             if isinstance(urls, str):
                 urls = [urls]
             out.append({
                 "doc_id": str(pl.get("doc_id") or ""),
-                "tag": str(pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or ""),
+                "tag": str(pl.get("tag") or ""),
                 "title": str(_payload_title(pl, meta)),
                 "urls": urls if isinstance(urls, list) else [],
             })
@@ -338,16 +333,9 @@ def build_context_list_light(
             pjt_id = _pjt_id(meta, pl)
             org = _pick_first(
                 pl.get("org_nm"),
-                pl.get("prfrm_org_nm"),
-                meta.get("PJT_PRFRM_ORG_NM"),
-                meta.get("prfrm_org_nm"),
-                meta.get("org_name"),
-                meta.get("과제수행기관명"),
-                meta.get("주관기관명"),
-                meta.get("기관명"),
-                meta.get("수행기관"),
+                meta.get("pjt_prfrm_org_nm"),
             )
-            year = _pick_first(pl.get("stan_yr"), meta.get("STAN_YR"), meta.get("연구개발기간시작년도"), meta.get("연도"), meta.get("시작년도"))
+            year = _pick_first(pl.get("stan_yr"), meta.get("stan_yr"))
             year = _normalize_year(year)
             line = f"- {_clean_one_line(title, 180)}"
             extra: List[str] = []
@@ -359,18 +347,9 @@ def build_context_list_light(
             continue
 
         if kind == "people":
-            name = _pick_first(
-                pl.get("hm_nm"),
-                meta.get("인물명"),
-                meta.get("참여연구자명"),
-                meta.get("연구자명"),
-                meta.get("성명"),
-                meta.get("이름"),
-                meta.get("NAME"),
-                meta.get("name"),
-            )
-            role = _pick_first(pl.get("role_slct_nm"), meta.get("역할"), meta.get("참여구분"), meta.get("참여유형"), meta.get("역할명"))
-            org = _pick_first(pl.get("blng_org_nm"), meta.get("소속기관명"), meta.get("소속"), meta.get("기관명"), meta.get("참여기관명"))
+            name = _pick_nested_first(pl, "prtcp_mp", "hm_nm")
+            role = _pick_nested_first(pl, "prtcp_mp", "role_slct_nm")
+            org = _pick_nested_first(pl, "prtcp_mp", "blng_org_nm")
             pjt_id = _pjt_id(meta, pl)
             line = f"- {_clean_one_line(name or '(이름없음)', 80)}"
             extra: List[str] = []
@@ -384,17 +363,10 @@ def build_context_list_light(
         if kind == "org":
             org = _pick_first(
                 pl.get("org_nm"),
-                pl.get("prfrm_org_nm"),
-                meta.get("참여기관명"),
-                meta.get("기관명"),
-                meta.get("수행기관명"),
-                meta.get("주관기관명"),
-                meta.get("prfrm_org_nm"),
-                meta.get("org_name"),
-                meta.get("ORG_NAME"),
-                meta.get("org"),
+                meta.get("pjt_prfrm_org_nm"),
+                _pick_nested_first(pl, "prtcp_org", "org_nm"),
             )
-            role = _pick_first(pl.get("org_slct_nm"), meta.get("기관역할"), meta.get("역할"), meta.get("참여구분"), meta.get("유형"))
+            role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
             pjt_id = _pjt_id(meta, pl)
             line = f"- {_clean_one_line(org or '(기관없음)', 100)}"
             extra: List[str] = []
@@ -406,17 +378,15 @@ def build_context_list_light(
 
         # perf default
         title = _payload_title(pl, meta)
-        pjt_name = _pick_first(meta.get("KOR_PJT_NM"), meta.get("국문과제명"), meta.get("과제명"))
+        pjt_name = _pick_first(meta.get("kor_pjt_nm"), meta.get("eng_pjt_nm"))
         pjt_id = _pjt_id(meta, pl)
-        perf_type = _pick_first(pl.get("tag"), meta.get("doc_type"), meta.get("source_table"), meta.get("성과유형"))
-        year = _pick_first(meta.get("성과연도"), meta.get("발행년도"), meta.get("연도"))
-        journal = _pick_first(meta.get("저널명"), meta.get("학술지명"), meta.get("발행처"))
+        perf_type = _pick_first(pl.get("tag"))
+        year = _pick_first(pl.get("dt1"), pl.get("dt2"), pl.get("stan_yr"), meta.get("stan_yr"))
 
         line = f"- {_clean_one_line(title, 180)}"
         extra: List[str] = []
         if perf_type: extra.append(_clean_one_line(perf_type, 32))
         if year: extra.append(str(year))
-        if journal: extra.append(_clean_one_line(journal, 40))
         if pjt_name or pjt_id: extra.append(_clean_one_line(pjt_name or f"PJT_ID={pjt_id}", 60))
         if extra: line += " (" + ", ".join(extra) + ")"
         items.append(line)
@@ -573,16 +543,13 @@ def _to_text(v: object) -> str:
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title") or pl.get("title1") or "")
     meta_title = _to_text(
-        meta.get("KOR_PJT_NM")
-        or meta.get("국문과제명")
-        or meta.get("성과명")
-        or meta.get("논문명")
-        or meta.get("title")
+        meta.get("kor_pjt_nm")
+        or meta.get("eng_pjt_nm")
         or ""
     )
     if not title:
         return meta_title
-    pjt_id = _to_text(pl.get("pjt_id") or meta.get("PJT_ID") or meta.get("PJT_NO") or "")
+    pjt_id = _to_text(pl.get("pjt_id") or meta.get("pjt_id") or meta.get("pjt_no") or "")
     if meta_title and (
         title.isdigit()
         or title.lower().startswith("ntis:")
@@ -598,38 +565,35 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
     meta = _get_meta(pl)
 
     title = _prefer_meta_title(pl, meta)
-    meta_flat = _to_text(
+    flat_text = _to_text(
         pl.get("flat_text")
         or pl.get("keyword_text")
-        or pl.get("meta_flat")
-        or meta.get("meta_flat")
         or ""
     )
-    answer_public = _to_text(
+    content_text = _to_text(
         pl.get("content_text")
         or pl.get("content")
         or pl.get("content1")
         or pl.get("content2")
-        or pl.get("answer_public")
-        or meta.get("answer_public")
         or ""
     )
     keyword_text = _to_text(pl.get("keyword_text") or pl.get("keyword1") or pl.get("keyword2") or "")
 
     meta_kv = []
     for k in (
-        "PJT_ID",
         "pjt_id",
-        "PJT_NO",
-        "PJT_PRFRM_ORG_NM",
-        "과제수행기관명",
-        "주관기관명",
-        "기관명",
-        "연도",
-        "성과연도",
-        "발행년도",
-        "저널명",
-        "학술지명",
+        "pjt_no",
+        "pjt_prfrm_org_nm",
+        "kor_pjt_nm",
+        "eng_pjt_nm",
+        "rndco_tot_amt",
+        "rsch_goal_abstract",
+        "rsch_abstract",
+        "kor_kywd",
+        "eng_kywd",
+        "tot_rsch_start_dt",
+        "tot_rsch_end_dt",
+        "stan_yr",
     ):
         if k in meta and meta.get(k) not in (None, ""):
             meta_kv.append(f"{k}:{_to_text(meta.get(k))}")
@@ -643,8 +607,8 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
 
     return {
         "title": title,
-        "meta_flat": meta_flat[:2000],
-        "answer_public": answer_public[:2000],
+        "flat_text": flat_text[:2000],
+        "content_text": content_text[:2000],
         "meta_kv": meta_kv_s,
     }
 
@@ -656,8 +620,8 @@ def _count_term_hits(text: str, term: str) -> int:
 def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
     tb = _payload_text_bundle(p)
     w_title = float(w.get("title", 2.0))
-    w_meta = float(w.get("meta_flat", 0.6))
-    w_ans = float(w.get("answer_public", 1.0))
+    w_flat = float(w.get("flat_text", 0.6))
+    w_content = float(w.get("content_text", 1.0))
 
     sc = 0.0
     for kw in (kws or [])[:30]:
@@ -665,8 +629,8 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         if not kw:
             continue
         sc += w_title * min(_count_term_hits(tb["title"], kw), 2)
-        sc += w_meta * min(_count_term_hits(tb["meta_flat"], kw), 4)
-        sc += w_ans * min(_count_term_hits(tb["answer_public"], kw), 3)
+        sc += w_flat * min(_count_term_hits(tb["flat_text"], kw), 4)
+        sc += w_content * min(_count_term_hits(tb["content_text"], kw), 3)
         sc += 0.4 * min(_count_term_hits(tb["meta_kv"], kw), 2)
     return float(sc)
 
@@ -699,7 +663,7 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
 
 def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool) -> float:
     tb = _payload_text_bundle(p)
-    hay = " | ".join([tb["title"], tb["meta_flat"], tb["meta_kv"], tb["answer_public"]]).lower()
+    hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
 
     sc = 0.0
 
@@ -738,8 +702,7 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
         pl = getattr(p, "payload", None) or {}
         if not isinstance(pl, dict):
             pl = {}
-        meta = _get_meta(pl)
-        tag = str(pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or "")
+        tag = str(pl.get("tag") or "")
         for t in list(it.perf_tag_filters)[:8]:
             if str(t) == tag:
                 sc += 90.0
@@ -750,8 +713,7 @@ def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool)
         pl = getattr(p, "payload", None) or {}
         if not isinstance(pl, dict):
             pl = {}
-        meta = _get_meta(pl)
-        tag = str(pl.get("tag") or meta.get("doc_type") or meta.get("source_table") or "")
+        tag = str(pl.get("tag") or "")
         for t in list(it.project_tag_filters)[:8]:
             if str(t) == tag:
                 sc += 80.0
@@ -913,7 +875,7 @@ def _extract_quoted_terms(q: str) -> List[str]:
 
 def _must_contain_terms(p: Any, terms: List[str]) -> bool:
     tb = _payload_text_bundle(p)
-    hay = " | ".join([tb["title"], tb["meta_flat"], tb["meta_kv"], tb["answer_public"]]).lower()
+    hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
     for t in (terms or []):
         if t.strip().lower() not in hay:
             return False
@@ -932,8 +894,8 @@ def _hydrate_points_payload(
 ) -> None:
     """
     points의 (collection, id) 기준으로 Qdrant retrieve를 돌려 payload를 갱신.
-    - 후보 단계에서는 meta/answer_public을 빼고,
-      최종 topN에서만 meta/answer_public을 채우는 용도.
+    - 후보 단계에서는 meta_basic/긴 content를 빼고,
+      최종 topN에서만 필요한 payload를 채우는 용도.
     """
     if not points:
         return
@@ -954,11 +916,8 @@ def _hydrate_points_payload(
         "keyword1",
         "keyword2",
         "flat_text",
-        "meta",
         "meta_basic",
         "meta_detail",
-        "meta_flat",
-        "answer_public",
         "org_nm",
         "org_name_norm",
         "pjt_id",
@@ -1547,7 +1506,7 @@ def _run_rag_with_vectors(
                             hop1_reranked = head_filtered
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
-                # ✅ hop1 상위만 join키 추출을 위해 meta 포함 payload 보강
+                # ✅ hop1 상위만 join키 추출을 위해 meta_basic 포함 payload 보강
                 _hydrate_points_payload(qdr, hop1_reranked[: max(20, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")))])
 
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
@@ -1698,17 +1657,16 @@ def _run_rag_with_vectors(
     def _lex_params_for_collection(col: str) -> Tuple[List[str], Dict[str, float]]:
         # 기관 질의가 보이면 project만 org_norm에 강가중
         if col == COL_PROJECT and org_terms:
-            lf = list(dict.fromkeys(list(lexical_fields_eff) + [KEY_ORG_NORM, "org_nm", "flat_text", "meta_flat"]))
+            lf = list(dict.fromkeys(list(lexical_fields_eff) + [KEY_ORG_NORM, "org_nm", "flat_text"]))
             lw = dict(lex_w_eff)
-            lw.setdefault("title_text", float(os.getenv("RAG_W_TITLE", "2.2")))
-            lw.setdefault("title", float(os.getenv("RAG_W_TITLE", "2.2")))
-            lw.setdefault("content_text", float(os.getenv("RAG_W_CONTENT", "1.2")))
-            lw.setdefault("answer_public", float(os.getenv("RAG_W_ANSWER_PUBLIC", "1.2")))
-            lw.setdefault("keyword_text", float(os.getenv("RAG_W_KEYWORD_TEXT", "0.8")))
+            lw.setdefault("title_text", float(os.getenv("RAG_W_TITLE", "5.0")))
+            lw.setdefault("title", float(os.getenv("RAG_W_TITLE", "5.0")))
+            lw.setdefault("content_text", float(os.getenv("RAG_W_CONTENT", "3.0")))
+            lw.setdefault("keyword_text", float(os.getenv("RAG_W_KEYWORD_TEXT", "3.0")))
+            lw.setdefault("cetegory", float(os.getenv("RAG_W_CETEGORY", "5.0")))
             lw[KEY_ORG_NORM] = float(os.getenv("RAG_W_ORG_NORM", "3.0"))
             lw.setdefault("org_nm", lw.get(KEY_ORG_NORM, 3.0))
-            lw.setdefault("flat_text", float(os.getenv("RAG_W_FLAT_TEXT", "0.35")))
-            lw.setdefault("meta_flat", float(os.getenv("RAG_W_META_FLAT", str(lw.get("meta_flat", 0.35)))))
+            lw.setdefault("flat_text", float(os.getenv("RAG_W_FLAT_TEXT", "2.0")))
             return lf, lw
         return lexical_fields_eff, lex_w_eff
 
@@ -1934,11 +1892,8 @@ def _run_rag_with_vectors(
             "keyword1",
             "keyword2",
             "flat_text",
-            "meta",
             "meta_basic",
             "meta_detail",
-            "meta_flat",
-            "answer_public",
             "org_nm",
             "org_name_norm",
             "pjt_id",
