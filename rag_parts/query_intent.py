@@ -181,6 +181,30 @@ PEOPLE_CUES = [
     "국가연구자번호", "과학기술인등록번호", "인물id", "인물 id", "참여인력일련번호",
     "성별", "남자", "여자", "남성", "여성",
 ]
+
+
+def _normalize_people_term(term: str) -> str:
+    return re.sub(r"\s+", "", (term or "")).strip().lower()
+
+
+_PEOPLE_CUE_SET = {_normalize_people_term(term) for term in PEOPLE_CUES}
+_PEOPLE_TERM_STOPWORDS = {
+    *_PEOPLE_CUE_SET,
+    _normalize_people_term("교수"),
+    _normalize_people_term("박사"),
+    _normalize_people_term("PI"),
+    _normalize_people_term("책임자"),
+    _normalize_people_term("연구책임자"),
+    _normalize_people_term("참여자"),
+    _normalize_people_term("연구진"),
+    _normalize_people_term("인물"),
+}
+
+
+def _is_stopword_people_term(term: str) -> bool:
+    t = _normalize_people_term(term)
+    return not t or t in _PEOPLE_TERM_STOPWORDS
+
 ORG_CUES = [
     "기관", "소속기관", "소속 기관", "주관기관", "주관 기관", "수행기관", "수행 기관",
     "참여기관", "참여 기관", "기관정보", "기관 정보", "산학협력단", "소속"
@@ -316,14 +340,14 @@ def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 2) -> List[
 
     for m in _NAME_LABEL_RE.finditer(q):
         s = (m.group(1) or "").strip()
-        if s and s not in cands:
+        if s and not _is_stopword_people_term(s) and s not in cands:
             cands.append(s)
             if len(cands) >= max_terms:
                 return cands
 
     for m in _NAME_NEAR_CUE_RE.finditer(q):
         s = (m.group(1) or "").strip()
-        if s and s not in cands:
+        if s and not _is_stopword_people_term(s) and s not in cands:
             cands.append(s)
             if len(cands) >= max_terms:
                 return cands
@@ -333,6 +357,8 @@ def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 2) -> List[
     if _hit_count(tl, PEOPLE_CUES) > 0:
         for kw in (kws or [])[:20]:
             t = (kw or "").strip()
+            if t in PEOPLE_CUES or _is_stopword_people_term(t):
+                continue
             if re.fullmatch(r"[가-힣]{2,4}", t) and (t not in cands):
                 cands.append(t)
                 if len(cands) >= max_terms:
