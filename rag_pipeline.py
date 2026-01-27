@@ -67,7 +67,7 @@ from rag_parts.join import (
 )
 from rag_parts.filters import (
     extract_org_terms as _extract_org_terms,
-    build_org_filter as _build_org_filter,
+    build_org_filter_by_role as _build_org_filter_by_role,
     build_people_filter as _build_people_filter,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
@@ -1205,7 +1205,15 @@ def _run_rag_with_vectors(
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or _extract_org_terms(q, kws) or []) if str(t).strip()]
     it.org_terms = org_terms
-    org_filter = _build_org_filter(org_terms) if org_terms else None
+    org_role = getattr(it, "org_role", None)
+    org_filter = _build_org_filter_by_role(org_terms, org_role) if org_terms else None
+    org_role_tag = None
+    if org_role == "affiliation":
+        org_role_tag = TAG_PJT_MP
+    elif org_role in ("performer", "participant"):
+        org_role_tag = TAG_PJT_ORG
+    if org_filter is not None and org_role_tag:
+        org_filter = _and_filter(_build_tag_only_filter([org_role_tag]), org_filter)
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
@@ -1246,6 +1254,7 @@ def _run_rag_with_vectors(
         people_terms=list(getattr(it, "people_terms", []) or []),
         gender_terms=list(getattr(it, "gender_terms", []) or []),
         org_terms=list(getattr(it, "org_terms", []) or []),
+        org_role=getattr(it, "org_role", None),
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         ids_flat=_flatten_ids_from_intent(it)[:20],

@@ -78,6 +78,51 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         return None
     return qmodels.Filter(should=should)
 
+def build_org_filter_by_role(org_terms: List[str], org_role: Optional[str]) -> Optional[Any]:
+    if qmodels is None or not org_terms:
+        return None
+    role = (org_role or "").strip().lower()
+    if role == "affiliation":
+        keys = [
+            KEY_ORG_NORM,
+            "blng_org_nm",
+            "meta.소속기관명",
+            "meta.소속",
+            "meta.기관명",
+            "meta_basic.org_name",
+            "meta_basic.blng_org_nm",
+        ]
+    elif role == "performer":
+        keys = [
+            KEY_ORG_NORM,
+            "prfrm_org_nm",
+            "meta.과제수행기관명",
+            "meta.수행기관명",
+            "meta.주관기관명",
+            "meta_basic.PJT_PRFRM_ORG_NM",
+            "meta_basic.prfrm_org_nm",
+            "meta_basic.org_name",
+        ]
+    elif role == "participant":
+        keys = [
+            KEY_ORG_NORM,
+            "org_nm",
+            "meta.참여기관명",
+            "meta.기관명",
+            "meta_basic.org_name",
+        ]
+    else:
+        return build_org_filter(org_terms)
+
+    should: List["qmodels.Condition"] = []
+    for key in keys:
+        if not key:
+            continue
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(org_terms)))
+    if not should:
+        return None
+    return qmodels.Filter(should=should)
+
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     if qmodels is None:
         return None
