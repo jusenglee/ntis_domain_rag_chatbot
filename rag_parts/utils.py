@@ -40,7 +40,15 @@ def point_brief(p: Any) -> Dict[str, Any]:
             meta.update(v)
 
     score = getattr(p, "score", None)
-    title = pl.get("title_text") or pl.get("title") or pl.get("title1") or ""
+    title = (
+        pl.get("title_text")
+        or pl.get("title")
+        or pl.get("title1")
+        or pl.get("title2")
+        or meta.get("kor_pjt_nm")
+        or meta.get("KOR_PJT_NM")
+        or ""
+    )
     doc_id = pl.get("doc_id") or ""
     col = pl.get("_collection") or ""
     st = meta.get("source_table") or meta.get("sourceTable") or ""
