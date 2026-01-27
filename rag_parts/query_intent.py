@@ -69,13 +69,27 @@ _ORG_SUFFIXES = [
     "공사", "공단", "협회", "청", "부", "처", "원",
     "주식회사", "㈜", "회사", "Corp", "Inc", "Ltd", "LLC",
 ]
-_ORG_NEAR_LABEL_RE = re.compile(r"(?:기관|소속|주관|수행|참여)\s*(?:기관명)?\s*[:：]\s*([가-힣A-Za-z0-9㈜().·\-\s]{2,40})")
+_ORG_NEAR_LABEL_RE = re.compile(
+    r"(?:기관|소속|주관|수행|참여)\s*(?:기관명)?\s*(?:[:：]\s*)?"
+    r"([가-힣A-Za-z0-9㈜().·\-\s]{2,40})"
+)
 # suffix로 끝나는 덩어리(공백 포함 허용)
 _ORG_SUFFIX_RE = re.compile(
     r"([가-힣A-Za-z0-9㈜().·\-\s]{2,40}(?:"
     + "|".join(map(re.escape, _ORG_SUFFIXES))
     + r"))"
 )
+_ORG_ACRONYM_RE = re.compile(r"^[A-Z]{3,10}$")
+
+
+def _is_org_like(term: str) -> bool:
+    t = (term or "").strip()
+    if not t:
+        return False
+    if _ORG_ACRONYM_RE.fullmatch(t):
+        return True
+    tl = t.lower()
+    return any(suf.lower() in tl for suf in _ORG_SUFFIXES)
 
 def _is_rare_token(tok: str) -> bool:
     t = (tok or "").strip()
@@ -299,10 +313,12 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
     cands: List[str] = []
 
     for m in _ORG_NEAR_LABEL_RE.finditer(q):
+        raw = m.group(0) or ""
         s = (m.group(1) or "").strip()
         if s:
             s = re.sub(r"\s+", " ", s).strip()
-        if s and s not in cands:
+        has_colon = (":" in raw) or ("：" in raw)
+        if s and (has_colon or _is_org_like(s)) and s not in cands:
             cands.append(s)
             if len(cands) >= max_terms:
                 return cands
@@ -321,7 +337,7 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         t = (kw or "").strip()
         if not t:
             continue
-        if any(suf.lower() in t.lower() for suf in _ORG_SUFFIXES):
+        if _is_org_like(t):
             if t not in cands:
                 cands.append(t)
             if len(cands) >= max_terms:
