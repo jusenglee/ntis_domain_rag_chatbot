@@ -61,11 +61,14 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         "prtcp_org.org_nm",
         "prfrm_org_nm",
         "org_name_raw",
+        "blng_org_nm",
+        "prtcp_org.org_nm",
         "meta.과제수행기관명",
         "meta.참여연구기관명",
         "meta.발행기관명",
         "meta.등록기관명",
         "meta.기탁기관명",
+        "meta.소속기관명",
         "meta_basic.PJT_PRFRM_ORG_NM",
         "meta_basic.prfrm_org_nm",
         "meta_basic.org_name",
@@ -116,6 +119,7 @@ def _build_prtcp_mp_nested_filter(
     people_terms: List[str],
     person_ids: List[str],
     gender_terms: List[str],
+    org_terms: Optional[List[str]] = None,
 ) -> Optional[Any]:
     if qmodels is None:
         return None
@@ -134,7 +138,12 @@ def _build_prtcp_mp_nested_filter(
         if person_ids
         else None
     )
-    base_must = [c for c in (name_cond, id_cond) if c is not None]
+    org_cond = (
+        qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(org_terms))
+        if org_terms
+        else None
+    )
+    base_must = [c for c in (name_cond, id_cond, org_cond) if c is not None]
     if not base_must and not gender_terms:
         return None
 
@@ -167,6 +176,7 @@ def build_people_filter(
     people_terms: List[str],
     person_ids: Optional[List[str]] = None,
     gender_terms: Optional[List[str]] = None,
+    org_terms: Optional[List[str]] = None,
 ) -> Optional[Any]:
     if qmodels is None:
         return None
@@ -174,6 +184,7 @@ def build_people_filter(
     terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
     ids = [str(v).strip() for v in (person_ids or []) if str(v).strip()]
     genders = [str(g).strip() for g in (gender_terms or []) if str(g).strip()]
+    orgs = [str(o).strip() for o in (org_terms or []) if str(o).strip()]
 
     should: List["qmodels.Condition"] = []
 
@@ -210,10 +221,24 @@ def build_people_filter(
         for key in id_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
 
+    if orgs:
+        org_keys = [
+            KEY_ORG_NORM,
+            "org_nm",
+            "blng_org_nm",
+            "meta.소속기관명",
+            "meta.소속",
+            "meta.기관명",
+            "prtcp_mp.blng_org_nm",
+        ]
+        for key in org_keys:
+            should.append(qmodels.FieldCondition(key=key, match=make_match_any(orgs)))
+
     nested_filter = _build_prtcp_mp_nested_filter(
         people_terms=terms,
         person_ids=ids,
         gender_terms=genders,
+        org_terms=orgs,
     )
     if genders and nested_filter is not None:
         return qmodels.Filter(must=[nested_filter])
