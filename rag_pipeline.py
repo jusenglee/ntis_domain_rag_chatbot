@@ -1166,18 +1166,71 @@ def _run_rag_with_vectors(
         preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
-    # filters (정규화된 intent 기반)
-    filter_bundle = build_filter_bundle(it)
-    org_terms = filter_bundle.org_terms
-    org_role = filter_bundle.org_role
-    people_terms = filter_bundle.people_terms
-    people_ids = filter_bundle.people_ids
-    gender_terms = filter_bundle.gender_terms
-    people_org_terms = filter_bundle.people_org_terms
-    org_filter = filter_bundle.org_filter
-    participant_org_filter = filter_bundle.participant_org_filter
-    people_filter = filter_bundle.people_filter
-    perf_tag_filter = filter_bundle.perf_tag_filter
+    # org terms/filter (필요 시)
+    org_terms = [t.strip() for t in (list(it.org_terms or []) or _extract_org_terms(q, kws) or []) if str(t).strip()]
+    it.org_terms = org_terms
+    org_filter = _build_org_filter(org_terms) if org_terms else None
+    org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+    participant_org_filter = _build_prtcp_org_nested_filter(org_terms) if org_terms else None
+
+    # people terms/filter (필요 시)
+    people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
+    gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
+    org_role = getattr(it, "org_role", None)
+    people_org_terms: List[str] = []
+    if org_role == "affiliation" and org_terms:
+        people_org_terms = list(org_terms)
+    qa_researchers = _get_attr(qa, "researchers", None) or []
+    if isinstance(qa_researchers, str):
+        qa_researchers = [qa_researchers]
+    hint_people_terms: List[str] = []
+    hint_people_ids: List[Any] = []
+    for researcher in (qa_researchers or []):
+        if isinstance(researcher, str):
+            name = researcher.strip()
+            if name:
+                hint_people_terms.append(name)
+            continue
+        name = _get_attr(researcher, "name", None)
+        if isinstance(name, str):
+            name = name.strip()
+        if name:
+            hint_people_terms.append(name)
+        researcher_id = _get_attr(researcher, "researcher_id", None)
+        if researcher_id not in (None, ""):
+            hint_people_ids.append(researcher_id)
+    if hint_people_terms:
+        merged_people = people_terms + hint_people_terms
+        deduped_people: List[str] = []
+        seen_people: set[str] = set()
+        for term in merged_people:
+            if term in seen_people:
+                continue
+            seen_people.add(term)
+            deduped_people.append(term)
+        people_terms = deduped_people
+    it.people_terms = people_terms
+    people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
+    if hint_people_ids:
+        merged_ids = people_ids + hint_people_ids
+        deduped_ids: List[Any] = []
+        seen_ids: set[Any] = set()
+        for pid in merged_ids:
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            deduped_ids.append(pid)
+        people_ids = deduped_ids
+    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    people_org_terms = org_terms if org_role == "affiliation" else []
+    people_filter = (
+        _build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
+        if (people_terms or people_ids or gender_terms or people_org_terms)
+        else None
+    )
+
+    # perf tag filter (필요 시)
+    perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
     log_kv(
         "RAG.FILTERS",
