@@ -5,7 +5,6 @@ Search preset builder
 - QueryIntent(action/intent/route/엔티티)에 따라:
   - 검색 파라미터(top_k_dense/top_k_lex_cand/top_k_lex)
   - 가중치(w_lex, field weights)
-  - flat_text / org_name_norm 사용 여부
   - dense threshold 사용 여부
   - 컨텍스트 아이템 수/조기 종료 조건
 를 결정한다.

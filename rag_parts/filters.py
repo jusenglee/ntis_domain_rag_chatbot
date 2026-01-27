@@ -44,7 +44,7 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         t = (kw or "").strip()
         if not t:
             continue
-        if ("대학교" in t) or ("대학" in t) or ("연구원" in t) or ("연구소" in t):
+        if ("대학교" in t) or ("대학" in t) or ("연구원" in t) or ("연구소" in t) :
             if t not in cands:
                 cands.append(t)
             if len(cands) >= max_terms:
