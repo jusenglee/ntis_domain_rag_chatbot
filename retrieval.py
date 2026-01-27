@@ -996,8 +996,11 @@ _META_CORE_KEYS = [
     "기준년도",
     "STAN_YR",
     "org_nm",
+    "org_name",
     "KOR_PJT_NM",
+    "kor_pjt_nm",
     "ENG_PJT_NM",
+    "eng_pjt_nm",
     "국문과제명",
     "영문과제명",
     "PJT_PRFRM_ORG_NM",
@@ -1016,6 +1019,8 @@ _META_CORE_KEYS = [
     "국가중점과학기술",
     "6T관련기술",
     "keyword_text",
+    "rsch_abstract",
+    "rsch_goal_abstract",
     "RST_ID",
     "등록번호",
     "성과명",
@@ -1023,7 +1028,16 @@ _META_CORE_KEYS = [
     "발명의명칭",
 ]
 
-_META_LONG_KEYS = {"연구내용요약", "연구목표요약", "내용", "요약", "RSCH_ABSTRACT", "RSCH_GOAL_ABSTRACT"}
+_META_LONG_KEYS = {
+    "연구내용요약",
+    "연구목표요약",
+    "내용",
+    "요약",
+    "RSCH_ABSTRACT",
+    "RSCH_GOAL_ABSTRACT",
+    "rsch_abstract",
+    "rsch_goal_abstract",
+}
 
 
 def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
