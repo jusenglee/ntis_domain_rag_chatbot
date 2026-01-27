@@ -127,8 +127,8 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     keys = [
         KEY_ORG_NORM,
         "org_nm",
-        "prtcp_org.org_nm",
-        "prtcp_mp.blng_org_nm",
+        "prtcp_org[].org_nm",
+        "prtcp_mp[].blng_org_nm",
         "meta_basic.pjt_prfrm_org_nm",
     ]
     should: List["qmodels.Condition"] = []
@@ -243,21 +243,21 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
     if terms:
         name_keys = [
-            "prtcp_mp.hm_nm",
+            "prtcp_mp[].hm_nm",
         ]
         for key in name_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(terms)))
 
     if ids:
         id_keys = [
-            "prtcp_mp.hm_id",
+            "prtcp_mp[].hm_id",
         ]
         for key in id_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
 
     if orgs:
         org_keys = [
-            "prtcp_mp.blng_org_nm",
+            "prtcp_mp[].blng_org_nm",
         ]
         for key in org_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(orgs)))

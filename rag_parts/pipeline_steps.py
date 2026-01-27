@@ -137,8 +137,10 @@ def normalize_intent(
         org_terms = _normalize_terms(extract_org_terms(query, keywords))
 
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])
+
     if hint_people_terms:
-        people_terms = _normalize_terms(people_terms + list(hint_people_terms))
+        # ✅ hint가 있으면 hint만 사용(override)
+        people_terms = _normalize_terms(list(hint_people_terms))
 
     gender_terms = _normalize_terms(getattr(intent, "gender_terms", None) or [])
 

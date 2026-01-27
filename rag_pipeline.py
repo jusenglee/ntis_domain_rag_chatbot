@@ -15,7 +15,7 @@ rag_pipeline.py (redesigned)
 - (옵션) rag_parts/* 유틸들
 """
 from __future__ import annotations
-
+from collections.abc import Mapping
 import os
 import re
 import time
@@ -1137,18 +1137,30 @@ def _run_rag_with_vectors(
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
+
     hint_people_terms: List[str] = []
-    for researcher in (qa_researchers or []):
-        if isinstance(researcher, str):
-            name = researcher.strip()
-            if name:
-                hint_people_terms.append(name)
-            continue
-        name = _get_attr(researcher, "name", None)
-        if isinstance(name, str):
-            name = name.strip()
+    hint_people_ids: List[Any] = []
+
+    for r in (qa_researchers or []):
+        name = None
+        rid = None
+
+        if isinstance(r, str):
+            name = r.strip()
+        elif isinstance(r, Mapping):
+            # dict hint 대응
+            name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
+            rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
+        else:
+            name = _get_attr(r, "name", None)
+            if isinstance(name, str):
+                name = name.strip()
+            rid = _get_attr(r, "researcher_id", None)
+
         if name:
             hint_people_terms.append(name)
+        if rid not in (None, ""):
+            hint_people_ids.append(rid)
     hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
 
     it = normalize_intent(
