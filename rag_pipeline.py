@@ -323,7 +323,17 @@ def build_context_list_light(
         if kind == "project":
             title = _payload_title(pl, meta)
             pjt_id = _pjt_id(meta, pl)
-            org = _pick_first(pl.get("org_nm"), meta.get("PJT_PRFRM_ORG_NM"), meta.get("과제수행기관명"), meta.get("주관기관명"), meta.get("기관명"), meta.get("수행기관"))
+            org = _pick_first(
+                pl.get("org_nm"),
+                pl.get("prfrm_org_nm"),
+                meta.get("PJT_PRFRM_ORG_NM"),
+                meta.get("prfrm_org_nm"),
+                meta.get("org_name"),
+                meta.get("과제수행기관명"),
+                meta.get("주관기관명"),
+                meta.get("기관명"),
+                meta.get("수행기관"),
+            )
             year = _pick_first(pl.get("stan_yr"), meta.get("STAN_YR"), meta.get("연구개발기간시작년도"), meta.get("연도"), meta.get("시작년도"))
             line = f"- {_clean_one_line(title, 180)}"
             extra: List[str] = []
@@ -360,10 +370,13 @@ def build_context_list_light(
         if kind == "org":
             org = _pick_first(
                 pl.get("org_nm"),
+                pl.get("prfrm_org_nm"),
                 meta.get("참여기관명"),
                 meta.get("기관명"),
                 meta.get("수행기관명"),
                 meta.get("주관기관명"),
+                meta.get("prfrm_org_nm"),
+                meta.get("org_name"),
                 meta.get("ORG_NAME"),
                 meta.get("org"),
             )

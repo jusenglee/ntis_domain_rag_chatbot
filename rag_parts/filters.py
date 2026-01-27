@@ -58,6 +58,7 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
     keys = [
         KEY_ORG_NORM,
         "org_nm",
+        "prfrm_org_nm",
         "org_name_raw",
         "meta.과제수행기관명",
         "meta.참여연구기관명",
@@ -65,6 +66,8 @@ def build_org_filter(org_terms: List[str]) -> Optional[Any]:
         "meta.등록기관명",
         "meta.기탁기관명",
         "meta_basic.PJT_PRFRM_ORG_NM",
+        "meta_basic.prfrm_org_nm",
+        "meta_basic.org_name",
     ]
     should: List["qmodels.Condition"] = []
     for key in keys:
