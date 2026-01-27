@@ -9,8 +9,6 @@ from .constants import (
     COL_PROJECT,
     COL_PERF,
     TAG_PJT_INFO,
-    TAG_PJT_MP,
-    TAG_PJT_ORG,
 )
 from .filters import (
     OrgFilterInput,
@@ -229,7 +227,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop1_kind="project",
             hop2_kind="people",
             hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[TAG_PJT_MP],
+            hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="참여인력 목록",
         )
     if relation == ("project", "org"):
@@ -239,7 +237,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop1_kind="project",
             hop2_kind="org",
             hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[TAG_PJT_ORG],
+            hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="참여기관 목록",
         )
     if relation == ("people", "perf"):
@@ -248,7 +246,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_col=COL_PERF,
             hop1_kind="people",
             hop2_kind="perf",
-            hop1_tag_filters=[TAG_PJT_MP],
+            hop1_tag_filters=[TAG_PJT_INFO],
             hop2_tag_filters=[],
             hop2_label="연관 성과(논문/특허/보고서 등) 목록",
         )
@@ -258,7 +256,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_col=COL_PERF,
             hop1_kind="org",
             hop2_kind="perf",
-            hop1_tag_filters=[TAG_PJT_ORG],
+            hop1_tag_filters=[TAG_PJT_INFO],
             hop2_tag_filters=[],
             hop2_label="연관 성과(논문/특허/보고서 등) 목록",
         )
@@ -279,7 +277,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop1_kind="perf",
             hop2_kind="people",
             hop1_tag_filters=None,
-            hop2_tag_filters=[TAG_PJT_MP],
+            hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="연관 과제의 참여인력 목록",
         )
     if relation == ("perf", "org"):
@@ -289,7 +287,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop1_kind="perf",
             hop2_kind="org",
             hop1_tag_filters=None,
-            hop2_tag_filters=[TAG_PJT_ORG],
+            hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="연관 과제의 참여기관 목록",
         )
     if relation == ("people", "project"):
@@ -298,7 +296,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_col=COL_PROJECT,
             hop1_kind="people",
             hop2_kind="project",
-            hop1_tag_filters=[TAG_PJT_MP],
+            hop1_tag_filters=[TAG_PJT_INFO],
             hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="참여 과제(프로젝트) 목록",
         )
@@ -308,7 +306,7 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_col=COL_PROJECT,
             hop1_kind="org",
             hop2_kind="project",
-            hop1_tag_filters=[TAG_PJT_ORG],
+            hop1_tag_filters=[TAG_PJT_INFO],
             hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="참여 과제(프로젝트) 목록",
         )

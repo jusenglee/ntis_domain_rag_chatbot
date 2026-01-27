@@ -45,8 +45,6 @@ from rag_parts.constants import (
     COL_PROJECT,
     COL_PERF,
     TAG_PJT_INFO,
-    TAG_PJT_MP,
-    TAG_PJT_ORG,
 )
 from rag_parts.query_intent import (
     QueryIntent,
@@ -1671,7 +1669,7 @@ def _run_rag_with_vectors(
     def _server_filter_for_col(col: str) -> Any:
         if plan.mode != "lookup":
             if plan.mode == "search" and col == COL_PROJECT and base_route == "people" and people_filter:
-                tag_filter_local = _build_tag_only_filter([TAG_PJT_MP])
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 return _and_filter(tag_filter_local, people_filter)
             return None
 
@@ -1695,10 +1693,11 @@ def _run_rag_with_vectors(
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
-                tag_filter_local = _build_tag_only_filter([TAG_PJT_MP])
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 return _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
             if base_route == "org":
-                return _build_tag_only_filter([TAG_PJT_ORG])
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                return _and_filter(tag_filter_local, participant_org_filter or org_filter) if (participant_org_filter or org_filter) else tag_filter_local
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 return _build_tag_only_filter([TAG_PJT_INFO])

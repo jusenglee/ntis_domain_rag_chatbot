@@ -22,8 +22,6 @@ from .constants import (
     COL_PROJECT,
     COL_PERF,
     TAG_PJT_INFO,
-    TAG_PJT_MP,
-    TAG_PJT_ORG,
     PROJECT_TAGS,
     PERF_TAGS,
     TAG_RI_PAPER,
@@ -253,16 +251,38 @@ def pick_project_tag_filters(q: str) -> List[str]:
         if tag and (tag in PROJECT_TAGS) and (tag not in tags):
             tags.append(tag)
 
-    # 참여인력/연구자 계열
-    if any(x in t for x in ["참여인력", "참여 인력", "참여연구원", "참여 연구원", "연구자", "연구원", "연구책임자", "책임자"]):
-        _add(TAG_PJT_MP)
-
-    # 참여기관/주관기관 계열
-    if any(x in t for x in ["참여기관", "참여 기관", "주관기관", "주관 기관", "수행기관", "수행 기관", "기관정보", "기관 정보", "기관코드", "사업자등록번호"]):
-        _add(TAG_PJT_ORG)
-
-    # 과제 정보(기본)
-    if any(x in t for x in ["과제정보", "연구목표", "연구내용", "연구기간", "연구비", "과제명", "영문과제명", "국문과제명"]):
+    project_like = any(
+        x in t
+        for x in [
+            "과제정보",
+            "연구목표",
+            "연구내용",
+            "연구기간",
+            "연구비",
+            "과제명",
+            "영문과제명",
+            "국문과제명",
+            "참여인력",
+            "참여 인력",
+            "참여연구원",
+            "참여 연구원",
+            "연구자",
+            "연구원",
+            "연구책임자",
+            "책임자",
+            "참여기관",
+            "참여 기관",
+            "주관기관",
+            "주관 기관",
+            "수행기관",
+            "수행 기관",
+            "기관정보",
+            "기관 정보",
+            "기관코드",
+            "사업자등록번호",
+        ]
+    )
+    if project_like:
         _add(TAG_PJT_INFO)
 
     return tags
@@ -760,7 +780,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_kind="project",
         hop2_kind="people",
         hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_MP],
+        hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="참여인력 목록",
     ),
     ("project", "org"): RelationRoute(
@@ -770,7 +790,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_kind="project",
         hop2_kind="org",
         hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_ORG],
+        hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="참여기관 목록",
     ),
     ("people", "perf"): RelationRoute(
@@ -779,7 +799,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_col=COL_PERF,
         hop1_kind="people",
         hop2_kind="perf",
-        hop1_tag_filters=[TAG_PJT_MP],
+        hop1_tag_filters=[TAG_PJT_INFO],
         hop2_tag_filters=[],
         hop2_label="연관 성과(논문/특허/보고서 등) 목록",
     ),
@@ -789,7 +809,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_col=COL_PERF,
         hop1_kind="org",
         hop2_kind="perf",
-        hop1_tag_filters=[TAG_PJT_ORG],
+        hop1_tag_filters=[TAG_PJT_INFO],
         hop2_tag_filters=[],
         hop2_label="연관 성과(논문/특허/보고서 등) 목록",
     ),
@@ -810,7 +830,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_kind="perf",
         hop2_kind="people",
         hop1_tag_filters=None,
-        hop2_tag_filters=[TAG_PJT_MP],
+        hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="연관 과제의 참여인력 목록",
     ),
     ("perf", "org"): RelationRoute(
@@ -820,7 +840,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_kind="perf",
         hop2_kind="org",
         hop1_tag_filters=None,
-        hop2_tag_filters=[TAG_PJT_ORG],
+        hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="연관 과제의 참여기관 목록",
     ),
     ("people", "project"): RelationRoute(
@@ -829,7 +849,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_col=COL_PROJECT,
         hop1_kind="people",
         hop2_kind="project",
-        hop1_tag_filters=[TAG_PJT_MP],
+        hop1_tag_filters=[TAG_PJT_INFO],
         hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="참여 과제(프로젝트) 목록",
     ),
@@ -839,7 +859,7 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_col=COL_PROJECT,
         hop1_kind="org",
         hop2_kind="project",
-        hop1_tag_filters=[TAG_PJT_ORG],
+        hop1_tag_filters=[TAG_PJT_INFO],
         hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="참여 과제(프로젝트) 목록",
     ),

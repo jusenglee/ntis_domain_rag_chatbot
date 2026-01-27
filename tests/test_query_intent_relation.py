@@ -1,6 +1,6 @@
 import unittest
 
-from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO, TAG_PJT_MP
+from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO
 from rag_parts.query_intent import (
     classify_query,
     get_relation_route,
@@ -17,13 +17,13 @@ class QueryIntentRelationTests(unittest.TestCase):
         self.assertEqual(intent.base_route, "people")
         self.assertEqual(intent.relation, ("people", "project"))
         self.assertEqual(intent.action, "relation")
-        self.assertIn(TAG_PJT_MP, intent.project_tag_filters)
+        self.assertIn(TAG_PJT_INFO, intent.project_tag_filters)
 
         route = get_relation_route(intent.relation)
         self.assertIsNotNone(route)
         self.assertEqual(route.hop1_col, COL_PROJECT)
         self.assertEqual(route.hop2_col, COL_PROJECT)
-        self.assertEqual(route.hop1_tag_filters, [TAG_PJT_MP])
+        self.assertEqual(route.hop1_tag_filters, [TAG_PJT_INFO])
         self.assertEqual(route.hop2_tag_filters, [TAG_PJT_INFO])
         self.assertEqual(set(relation_target_collections(intent.relation)), {COL_PROJECT})
 
