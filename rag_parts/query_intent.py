@@ -135,6 +135,16 @@ ORG_CUES = [
     "사업자등록번호", "기관코드",
 ]
 
+ORG_ROLE_AFFILIATION_CUES = [
+    "소속", "소속기관", "소속 기관", "재직", "근무",
+]
+ORG_ROLE_PARTICIPANT_CUES = [
+    "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+]
+ORG_ROLE_PERFORMER_CUES = [
+    "수행기관", "수행 기관", "주관기관", "주관 기관", "과제수행기관", "과제 수행기관",
+]
+
 REL_PEOPLE_CUES = PEOPLE_CUES[:]  # join relation용
 REL_ORG_CUES = ORG_CUES[:]
 PERF_TO_PROJECT_CUES = ["어느 과제", "어떤 과제", "관련 과제", "소속 과제", "과제 정보", "과제번호", "pjt_id", "pjt id", "project id"]
@@ -540,6 +550,20 @@ def pick_structured_intent(base_route: str, q: str, is_id_query: bool) -> str:
     return "content"
 
 
+def pick_org_role(q: str) -> Optional[str]:
+    t = (q or "").lower()
+    if not t.strip():
+        return None
+
+    if any(c in t for c in ORG_ROLE_AFFILIATION_CUES):
+        return "affiliation"
+    if any(c in t for c in ORG_ROLE_PARTICIPANT_CUES):
+        return "participant"
+    if any(c in t for c in ORG_ROLE_PERFORMER_CUES):
+        return "performer"
+    return None
+
+
 @dataclass
 class QueryIntent:
     # core
@@ -555,6 +579,7 @@ class QueryIntent:
     people_terms: List[str] = field(default_factory=list)
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
+    org_role: Optional[str] = None
     years: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
@@ -579,6 +604,7 @@ class QueryIntent:
             "people_terms": self.people_terms,
             "gender_terms": self.gender_terms,
             "org_terms": self.org_terms,
+            "org_role": self.org_role,
             "years": self.years,
             "ids_map": self.ids_map,
             "ids_flat": self.ids_flat,
@@ -645,6 +671,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     people_terms = extract_people_terms(q, kws)
     gender_terms = extract_gender_terms(q, kws)
     org_terms = extract_org_terms(q, kws)
+    org_role = pick_org_role(q)
     years = extract_years(q)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id"))
@@ -720,6 +747,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
         people_terms=people_terms,
         gender_terms=gender_terms,
         org_terms=org_terms,
+        org_role=org_role,
         years=years,
         ids_map=ids_map,
         ids_flat=ids_flat,
