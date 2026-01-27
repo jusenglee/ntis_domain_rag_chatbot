@@ -20,8 +20,16 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 _PJT_ID_KEYS = (
+    "PJT_ID",
+    "PJT_NO",
     "pjt_id",
+    "pjtId",
+    "pjtNo",
     "pjt_no",
+    "pjtid",
+    "pjtno",
+    "project_id",
+    "project_no",
 )
 
 # 흔한 중첩 경로 후보 (payload 안의 meta_basic/meta_detail dict)

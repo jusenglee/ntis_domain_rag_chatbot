@@ -1390,6 +1390,7 @@ def _run_rag_with_vectors(
 
             join_ids: List[str] = []
             hop1_top: List[Any] = []
+            hop1_filter = None
 
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
             if pjt_ids:
@@ -1479,8 +1480,17 @@ def _run_rag_with_vectors(
                             hop1_reranked = head_filtered
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
-                # ✅ hop1 상위만 join키 추출을 위해 meta_basic 포함 payload 보강
-                _hydrate_points_payload(qdr, hop1_reranked[: max(20, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")))])
+                if not hop1_top:
+                    log_kv(
+                        "RAG.JOIN.HOP1.EMPTY",
+                        hop1_kind=hop1_kind,
+                        hop1_tag_filters=hop1_tag_filters,
+                        hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    )
+                else:
+                    # ✅ hop1 결과에 meta_basic 포함 payload 보강
+                    hydrate_keep = max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20)
+                    _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
 
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
 
