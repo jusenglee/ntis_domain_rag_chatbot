@@ -60,3 +60,4 @@ def point_brief(p: Any) -> Dict[str, Any]:
         "source_table": str(st),
         "title": str(title)[:80],
     }
+

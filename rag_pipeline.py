@@ -72,7 +72,7 @@ from rag_parts.filters import (
     build_perf_filter as build_perf_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     JoinFilterInput,
-    PerfFilterInput, PeopleFilterInput,
+    PerfFilterInput, PeopleFilterInput, OrgFilterInput,
 )
 
 try:

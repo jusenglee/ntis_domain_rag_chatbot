@@ -240,7 +240,6 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
     if terms:
         name_keys = [
-            "flat_text",
             "prtcp_mp.hm_nm",
         ]
         for key in name_keys:
@@ -248,7 +247,6 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
     if ids:
         id_keys = [
-            "flat_text",
             "prtcp_mp.hm_id",
         ]
         for key in id_keys:
@@ -256,8 +254,6 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
     if orgs:
         org_keys = [
-            KEY_ORG_NORM,
-            "org_nm",
             "prtcp_mp.blng_org_nm",
         ]
         for key in org_keys:
@@ -273,7 +269,7 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
         return qmodels.Filter(must=[nested_filter])
 
     if genders:
-        for key in ["flat_text", "gender_slct", "gender_slct_nm"]:
+        for key in ["gender_slct", "gender_slct_nm"]:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(genders)))
 
     if nested_filter is not None:
