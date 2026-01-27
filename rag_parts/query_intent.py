@@ -287,8 +287,15 @@ def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
     if not t.strip():
         return []
 
-    male = any(x in t for x in ["남자", "남성", "male", "m "]) or "남" in t
-    female = any(x in t for x in ["여자", "여성", "female", "f "]) or "여" in t
+    def _has_standalone(pattern: str) -> bool:
+        return re.search(pattern, t) is not None
+
+    male = any(x in t for x in ["남자", "남성", "male"]) or _has_standalone(
+        r"(?<![가-힣A-Za-z0-9])남(?![가-힣A-Za-z0-9])"
+    ) or _has_standalone(r"(?<![a-z0-9])m(?![a-z0-9])")
+    female = any(x in t for x in ["여자", "여성", "female"]) or _has_standalone(
+        r"(?<![가-힣A-Za-z0-9])여(?![가-힣A-Za-z0-9])"
+    ) or _has_standalone(r"(?<![a-z0-9])f(?![a-z0-9])")
 
     out: List[str] = []
     if male:
