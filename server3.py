@@ -745,7 +745,8 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
 
     for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
-        title = metadata.get("ref").get("title", "").strip()
+        ref = metadata.get("ref") or {}
+        title = ref.get("title", "").strip()
         if title_only:
             if not title:
                 continue
@@ -888,16 +889,21 @@ async def query_stream(payload: QueryRequest):
                     docs = data.get("output", {}).get("context", [])
                     documents_used.extend(docs)
 
-            ref_docs = [
-                {
-                    "tag": d.metadata["ref"]["tag"],
-                    "id": d.metadata["ref"]["source_pk"],
-                    "title": d.metadata["ref"]["title"],
-                    "project": d.metadata.get("국문과제명", d.metadata["ref"]["title"]),
-                    "researcher": d.metadata.get("인물명", ""),
-                    "institute": d.metadata.get("소속기관명", "")
-                } for d in documents_used
-            ]
+            ref_docs = []
+            for d in documents_used:
+                metadata = d.metadata or {}
+                ref = metadata.get("ref") or {}
+                title = ref.get("title", "")
+                ref_docs.append(
+                    {
+                        "tag": ref.get("tag", ""),
+                        "id": ref.get("source_pk", metadata.get("source_pk", "")),
+                        "title": title,
+                        "project": metadata.get("국문과제명", title),
+                        "researcher": metadata.get("인물명", ""),
+                        "institute": metadata.get("소속기관명", "")
+                    }
+                )
             log_section("REF PUSH", f"coq: {conversation_id}{question}\n{ref_docs}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
