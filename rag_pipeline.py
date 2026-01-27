@@ -1245,6 +1245,22 @@ def _run_rag_with_vectors(
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
+    log_kv(
+        "RAG.FILTERS",
+        org_terms=org_terms,
+        org_role=org_role,
+        people_terms=people_terms,
+        people_ids=people_ids,
+        gender_terms=gender_terms,
+        people_org_terms=people_org_terms,
+        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        tag_filters=list(getattr(it, "tag_filters", []) or []),
+        org_filter=str(org_filter) if org_filter is not None else None,
+        participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
+        people_filter=str(people_filter) if people_filter is not None else None,
+        perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
+    )
+
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
     # -------------------------
@@ -1317,6 +1333,15 @@ def _run_rag_with_vectors(
         filtered = _pick_collections((plan.target_collections or []), allow_cols)
         plan.target_collections = filtered if filtered else list(allow_cols)
 
+    log_kv(
+        "RAG.ROUTE/PLAN",
+        mode=plan.mode,
+        route=getattr(plan, "route", None),
+        base_route=base_route,
+        action=action,
+        relation=relation,
+        target_cols=list(getattr(plan, "target_collections", []) or []),
+    )
     log_kv(
         "RAG.PRESET/PLAN.POST",
         mode=plan.mode,
@@ -1774,6 +1799,46 @@ def _run_rag_with_vectors(
             _ensure_collection_mark(lst or [], col)
 
         sr_by_col[col] = sr
+
+        dense_vec_stats: Dict[str, Dict[str, float]] = {}
+        for vname, lst in (sr.get("dense") or {}).items():
+            if not lst:
+                continue
+            top_score = None
+            try:
+                top_score = float(getattr(lst[0], "score", 0.0))
+            except Exception:
+                top_score = None
+            dense_vec_stats[str(vname)] = {
+                "hits": float(len(lst)),
+                "top_score": float(top_score) if top_score is not None else -1.0,
+            }
+
+        lex_top_score = None
+        if sr.get("lexical"):
+            try:
+                lex_top_score = float(getattr(sr["lexical"][0], "score", 0.0))
+            except Exception:
+                lex_top_score = None
+
+        log_section(
+            "RAG.COL.RESULTS",
+            {
+                "col": col,
+                "dense": dense_vec_stats,
+                "lexical": {
+                    "hits": float(len(sr.get("lexical") or [])),
+                    "top_score": float(lex_top_score) if lex_top_score is not None else -1.0,
+                },
+            },
+        )
+
+        dense_topn = int(os.getenv("RAG_LOG_TOPN_COL_DENSE", "4"))
+        for vname, lst in (sr.get("dense") or {}).items():
+            log_top_points(f"RAG.COL.DENSE.TOP.{col}.{vname}", lst or [], topn=dense_topn)
+
+        lex_topn = int(os.getenv("RAG_LOG_TOPN_COL_LEX", "4"))
+        log_top_points(f"RAG.COL.LEX.TOP.{col}", sr.get("lexical") or [], topn=lex_topn)
 
         # stats
         d_hit = sum(len(lst or []) for lst in (sr.get("dense") or {}).values())
