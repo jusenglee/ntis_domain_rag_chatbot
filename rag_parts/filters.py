@@ -1,4 +1,5 @@
 import os
+import re
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
@@ -17,54 +18,42 @@ try:
 except Exception:  # pragma: no cover
     qmodels = None
 
-def _normalize_terms(values: Optional[List[str]]) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for v in values or []:
-        s = str(v).strip()
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        out.append(s)
-    return out
+_ORG_TERM_STOPWORDS = {
+    "이력",
+    "현황",
+    "목록",
+    "정보",
+    "리스트",
+    "조회",
+    "명단",
+    "안내",
+    "내용",
+    "상세",
+}
+_ORG_SUFFIXES = ("대학교", "대학", "연구원", "연구소")
 
-@dataclass
-class OrgFilterInput:
-    terms: List[str] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        self.terms = _normalize_terms(self.terms)
+def _normalize_org_term(term: str) -> str:
+    return re.sub(r"\s+", " ", (term or "")).strip()
 
-@dataclass
-class PeopleFilterInput:
-    people_terms: List[str] = field(default_factory=list)
-    person_ids: List[str] = field(default_factory=list)
-    gender_terms: List[str] = field(default_factory=list)
-    org_terms: List[str] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        self.people_terms = _normalize_terms(self.people_terms)
-        self.person_ids = _normalize_terms(self.person_ids)
-        self.gender_terms = _normalize_terms(self.gender_terms)
-        self.org_terms = _normalize_terms(self.org_terms)
+def _is_stopword_org_term(term: str) -> bool:
+    t = _normalize_org_term(term).replace(" ", "")
+    return t in _ORG_TERM_STOPWORDS
 
-@dataclass
-class JoinFilterInput:
-    join_ids: List[str] = field(default_factory=list)
-    tag_filters: Optional[List[str]] = None
 
-    def __post_init__(self) -> None:
-        self.join_ids = _normalize_terms(self.join_ids)
-        self.tag_filters = _normalize_terms(self.tag_filters)
-
-@dataclass
-class PerfFilterInput:
-    query: str = ""
-    join_ids: List[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.query = (self.query or "").strip()
-        self.join_ids = _normalize_terms(self.join_ids)
+def _is_valid_org_term(term: str, *, require_suffix: bool = False) -> bool:
+    t = _normalize_org_term(term)
+    if not t or _is_stopword_org_term(t):
+        return False
+    if require_suffix:
+        for suf in _ORG_SUFFIXES:
+            if t == suf:
+                return False
+            if t.endswith(suf):
+                return len(t) > (len(suf) + 1)
+        return False
+    return True
 
 def make_match_any(values: List[str]):
     try:
@@ -85,7 +74,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
     cands: List[str] = []
     for m in ORG_RE.finditer(q):
         s = (m.group(1) or "").strip()
-        if s and s not in cands:
+        s = _normalize_org_term(s)
+        if s and not _is_stopword_org_term(s) and s not in cands:
             cands.append(s)
         if len(cands) >= max_terms:
             return cands
@@ -94,7 +84,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         t = (kw or "").strip()
         if not t:
             continue
-        if ("대학교" in t) or ("대학" in t) or ("연구원" in t) or ("연구소" in t) :
+        t = _normalize_org_term(t)
+        if _is_valid_org_term(t, require_suffix=True):
             if t not in cands:
                 cands.append(t)
             if len(cands) >= max_terms:
