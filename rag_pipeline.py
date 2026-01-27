@@ -23,7 +23,7 @@ import inspect
 import json
 from pprint import pformat
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget, RAG_COLLECTION_ALLOWLIST
 from rag_types import RagResult
@@ -771,11 +771,12 @@ def _family_bonus(p: Any, base_route: str) -> float:
         return 4.0
     return 0.0
 
-def _pick_collections(all_cols: list[str]) -> list[str]:
-    if not RAG_COLLECTION_ALLOWLIST:
+def _pick_collections(all_cols: list[str], allow: Optional[Iterable[str]] = None) -> list[str]:
+    allow_list = list(allow) if allow is not None else list(RAG_COLLECTION_ALLOWLIST)
+    if not allow_list:
         return all_cols  # 제한 없음
-    allow = set(RAG_COLLECTION_ALLOWLIST)
-    return [c for c in all_cols if c in allow]
+    allow_set = set(allow_list)
+    return [c for c in all_cols if c in allow_set]
 
 def _final_rerank(
         cands: List[Any],
@@ -1218,6 +1219,10 @@ def _run_rag_with_vectors(
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
     gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
+    org_role = getattr(it, "org_role", None)
+    people_org_terms: List[str] = []
+    if org_role == "affiliation" and org_terms:
+        people_org_terms = list(org_terms)
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
@@ -1234,7 +1239,13 @@ def _run_rag_with_vectors(
         people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
-    people_filter = _build_people_filter(people_terms, people_ids, gender_terms) if (people_terms or people_ids or gender_terms) else None
+    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    people_org_terms = org_terms if org_role == "affiliation" else []
+    people_filter = (
+        _build_people_filter(people_terms, people_ids, gender_terms, people_org_terms)
+        if (people_terms or people_ids or gender_terms or people_org_terms)
+        else None
+    )
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
@@ -1308,7 +1319,7 @@ def _run_rag_with_vectors(
         plan.target_collections = hinted_cols
 
     if allow_cols:
-        filtered = [c for c in (plan.target_collections or []) if c in allow_cols]
+        filtered = _pick_collections((plan.target_collections or []), allow_cols)
         plan.target_collections = filtered if filtered else list(allow_cols)
 
     log_kv(

@@ -138,6 +138,16 @@ ORG_ROLE_AFFILIATION_CUES = ["소속", "소속기관", "소속 기관"]
 ORG_ROLE_PERFORMER_CUES = ["주관", "주관기관", "주관 기관", "수행", "수행기관", "수행 기관"]
 ORG_ROLE_PARTICIPANT_CUES = ["참여", "참여기관", "참여 기관"]
 
+ORG_ROLE_AFFILIATION_CUES = [
+    "소속", "소속기관", "소속 기관", "재직", "근무",
+]
+ORG_ROLE_PARTICIPANT_CUES = [
+    "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+]
+ORG_ROLE_PERFORMER_CUES = [
+    "수행기관", "수행 기관", "주관기관", "주관 기관", "과제수행기관", "과제 수행기관",
+]
+
 REL_PEOPLE_CUES = PEOPLE_CUES[:]  # join relation용
 REL_ORG_CUES = ORG_CUES[:]
 PERF_TO_PROJECT_CUES = ["어느 과제", "어떤 과제", "관련 과제", "소속 과제", "과제 정보", "과제번호", "pjt_id", "pjt id", "project id"]
@@ -558,6 +568,20 @@ def pick_structured_intent(base_route: str, q: str, is_id_query: bool) -> str:
     if any(c in t for c in TOPIC_CUES) or ("관련" in t and ("과제" in t or "project" in t or "pjt" in t)):
         return "topic"
     return "content"
+
+
+def pick_org_role(q: str) -> Optional[str]:
+    t = (q or "").lower()
+    if not t.strip():
+        return None
+
+    if any(c in t for c in ORG_ROLE_AFFILIATION_CUES):
+        return "affiliation"
+    if any(c in t for c in ORG_ROLE_PARTICIPANT_CUES):
+        return "participant"
+    if any(c in t for c in ORG_ROLE_PERFORMER_CUES):
+        return "performer"
+    return None
 
 
 @dataclass
