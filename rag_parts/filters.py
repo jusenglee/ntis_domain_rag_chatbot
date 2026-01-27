@@ -1,4 +1,5 @@
 import os
+import re
 # -*- coding: utf-8 -*-
 
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,43 @@ try:
     from qdrant_client.http import models as qmodels
 except Exception:  # pragma: no cover
     qmodels = None
+
+_ORG_TERM_STOPWORDS = {
+    "이력",
+    "현황",
+    "목록",
+    "정보",
+    "리스트",
+    "조회",
+    "명단",
+    "안내",
+    "내용",
+    "상세",
+}
+_ORG_SUFFIXES = ("대학교", "대학", "연구원", "연구소")
+
+
+def _normalize_org_term(term: str) -> str:
+    return re.sub(r"\s+", " ", (term or "")).strip()
+
+
+def _is_stopword_org_term(term: str) -> bool:
+    t = _normalize_org_term(term).replace(" ", "")
+    return t in _ORG_TERM_STOPWORDS
+
+
+def _is_valid_org_term(term: str, *, require_suffix: bool = False) -> bool:
+    t = _normalize_org_term(term)
+    if not t or _is_stopword_org_term(t):
+        return False
+    if require_suffix:
+        for suf in _ORG_SUFFIXES:
+            if t == suf:
+                return False
+            if t.endswith(suf):
+                return len(t) > (len(suf) + 1)
+        return False
+    return True
 
 def make_match_any(values: List[str]):
     try:
@@ -35,7 +73,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
     cands: List[str] = []
     for m in ORG_RE.finditer(q):
         s = (m.group(1) or "").strip()
-        if s and s not in cands:
+        s = _normalize_org_term(s)
+        if s and not _is_stopword_org_term(s) and s not in cands:
             cands.append(s)
         if len(cands) >= max_terms:
             return cands
@@ -44,7 +83,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         t = (kw or "").strip()
         if not t:
             continue
-        if ("대학교" in t) or ("대학" in t) or ("연구원" in t) or ("연구소" in t) :
+        t = _normalize_org_term(t)
+        if _is_valid_org_term(t, require_suffix=True):
             if t not in cands:
                 cands.append(t)
             if len(cands) >= max_terms:
