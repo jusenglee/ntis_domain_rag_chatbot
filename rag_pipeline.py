@@ -255,10 +255,12 @@ def _payload_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
         pl.get("title1"),
         pl.get("title2"),
         meta.get("KOR_PJT_NM"),
+        meta.get("kor_pjt_nm"),
         meta.get("국문과제명"),
         meta.get("과제명"),
         meta.get("성과명"),
         meta.get("논문명"),
+        meta.get("eng_pjt_nm"),
         meta.get("title"),
     )
 
@@ -270,11 +272,14 @@ def _payload_content(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
         pl.get("content2"),
         pl.get("answer_public"),
         meta.get("RSCH_ABSTRACT"),
+        meta.get("rsch_abstract"),
         meta.get("RSCH_GOAL_ABSTRACT"),
+        meta.get("rsch_goal_abstract"),
         meta.get("연구내용요약"),
         meta.get("연구목표요약"),
         meta.get("내용"),
         meta.get("요약"),
+        meta.get("org_name"),
     )
 
 def build_context_list_light(
