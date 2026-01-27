@@ -1137,7 +1137,18 @@ def _run_rag_with_vectors(
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
-    hint_people_terms = [str(t).strip() for t in (qa_researchers or []) if str(t).strip()]
+    hint_people_terms: List[str] = []
+    for researcher in (qa_researchers or []):
+        if isinstance(researcher, str):
+            name = researcher.strip()
+            if name:
+                hint_people_terms.append(name)
+            continue
+        name = _get_attr(researcher, "name", None)
+        if isinstance(name, str):
+            name = name.strip()
+        if name:
+            hint_people_terms.append(name)
     hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
 
     it = normalize_intent(
@@ -1184,7 +1195,7 @@ def _run_rag_with_vectors(
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
-    hint_people_terms: List[str] = []
+    hint_people_terms = []
     hint_people_ids: List[Any] = []
     for researcher in (qa_researchers or []):
         if isinstance(researcher, str):
@@ -1201,7 +1212,7 @@ def _run_rag_with_vectors(
         if researcher_id not in (None, ""):
             hint_people_ids.append(researcher_id)
     if hint_people_terms:
-        merged_people = people_terms + hint_people_terms
+        merged_people = hint_people_terms + people_terms
         deduped_people: List[str] = []
         seen_people: set[str] = set()
         for term in merged_people:
@@ -1213,7 +1224,7 @@ def _run_rag_with_vectors(
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
     if hint_people_ids:
-        merged_ids = people_ids + hint_people_ids
+        merged_ids = hint_people_ids + people_ids
         deduped_ids: List[Any] = []
         seen_ids: set[Any] = set()
         for pid in merged_ids:
