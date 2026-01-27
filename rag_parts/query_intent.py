@@ -82,6 +82,41 @@ _ORG_SUFFIX_RE = re.compile(
     + r"))"
 )
 _ORG_ACRONYM_RE = re.compile(r"^[A-Z]{3,10}$")
+_ORG_TERM_STOPWORDS = {
+    "이력",
+    "현황",
+    "목록",
+    "정보",
+    "리스트",
+    "조회",
+    "명단",
+    "안내",
+    "내용",
+    "상세",
+}
+
+
+def _normalize_org_term(term: str) -> str:
+    return re.sub(r"\s+", " ", (term or "")).strip()
+
+
+def _is_stopword_org_term(term: str) -> bool:
+    t = _normalize_org_term(term).replace(" ", "")
+    return t in _ORG_TERM_STOPWORDS
+
+
+def _is_valid_org_term(term: str, *, require_suffix: bool = False) -> bool:
+    t = _normalize_org_term(term)
+    if not t or _is_stopword_org_term(t):
+        return False
+    if require_suffix:
+        for suf in _ORG_SUFFIXES:
+            if t == suf:
+                return False
+            if t.endswith(suf):
+                return len(t) > (len(suf) + 1)
+        return False
+    return True
 
 
 def _is_org_like(term: str) -> bool:
@@ -325,9 +360,9 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         raw = m.group(0) or ""
         s = (m.group(1) or "").strip()
         if s:
-            s = re.sub(r"\s+", " ", s).strip()
+            s = _normalize_org_term(s)
         has_colon = (":" in raw) or ("：" in raw)
-        if s and (has_colon or _is_org_like(s)) and s not in cands:
+        if s and not _is_stopword_org_term(s) and (has_colon or _is_org_like(s)) and s not in cands:
             cands.append(s)
             if len(cands) >= max_terms:
                 return cands
@@ -335,8 +370,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
     for m in _ORG_SUFFIX_RE.finditer(q):
         s = (m.group(1) or "").strip()
         if s:
-            s = re.sub(r"\s+", " ", s).strip()
-        if s and s not in cands:
+            s = _normalize_org_term(s)
+        if s and _is_valid_org_term(s, require_suffix=True) and s not in cands:
             cands.append(s)
             if len(cands) >= max_terms:
                 return cands
@@ -346,7 +381,8 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         t = (kw or "").strip()
         if not t:
             continue
-        if _is_org_like(t):
+        t = _normalize_org_term(t)
+        if _is_org_like(t) and _is_valid_org_term(t) and t not in cands:
             if t not in cands:
                 cands.append(t)
             if len(cands) >= max_terms:

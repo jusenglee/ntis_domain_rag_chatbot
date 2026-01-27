@@ -68,10 +68,8 @@ from rag_parts.join import (
     sanitize_query_by_terms as _sanitize_query_by_terms,
 )
 from rag_parts.filters import (
-    extract_org_terms as _extract_org_terms,
-    build_org_filter as _build_org_filter,
-    build_prtcp_org_nested_filter as _build_prtcp_org_nested_filter,
-    build_people_filter as _build_people_filter,
+    JoinFilterInput,
+    PerfFilterInput,
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
@@ -213,17 +211,6 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
 # -------------------------
 # Lightweight list/stats context
 # -------------------------
-def _classify_query_compat(q: str, kws: List[str], *, domain_hint: Optional[str], hint: Optional[Dict[str, Any]] = None) -> "QueryIntent":
-    """query_intent.classify_query signature 호환 래퍼."""
-    try:
-        sig = inspect.signature(_classify_query)
-        if hint is not None and "hint" in sig.parameters:
-            return _classify_query(q, kws, domain_hint=domain_hint, hint=hint)
-        return _classify_query(q, kws, domain_hint=domain_hint)
-    except Exception:
-        return _classify_query(q, kws, domain_hint=domain_hint)
-
-
 def _clean_one_line(s: object, max_len: int = 160) -> str:
     if s is None:
         return ""
@@ -663,7 +650,7 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
                 out.append(s)
     return out
 
-def _filter_score(p: Any, it: QueryIntent, base_route: str, *, strict_ids: bool) -> float:
+def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: bool) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
 
@@ -746,7 +733,7 @@ def _pick_collections(all_cols: list[str], allow: Optional[Iterable[str]] = None
 def _final_rerank(
         cands: List[Any],
         *,
-        it: QueryIntent,
+        it: NormalizedIntent,
         kws: List[str],
         lex_w: Dict[str, float],
         base_route: str,
@@ -819,7 +806,7 @@ class QueryPlan:
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
 
-def _has_any_ids(it: QueryIntent) -> bool:
+def _has_any_ids(it: NormalizedIntent) -> bool:
     ids_map = getattr(it, "ids_map", None)
     if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
         return True
@@ -832,7 +819,7 @@ def _has_any_ids(it: QueryIntent) -> bool:
         return True
     return False
 
-def _build_plan(it: QueryIntent) -> QueryPlan:
+def _build_plan(it: NormalizedIntent) -> QueryPlan:
     action = it.action
     base_route = it.base_route
     rel = it.relation
@@ -1147,7 +1134,20 @@ def _run_rag_with_vectors(
 
     # intent (hint는 query_intent에서 흡수)
     domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support") else None
-    it = _classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+    raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+    qa_researchers = _get_attr(qa, "researchers", None) or []
+    if isinstance(qa_researchers, str):
+        qa_researchers = [qa_researchers]
+    hint_people_terms = [str(t).strip() for t in (qa_researchers or []) if str(t).strip()]
+    hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+
+    it = normalize_intent(
+        raw_intent,
+        query=q,
+        keywords=kws,
+        hint_people_terms=hint_people_terms,
+        hint_org_role=hint_org_role,
+    )
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1183,7 +1183,22 @@ def _run_rag_with_vectors(
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
-    hint_people_terms = [str(t).strip() for t in (qa_researchers or []) if str(t).strip()]
+    hint_people_terms: List[str] = []
+    hint_people_ids: List[Any] = []
+    for researcher in (qa_researchers or []):
+        if isinstance(researcher, str):
+            name = researcher.strip()
+            if name:
+                hint_people_terms.append(name)
+            continue
+        name = _get_attr(researcher, "name", None)
+        if isinstance(name, str):
+            name = name.strip()
+        if name:
+            hint_people_terms.append(name)
+        researcher_id = _get_attr(researcher, "researcher_id", None)
+        if researcher_id not in (None, ""):
+            hint_people_ids.append(researcher_id)
     if hint_people_terms:
         merged_people = people_terms + hint_people_terms
         deduped_people: List[str] = []
@@ -1196,6 +1211,16 @@ def _run_rag_with_vectors(
         people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
+    if hint_people_ids:
+        merged_ids = people_ids + hint_people_ids
+        deduped_ids: List[Any] = []
+        seen_ids: set[Any] = set()
+        for pid in merged_ids:
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            deduped_ids.append(pid)
+        people_ids = deduped_ids
     org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_filter = (
@@ -1370,6 +1395,7 @@ def _run_rag_with_vectors(
 
             join_ids: List[str] = []
             hop1_top: List[Any] = []
+            hop1_filter = None
 
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
             if pjt_ids:
@@ -1459,8 +1485,17 @@ def _run_rag_with_vectors(
                             hop1_reranked = head_filtered
 
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
-                # ✅ hop1 상위만 join키 추출을 위해 meta_basic 포함 payload 보강
-                _hydrate_points_payload(qdr, hop1_reranked[: max(20, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")))])
+                if not hop1_top:
+                    log_kv(
+                        "RAG.JOIN.HOP1.EMPTY",
+                        hop1_kind=hop1_kind,
+                        hop1_tag_filters=hop1_tag_filters,
+                        hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    )
+                else:
+                    # ✅ hop1 결과에 meta_basic 포함 payload 보강
+                    hydrate_keep = max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20)
+                    _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
 
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
 
@@ -1493,9 +1528,9 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(q, join_ids)
+                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
-                hop2_filter = build_join_filter(join_ids, tag_filters=hop2_tag_filters)
+                hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
@@ -1635,7 +1670,7 @@ def _run_rag_with_vectors(
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         if pjt_ids:
             # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-            return build_join_filter(pjt_ids, tag_filters=None)
+            return build_join_filter(JoinFilterInput(join_ids=pjt_ids, tag_filters=None))
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
