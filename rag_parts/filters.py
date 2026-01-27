@@ -12,6 +12,31 @@ from .constants import (
     TAG_RI_SW, TAG_RI_NVR, TAG_RI_COMPOUND, TAG_RI_ORGSM_INFO, TAG_RI_ORGSM_RES,
 )
 
+
+@dataclass(frozen=True)
+class OrgFilterInput:
+    terms: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PeopleFilterInput:
+    people_terms: List[str] = field(default_factory=list)
+    person_ids: List[str] = field(default_factory=list)
+    gender_terms: List[str] = field(default_factory=list)
+    org_terms: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class JoinFilterInput:
+    join_ids: List[str] = field(default_factory=list)
+    tag_filters: Optional[List[str]] = None
+
+
+@dataclass(frozen=True)
+class PerfFilterInput:
+    query: str = ""
+    join_ids: List[str] = field(default_factory=list)
+
 # qdrant filter models (optional import)
 try:
     from qdrant_client.http import models as qmodels

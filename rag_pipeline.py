@@ -73,6 +73,8 @@ from rag_parts.filters import (
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
+    JoinFilterInput,
+    PerfFilterInput,
 )
 
 try:
@@ -1527,7 +1529,7 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(PerfFilterI nput(query=q, join_ids=join_ids))
+                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
                 hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
                 if hop2_kind in ("project", "org") and org_filter:
