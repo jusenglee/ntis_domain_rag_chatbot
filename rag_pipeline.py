@@ -47,12 +47,11 @@ from rag_parts.constants import (
     TAG_PJT_MP,
     TAG_PJT_ORG,
 )
-from rag_parts.pipeline_steps import (
-    NormalizedIntent,
-    classify_query_compat,
-    normalize_intent,
-    build_filter_bundle,
-    resolve_join_hops,
+from rag_parts.query_intent import (
+    QueryIntent,
+    classify_query as _classify_query,
+    get_relation_route,
+    relation_target_collections,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -826,12 +825,13 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     rel = it.relation
 
     if rel:
+        target_cols = relation_target_collections(rel)
         return QueryPlan(
             mode="join",
             base_route=base_route,
             action=action,
             relation=rel,
-            target_collections=[COL_PROJECT, COL_PERF, COL_SUPPORT],
+            target_collections=target_cols if target_cols else [COL_PROJECT, COL_PERF, COL_SUPPORT],
             filters={},
         )
 
@@ -1347,17 +1347,22 @@ def _run_rag_with_vectors(
 
 
 
-        hop_plan = resolve_join_hops(relation)
-        if hop_plan is None:
+        # relation mapping
+        hop1_col = hop2_col = ""
+        hop1_kind = hop2_kind = "project"
+        hop1_tag_filters: Optional[List[str]] = None
+        hop2_tag_filters: Optional[List[str]] = None
+        hop2_label = ""
+
+        route = get_relation_route(relation)
+        if route is None:
+            # unknown relation -> fall back to base SEARCH
             relation = None
         else:
-            hop1_col = hop_plan.hop1_col
-            hop2_col = hop_plan.hop2_col
-            hop1_kind = hop_plan.hop1_kind
-            hop2_kind = hop_plan.hop2_kind
-            hop1_tag_filters = hop_plan.hop1_tag_filters
-            hop2_tag_filters = hop_plan.hop2_tag_filters
-            hop2_label = hop_plan.hop2_label
+            hop1_col, hop2_col = route.hop1_col, route.hop2_col
+            hop1_kind, hop2_kind = route.hop1_kind, route.hop2_kind
+            hop1_tag_filters, hop2_tag_filters = route.hop1_tag_filters, route.hop2_tag_filters
+            hop2_label = route.hop2_label
 
         if relation:
             allowed_cols = set(plan.target_collections or [])
