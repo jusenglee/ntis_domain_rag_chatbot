@@ -773,6 +773,12 @@ def dense_retrieve_hybrid_multi(
             "meta_flat": 0.35,
         }
     )
+    id_toks = _extract_id_tokens(q)
+    if id_toks:
+        if "meta_flat" not in lexical_fields_eff:
+            lexical_fields_eff.append("meta_flat")
+        if float(lexical_weights_eff.get("meta_flat", 0.0)) < 0.8:
+            lexical_weights_eff["meta_flat"] = 0.9
 
     t_scroll = 0.0
     t_score = 0.0
