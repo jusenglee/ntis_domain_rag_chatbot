@@ -1,9 +1,11 @@
 import unittest
 
 from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO
+from rag_parts.filters import extract_org_terms as extract_org_terms_filters
 from rag_parts.query_intent import (
     classify_query,
     get_relation_route,
+    extract_org_terms as extract_org_terms_intent,
     relation_target_collections,
 )
 
@@ -43,6 +45,13 @@ class QueryIntentRelationTests(unittest.TestCase):
         self.assertEqual(route.hop1_tag_filters, [TAG_PJT_INFO])
         self.assertIsNone(route.hop2_tag_filters)
         self.assertEqual(relation_target_collections(intent.relation), [COL_PROJECT, COL_PERF])
+
+    def test_extract_org_terms_excludes_task_only_query(self) -> None:
+        q = "과제"
+        kws = q.split()
+
+        self.assertEqual(extract_org_terms_intent(q, kws), [])
+        self.assertEqual(extract_org_terms_filters(q, kws), [])
 
 
 if __name__ == "__main__":
