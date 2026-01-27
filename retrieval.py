@@ -330,6 +330,7 @@ def _id_exact_score(
 # =========================
 
 _SPACE_RE = re.compile(r"\s+")
+_HANGUL_RE = re.compile(r"[\u3131-\u318E\uAC00-\uD7A3]")
 
 
 def normalize_query(q: str) -> str:
@@ -339,6 +340,12 @@ def normalize_query(q: str) -> str:
     q = str(q).strip()
     q = _SPACE_RE.sub(" ", q)
     return q
+
+
+def _strip_whitespace_korean(text: str) -> str:
+    if not text or not _HANGUL_RE.search(text):
+        return ""
+    return re.sub(r"\s+", "", text)
 
 
 _KW_RE = re.compile(r"[\w\u3131-\u318E\uAC00-\uD7A3]+", re.UNICODE)
@@ -548,59 +555,67 @@ def lexical_score_weighted(
     if not field_tokens:
         return 0.0
 
-    # BM25-like (field-level) scoring
-    num_fields = len(field_tokens)
-    avg_dl = sum(len(toks) for toks in field_tokens.values()) / float(max(1, num_fields))
-    df: Dict[str, int] = {}
-    for t in set(query_tokens):
-        df[t] = sum(1 for toks in field_tokens.values() if t in toks)
+    def _score_for_query(qtext: str, qtokens: List[str]) -> float:
+        num_fields = len(field_tokens)
+        avg_dl = sum(len(toks) for toks in field_tokens.values()) / float(max(1, num_fields))
+        df: Dict[str, int] = {}
+        for t in set(qtokens):
+            df[t] = sum(1 for toks in field_tokens.values() if t in toks)
 
-    k1 = 1.2
-    b = 0.75
+        k1 = 1.2
+        b = 0.75
 
-    bm25_score = 0.0
-    qtf: Dict[str, int] = {}
-    for t in query_tokens:
-        qtf[t] = qtf.get(t, 0) + 1
+        bm25_score = 0.0
+        qtf: Dict[str, int] = {}
+        for t in qtokens:
+            qtf[t] = qtf.get(t, 0) + 1
 
-    for f, counts in field_counts.items():
-        dl = float(len(field_tokens.get(f, [])))
-        if dl <= 0:
-            continue
-        w = float(weights.get(f, 1.0))
-        denom_norm = k1 * (1.0 - b + b * (dl / max(1.0, avg_dl)))
-        for t, qt_count in qtf.items():
-            tf = float(counts.get(t, 0))
-            if tf <= 0:
-                continue
-            df_t = float(df.get(t, 0))
-            idf = math.log(1.0 + (num_fields - df_t + 0.5) / (df_t + 0.5))
-            bm25_score += w * idf * ((tf * (k1 + 1.0)) / (tf + denom_norm)) * float(qt_count)
-
-    base = 0.0
-    if mode in ("bm25", "bm25_only"):
-        base = bm25_score
-    elif mode in ("mix", "hybrid", "bm25_fuzzy"):
-        fuzzy_score = 0.0
-        total_w = 0.0
-        for f in fields:
-            txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-            if not txt:
+        for f, counts in field_counts.items():
+            dl = float(len(field_tokens.get(f, [])))
+            if dl <= 0:
                 continue
             w = float(weights.get(f, 1.0))
-            total_w += w
-            fuzzy_score += w * _fuzzy_ratio(qt, txt)
-        fuzzy_norm = fuzzy_score / max(1.0, total_w)
-        bm25_norm = bm25_score / (1.0 + bm25_score)
-        base = (0.65 * bm25_norm) + (0.35 * fuzzy_norm)
-    else:
-        # fallback: fuzzy only
-        for f in fields:
-            txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-            if not txt:
-                continue
-            w = float(weights.get(f, 1.0))
-            base += w * _fuzzy_ratio(qt, txt)
+            denom_norm = k1 * (1.0 - b + b * (dl / max(1.0, avg_dl)))
+            for t, qt_count in qtf.items():
+                tf = float(counts.get(t, 0))
+                if tf <= 0:
+                    continue
+                df_t = float(df.get(t, 0))
+                idf = math.log(1.0 + (num_fields - df_t + 0.5) / (df_t + 0.5))
+                bm25_score += w * idf * ((tf * (k1 + 1.0)) / (tf + denom_norm)) * float(qt_count)
+
+        base_score = 0.0
+        if mode in ("bm25", "bm25_only"):
+            base_score = bm25_score
+        elif mode in ("mix", "hybrid", "bm25_fuzzy"):
+            fuzzy_score = 0.0
+            total_w = 0.0
+            for f in fields:
+                txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
+                if not txt:
+                    continue
+                w = float(weights.get(f, 1.0))
+                total_w += w
+                fuzzy_score += w * _fuzzy_ratio(qtext, txt)
+            fuzzy_norm = fuzzy_score / max(1.0, total_w)
+            bm25_norm = bm25_score / (1.0 + bm25_score)
+            base_score = (0.65 * bm25_norm) + (0.35 * fuzzy_norm)
+        else:
+            # fallback: fuzzy only
+            for f in fields:
+                txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
+                if not txt:
+                    continue
+                w = float(weights.get(f, 1.0))
+                base_score += w * _fuzzy_ratio(qtext, txt)
+        return float(base_score)
+
+    base = _score_for_query(qt, query_tokens)
+    qt_nospace = _strip_whitespace_korean(qt)
+    if qt_nospace and qt_nospace != qt:
+        aux_tokens = _tokenize_simple(qt_nospace)
+        if aux_tokens:
+            base += 0.15 * _score_for_query(qt_nospace, aux_tokens)
 
     if systems_hint:
         ql = qt.lower()
@@ -801,8 +816,11 @@ def dense_retrieve_hybrid_multi(
             query_text = " ".join(keywords[:12]).strip() or q
             if len(query_text) > 128:
                 query_text = query_text[:128]
+            query_text_nospace = _strip_whitespace_korean(query_text)
             for f in lexical_fields_eff:
                 should_conds.append(models.FieldCondition(key=f, match=models.MatchText(text=query_text)))
+                if query_text_nospace and query_text_nospace != query_text:
+                    should_conds.append(models.FieldCondition(key=f, match=models.MatchText(text=query_text_nospace)))
 
         lex_filter = models.Filter(should=should_conds)
         final_filter = _combine_filters(query_filter, lex_filter)
