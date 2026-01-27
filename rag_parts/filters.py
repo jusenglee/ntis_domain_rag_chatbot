@@ -198,12 +198,12 @@ def build_people_filter(
 
     if orgs:
         org_keys = [
-            "flat_text",
-            "meta_flat",
+            KEY_ORG_NORM,
+            "org_nm",
+            "blng_org_nm",
             "meta.소속기관명",
             "meta.소속",
             "meta.기관명",
-            "blng_org_nm",
             "prtcp_mp.blng_org_nm",
         ]
         for key in org_keys:
