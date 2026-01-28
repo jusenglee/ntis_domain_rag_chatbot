@@ -753,7 +753,7 @@ def refine_documents_rule_based(docs: List[Document], title_only: bool = False) 
     for idx, doc in enumerate(docs, start=1):
         metadata = doc.metadata or {}
         ref = metadata.get("ref") or {}
-        title = ref.get("title", "").strip()
+        title = (ref.get("title") or "").strip()
         if title_only:
             if not title:
                 continue
