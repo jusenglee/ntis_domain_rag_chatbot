@@ -1717,7 +1717,8 @@ def _run_rag_with_vectors(
                 return _and_filter(tag_filter_local, participant_org_filter or org_filter) if (participant_org_filter or org_filter) else tag_filter_local
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
-                return _build_tag_only_filter([TAG_PJT_INFO])
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                return _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
 
         if col == COL_PERF and base_route == "perf" and perf_tag_filter:
             return perf_tag_filter
