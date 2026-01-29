@@ -399,45 +399,17 @@ def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
 
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
-    """질의에서 기관명 후보 추출(라벨/접미사 기반)."""
+    """질의에서 기관명 후보 추출(LLM 기반)."""
+    if not LLM_PLANNER_ENABLED:
+        return []
     q = (q or "").strip()
     if not q:
         return []
-    cands: List[str] = []
-
-    for m in _ORG_NEAR_LABEL_RE.finditer(q):
-        raw = m.group(0) or ""
-        s = (m.group(1) or "").strip()
-        if s:
-            s = _normalize_org_term(s)
-        has_colon = (":" in raw) or ("：" in raw)
-        if s and not _is_stopword_org_term(s) and (has_colon or _is_org_like(s)) and s not in cands:
-            cands.append(s)
-            if len(cands) >= max_terms:
-                return cands
-
-    for m in _ORG_SUFFIX_RE.finditer(q):
-        s = (m.group(1) or "").strip()
-        if s:
-            s = _normalize_org_term(s)
-        if s and _is_valid_org_term(s, require_suffix=True) and s not in cands:
-            cands.append(s)
-            if len(cands) >= max_terms:
-                return cands
-
-    # 키워드에서 suffix/회사 표기 등 잡기
-    for kw in (kws or [])[:30]:
-        t = (kw or "").strip()
-        if not t:
-            continue
-        t = _normalize_org_term(t)
-        if _is_org_like(t) and _is_valid_org_term(t) and t not in cands:
-            if t not in cands:
-                cands.append(t)
-            if len(cands) >= max_terms:
-                break
-
-    return cands[:max_terms]
+    plan = _plan_with_llm(q, list(kws or []), {}, domain_hint=None)
+    org_terms = _normalize_str_list(plan.get("org_terms") or plan.get("organizations"))
+    if not org_terms:
+        return []
+    return org_terms[:max_terms]
 
 def extract_org_role(q: str) -> Optional[str]:
     t = (q or "").strip().lower()
@@ -1343,8 +1315,6 @@ def classify_query(
 
     if not gender_terms:
         gender_terms = extract_gender_terms(q, kws)
-    if not org_terms:
-        org_terms = extract_org_terms(q, kws)
     if not org_role:
         org_role = extract_org_role(q)
     if not years:
