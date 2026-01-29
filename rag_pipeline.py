@@ -384,7 +384,6 @@ def _call_dense_retrieve_hybrid_multi(
         collection: str,
         sparse_vector_name: Optional[str],
         sparse_topk: Optional[int],
-        sparse_weight: Optional[float],
         top_k_dense: int,
         top_k_lex_cand: int,
         top_k_lex: int,
@@ -405,7 +404,6 @@ def _call_dense_retrieve_hybrid_multi(
             top_k_lexical=top_k_lex,
             sparse_vector_name=sparse_vector_name,
             sparse_topk=sparse_topk,
-            sparse_weight=sparse_weight,
             query_filter=query_filter,
             timings=timings_out,
         )
@@ -422,7 +420,6 @@ def _call_dense_retrieve_hybrid_multi(
             top_k_lexical=top_k_lex,
             sparse_vector_name=sparse_vector_name,
             sparse_topk=sparse_topk,
-            sparse_weight=sparse_weight,
             filter_obj=query_filter,
             timings=timings_out,
         )
@@ -439,7 +436,6 @@ def _call_dense_retrieve_hybrid_multi(
         top_k_lexical=top_k_lex,
         sparse_vector_name=sparse_vector_name,
         sparse_topk=sparse_topk,
-        sparse_weight=sparse_weight,
         query_filter=query_filter,
         timings=timings_out,
     )
@@ -538,6 +534,7 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
         or ""
     )
     keyword_text = _to_text(pl.get("keyword_text") or pl.get("keyword1") or pl.get("keyword2") or "")
+    category_text = _to_text(pl.get("category") or pl.get("cetegory") or "")
 
     meta_kv = []
     for k in (
@@ -560,7 +557,7 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
     if pl.get("org_nm"):
         meta_kv.append(f"org_nm:{_to_text(pl.get('org_nm'))}")
     if pl.get("category") or pl.get("cetegory"):
-        meta_kv.append(f"category:{_to_text(pl.get('category') or pl.get('cetegory'))}")
+        meta_kv.append(f"category:{category_text}")
     if keyword_text:
         meta_kv.append(f"keyword_text:{keyword_text}")
     meta_kv_s = _to_text("; ".join(meta_kv))[:800]
@@ -569,6 +566,8 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
         "title": title,
         "flat_text": flat_text[:2000],
         "content_text": content_text[:2000],
+        "keyword_text": keyword_text[:1200],
+        "category": category_text[:200],
         "meta_kv": meta_kv_s,
     }
 
@@ -578,10 +577,14 @@ def _count_term_hits(text: str, term: str) -> int:
     return text.lower().count(term.lower())
 
 def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
+    w = w or {}
     tb = _payload_text_bundle(p)
     w_title = float(w.get("title", 2.0))
     w_flat = float(w.get("flat_text", 0.6))
     w_content = float(w.get("content_text", 1.0))
+    w_keyword = float(w.get("keyword_text", 0.8))
+    w_category = float(w.get("category", 0.6))
+    w_meta = float(w.get("meta_kv", 0.4))
 
     sc = 0.0
     for kw in (kws or [])[:30]:
@@ -591,7 +594,9 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         sc += w_title * min(_count_term_hits(tb["title"], kw), 2)
         sc += w_flat * min(_count_term_hits(tb["flat_text"], kw), 4)
         sc += w_content * min(_count_term_hits(tb["content_text"], kw), 3)
-        sc += 0.4 * min(_count_term_hits(tb["meta_kv"], kw), 2)
+        sc += w_keyword * min(_count_term_hits(tb["keyword_text"], kw), 3)
+        sc += w_category * min(_count_term_hits(tb["category"], kw), 2)
+        sc += w_meta * min(_count_term_hits(tb["meta_kv"], kw), 2)
     return float(sc)
 
 def _flatten_ids_from_intent(it: Any) -> List[str]:
@@ -861,7 +866,7 @@ def _hydrate_points_payload(
 ) -> None:
     """
     Always hydrate points with FULL payload from Qdrant (with_payload=True).
-    - 내부 메타(_collection/_rrf/_final_*) 보존하지 않음 (요구사항)
+    - 내부 메타(_collection/_rrf/_final_*)는 보존하지 않고 DB payload로 덮어씀
     - include_fields는 호환용으로만 두고 무시
     """
     if not points:
@@ -917,67 +922,6 @@ def _hydrate_points_payload(
                 key = str(pid)
                 if key in rec_payload:
                     _set(p, "payload", rec_payload[key])
-
-
-    # collection별로 나눠서 retrieve 호출 최소화
-    # points[i].payload["_collection"] (혹은 points[i]._collection)을 사용한다고 가정(현재 파이프라인 패턴)
-    buckets = {}
-    for p in points:
-        payload = _get(p, "payload", {}) or {}
-        col = None
-        if isinstance(payload, dict):
-            col = payload.get("_collection")
-        if not col:
-            col = _get(p, "_collection", None)
-        if not col:
-            # collection을 모르겠으면 건너뜀(안전)
-            continue
-        buckets.setdefault(col, []).append(p)
-
-    for collection_name, plist in buckets.items():
-        # chunk retrieve
-        for i in range(0, len(plist), max(1, int(chunk_size))):
-            chunk = plist[i : i + max(1, int(chunk_size))]
-            ids = []
-            old_payload_by_id = {}
-
-            for p in chunk:
-                pid = _get(p, "id", None)
-                if pid is None:
-                    continue
-                ids.append(pid)
-                old_payload_by_id[str(pid)] = _get(p, "payload", {}) or {}
-
-            if not ids:
-                continue
-
-            recs = qdr.retrieve(
-                collection_name=collection_name,
-                ids=ids,
-                with_payload=True,   # ✅ 항상 full payload
-                with_vectors=False,
-            )
-
-            # id -> payload
-            rec_payload = {}
-            for r in (recs or []):
-                rid = _get(r, "id", None)
-                if rid is None:
-                    continue
-                rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-
-            # points 갱신(내부 메타 보존)
-            for p in chunk:
-                pid = _get(p, "id", None)
-                if pid is None:
-                    continue
-                key = str(pid)
-                if key not in rec_payload:
-                    continue
-
-                new_pl = rec_payload.get(key, {}) or {}
-
-                _set(p, "payload", new_pl)
 
 
 def _run_rag_with_vectors(
@@ -1188,6 +1132,7 @@ def _run_rag_with_vectors(
 
     sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
     sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
+    # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or extract_org_terms(q, kws) or []) if str(t).strip()]
@@ -1468,7 +1413,6 @@ def _run_rag_with_vectors(
                     collection=hop1_col,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
-                    sparse_weight=sparse_weight_eff,
                     top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
@@ -1595,7 +1539,6 @@ def _run_rag_with_vectors(
                 collection=hop2_col,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
-                sparse_weight=sparse_weight_eff,
                 top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
@@ -1701,7 +1644,7 @@ def _run_rag_with_vectors(
             return perf_tag_filter
 
         # (선택) org_filter는 project 컬렉션에서만
-        if col == COL_PROJECT and org_terms:
+        if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
             if org_role == "participant":
                 return participant_org_filter or org_filter
             if org_filter:
@@ -1718,7 +1661,12 @@ def _run_rag_with_vectors(
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
+                combined_filter = tag_filter_local
+                if people_filter:
+                    combined_filter = _and_filter(combined_filter, people_filter)
+                if participant_org_filter or org_filter:
+                    combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
+                return combined_filter
 
         if col == COL_PERF and base_route == "perf" and perf_tag_filter:
             return perf_tag_filter
@@ -1759,7 +1707,6 @@ def _run_rag_with_vectors(
             collection=col,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=sparse_topk_eff,
-            sparse_weight=sparse_weight_eff,
             top_k_dense=use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,

@@ -196,8 +196,6 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "doc_id,"
     "tag,"
     "title_text,"
-    "title1,"
-    "title2,"
     "content_text,"
     "keyword_text,"
     "flat_text,"
@@ -207,7 +205,8 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "prtcp_org[].org_nm,"
     "org_nm,"
     "pjt_id,"
-    "pjt_no"
+    "pjt_no,"
+    "meta_basic.pjt_no"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
@@ -830,7 +829,6 @@ def dense_retrieve_hybrid_multi(
         top_k_lexical: int = _DEFAULT_TOPK_LEX,
         sparse_vector_name: Optional[str] = None,
         sparse_topk: Optional[int] = None,
-        sparse_weight: Optional[float] = None,
         query_filter: Optional[models.Filter] = None,
         timings: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
@@ -931,6 +929,12 @@ def dense_retrieve_hybrid_multi(
     lexical_fields_eff = list(
         lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "category", "prtcp_mp[].hm_nm", "prtcp_mp[].blng_org_nm", "prtcp_org[].org_nm"]
     )
+    lex_base_fields = _PAYLOAD_MIN_FIELDS
+    with_payload_lex = _with_payload_selector(
+        _PAYLOAD_MODE_LEX,
+        lex_base_fields,
+        lexical_fields_eff,
+    )
     lexical_weights_eff = dict(
         lexical_field_weights
         or {
@@ -965,7 +969,7 @@ def dense_retrieve_hybrid_multi(
             sparse_vector_name=str(sparse_vector_name),
             limit=max(int(top_k_lexical_candidates_eff), int(top_k_lexical)),
             query_filter=query_filter,
-            with_payload=with_payload_dense_spase, #임베딩 벡터 - 스파서 벡터는 동일 필드 지정되어있음
+            with_payload=with_payload_lex,
         )
         if sp_hits:
             lex_points = list(sp_hits)[: int(top_k_lexical)]
@@ -1008,12 +1012,6 @@ def dense_retrieve_hybrid_multi(
 
         lex_filter = models.Filter(should=should_conds)
         final_filter = _combine_filters(query_filter, lex_filter)
-        lex_base_fields = _PAYLOAD_MIN_FIELDS
-        with_payload_lex = _with_payload_selector(
-            _PAYLOAD_MODE_LEX,
-            lex_base_fields,
-            lexical_fields_eff,
-        )
         try:
             try:
                 scroll_res, _ = client.scroll(

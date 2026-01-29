@@ -58,6 +58,13 @@ _ORG_CODE_RE = re.compile(r"\b[A-Z]{2,5}\d{3,6}\b")
 
 # PJT_ID는 보통 8~12자리 숫자
 _PJT_ID_NUM_RE = re.compile(r"\b\d{8,12}\b")
+# PJT_NO 패턴: 라벨 기반 또는 PJT 접두 + 하이픈/슬래시 포함
+_PJT_NO_LABEL_RE = re.compile(
+    r"(?:PJT[_\s-]?NO|PROJECT[_\s-]?NO|과제번호|과제\s*번호)\s*[:：]?\s*"
+    r"([A-Za-z0-9][A-Za-z0-9\-\/]{3,})",
+    re.IGNORECASE,
+)
+_PJT_NO_TOKEN_RE = re.compile(r"\bPJT[-_/]?[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+){1,}\b", re.IGNORECASE)
 
 # 사람 이름 후보: 한글 2~4자 (단독으로는 오탐이 많아서 '연구자/연구원/참여인력' 등 주변 신호와 결합)
 _NAME_NEAR_CUE_RE = re.compile(r"([가-힣]{2,4})\s*(?:연구자|연구원|교수|박사|PI|책임자|연구책임자|참여연구원|참여인력)")
@@ -209,8 +216,8 @@ def _is_stopword_people_term(term: str) -> bool:
 
 ORG_CUES = [
     "기관", "소속기관", "소속 기관", "주관기관", "주관 기관", "수행기관", "수행 기관",
-    "참여기관", "참여 기관", "기관정보", "기관 정보", "산학협력단", "소속"
-                                               "사업자등록번호", "기관코드",
+    "참여기관", "참여 기관", "기관정보", "기관 정보", "산학협력단", "소속",
+    "사업자등록번호", "기관코드",
 ]
 ORG_ROLE_AFFILIATION_CUES = ["소속", "소속기관", "소속 기관"]
 ORG_ROLE_PERFORMER_CUES = ["주관", "주관기관", "주관 기관", "수행", "수행기관", "수행 기관"]
@@ -464,6 +471,7 @@ def extract_id_candidates(q: str, kws: List[str]) -> Dict[str, List[str]]:
     qtext = (q or "")
     out: Dict[str, List[str]] = {
         "pjt_id": [],
+        "pjt_no": [],
         "rst_id": [],
         "doi": [],
         "issn": [],
@@ -505,6 +513,14 @@ def extract_id_candidates(q: str, kws: List[str]) -> Dict[str, List[str]]:
         tt = (t or "").strip()
         if tt.isdigit() and (8 <= len(tt) <= 12):
             _add("pjt_id", tt)
+
+    # PJT_NO label-based
+    for m in _PJT_NO_LABEL_RE.finditer(qtext):
+        _add("pjt_no", m.group(1))
+
+    # PJT_NO token-based (PJT 접두 + 하이픈/슬래시 포함)
+    for m in _PJT_NO_TOKEN_RE.finditer(qtext):
+        _add("pjt_no", m.group(0))
 
     # 사람 번호(숫자 8~10자리) - 라벨이 있을 때만
     if re.search(r"(국가연구자번호|인물ID|참여인력일련번호|과학기술인등록번호)\s*[:：]?\s*(\d{8,10})", qtext):
@@ -575,7 +591,7 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     people_terms = people_terms or []
     org_terms = org_terms or []
 
-    has_pjt_id = bool((ids_map or {}).get("pjt_id"))
+    has_pjt_id = bool((ids_map or {}).get("pjt_id") or (ids_map or {}).get("pjt_no"))
     has_perf_id = bool((ids_map or {}).get("doi") or (ids_map or {}).get("issn") or (ids_map or {}).get("rst_id") or (ids_map or {}).get("patent_reg_no"))
     has_people_id = bool((ids_map or {}).get("person_no"))
 
@@ -919,13 +935,14 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
 
     is_id_query = (
-            len(rare_kws) >= 2
-            or bool(_RST_ID_RE.search(q))
-            or bool(_DOI_RE.search(q))
-            or bool(_ISSN_RE.search(q))
-            or bool(_PATENT_REG_NO_RE.search(q))
-            or bool(_PJT_ID_NUM_RE.search(q))
-            or any(bool(v) for v in (ids_map or {}).values())
+        len(rare_kws) >= 2
+        or bool(_RST_ID_RE.search(q))
+        or bool(_DOI_RE.search(q))
+        or bool(_ISSN_RE.search(q))
+        or bool(_PATENT_REG_NO_RE.search(q))
+        or bool(_PJT_ID_NUM_RE.search(q))
+        or bool(_PJT_NO_LABEL_RE.search(q))
+        or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
@@ -936,7 +953,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     org_role = extract_org_role(q)
     years = extract_years(q)
 
-    has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id"))
+    has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
     has_people = bool(people_terms) or _has_any_cue(tl, PEOPLE_CUES) or bool(ids_map.get("person_no"))
     has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
@@ -980,7 +997,7 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
         else:
             action = "relation"
     else:
-        exact_id = bool(ids_map.get("pjt_id") or ids_map.get("rst_id") or ids_map.get("doi") or ids_map.get("issn") or ids_map.get("patent_reg_no") or ids_map.get("biz_no"))
+        exact_id = bool(ids_map.get("pjt_id") or ids_map.get("pjt_no") or ids_map.get("rst_id") or ids_map.get("doi") or ids_map.get("issn") or ids_map.get("patent_reg_no") or ids_map.get("biz_no"))
         if exact_id:
             action = "id_exact"
         elif is_id_query:

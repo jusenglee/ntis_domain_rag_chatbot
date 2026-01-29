@@ -53,6 +53,14 @@ class QueryIntentRelationTests(unittest.TestCase):
         self.assertEqual(extract_org_terms_intent(q, kws), [])
         self.assertEqual(extract_org_terms_filters(q, kws), [])
 
+    def test_org_cues_include_business_registration_lookup(self) -> None:
+        q = "사업자등록번호로 기관 조회"
+        kws = q.split()
+        intent = classify_query(q, kws)
+
+        self.assertEqual(intent.base_route, "org")
+        self.assertEqual(intent.action, "list")
+
 
 if __name__ == "__main__":
     unittest.main()
