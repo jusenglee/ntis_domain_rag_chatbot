@@ -1,4 +1,7 @@
+import os
 import unittest
+
+os.environ.setdefault("QUERY_INTENT_USE_LLM", "0")
 
 from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO
 from rag_parts.filters import extract_org_terms as extract_org_terms_filters

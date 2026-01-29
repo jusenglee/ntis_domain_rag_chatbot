@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+import json
+import logging
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
 from .constants import (
     RARE_TOKEN_RE,
@@ -35,6 +38,10 @@ from .constants import (
     TAG_RI_ORGSM_INFO,
     TAG_RI_ORGSM_RES,
 )
+from settings import MAX_TOKENS
+from triton_client import triton_infer
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------
 # Regex
@@ -155,6 +162,21 @@ def _is_rare_token(tok: str) -> bool:
 # -----------------------------
 # Cue lists
 # -----------------------------
+LLM_PLANNER_MODEL = os.getenv("QUERY_INTENT_LLM_MODEL", "gpt_oss_0")
+LLM_PLANNER_MAX_TOKENS = int(os.getenv("QUERY_INTENT_LLM_MAX_TOKENS", "1024"))
+LLM_PLANNER_MAX_LIMIT = int(os.getenv("QUERY_INTENT_MAX_LIMIT", "20"))
+LLM_PLANNER_MAX_RETRIEVAL_QUERY = int(os.getenv("QUERY_INTENT_MAX_RETRIEVAL_QUERY", "120"))
+LLM_PLANNER_MIN_CONF = float(os.getenv("QUERY_INTENT_MIN_CONF", "0.4"))
+LLM_PLANNER_ENABLED = os.getenv("QUERY_INTENT_USE_LLM", "1").strip().lower() not in ("0", "false", "no")
+
+CHEAP_GREETING_CUES = [
+    "안녕", "안녕하세요", "hello", "hi", "반가워", "문의드립니다", "질문이요",
+]
+CHEAP_SYSTEM_CUES = [
+    "로그인", "비밀번호", "아이디", "인증", "권한", "승인",
+    "오류", "에러", "실패", "안돼", "안되", "안됨", "안됩니다", "접속", "접속불가",
+]
+
 SUPPORT_STRONG_CUES = [
     "회원가입", "가입", "로그인", "비밀번호", "아이디", "인증", "재설정", "변경", "탈퇴", "권한", "승인",
     "오류", "에러", "실패", "안돼", "안되", "안됨", "안됩니다", "접속", "접속불가", "권한없음", "access denied", "forbidden",
@@ -708,6 +730,11 @@ class QueryIntent:
     wants_count: bool = False
     wants_list: bool = False
     wants_detail: bool = False
+    # planner meta
+    categories: List[str] = field(default_factory=list)
+    planner_limit: Optional[int] = None
+    retrieval_query: Optional[str] = None
+    planner_confidence: Optional[float] = None
 
     def debug_dict(self) -> Dict[str, object]:
         return {
@@ -731,6 +758,10 @@ class QueryIntent:
             "wants_count": self.wants_count,
             "wants_list": self.wants_list,
             "wants_detail": self.wants_detail,
+            "categories": self.categories,
+            "planner_limit": self.planner_limit,
+            "retrieval_query": self.retrieval_query,
+            "planner_confidence": self.planner_confidence,
         }
 
 def normalize_categories(cat) -> list[str]:
@@ -761,6 +792,185 @@ def pick_domain_hint_from_categories(cats: list[str]) -> str | None:
     if "support" in cats:
         return "support"
     return None
+
+
+def _fallback_categories_for_route(base_route: str) -> List[str]:
+    if base_route == "project":
+        return ["project"]
+    if base_route == "perf":
+        return ["performance"]
+    if base_route == "people":
+        return ["researcher"]
+    if base_route == "org":
+        return ["organization"]
+    if base_route == "support":
+        return ["qna"]
+    return ["etc"]
+
+
+def _cheap_precheck(q: str) -> Optional[str]:
+    t = (q or "").strip().lower()
+    if not t:
+        return "empty"
+    if any(c in t for c in CHEAP_GREETING_CUES):
+        return "greeting"
+    if len(t) <= 2 or (len(t) <= 5 and len(t.split()) <= 1):
+        return "too_short"
+    if any(c in t for c in CHEAP_SYSTEM_CUES):
+        return "system"
+    return None
+
+
+def _extract_json(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("JSON not found")
+    return text[start:end + 1]
+
+
+def _normalize_str_list(values: Any) -> List[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    out: List[str] = []
+    seen: set[str] = set()
+    for v in values:
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _parse_relation(value: Any) -> Optional[Tuple[str, str]]:
+    if not value:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (str(value[0]).strip().lower(), str(value[1]).strip().lower())
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if "_" in text:
+        parts = [p.strip() for p in text.split("_") if p.strip()]
+        if len(parts) == 2:
+            return (parts[0], parts[1])
+    if ">" in text:
+        parts = [p.strip() for p in text.split(">") if p.strip()]
+        if len(parts) == 2:
+            return (parts[0], parts[1])
+    return None
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_tag_filters(values: Any, allowed: set[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for v in _normalize_str_list(values):
+        if v in allowed and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+def _plan_from_hint(hint: Any) -> Dict[str, Any]:
+    if hint is None:
+        return {}
+    def _get_attr(obj: Any, name: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    plan: Dict[str, Any] = {
+        "category": _get_attr(hint, "category") or _get_attr(hint, "categories"),
+        "base_route": _get_attr(hint, "head"),
+        "relation": _get_attr(hint, "relation"),
+        "intent": _get_attr(hint, "intent"),
+        "action": _get_attr(hint, "action"),
+        "people_terms": _get_attr(hint, "people_terms"),
+        "org_terms": _get_attr(hint, "organizations") or _get_attr(hint, "org_terms"),
+        "org_role": _get_attr(hint, "org_role"),
+        "years": _get_attr(hint, "years"),
+        "project_tag_filters": _get_attr(hint, "project_tag_filters"),
+        "perf_tag_filters": _get_attr(hint, "perf_tag_filters"),
+        "wants_count": _get_attr(hint, "wants_count"),
+        "wants_list": _get_attr(hint, "wants_list"),
+        "wants_detail": _get_attr(hint, "wants_detail"),
+        "limit": _get_attr(hint, "limit"),
+        "retrieval_query": _get_attr(hint, "retrieval_query"),
+        "confidence": _get_attr(hint, "confidence"),
+    }
+    return plan
+
+
+def _plan_with_llm(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, domain_hint: Optional[str]) -> Dict[str, Any]:
+    prompt = (
+        "당신은 R&D 질의 분석용 LLM Planner입니다.\n"
+        "목표: 질문을 검색 플랜(JSON)으로 변환합니다.\n"
+        "규칙:\n"
+        "1) 출력은 JSON 객체만.\n"
+        "1-1) IDs(과제번호/DOI/ISSN/특허등록번호 등)는 ids_map을 그대로 참고하고, 새로 생성/복원하지 않습니다.\n"
+        "2) base_route는 support|project|perf|people|org 중 하나.\n"
+        "3) relation은 project_perf|project_people|project_org|people_project|people_perf|org_project|org_perf|perf_project|perf_people|perf_org 또는 null.\n"
+        "4) intent는 support|id|filter|topic|content 중 하나.\n"
+        "5) action은 support|id_exact|id_fuzzy|list|stats|topic|detail|content|relation 중 하나.\n"
+        "6) tag_filters는 아래 허용 목록 내에서만 선택:\n"
+        f"   - project_tag_filters: {sorted(PROJECT_TAGS)}\n"
+        f"   - perf_tag_filters: {sorted(PERF_TAGS)}\n"
+        "7) category는 project|performance|researcher|qna|etc 중에서 선택(복수 가능).\n"
+        "8) retrieval_query는 핵심 키워드 5개 이내, 최대 120자.\n"
+        "9) limit는 1~20 범위에서만 출력.\n"
+        "\n"
+        "[입력]\n"
+        f"- question: {q}\n"
+        f"- keywords: {kws}\n"
+        f"- ids_map: {ids_map}\n"
+        f"- domain_hint: {domain_hint}\n"
+        "\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "category": ["project"],\n'
+        '  "base_route": "project",\n'
+        '  "relation": "project_perf",\n'
+        '  "intent": "filter",\n'
+        '  "action": "list",\n'
+        '  "people_terms": [],\n'
+        '  "org_terms": [],\n'
+        '  "org_role": null,\n'
+        '  "years": [],\n'
+        '  "project_tag_filters": [],\n'
+        '  "perf_tag_filters": [],\n'
+        '  "wants_count": false,\n'
+        '  "wants_list": false,\n'
+        '  "wants_detail": false,\n'
+        f'  "limit": {LLM_PLANNER_MAX_LIMIT},\n'
+        '  "retrieval_query": "",\n'
+        '  "confidence": 0.0\n'
+        "}\n"
+    )
+
+    try:
+        response = triton_infer(
+            LLM_PLANNER_MODEL,
+            prompt,
+            stream=False,
+            max_tokens=min(LLM_PLANNER_MAX_TOKENS, MAX_TOKENS),
+        )
+        payload = _extract_json(response)
+        return json.loads(payload)
+    except Exception as exc:
+        logger.warning("LLM planner failed: %s", exc)
+        return {}
 
 
 @dataclass(frozen=True)
@@ -893,11 +1103,17 @@ def relation_target_collections(relation: Optional[Tuple[str, str]]) -> List[str
     return route.target_collections() if route else []
 
 
-def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None) -> QueryIntent:
+def _classify_query_heuristic(
+    q: str,
+    kws: List[str],
+    *,
+    domain_hint: Optional[str] = None,
+    ids_map: Optional[Dict[str, List[str]]] = None,
+) -> QueryIntent:
     q = (q or "").strip()
     tl = q.lower()
 
-    ids_map = extract_id_candidates(q, kws)
+    ids_map = ids_map or extract_id_candidates(q, kws)
 
     # S1: rare/id/long
     rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
@@ -916,7 +1132,6 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
     # entities
-    # 사람명은 server3의 LLM 분석(Researchers) 결과를 신뢰한다.
     people_terms: List[str] = []
     gender_terms = extract_gender_terms(q, kws)
     org_terms = extract_org_terms(q, kws)
@@ -1006,4 +1221,174 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+    )
+
+
+def classify_query(
+    q: str,
+    kws: List[str],
+    *,
+    domain_hint: Optional[str] = None,
+    hint: Optional[Any] = None,
+) -> QueryIntent:
+    q = (q or "").strip()
+    tl = q.lower()
+
+    ids_map = extract_id_candidates(q, kws)
+    ids_flat = flatten_ids(ids_map)
+
+    precheck = _cheap_precheck(q)
+    if precheck:
+        return QueryIntent(
+            base_route="support",
+            relation=None,
+            intent="support",
+            action="support",
+            is_id_query=bool(ids_flat),
+            long_query=(len(q.split()) >= 12) or (len(q) >= 40),
+            rare_ratio=0.0,
+            ids_map=ids_map,
+            ids_flat=ids_flat,
+            categories=["qna"],
+            planner_confidence=0.0,
+        )
+
+    plan = _plan_from_hint(hint)
+    if not plan and LLM_PLANNER_ENABLED:
+        plan = _plan_with_llm(q, kws, ids_map, domain_hint=domain_hint)
+
+    if not plan:
+        return _classify_query_heuristic(q, kws, domain_hint=domain_hint, ids_map=ids_map)
+
+    categories = normalize_categories(plan.get("category") or plan.get("categories"))
+    valid_categories = {
+        "project",
+        "performance",
+        "researcher",
+        "qna",
+        "etc",
+        "org",
+        "organization",
+        "support",
+    }
+    categories = [c for c in categories if c in valid_categories]
+    confidence = float(plan.get("confidence") or 0.0)
+    if confidence < LLM_PLANNER_MIN_CONF and LLM_PLANNER_ENABLED:
+        logger.info("LLM planner confidence too low: %.2f", confidence)
+
+    base_route = str(plan.get("base_route") or plan.get("head") or "").strip().lower()
+    if base_route not in ("support", "project", "perf", "people", "org"):
+        base_route = pick_domain_hint_from_categories(categories) or (domain_hint or "")
+    if base_route not in ("support", "project", "perf", "people", "org"):
+        base_route = pick_base_route(q, kws, ids_map, domain_hint=domain_hint)
+
+    if not categories:
+        categories = _fallback_categories_for_route(base_route)
+
+    relation = _parse_relation(plan.get("relation"))
+    if relation not in RELATION_ROUTE_TABLES:
+        relation = None
+
+    intent = str(plan.get("intent") or "").strip().lower()
+    if intent not in ("support", "id", "filter", "topic", "content"):
+        intent = pick_structured_intent(base_route, q, is_id_query=bool(ids_flat))
+
+    wants_count = bool(plan.get("wants_count", False))
+    wants_list = bool(plan.get("wants_list", False))
+    wants_detail = bool(plan.get("wants_detail", False))
+
+    action = str(plan.get("action") or "").strip().lower()
+    if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
+        if base_route == "support":
+            action = "support"
+        elif relation is not None:
+            if wants_count and not wants_list:
+                action = "stats"
+            elif wants_list:
+                action = "list"
+            elif wants_detail:
+                action = "detail"
+            else:
+                action = "relation"
+        else:
+            exact_id = bool(
+                ids_map.get("pjt_id")
+                or ids_map.get("pjt_no")
+                or ids_map.get("rst_id")
+                or ids_map.get("doi")
+                or ids_map.get("issn")
+                or ids_map.get("patent_reg_no")
+                or ids_map.get("biz_no")
+            )
+            if exact_id:
+                action = "id_exact"
+            elif ids_flat:
+                action = "id_fuzzy"
+            elif wants_count:
+                action = "stats"
+            elif wants_list or intent == "filter":
+                action = "list"
+            elif intent == "topic":
+                action = "topic"
+            elif wants_detail:
+                action = "detail"
+            else:
+                action = "content"
+
+    people_terms = _normalize_str_list(plan.get("people_terms") or plan.get("researchers"))
+    gender_terms = _normalize_str_list(plan.get("gender_terms"))
+    org_terms = _normalize_str_list(plan.get("org_terms") or plan.get("organizations"))
+    org_role = str(plan.get("org_role") or "").strip().lower() or None
+    years = _normalize_str_list(plan.get("years"))
+
+    if not gender_terms:
+        gender_terms = extract_gender_terms(q, kws)
+    if not org_terms:
+        org_terms = extract_org_terms(q, kws)
+    if not org_role:
+        org_role = extract_org_role(q)
+    if not years:
+        years = extract_years(q)
+
+    project_tag_filters = _normalize_tag_filters(plan.get("project_tag_filters"), PROJECT_TAGS)
+    perf_tag_filters = _normalize_tag_filters(plan.get("perf_tag_filters"), PERF_TAGS)
+    if not project_tag_filters and base_route in ("project", "people", "org"):
+        project_tag_filters = pick_project_tag_filters(q)
+    if not perf_tag_filters and base_route in ("perf", "project"):
+        perf_tag_filters = pick_perf_tag_filters(q)
+
+    limit = _coerce_int(plan.get("limit"), LLM_PLANNER_MAX_LIMIT)
+    limit = max(1, min(limit, LLM_PLANNER_MAX_LIMIT))
+    retrieval_query = str(plan.get("retrieval_query") or "").strip()
+    if retrieval_query:
+        retrieval_query = retrieval_query[:LLM_PLANNER_MAX_RETRIEVAL_QUERY]
+
+    rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
+    rare_ratio = len(rare_kws) / max(1, len(kws or []))
+
+    return QueryIntent(
+        base_route=base_route,
+        relation=relation,
+        intent=intent,
+        action=action,
+        is_id_query=bool(ids_flat),
+        long_query=(len(q.split()) >= 12) or (len(q) >= 40),
+        rare_ratio=float(rare_ratio),
+        people_terms=people_terms,
+        gender_terms=gender_terms,
+        org_terms=org_terms,
+        org_role=org_role,
+        years=years,
+        ids_map=ids_map,
+        ids_flat=ids_flat,
+        project_tag_filters=project_tag_filters,
+        perf_tag_filters=perf_tag_filters,
+        tag_filters=list(dict.fromkeys([*project_tag_filters, *perf_tag_filters])),
+        wants_count=wants_count,
+        wants_list=wants_list,
+        wants_detail=wants_detail,
+        categories=categories,
+        planner_limit=limit,
+        retrieval_query=retrieval_query or None,
+        planner_confidence=confidence if plan else None,
     )
