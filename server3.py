@@ -105,6 +105,11 @@ class QuestionAnalysis(BaseModel):
     related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
     researchers: list[Researcher] = Field(default_factory=list)
     organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
+    mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
+    head: str | None = Field(default=None, description="project | perf | people | org | support")
+    relation: str | None = Field(default=None, description="project_perf | people_project 등")
+    ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
+    filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
     history_summary: str = Field(description="대화 이력 기반 질문 요약")
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
@@ -292,6 +297,11 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "3. related_docs: QuestionType.FOLLOW_UP 인 경우 관련된 출처의 번호 배열 \n"
         "4. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
         "4-1. organizations: 질문에서 특정 기관이 식별되는 경우만 포함\n"
+        "4-2. mode: SEARCH | LOOKUP | JOIN\n"
+        "4-3. head: project | perf | people | org | support\n"
+        "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
+        "4-5. ids_map: {pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...}\n"
+        "4-6. filters: {year_from, year_to, org_name, researcher_name, tag_filters, ...}\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
         "7. retrieval_query:\n"
@@ -325,6 +335,11 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
             f"RelatedDocs: {result.related_docs}\n"
             f"Researchers: {result.researchers}\n"
             f"Organizations: {result.organizations}\n"
+            f"Mode: {result.mode}\n"
+            f"Head: {result.head}\n"
+            f"Relation: {result.relation}\n"
+            f"IdsMap: {result.ids_map}\n"
+            f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -342,6 +357,11 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
                 related_docs = [],
                 researchers=[],
                 organizations=[],
+                mode=None,
+                head=None,
+                relation=None,
+                ids_map={},
+                filters={},
                 limit=20,
                 history_summary=state.messages[-1].content,
                 retrieval_query=state.messages[-1].content[:120],
@@ -506,6 +526,11 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                 {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
             ] if qa else [],
             "organizations": list(qa.organizations or []) if qa else [],
+            "mode": (qa.mode if qa else None),
+            "head": (qa.head if qa else None),
+            "relation": (qa.relation if qa else None),
+            "ids_map": dict(qa.ids_map or {}) if qa else {},
+            "filters": dict(qa.filters or {}) if qa else {},
             "limit": int(search_num),
             "history_summary": (qa.history_summary if qa else ""),
             "retrieval_query": query,

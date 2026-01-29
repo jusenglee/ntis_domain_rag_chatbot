@@ -1118,6 +1118,80 @@ def _run_rag_with_vectors(
         hint_org_terms=hint_org_terms,
         hint_org_role=hint_org_role,
     )
+
+    def _normalize_hint_terms(values: Any) -> List[str]:
+        if values is None:
+            return []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, (list, tuple, set)):
+            values = [values]
+        out: List[str] = []
+        seen: set[str] = set()
+        for v in values:
+            s = str(v).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+        return out
+
+    def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, List[str]] = {}
+        for key, values in raw.items():
+            norm = _normalize_hint_terms(values)
+            if norm:
+                out[str(key)] = norm
+        return out
+
+    def _parse_relation_hint(value: Any) -> Optional[Tuple[str, str]]:
+        if not value:
+            return None
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return (str(value[0]).strip().lower(), str(value[1]).strip().lower())
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if "_" in text:
+            parts = [p.strip() for p in text.split("_") if p.strip()]
+            if len(parts) == 2:
+                return (parts[0], parts[1])
+        return None
+
+    hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
+    hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
+    hint_relation = _parse_relation_hint(_get_attr(qa, "relation", None))
+    hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
+    hint_filters = _get_attr(qa, "filters", None) or {}
+
+    if hint_head in ("project", "perf", "people", "org", "support"):
+        it.base_route = hint_head
+    if hint_relation:
+        it.relation = hint_relation
+    if hint_ids_map:
+        merged_ids = dict(it.ids_map or {})
+        for key, values in hint_ids_map.items():
+            merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
+        it.ids_map = merged_ids
+    if isinstance(hint_filters, dict):
+        org_terms_hint = _normalize_hint_terms(hint_filters.get("org_name") or hint_filters.get("org"))
+        if org_terms_hint:
+            it.org_terms = org_terms_hint
+        people_terms_hint = _normalize_hint_terms(
+            hint_filters.get("researcher_name") or hint_filters.get("people_name")
+        )
+        if people_terms_hint:
+            it.people_terms = people_terms_hint
+        year_terms_hint = _normalize_hint_terms(
+            [hint_filters.get("year_from"), hint_filters.get("year_to")]
+        )
+        if year_terms_hint:
+            it.years = year_terms_hint
+        tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
+        if tag_filters_hint:
+            it.tag_filters = tag_filters_hint
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1296,6 +1370,8 @@ def _run_rag_with_vectors(
 
     # plan
     plan = _build_plan(it)
+    if hint_mode in ("search", "lookup", "join"):
+        plan.mode = hint_mode
     if hinted_cols:
         plan.target_collections = hinted_cols
 
