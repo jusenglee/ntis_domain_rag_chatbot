@@ -23,32 +23,32 @@ class TritonChatModel(BaseChatModel):
         for chunk in gen:
             if chunk:
                 full_text += chunk
-        
+
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=full_text))])
 
     async def _astream(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
         """스트리밍 지원"""
         prompt = self._format_messages(messages)
-        
+
         # Triton generator를 비동기 루프에서 실행 (block 방지)
         import asyncio
         loop = asyncio.get_running_loop()
-        
+
         # stream=True
         gen = triton_infer(self.model_name, prompt, stream=True)
-        
+
         try:
             while True:
                 # next(gen)을 스레드 풀에서 실행
                 chunk = await loop.run_in_executor(None, next, gen, None)
                 if chunk is None:
                     break
-                
+
                 text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="ignore")
                 if text:
                     yield ChatGenerationChunk(message=AIMessageChunk(content=text))
         finally:
-            try: gen.close() 
+            try: gen.close()
             except: pass
 
     def _format_messages(self, messages: List[BaseMessage]) -> str:
@@ -60,7 +60,7 @@ class TritonChatModel(BaseChatModel):
             if isinstance(m, SystemMessage): role = "system"
             elif isinstance(m, AIMessage): role = "assistant"
             chat_format.append({"role": role, "content": m.content})
-            
+
         try:
             return tokenizer.apply_chat_template(chat_format, tokenize=False, add_generation_prompt=True)
         except:

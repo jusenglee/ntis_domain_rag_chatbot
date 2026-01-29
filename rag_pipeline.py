@@ -84,7 +84,7 @@ except Exception:
 # =====================================================================
 
 def _rag_debug_on() -> bool:
-    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in ("1", "true", "yes", "y")
+    return str(os.getenv("RAG_DEBUG", "1")).strip().lower() in ("1", "true", "yes", "y")
 
 def _rag_color_on() -> bool:
     # 파일 로깅이면 ANSI가 지저분할 수 있으니 기본 OFF
@@ -539,9 +539,9 @@ def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
         return meta_title
     pjt_id = _to_text(pl.get("pjt_id") or meta.get("pjt_id") or meta.get("pjt_no") or "")
     if meta_title and (
-        title.isdigit()
-        or title.lower().startswith("ntis:")
-        or (pjt_id and title == pjt_id)
+            title.isdigit()
+            or title.lower().startswith("ntis:")
+            or (pjt_id and title == pjt_id)
     ):
         return meta_title
     return title or meta_title
@@ -569,19 +569,19 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
 
     meta_kv = []
     for k in (
-        "pjt_id",
-        "pjt_no",
-        "pjt_prfrm_org_nm",
-        "kor_pjt_nm",
-        "eng_pjt_nm",
-        "rndco_tot_amt",
-        "rsch_goal_abstract",
-        "rsch_abstract",
-        "kor_kywd",
-        "eng_kywd",
-        "tot_rsch_start_dt",
-        "tot_rsch_end_dt",
-        "stan_yr",
+            "pjt_id",
+            "pjt_no",
+            "pjt_prfrm_org_nm",
+            "kor_pjt_nm",
+            "eng_pjt_nm",
+            "rndco_tot_amt",
+            "rsch_goal_abstract",
+            "rsch_abstract",
+            "kor_kywd",
+            "eng_kywd",
+            "tot_rsch_start_dt",
+            "tot_rsch_end_dt",
+            "stan_yr",
     ):
         if k in meta and meta.get(k) not in (None, ""):
             meta_kv.append(f"{k}:{_to_text(meta.get(k))}")

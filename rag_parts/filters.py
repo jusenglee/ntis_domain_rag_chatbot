@@ -173,11 +173,11 @@ def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     return qmodels.Filter(must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(tags))])
 
 def _build_prtcp_mp_nested_filter(
-    *,
-    people_terms: List[str],
-    person_ids: List[str],
-    gender_terms: List[str],
-    org_terms: Optional[List[str]] = None,
+        *,
+        people_terms: List[str],
+        person_ids: List[str],
+        gender_terms: List[str],
+        org_terms: Optional[List[str]] = None,
 ) -> Optional[Any]:
     if qmodels is None:
         return None

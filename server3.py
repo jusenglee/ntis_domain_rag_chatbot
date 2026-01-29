@@ -33,6 +33,8 @@ from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 
+from rag_mapper.rag_mapper import RagMapper, MappingError
+
 # --- Logging Setup ---
 def log_section(title, content):
     header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
@@ -121,10 +123,10 @@ class AgentState(BaseModel):
 
     # Redis 데이터
     chat_history: List[BaseMessage] = Field(default_factory=list)
-    prev_context: List[Document] = Field(default_factory=list)
+    prev_context: List[Dict] = Field(default_factory=list)
 
     # 처리 데이터
-    context: List[Document] = Field(default_factory=list)
+    context: List[Dict] = Field(default_factory=list)
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -134,7 +136,6 @@ class AgentState(BaseModel):
     conversation_id: str = ""
 
     question: str = ""
-    target_collections: Optional[List[str]] = None
 
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
@@ -179,7 +180,7 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     key_ctx = f"conversation:{cid}:last_context"
 
     loaded_history = []
-    loaded_prev_context = []
+    ctx_list = []
 
     if redis_client:
         try:
@@ -193,21 +194,17 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
             raw_ctx = await redis_client.get(key_ctx)
             if raw_ctx:
                 ctx_list = json.loads(raw_ctx)
-                for d in ctx_list:
-                    loaded_prev_context.append(
-                        Document(page_content=d["page_content"], metadata=d["metadata"])
-                    )
         except Exception as e:
             logger.error(f"Redis Load Error: {e}")
 
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
-                f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(loaded_prev_context)} docs")
+                f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question" : state.messages[-1].content,
         "chat_history": current_full_history,
-        "prev_context": loaded_prev_context
+        "prev_context": ctx_list
     }
 
 # --- Node 2: Rule-based Precheck ---
@@ -337,8 +334,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    title_only = len(state.context) > 2
-    prev_context_str = refine_documents_rule_based(state.prev_context, title_only=False)
+    prev_context_str = refine_documents_rule_based(state.prev_context)
 
     system_prompt = (
         "당신은 지식 충분성 판단 전문가입니다.\n"
@@ -408,7 +404,7 @@ class CustomRAGRetriever(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def retrieve(self, query: str) -> List[Document]:
+    def retrieve(self, query: str) -> List[Dict]:
         """동기 검색 함수"""
         res_map = run_rag_ab_compare(query=query, model_name=self.model_name, hint=self.hint)
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
@@ -418,10 +414,7 @@ class CustomRAGRetriever(BaseModel):
         if not hits:
             context_str = getattr(res_m, "context", "")
             if context_str.strip():
-                return [Document(
-                    page_content=context_str,
-                    metadata={"title": "Raw Context", "source": "fallback"}
-                )]
+                return [{"title": context_str}]
             return []
 
         documents = []
@@ -436,26 +429,14 @@ class CustomRAGRetriever(BaseModel):
                 hit_data = getattr(hit, "__dict__", {})
                 score = 0.0
 
-            content = (
-                hit_data.get("content_text")
-                or hit_data.get("content1")
-                or hit_data.get("content2")
-                or ""
-            )
+            rag_data = {
+                "tag" : hit_data.get("tag"),
+                "meta_basic" : hit_data.get("meta_basic"),
+                "meta_detail" : hit_data.get("meta_detail"),
+                "prtcp_mp" : hit_data.get("prtcp_mp", [])
+            }
 
-            metadata = hit_data.get("meta", {})
-            ref = hit_data.get("ref", {})
-
-            metadata.update({
-                "ref" : {
-                    "title" : ref.get("title", hit_data.get("title")),
-                    "tag" : hit_data.get("tag"),
-                    "source_pk" : ref.get("source_pk", metadata.get("source_pk")),
-                    "score": score
-                }
-            })
-
-            documents.append(Document(page_content=content, metadata=metadata))
+            documents.append(rag_data)
 
         return documents
 
@@ -480,8 +461,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             "limit": int(search_num),
             "history_summary": (qa.history_summary if qa else ""),
             "retrieval_query": query,
-            "confidence": float(qa.confidence if qa else 0.0),
-            "target_collections": list(state.target_collections or []),
+            "confidence": float(qa.confidence if qa else 0.0)
         }
 
         retriever = CustomRAGRetriever(
@@ -496,19 +476,14 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             func=retriever.retrieve
         )
 
-        docs = await asyncio.to_thread(rag_tool.func, query)
+        # docs = await asyncio.to_thread(rag_tool.func, query)
+        from sample_data import SAMPLE_DATA
+        docs = SAMPLE_DATA
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
-            meta = doc.metadata
-            ref = meta.get("ref") or {}
-            title = ref.get("title") or meta.get("kor_pjt_nm") or meta.get("eng_pjt_nm") or "문서"
-            score = ref.get("score")
-            content = doc.page_content.replace("\n", " ")[:100]
-            score_str = f"{score:.4f}" if isinstance(score, (int, float)) else "N/A"
             doc_previews.append(
-                f"[{i}] 📌 {title} | Score: {score_str}\n"
-                f"      📝 {content}..."
+                json.dumps(doc, ensure_ascii=False, indent=2)
             )
 
         log_section("RAG SEARCH",
@@ -551,7 +526,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    context_text = refine_documents_rule_based(state.context, title_only=False)
+    context_text = refine_documents_rule_based(state.context)
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
@@ -630,13 +605,9 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
         )
 
         if state.context:
-            serialized_docs = [
-                {"page_content": d.page_content, "metadata": d.metadata}
-                for d in state.context
-            ]
             await redis_client.set(
                 f"conversation:{cid}:last_context",
-                json.dumps(serialized_docs, ensure_ascii=False),
+                json.dumps(state.context, ensure_ascii=False),
                 ex=REDIS_TTL
             )
 
@@ -746,31 +717,16 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], title_only: bool = False) -> str:
+def refine_documents_rule_based(docs: List[Document]) -> str:
     """문서 정제 유틸"""
     context_chunks: List[str] = []
 
     for idx, doc in enumerate(docs, start=1):
-        metadata = doc.metadata or {}
-        ref = metadata.get("ref") or {}
-        title = ref.get("title", "").strip()
-        if title_only:
-            if not title:
-                continue
-            context_chunks.append(f"## 문서 {idx}. {title}\n")
-            continue
 
-        # 기존 full mode
-        content = (doc.page_content or "").strip()
+        mapped_doc = RagMapper.map(doc)
 
-        formatted_metadata = format_metadata(metadata)
-
-        refined_text = (
-            "내용:\n"
-            f"{content}\n\n"
-            "세부내용:\n"
-            f"{formatted_metadata}"
-        )
+        title = mapped_doc["title"]
+        refined_text = format_metadata(mapped_doc["meta_basic"])
 
         context_chunks.append(
             f"## 출처 {idx}. {title}\n"
@@ -784,9 +740,6 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
     lines = []
 
     for key, value in metadata.items():
-        ignore_keys = ['ref', 'source_pk', 'meta_raw', 'update_date', 'update_at', 'updated_at']
-        if key in ignore_keys:
-            continue
         if value is None:
             continue
 
@@ -798,6 +751,7 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
         lines.append(f"- {key}: {value}")
 
     return "\n".join(lines) if lines else "- 없음"
+
 
 def sanitize_llm_json(msg) -> str:
     text = msg.content
@@ -841,7 +795,6 @@ async def home(request: Request):
 class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
-    target_collections: Optional[List[str]] = None
 
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
@@ -852,8 +805,7 @@ async def query_stream(payload: QueryRequest):
 
     inputs = {
         "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)],
-        "target_collections": payload.target_collections,
+        "messages": [HumanMessage(content=question)]
     }
 
     graph = app.state.graph
@@ -900,19 +852,7 @@ async def query_stream(payload: QueryRequest):
 
             ref_docs = []
             for d in documents_used:
-                metadata = d.metadata or {}
-                ref = metadata.get("ref") or {}
-                title = ref.get("title", "")
-                ref_docs.append(
-                    {
-                        "tag": ref.get("tag", ""),
-                        "id": ref.get("source_pk", metadata.get("source_pk", "")),
-                        "title": title,
-                        "project": metadata.get("국문과제명", title),
-                        "researcher": metadata.get("인물명", ""),
-                        "institute": metadata.get("소속기관명", "")
-                    }
-                )
+                ref_docs.append(RagMapper.get_references(d))
             log_section("REF PUSH", f"coq: {conversation_id}{question}\n{ref_docs}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
@@ -939,8 +879,7 @@ async def query_debug(payload: QueryRequest):
 
     inputs = {
         "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)],
-        "target_collections": payload.target_collections,
+        "messages": [HumanMessage(content=question)]
     }
 
     graph = app.state.graph
@@ -988,4 +927,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8008)
+    uvicorn.run(app, host="0.0.0.0", port=8008, access_log=False)

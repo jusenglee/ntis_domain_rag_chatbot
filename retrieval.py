@@ -96,13 +96,27 @@ _PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()  
 # 후보 단계에 필요한 최소 키들(메타/본문 제외)
 _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_MIN_FIELDS",
-    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,cetegory,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,urls,systems"
+    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,urls,systems"
 ).split(",") if s.strip()]
 
 # 최종 컨텍스트용(필요하면 meta/content 포함)
 _PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_FULL_FIELDS",
-    "doc_id,tag,title_text,title,title1,title2,content_text,content1,content2,keyword_text,keyword1,keyword2,flat_text,category,cetegory,meta_basic,meta_detail,org_nm,org_name_norm,pjt_id,stan_yr,start_dt,end_dt,dt1,dt2,urls,systems"
+    "doc_id,"
+    "tag,"
+    "title_text,"
+    "title1,"
+    "title2,"
+    "content_text,"
+    "content1,"
+    "content2,"
+    "keyword_text,"
+    "keyword1,"
+    "keyword2,"
+    "flat_text,"
+    "category,"
+    "meta_basic,"
+    "meta_detail"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
