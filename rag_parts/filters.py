@@ -292,9 +292,12 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
         min_should_cls = getattr(qmodels, "MinShould", None)
         if min_should_cls is not None:
             try:
-                min_should_value = min_should_cls(min_should=1)
+                min_should_value = min_should_cls(conditions=should, min_count=1)
             except Exception:
-                min_should_value = min_should_cls(value=1)
+                try:
+                    min_should_value = min_should_cls(min_should=1)
+                except Exception:
+                    min_should_value = min_should_cls(value=1)
         else:
             min_should_value = {"min_should": 1}
         return qmodels.Filter(should=should, min_should=min_should_value)
