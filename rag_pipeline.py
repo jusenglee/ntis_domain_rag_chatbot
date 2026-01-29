@@ -797,6 +797,17 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     base_route = it.base_route
     rel = it.relation
 
+    if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
+        target_cols = relation_target_collections(rel)
+        return QueryPlan(
+            mode="lookup",
+            base_route=base_route,
+            action=action,
+            relation=rel,
+            target_collections=target_cols if target_cols else _default_target_collections(),
+            filters={},
+        )
+
     if rel:
         target_cols = relation_target_collections(rel)
         return QueryPlan(
@@ -1721,6 +1732,10 @@ def _run_rag_with_vectors(
             return perf_tag_filter
 
         # (선택) org_filter는 project 컬렉션에서만
+        if col == COL_PROJECT and relation == ("people", "project") and people_filter:
+            tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+            return _and_filter(tag_filter_local, people_filter)
+
         if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
             if org_role == "participant":
                 return participant_org_filter or org_filter

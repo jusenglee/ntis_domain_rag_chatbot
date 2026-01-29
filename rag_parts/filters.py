@@ -281,6 +281,16 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if not should:
         return None
 
+    filter_fields = None
+    for attr in ("model_fields", "__fields__"):
+        fields = getattr(qmodels.Filter, attr, None)
+        if isinstance(fields, dict):
+            filter_fields = fields
+            break
+
+    if filter_fields and "min_should" in filter_fields:
+        return qmodels.Filter(should=should, min_should=1)
+
     return qmodels.Filter(should=should)
 
 def and_filter(a: Any, b: Any) -> Any:
