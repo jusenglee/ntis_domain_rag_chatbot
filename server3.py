@@ -44,7 +44,7 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
-def setup_file_logging(log_path="logs/server_dev.log"):
+def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root = logging.getLogger()
@@ -279,9 +279,9 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "[QuestionType 정의]\n"
         "- DEFAULT: 기본\n"
         "- FOLLOW_UP: 다음 중 하나라도 만족하는 경우\n"
-        "  1. 이전 질문/응답에서 언급된 동일한 대상(과제, 연구자, 성과 등)을 명시적 또는 암시적으로 재지칭하는 경우\n"
-        "  2. 질문 자체는 단독으로 성립하더라도, 대화 이력에 동일 키워드(과제명, 연구자명, 기관명)가 존재하는 경우\n"
-        '  3. "설명", "상세", "자세히", "추가로", "관련", "그", "해당" 등의 후속 탐색 의도가 명확한 표현이 포함된 경우\n'
+        "  1. 질문의 핵심 대상이 이전 질문/응답에서 정의된 특정 엔트리(특정 과제, 특정 출처 번호, 특정 문서)에 종속되는 경우\n"
+        '  2. "그 과제", "해당 연구", "출처 N", "앞서 언급한" 등 이전 응답 없이는 지시 대상이 불명확한 표현이 포함된 경우\n'
+        "  3. 단, 새로운 목록 확장을 요청하는 질문은 FOLLOW_UP으로 분류하지 않는다.\n\n"
 
         "아래 형식의 JSON 객체만 출력하십시오.\n\n"
 
@@ -589,8 +589,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    logger.info(context_text)
-
     human_prompt = (
         f"[제공된 정보]\n{context_text or '없음'}\n\n"
         f"[질문 요약]\n{qa.history_summary}\n\n"
@@ -629,7 +627,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
-                f"coq: {state.conversation_id}{state.question}"
+                f"coq: {state.conversation_id}{state.question}\n"
                 f"Strategy: {ks.requires_new_knowledge}\n"
                 f"Gemma: {state.answer_gemma[:100]}...\n"
                 f"GPT: {state.answer_gpt[:100]}...")
@@ -1000,4 +998,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8007, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=8008, access_log=False)
