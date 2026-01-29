@@ -341,39 +341,8 @@ def extract_years(q: str) -> List[str]:
 
 
 def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 2) -> List[str]:
-    """질의에서 사람 이름(주로 한글 2~4자) 후보 추출."""
-    q = (q or "").strip()
-    if not q:
-        return []
-    cands: List[str] = []
-
-    for m in _NAME_LABEL_RE.finditer(q):
-        s = (m.group(1) or "").strip()
-        if s and not _is_stopword_people_term(s) and s not in cands:
-            cands.append(s)
-            if len(cands) >= max_terms:
-                return cands
-
-    for m in _NAME_NEAR_CUE_RE.finditer(q):
-        s = (m.group(1) or "").strip()
-        if s and not _is_stopword_people_term(s) and s not in cands:
-            cands.append(s)
-            if len(cands) >= max_terms:
-                return cands
-
-    # 키워드에 2~4자 한글이 있고, 질의에 people cue가 있으면 약하게 채택
-    tl = q.lower()
-    if _hit_count(tl, PEOPLE_CUES) > 0:
-        for kw in (kws or [])[:20]:
-            t = (kw or "").strip()
-            if t in PEOPLE_CUES or _is_stopword_people_term(t):
-                continue
-            if re.fullmatch(r"[가-힣]{2,4}", t) and (t not in cands):
-                cands.append(t)
-                if len(cands) >= max_terms:
-                    break
-
-    return cands[:max_terms]
+    """질의 기반 사람 후보 추출(Deprecated). 서버 분석(Researchers) 결과를 신뢰한다."""
+    return []
 
 
 def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
@@ -595,8 +564,8 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     has_perf_id = bool((ids_map or {}).get("doi") or (ids_map or {}).get("issn") or (ids_map or {}).get("rst_id") or (ids_map or {}).get("patent_reg_no"))
     has_people_id = bool((ids_map or {}).get("person_no"))
 
-    has_people = bool(people_terms) or has_people_id or _has_any_cue(tl, PEOPLE_CUES)
     has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES)
+    has_people = bool(people_terms) or has_people_id
 
     has_project = has_pjt_id or _has_any_cue(tl, PROJECT_CUES)
     has_perf = has_perf_id or _has_any_cue(tl, PERF_CUES)
@@ -947,7 +916,8 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
     # entities
-    people_terms = extract_people_terms(q, kws)
+    # 사람명은 server3의 LLM 분석(Researchers) 결과를 신뢰한다.
+    people_terms: List[str] = []
     gender_terms = extract_gender_terms(q, kws)
     org_terms = extract_org_terms(q, kws)
     org_role = extract_org_role(q)
@@ -955,8 +925,8 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
-    has_people = bool(people_terms) or _has_any_cue(tl, PEOPLE_CUES) or bool(ids_map.get("person_no"))
     has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
 
     base_route = pick_base_route(
         q, kws, ids_map,

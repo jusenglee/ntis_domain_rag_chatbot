@@ -16,8 +16,8 @@ class QueryIntentRelationTests(unittest.TestCase):
         kws = q.split()
         intent = classify_query(q, kws)
 
-        self.assertEqual(intent.base_route, "people")
-        self.assertEqual(intent.relation, ("people", "project"))
+        self.assertEqual(intent.base_route, "project")
+        self.assertEqual(intent.relation, ("project", "people"))
         self.assertEqual(intent.action, "relation")
         self.assertIn(TAG_PJT_INFO, intent.project_tag_filters)
 
@@ -44,7 +44,10 @@ class QueryIntentRelationTests(unittest.TestCase):
         self.assertEqual(route.hop2_col, COL_PERF)
         self.assertEqual(route.hop1_tag_filters, [TAG_PJT_INFO])
         self.assertIsNone(route.hop2_tag_filters)
-        self.assertEqual(relation_target_collections(intent.relation), [COL_PROJECT, COL_PERF])
+        self.assertEqual(
+            relation_target_collections(intent.relation),
+            list(dict.fromkeys([COL_PROJECT, COL_PERF])),
+        )
 
     def test_extract_org_terms_excludes_task_only_query(self) -> None:
         q = "과제"
@@ -60,6 +63,14 @@ class QueryIntentRelationTests(unittest.TestCase):
 
         self.assertEqual(intent.base_route, "org")
         self.assertEqual(intent.action, "list")
+
+    def test_org_name_with_researcher_suffix_does_not_trigger_people(self) -> None:
+        q = "농업생명과학연구원 과제 상세 정보"
+        kws = q.split()
+        intent = classify_query(q, kws)
+
+        self.assertNotEqual(intent.base_route, "people")
+        self.assertEqual(intent.people_terms, [])
 
 
 if __name__ == "__main__":
