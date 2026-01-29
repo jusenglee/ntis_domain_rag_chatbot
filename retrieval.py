@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from qdrant_client import QdrantClient
@@ -61,6 +62,169 @@ def _encode_sparse_query(text: str, *, model_name: str):
         return None
 
 
+def _get_qdrant_client_version() -> Optional[str]:
+    try:
+        return package_version("qdrant-client")
+    except PackageNotFoundError:
+        return None
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] qdrant-client version lookup failed: {e}")
+        return None
+
+
+def _parse_version_tuple(version_str: Optional[str]) -> Optional[Tuple[int, ...]]:
+    if not version_str:
+        return None
+    parts = re.split(r"[.+-]", version_str)
+    parsed: List[int] = []
+    for part in parts:
+        if part.isdigit():
+            parsed.append(int(part))
+        else:
+            break
+    return tuple(parsed) if parsed else None
+
+
+def _version_at_least(version_str: Optional[str], minimum: str) -> Optional[bool]:
+    parsed = _parse_version_tuple(version_str)
+    minimum_parsed = _parse_version_tuple(minimum)
+    if parsed is None or minimum_parsed is None:
+        return None
+    length = max(len(parsed), len(minimum_parsed))
+    parsed += (0,) * (length - len(parsed))
+    minimum_parsed += (0,) * (length - len(minimum_parsed))
+    return parsed >= minimum_parsed
+
+
+def _supports_named_sparse_vector() -> bool:
+    if not hasattr(models, "NamedSparseVector"):
+        return False
+    supported = _version_at_least(_get_qdrant_client_version(), "1.7.0")
+    if supported is False:
+        return False
+    return True
+
+
+def _is_named_sparse_vector_unsupported(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "namedsparsevector" in msg or "named sparse vector" in msg
+
+
+def _call_with_filter_fallback(func, kwargs: Dict[str, Any], query_filter: Any):
+    if query_filter is None:
+        return func(**kwargs)
+    try:
+        return func(**kwargs, query_filter=query_filter)
+    except TypeError:
+        return func(**kwargs, filter=query_filter)
+
+
+def _query_points_legacy(
+    client: Any,
+    *,
+    collection_name: str,
+    sparse_vector: models.SparseVector,
+    sparse_vector_name: str,
+    limit: int,
+    with_payload: Any,
+    query_filter: Any,
+):
+    base_kwargs = dict(
+        collection_name=collection_name,
+        query=sparse_vector,
+        limit=int(limit),
+        with_payload=with_payload,
+        with_vectors=False,
+        timeout=int(_DEFAULT_QDRANT_TIMEOUT),
+    )
+    try:
+        return _call_with_filter_fallback(
+            client.query_points,
+            {**base_kwargs, "using": str(sparse_vector_name)},
+            query_filter,
+        )
+    except TypeError:
+        return _call_with_filter_fallback(client.query_points, base_kwargs, query_filter)
+
+
+def _search_legacy(
+    client: Any,
+    *,
+    collection_name: str,
+    sparse_vector: models.SparseVector,
+    sparse_vector_name: str,
+    limit: int,
+    with_payload: Any,
+    query_filter: Any,
+):
+    base_kwargs = dict(
+        collection_name=collection_name,
+        query_vector=sparse_vector,
+        limit=int(limit),
+        with_payload=with_payload,
+        with_vectors=False,
+    )
+    try:
+        return _call_with_filter_fallback(
+            client.search,
+            {**base_kwargs, "vector_name": str(sparse_vector_name)},
+            query_filter,
+        )
+    except TypeError:
+        try:
+            return _call_with_filter_fallback(
+                client.search,
+                {**base_kwargs, "using": str(sparse_vector_name)},
+                query_filter,
+            )
+        except TypeError:
+            return _call_with_filter_fallback(client.search, base_kwargs, query_filter)
+
+
+def _qdrant_sparse_search_legacy(
+    client: Any,
+    *,
+    collection_name: str,
+    sparse_vector: models.SparseVector,
+    sparse_vector_name: str,
+    limit: int,
+    query_filter: Any,
+    with_payload: Any,
+):
+    if hasattr(client, "query_points"):
+        try:
+            res = _query_points_legacy(
+                client,
+                collection_name=collection_name,
+                sparse_vector=sparse_vector,
+                sparse_vector_name=sparse_vector_name,
+                limit=limit,
+                with_payload=with_payload,
+                query_filter=query_filter,
+            )
+            return list(getattr(res, "points", []) or [])
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[retrieval] client.query_points failed: {e}")
+            return None
+    if hasattr(client, "search"):
+        try:
+            res = _search_legacy(
+                client,
+                collection_name=collection_name,
+                sparse_vector=sparse_vector,
+                sparse_vector_name=sparse_vector_name,
+                limit=limit,
+                with_payload=with_payload,
+                query_filter=query_filter,
+            )
+            return list(res or [])
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[retrieval] client.search failed: {e}")
+            return None
+    logger.warning("[retrieval] sparse search not supported by client")
+    return None
+
+
 def _qdrant_sparse_search(
     client: Any,
     *,
@@ -79,36 +243,61 @@ def _qdrant_sparse_search(
     if sv is None:
         return []
 
-    qv = models.NamedSparseVector(
-        name=str(sparse_vector_name),
-        vector=sv,
-    )
-    logger.warning(
-        "[retrieval] sparse_search query_points args types: "
-        "using=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
-        sparse_vector_name, type(sparse_vector_name).__name__,
-        limit, type(limit).__name__,
-        _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
-        with_payload, type(with_payload).__name__,
-        qv,
-        type(query_filter).__name__,
-    )
-    # qdrant-client API differs by version: filter vs query_filter
-    try:
-        res = client.query_points(
-            collection_name=collection_name,
-            query=qv,
-            using=str(sparse_vector_name),
-            limit=int(limit),
-            with_payload=with_payload,
-            with_vectors=False,
-            query_filter=query_filter,
-            timeout=int(_DEFAULT_QDRANT_TIMEOUT),
+    if _supports_named_sparse_vector():
+        qv = models.NamedSparseVector(
+            name=str(sparse_vector_name),
+            vector=sv,
         )
-        return list(getattr(res, "points", []) or [])
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"[retrieval] client.search failed: {e}")
-        return None
+        logger.warning(
+            "[retrieval] sparse_search query_points args types: "
+            "using=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
+            sparse_vector_name, type(sparse_vector_name).__name__,
+            limit, type(limit).__name__,
+            _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
+            with_payload, type(with_payload).__name__,
+            qv,
+            type(query_filter).__name__,
+        )
+        # qdrant-client API differs by version: filter vs query_filter
+        try:
+            res = client.query_points(
+                collection_name=collection_name,
+                query=qv,
+                using=str(sparse_vector_name),
+                limit=int(limit),
+                with_payload=with_payload,
+                with_vectors=False,
+                query_filter=query_filter,
+                timeout=int(_DEFAULT_QDRANT_TIMEOUT),
+            )
+            return list(getattr(res, "points", []) or [])
+        except Exception as e:  # pragma: no cover
+            if _is_named_sparse_vector_unsupported(e):
+                logger.warning(
+                    "[retrieval] NamedSparseVector unsupported; falling back to legacy sparse query: %s",
+                    e,
+                )
+                return _qdrant_sparse_search_legacy(
+                    client,
+                    collection_name=collection_name,
+                    sparse_vector=sv,
+                    sparse_vector_name=str(sparse_vector_name),
+                    limit=limit,
+                    query_filter=query_filter,
+                    with_payload=with_payload,
+                )
+            logger.warning(f"[retrieval] client.query_points failed: {e}")
+            return None
+
+    return _qdrant_sparse_search_legacy(
+        client,
+        collection_name=collection_name,
+        sparse_vector=sv,
+        sparse_vector_name=str(sparse_vector_name),
+        limit=limit,
+        query_filter=query_filter,
+        with_payload=with_payload,
+    )
 
 def fetch_full_payloads(client: QdrantClient, collection_name: str, points):
     ids = [p.id for p in points if getattr(p, "id", None) is not None]
