@@ -538,6 +538,7 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
         or ""
     )
     keyword_text = _to_text(pl.get("keyword_text") or pl.get("keyword1") or pl.get("keyword2") or "")
+    category_text = _to_text(pl.get("category") or pl.get("cetegory") or "")
 
     meta_kv = []
     for k in (
@@ -560,7 +561,7 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
     if pl.get("org_nm"):
         meta_kv.append(f"org_nm:{_to_text(pl.get('org_nm'))}")
     if pl.get("category") or pl.get("cetegory"):
-        meta_kv.append(f"category:{_to_text(pl.get('category') or pl.get('cetegory'))}")
+        meta_kv.append(f"category:{category_text}")
     if keyword_text:
         meta_kv.append(f"keyword_text:{keyword_text}")
     meta_kv_s = _to_text("; ".join(meta_kv))[:800]
@@ -569,6 +570,8 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
         "title": title,
         "flat_text": flat_text[:2000],
         "content_text": content_text[:2000],
+        "keyword_text": keyword_text[:1200],
+        "category": category_text[:200],
         "meta_kv": meta_kv_s,
     }
 
@@ -578,10 +581,14 @@ def _count_term_hits(text: str, term: str) -> int:
     return text.lower().count(term.lower())
 
 def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
+    w = w or {}
     tb = _payload_text_bundle(p)
     w_title = float(w.get("title", 2.0))
     w_flat = float(w.get("flat_text", 0.6))
     w_content = float(w.get("content_text", 1.0))
+    w_keyword = float(w.get("keyword_text", 0.8))
+    w_category = float(w.get("category", 0.6))
+    w_meta = float(w.get("meta_kv", 0.4))
 
     sc = 0.0
     for kw in (kws or [])[:30]:
@@ -591,7 +598,9 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         sc += w_title * min(_count_term_hits(tb["title"], kw), 2)
         sc += w_flat * min(_count_term_hits(tb["flat_text"], kw), 4)
         sc += w_content * min(_count_term_hits(tb["content_text"], kw), 3)
-        sc += 0.4 * min(_count_term_hits(tb["meta_kv"], kw), 2)
+        sc += w_keyword * min(_count_term_hits(tb["keyword_text"], kw), 3)
+        sc += w_category * min(_count_term_hits(tb["category"], kw), 2)
+        sc += w_meta * min(_count_term_hits(tb["meta_kv"], kw), 2)
     return float(sc)
 
 def _flatten_ids_from_intent(it: Any) -> List[str]:
