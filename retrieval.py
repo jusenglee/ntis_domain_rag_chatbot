@@ -15,6 +15,7 @@ NTIS/일반 문서형 RAG 검색 모듈.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -110,9 +111,28 @@ def _qdrant_sparse_search(
         logger.warning(f"[retrieval] client.search failed: {e}")
         return None
 
+def _prefetch_supports_using() -> bool:
+    prefetch_cls = getattr(models, "Prefetch", None)
+    if prefetch_cls is None:
+        return False
+    for attr in ("model_fields", "__fields__"):
+        fields = getattr(prefetch_cls, attr, None)
+        if isinstance(fields, dict) and "using" in fields:
+            return True
+    try:
+        signature = inspect.signature(prefetch_cls)
+    except (TypeError, ValueError):
+        return False
+    return "using" in signature.parameters
+
+
 def _supports_qdrant_hybrid_query() -> bool:
-    required = ("Prefetch", "Query", "Fusion", "NamedVector", "NamedSparseVector")
-    return all(hasattr(models, name) for name in required)
+    required = ("Prefetch", "Query", "Fusion")
+    if not all(hasattr(models, name) for name in required):
+        return False
+    if _prefetch_supports_using():
+        return True
+    return all(hasattr(models, name) for name in ("NamedVector", "NamedSparseVector"))
 
 
 def _get_fusion_rrf() -> Any:
@@ -144,28 +164,84 @@ def _qdrant_hybrid_query_once(
     if fusion is None:
         return None
 
+    supports_using = _prefetch_supports_using()
+    supports_named_vector = hasattr(models, "NamedVector")
+    supports_named_sparse = hasattr(models, "NamedSparseVector")
+    logger.debug(
+        "[retrieval] hybrid prefetch support using=%s named_vector=%s named_sparse=%s",
+        supports_using,
+        supports_named_vector,
+        supports_named_sparse,
+    )
+
     prefetch = []
     for vec_name, emb in (emb_map or {}).items():
         v = embed_query(emb, query_text)
         if not v:
             continue
-        prefetch.append(
-            models.Prefetch(
-                query=models.NamedVector(name=str(vec_name), vector=v),
-                limit=int(top_k_dense),
+        if supports_using:
+            logger.debug(
+                "[retrieval] hybrid prefetch dense using path vec_name=%s",
+                vec_name,
             )
-        )
+            prefetch.append(
+                models.Prefetch(
+                    query=v,
+                    using=str(vec_name),
+                    limit=int(top_k_dense),
+                )
+            )
+        elif supports_named_vector:
+            logger.debug(
+                "[retrieval] hybrid prefetch dense named_vector path vec_name=%s",
+                vec_name,
+            )
+            prefetch.append(
+                models.Prefetch(
+                    query=models.NamedVector(name=str(vec_name), vector=v),
+                    limit=int(top_k_dense),
+                )
+            )
+        else:
+            logger.debug(
+                "[retrieval] hybrid prefetch dense unsupported vec_name=%s",
+                vec_name,
+            )
+            return None
 
     model_name = str(os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
     sv = _encode_sparse_query(query_text, model_name=model_name)
     if sv is None:
         return None
-    prefetch.append(
-        models.Prefetch(
-            query=models.NamedSparseVector(name=str(sparse_vector_name), vector=sv),
-            limit=int(top_k_lexical_candidates),
+    if supports_using:
+        logger.debug(
+            "[retrieval] hybrid prefetch sparse using path vec_name=%s",
+            sparse_vector_name,
         )
-    )
+        prefetch.append(
+            models.Prefetch(
+                query=sv,
+                using=str(sparse_vector_name),
+                limit=int(top_k_lexical_candidates),
+            )
+        )
+    elif supports_named_sparse:
+        logger.debug(
+            "[retrieval] hybrid prefetch sparse named_sparse path vec_name=%s",
+            sparse_vector_name,
+        )
+        prefetch.append(
+            models.Prefetch(
+                query=models.NamedSparseVector(name=str(sparse_vector_name), vector=sv),
+                limit=int(top_k_lexical_candidates),
+            )
+        )
+    else:
+        logger.debug(
+            "[retrieval] hybrid prefetch sparse unsupported vec_name=%s",
+            sparse_vector_name,
+        )
+        return None
 
     if not prefetch:
         return None
