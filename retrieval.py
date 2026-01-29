@@ -80,36 +80,43 @@ def _qdrant_sparse_search(
     if sv is None:
         return []
 
-    qv = models.NamedSparseVector(
-        name=str(sparse_vector_name),
-        vector=sv,
-    )
     logger.warning(
-        "[retrieval] sparse_search query_points args types: "
-        "using=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
+        "[retrieval] sparse_search search args types: "
+        "name=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
         sparse_vector_name, type(sparse_vector_name).__name__,
         limit, type(limit).__name__,
         _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
         with_payload, type(with_payload).__name__,
-        qv,
+        sv,
         type(query_filter).__name__,
     )
-    # qdrant-client API differs by version: filter vs query_filter
     try:
-        res = client.query_points(
+        res = client.search(
             collection_name=collection_name,
-            query=qv,
-            using=str(sparse_vector_name),
+            query_vector=(str(sparse_vector_name), sv),
             limit=int(limit),
             with_payload=with_payload,
             with_vectors=False,
             query_filter=query_filter,
-            timeout=int(_DEFAULT_QDRANT_TIMEOUT),
         )
-        return list(getattr(res, "points", []) or [])
+        return list(res or [])
+    except TypeError:
+        try:
+            res = client.search(
+                collection_name=collection_name,
+                query_vector=(str(sparse_vector_name), sv),
+                limit=int(limit),
+                with_payload=with_payload,
+                with_vectors=False,
+                filter=query_filter,
+            )
+            return list(res or [])
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[retrieval] client.search failed: {e}")
+            return []
     except Exception as e:  # pragma: no cover
         logger.warning(f"[retrieval] client.search failed: {e}")
-        return None
+        return []
 
 def _prefetch_supports_using() -> bool:
     prefetch_cls = getattr(models, "Prefetch", None)
@@ -165,6 +172,8 @@ def _qdrant_hybrid_query_once(
         return None
 
     supports_using = _prefetch_supports_using()
+    if not supports_using:
+        return None
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")
     logger.debug(
