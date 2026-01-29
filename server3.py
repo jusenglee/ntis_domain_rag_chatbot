@@ -722,6 +722,14 @@ def refine_documents_rule_based(docs: List[Document]) -> str:
     context_chunks: List[str] = []
 
     for idx, doc in enumerate(docs, start=1):
+        metadata = doc.metadata or {}
+        ref = metadata.get("ref") or {}
+        title = (ref.get("title") or "").strip()
+        if title_only:
+            if not title:
+                continue
+            context_chunks.append(f"## 문서 {idx}. {title}\n")
+            continue
 
         mapped_doc = RagMapper.map(doc)
 

@@ -736,7 +736,7 @@ def dense_retrieve_hybrid_multi(
         try:
             try:
                 res = client.query_points(
-                    collection_name="ntis_project_v2",
+                    collection_name=collection_name,
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
@@ -747,7 +747,7 @@ def dense_retrieve_hybrid_multi(
                 )
             except TypeError:
                 res = client.query_points(
-                    collection_name="ntis_project_v2",
+                    collection_name=collection_name,
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
@@ -852,7 +852,7 @@ def dense_retrieve_hybrid_multi(
         try:
             try:
                 scroll_res, _ = client.scroll(
-                    collection_name="ntis_project_v2",
+                    collection_name=collection_name,
                     scroll_filter=final_filter,
                     limit=int(top_k_lexical_candidates_eff),
                     with_payload=with_payload_lex,
@@ -861,7 +861,7 @@ def dense_retrieve_hybrid_multi(
                 )
             except TypeError:
                 scroll_res, _ = client.scroll(
-                    collection_name="ntis_project_v2",
+                    collection_name=collection_name,
                     scroll_filter=final_filter,
                     limit=int(top_k_lexical_candidates_eff),
                     with_payload=with_payload_lex,

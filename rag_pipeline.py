@@ -729,6 +729,12 @@ def _pick_collections(all_cols: list[str], allow: Optional[Iterable[str]] = None
     allow_set = set(allow_list)
     return [c for c in all_cols if c in allow_set]
 
+def _default_target_collections() -> list[str]:
+    allow_list = list(RAG_COLLECTION_ALLOWLIST)
+    if allow_list:
+        return allow_list
+    return [COL_PROJECT, COL_PERF, COL_SUPPORT]
+
 def _final_rerank(
         cands: List[Any],
         *,
@@ -830,7 +836,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=rel,
-            target_collections=target_cols if target_cols else [COL_PROJECT, COL_PERF, COL_SUPPORT],
+            target_collections=target_cols if target_cols else _default_target_collections(),
             filters={},
         )
 
@@ -840,7 +846,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=None,
-            target_collections=[COL_PROJECT, COL_PERF, COL_SUPPORT],
+            target_collections=_default_target_collections(),
             filters={},
         )
 
@@ -849,7 +855,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
         base_route=base_route,
         action=action,
         relation=None,
-        target_collections=[COL_PROJECT, COL_PERF, COL_SUPPORT],
+        target_collections=_default_target_collections(),
         filters={},
     )
 
@@ -1076,9 +1082,13 @@ def _run_rag_with_vectors(
                 col = COL_PERF
             elif key_lower == COL_SUPPORT.lower():
                 col = COL_SUPPORT
-            if col and col not in seen:
-                seen.add(col)
-                out.append(col)
+            if col:
+                if col not in seen:
+                    seen.add(col)
+                    out.append(col)
+            elif key not in seen:
+                seen.add(key)
+                out.append(key)
         return out
 
     def _coerce_int(x: Any, default: int) -> int:
@@ -1656,7 +1666,7 @@ def _run_rag_with_vectors(
     t0 = time.time()
 
     # collection list
-    target_cols = list(plan.target_collections or [COL_PROJECT, COL_PERF, COL_SUPPORT])
+    target_cols = list(plan.target_collections or _default_target_collections())
 
     # topK caps
     topk_dense = int(preset.top_k_dense)
