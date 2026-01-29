@@ -110,6 +110,104 @@ def _qdrant_sparse_search(
         logger.warning(f"[retrieval] client.search failed: {e}")
         return None
 
+def _supports_qdrant_hybrid_query() -> bool:
+    required = ("Prefetch", "Query", "Fusion", "NamedVector", "NamedSparseVector")
+    return all(hasattr(models, name) for name in required)
+
+
+def _get_fusion_rrf() -> Any:
+    fusion_cls = getattr(models, "Fusion", None)
+    if fusion_cls is None:
+        return None
+    for attr in ("RRF", "rrf"):
+        if hasattr(fusion_cls, attr):
+            return getattr(fusion_cls, attr)
+    return None
+
+
+def _qdrant_hybrid_query_once(
+    client: Any,
+    *,
+    collection_name: str,
+    query_text: str,
+    emb_map: Dict[str, Any],
+    sparse_vector_name: str,
+    top_k_dense: int,
+    top_k_lexical_candidates: int,
+    top_k_lexical: int,
+    lexical_fields: Optional[List[str]],
+    query_filter: Any = None,
+) -> Optional[List[models.ScoredPoint]]:
+    if not _supports_qdrant_hybrid_query():
+        return None
+    fusion = _get_fusion_rrf()
+    if fusion is None:
+        return None
+
+    prefetch = []
+    for vec_name, emb in (emb_map or {}).items():
+        v = embed_query(emb, query_text)
+        if not v:
+            continue
+        prefetch.append(
+            models.Prefetch(
+                query=models.NamedVector(name=str(vec_name), vector=v),
+                limit=int(top_k_dense),
+            )
+        )
+
+    model_name = str(os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
+    sv = _encode_sparse_query(query_text, model_name=model_name)
+    if sv is None:
+        return None
+    prefetch.append(
+        models.Prefetch(
+            query=models.NamedSparseVector(name=str(sparse_vector_name), vector=sv),
+            limit=int(top_k_lexical_candidates),
+        )
+    )
+
+    if not prefetch:
+        return None
+
+    lexical_fields_eff = list(
+        lexical_fields
+        or [
+            "title_text",
+            "content_text",
+            "keyword_text",
+            "flat_text",
+            "category",
+            "prtcp_mp[].hm_nm",
+            "prtcp_mp[].blng_org_nm",
+            "prtcp_org[].org_nm",
+        ]
+    )
+    with_payload = _with_payload_selector(
+        _PAYLOAD_MODE_LEX,
+        _PAYLOAD_MIN_FIELDS,
+        lexical_fields_eff,
+    )
+
+    try:
+        res = client.query_points(
+            collection_name=collection_name,
+            query=models.Query(
+                prefetch=prefetch,
+                query=fusion,
+            ),
+            limit=int(max(int(top_k_dense), int(top_k_lexical))),
+            with_payload=with_payload,
+            with_vectors=False,
+            query_filter=query_filter,
+            timeout=int(_DEFAULT_QDRANT_TIMEOUT),
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] hybrid query_points failed: {e}")
+        return None
+
+    return list(getattr(res, "points", []) or [])
+
 def fetch_full_payloads(client: QdrantClient, collection_name: str, points):
     ids = [p.id for p in points if getattr(p, "id", None) is not None]
     if not ids:
@@ -142,6 +240,8 @@ _DEFAULT_TOPK_LEX = int(os.getenv("RAG_TOPK_LEX", "50"))
 
 _DEFAULT_RRF_K = int(os.getenv("RAG_RRF_K", "60"))
 _DEFAULT_RERANK_K = int(os.getenv("RAG_RERANK_K", "60"))
+
+_HYBRID_QUERY_ONCE = os.getenv("RAG_HYBRID_QUERY_ONCE", "1") == "1"
 
 _SNIP_MAX_CHARS = int(os.getenv("SNIPPET_MAX_CHARS", "8192"))
 _CTX_TOKEN_BUDGET = int(os.getenv("CTX_TOKEN_BUDGET", "8192"))
@@ -485,6 +585,7 @@ def dense_retrieve_hybrid_multi(
     sparse_topk: Optional[int] = None,
     query_filter: Optional[models.Filter] = None,
     timings: Optional[Dict[str, float]] = None,
+    hybrid_once: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
@@ -492,6 +593,26 @@ def dense_retrieve_hybrid_multi(
     q = normalize_query(expanded_text)
     if not q:
         return {"dense": {}, "lexical": []}
+
+    hybrid_once_eff = _HYBRID_QUERY_ONCE if hybrid_once is None else bool(hybrid_once)
+    if hybrid_once_eff and sparse_vector_name and emb_map:
+        t_hybrid0 = time.perf_counter()
+        hybrid_points = _qdrant_hybrid_query_once(
+            client,
+            collection_name=collection_name,
+            query_text=q,
+            emb_map=emb_map,
+            sparse_vector_name=str(sparse_vector_name),
+            top_k_dense=top_k_dense,
+            top_k_lexical_candidates=top_k_lexical_candidates,
+            top_k_lexical=top_k_lexical,
+            lexical_fields=lexical_fields,
+            query_filter=query_filter,
+        )
+        timings["hybrid_once_total"] = time.perf_counter() - t_hybrid0
+        if hybrid_points is not None:
+            timings["hybrid_once_hits"] = float(len(hybrid_points))
+            return {"dense": {}, "lexical": [], "hybrid": hybrid_points}
 
     # -----------------------
     # Dense retrieval
