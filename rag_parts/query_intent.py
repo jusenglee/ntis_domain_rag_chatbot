@@ -935,13 +935,14 @@ def classify_query(q: str, kws: List[str], *, domain_hint: Optional[str] = None)
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
 
     is_id_query = (
-            len(rare_kws) >= 2
-            or bool(_RST_ID_RE.search(q))
-            or bool(_DOI_RE.search(q))
-            or bool(_ISSN_RE.search(q))
-            or bool(_PATENT_REG_NO_RE.search(q))
-            or bool(_PJT_ID_NUM_RE.search(q))
-            or any(bool(v) for v in (ids_map or {}).values())
+        len(rare_kws) >= 2
+        or bool(_RST_ID_RE.search(q))
+        or bool(_DOI_RE.search(q))
+        or bool(_ISSN_RE.search(q))
+        or bool(_PATENT_REG_NO_RE.search(q))
+        or bool(_PJT_ID_NUM_RE.search(q))
+        or bool(_PJT_NO_LABEL_RE.search(q))
+        or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
