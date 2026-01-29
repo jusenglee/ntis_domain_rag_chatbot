@@ -196,6 +196,8 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "doc_id,"
     "tag,"
     "title_text,"
+    "title1,"
+    "title2,"
     "content_text,"
     "keyword_text,"
     "flat_text,"
@@ -204,7 +206,8 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "prtcp_mp[].blng_org_nm,"
     "prtcp_org[].org_nm,"
     "org_nm,"
-    "pjt_id"
+    "pjt_id,"
+    "pjt_no"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
