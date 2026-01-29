@@ -300,8 +300,8 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "4-2. mode: SEARCH | LOOKUP | JOIN\n"
         "4-3. head: project | perf | people | org | support\n"
         "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
-        "4-5. ids_map: {pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...}\n"
-        "4-6. filters: {year_from, year_to, org_name, researcher_name, tag_filters, ...}\n"
+        "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
+        "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
         "7. retrieval_query:\n"
@@ -550,8 +550,6 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
-        from sample_data import SAMPLE_DATA
-        # docs = SAMPLE_DATA
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -1028,4 +1026,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8008, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=8007, access_log=False)
