@@ -22,6 +22,32 @@ from typing import Dict, List, Optional
 from .constants import KEY_ORG_NORM
 from .query_intent import QueryIntent
 
+PEOPLE_ORG_FIELDS = ["prtcp_mp[].hm_nm", "prtcp_mp[].blng_org_nm", "prtcp_org[].org_nm"]
+
+
+def _is_people_org_intent(intent: QueryIntent) -> bool:
+    if intent.base_route in ("people", "org"):
+        return True
+    if intent.action == "relation" and intent.relation:
+        return any(route in ("people", "org") for route in intent.relation)
+    return False
+
+
+def _prioritize_people_org_fields(
+    preset: SearchPreset,
+    *,
+    intent: QueryIntent,
+    default_weights: Dict[str, float],
+) -> SearchPreset:
+    if not _is_people_org_intent(intent):
+        return preset
+    prioritized = PEOPLE_ORG_FIELDS
+    preset.lexical_fields = prioritized + [f for f in preset.lexical_fields if f not in prioritized]
+    for field in prioritized:
+        preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
+    return preset
+
+
 @dataclass
 class SearchPreset:
     # retrieval sizing
@@ -107,10 +133,20 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
     default_cetegory_w = _f("RAG_W_CETEGORY", 5.0)
+    default_prtcp_person_w = _f("RAG_W_PRTCP_PERSON", 4.0)
+    default_prtcp_org_w = _f("RAG_W_PRTCP_ORG", 4.0)
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
-    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
+    base_fields = [
+        "title_text",
+        "content_text",
+        "keyword_text",
+        "flat_text",
+        "cetegory",
+        "title",
+        *PEOPLE_ORG_FIELDS,
+    ]
 
     weights = {
         "title_text": default_title_w,
@@ -119,6 +155,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         "flat_text": default_flat_w,
         "cetegory": default_cetegory_w,
         "title": default_title_w,
+        "prtcp_mp[].hm_nm": default_prtcp_person_w,
+        "prtcp_mp[].blng_org_nm": default_prtcp_org_w,
+        "prtcp_org[].org_nm": default_prtcp_org_w,
     }
 
     # ---- action presets ----
@@ -145,7 +184,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_SUPPORT", _f("RAG_TAG_BOOST", 0.4)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_SUPPORT", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
         )
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 2) Relation (2-hop) — hop1/hop2는 파이프라인에서 별도 조정 가능.
     if action == "relation":
@@ -168,7 +207,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_REL", _f("RAG_TAG_BOOST", 1.0)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_REL", _f("RAG_TAG_MISMATCH_PENALTY", 0.2)),
         )
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 3) Exact ID lookup
     if action == "id_exact":
@@ -195,7 +234,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_ID_EXACT", _f("RAG_TAG_BOOST", 1.2)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID_EXACT", _f("RAG_TAG_MISMATCH_PENALTY", 0.3)),
         )
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 4) Fuzzy ID-like query
     if action == "id_fuzzy":
@@ -218,7 +257,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_ID", _f("RAG_TAG_BOOST", 0.9)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID", _f("RAG_TAG_MISMATCH_PENALTY", 0.2)),
         )
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 5) List/filter
     if action in ("list", "download", "stats"):
@@ -256,7 +295,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
                 preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title", KEY_ORG_NORM, "org_nm"]
             preset.lexical_field_weights[KEY_ORG_NORM] = _f("RAG_W_ORG_NORM", 3.0)
             preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights[KEY_ORG_NORM])
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 6) Topic summary
     if action == "topic":
@@ -279,7 +318,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.6)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.1)),
         )
-        return preset
+        return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 7) Detail/content (default)
     top_k_lex = _i("RAG_TOPK_LEX", 50)
@@ -301,4 +340,4 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         tag_boost=_f("RAG_TAG_BOOST", 0.6),
         tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.1),
     )
-    return preset
+    return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
