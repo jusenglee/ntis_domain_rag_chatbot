@@ -147,6 +147,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
     default_category_w = _f("RAG_W_CATEGORY", _f("RAG_W_CETEGORY", 5.0))
     default_pjt_no_w = _f("RAG_W_PJT_NO", default_title_w)
+    default_prtcp_person_w = _f("RAG_W_PJT_NO", default_title_w)
+    default_prtcp_org_w = _f("RAG_W_PJT_NO", default_title_w)
+    default_prtcp_org_w = _f("RAG_W_PJT_NO", default_title_w)
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
