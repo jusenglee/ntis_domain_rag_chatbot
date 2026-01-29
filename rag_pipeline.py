@@ -256,15 +256,6 @@ def _payload_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
         meta.get("eng_pjt_nm"),
     )
 
-def _payload_content(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
-    return _pick_first(
-        pl.get("content_text"),
-        pl.get("content1"),
-        pl.get("content2"),
-        meta.get("rsch_abstract"),
-        meta.get("rsch_goal_abstract"),
-    )
-
 def build_context_list_light(
         points: List[Any],
         *,
@@ -290,24 +281,6 @@ def build_context_list_light(
 
     def _pjt_id(meta, pl):
         return _pick_first(pl.get("pjt_id"), meta.get("pjt_id"), meta.get("pjt_no"))
-
-    def _refs(points: List[Any]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for p in (points or [])[: max(0, int(max_items))]:
-            pl = getattr(p, "payload", None) or {}
-            if not isinstance(pl, dict):
-                pl = {}
-            meta = _get_meta(pl)
-            urls = pl.get("urls") or []
-            if isinstance(urls, str):
-                urls = [urls]
-            out.append({
-                "doc_id": str(pl.get("doc_id") or ""),
-                "tag": str(pl.get("tag") or ""),
-                "title": str(_payload_title(pl, meta)),
-                "urls": urls if isinstance(urls, list) else [],
-            })
-        return out
 
     for p in (points or [])[: max(0, int(max_items))]:
         pl = getattr(p, "payload", None) or {}
@@ -380,7 +353,7 @@ def build_context_list_light(
 
     header = f"질의: {_clean_one_line(query_text, 120)}\n" if query_text else ""
     ctx = header + ("\n".join(items) if items else "(후보 없음)")
-    return ctx, _refs(points)
+    return ctx, points
 
 # -------------------------
 # Precomputed embedding wrapper
@@ -880,110 +853,131 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
 # Main
 # -------------------------
 def _hydrate_points_payload(
-        qdr: Any,
-        points: List[Any],
+        qdr,
+        points,
         *,
-        include_fields: Optional[List[str]] = None,
+        include_fields=None,  # ✅ 호환용(무시됨)
         chunk_size: int = 128,
 ) -> None:
     """
-    points의 (collection, id) 기준으로 Qdrant retrieve를 돌려 payload를 갱신.
-    - 후보 단계에서는 meta_basic/긴 content를 빼고,
-      최종 topN에서만 필요한 payload를 채우는 용도.
+    Always hydrate points with FULL payload from Qdrant (with_payload=True).
+    - 내부 메타(_collection/_rrf/_final_*) 보존하지 않음 (요구사항)
+    - include_fields는 호환용으로만 두고 무시
     """
     if not points:
         return
-    if qmodels is None or not hasattr(qdr, "retrieve"):
-        return
 
-    include_fields = include_fields or [
-        "doc_id",
-        "tag",
-        "title_text",
-        "title",
-        "title1",
-        "title2",
-        "content_text",
-        "content1",
-        "content2",
-        "keyword_text",
-        "keyword1",
-        "keyword2",
-        "flat_text",
-        "meta_basic",
-        "meta_detail",
-        "org_nm",
-        "org_name_norm",
-        "pjt_id",
-        "stan_yr",
-        "start_dt",
-        "end_dt",
-        "dt1",
-        "dt2",
-        "urls",
-        "systems",
-    ]
-    selector = qmodels.PayloadSelectorInclude(include=include_fields)
+    def _get(p, k, default=None):
+        return getattr(p, k, default)
 
-    # group by collection
-    by_col: Dict[str, List[Any]] = {}
+    def _set(p, k, v):
+        setattr(p, k, v)
+
+    # collection별로 묶어서 retrieve 호출 수를 줄임
+    buckets = {}
     for p in points:
-        pl = getattr(p, "payload", None)
-        if not isinstance(pl, dict):
-            continue
-        col = str(pl.get("_collection") or "")
+        payload = _get(p, "payload", {}) or {}
+        col = None
+        if isinstance(payload, dict):
+            col = payload.get("_collection")
         if not col:
+            col = _get(p, "_collection", None)
+        if not col:
+            # collection을 모르면 hydrate 불가(안전 스킵)
             continue
-        by_col.setdefault(col, []).append(p)
+        buckets.setdefault(col, []).append(p)
 
-    for col, pts in by_col.items():
-        # ids chunk
-        ids = []
-        for p in pts:
-            pid = getattr(p, "id", None)
-            if pid is None:
-                continue
-            ids.append(pid)
-
-        t0 = time.perf_counter()
-        for i in range(0, len(ids), int(chunk_size)):
-            sub = ids[i:i+int(chunk_size)]
-            try:
-                recs = qdr.retrieve(
-                    collection_name=col,
-                    ids=sub,
-                    with_payload=selector,
-                    with_vectors=False,
-                )
-            except Exception as e:
-                logger.warning(f"[RAG] hydrate retrieve failed col={col} n={len(sub)} err={e}")
+    for collection_name, plist in buckets.items():
+        step = max(1, int(chunk_size))
+        for i in range(0, len(plist), step):
+            chunk = plist[i : i + step]
+            ids = [_get(p, "id") for p in chunk if _get(p, "id", None) is not None]
+            if not ids:
                 continue
 
-            # id -> payload
-            mp: Dict[str, Dict[str, Any]] = {}
+            recs = qdr.retrieve(
+                collection_name=collection_name,
+                ids=ids,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            rec_payload = {}
             for r in (recs or []):
-                rid = getattr(r, "id", None)
-                rpl = getattr(r, "payload", None)
-                if rid is None or not isinstance(rpl, dict):
+                rid = _get(r, "id", None)
+                if rid is None:
                     continue
-                mp[str(rid)] = rpl
+                rec_payload[str(rid)] = _get(r, "payload", {}) or {}
 
-            for p in pts:
-                pid = getattr(p, "id", None)
+            # payload를 "그대로" 덮어씀 (내부 메타 유지 X)
+            for p in chunk:
+                pid = _get(p, "id", None)
                 if pid is None:
                     continue
-                upd = mp.get(str(pid))
-                if not upd:
-                    continue
-                pl = getattr(p, "payload", None)
-                if isinstance(pl, dict):
-                    # 기존 _collection/_rrf/_final_* 등은 유지되게 update만
-                    keep_col = pl.get("_collection")
-                    pl.update(upd)
-                    pl["_collection"] = keep_col or col
+                key = str(pid)
+                if key in rec_payload:
+                    _set(p, "payload", rec_payload[key])
 
-        dt = time.perf_counter() - t0
-        log_kv("RAG.HYDRATE", col=col, n=len(pts), seconds=dt, fields=include_fields[:10])
+
+    # collection별로 나눠서 retrieve 호출 최소화
+    # points[i].payload["_collection"] (혹은 points[i]._collection)을 사용한다고 가정(현재 파이프라인 패턴)
+    buckets = {}
+    for p in points:
+        payload = _get(p, "payload", {}) or {}
+        col = None
+        if isinstance(payload, dict):
+            col = payload.get("_collection")
+        if not col:
+            col = _get(p, "_collection", None)
+        if not col:
+            # collection을 모르겠으면 건너뜀(안전)
+            continue
+        buckets.setdefault(col, []).append(p)
+
+    for collection_name, plist in buckets.items():
+        # chunk retrieve
+        for i in range(0, len(plist), max(1, int(chunk_size))):
+            chunk = plist[i : i + max(1, int(chunk_size))]
+            ids = []
+            old_payload_by_id = {}
+
+            for p in chunk:
+                pid = _get(p, "id", None)
+                if pid is None:
+                    continue
+                ids.append(pid)
+                old_payload_by_id[str(pid)] = _get(p, "payload", {}) or {}
+
+            if not ids:
+                continue
+
+            recs = qdr.retrieve(
+                collection_name=collection_name,
+                ids=ids,
+                with_payload=True,   # ✅ 항상 full payload
+                with_vectors=False,
+            )
+
+            # id -> payload
+            rec_payload = {}
+            for r in (recs or []):
+                rid = _get(r, "id", None)
+                if rid is None:
+                    continue
+                rec_payload[str(rid)] = _get(r, "payload", {}) or {}
+
+            # points 갱신(내부 메타 보존)
+            for p in chunk:
+                pid = _get(p, "id", None)
+                if pid is None:
+                    continue
+                key = str(pid)
+                if key not in rec_payload:
+                    continue
+
+                new_pl = rec_payload.get(key, {}) or {}
+
+                _set(p, "payload", new_pl)
 
 
 def _run_rag_with_vectors(
@@ -1652,7 +1646,14 @@ def _run_rag_with_vectors(
                 f"- 필터 PJT_ID 후보: {', '.join(join_ids[:10])}\n\n"
                 f"{hop2_ctx or '(후보 없음)'}"
             )
-
+            t0 = time.time()
+            # 검색단계에서 최소 페아로드 -> server3.py 에는 전체 페이로드를 전달하기 위해 선정된 정보들 페이로드 채우기
+            _hydrate_points_payload(
+                qdr,
+                hop2_reranked,  # len == final_keep
+                chunk_size=int(os.getenv("RAG_HYDRATE_FULL_CHUNK", "64")),
+            )
+            timings["hydrate_full_payload"] = time.time() - t0
             refs = (hop1_refs or []) + (hop2_refs or [])
             timings["hop_total"] = time.time() - t_hop0
             timings["total"] = time.time() - t_all0
@@ -1891,33 +1892,7 @@ def _run_rag_with_vectors(
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
     if not fallback_chat:
         max_items = int(preset.max_ctx_items)
-        _hydrate_points_payload(qdr, reranked[: max(1, max_items)], include_fields=[
-            "doc_id",
-            "tag",
-            "title_text",
-            "title",
-            "title1",
-            "title2",
-            "content_text",
-            "content1",
-            "content2",
-            "keyword_text",
-            "keyword1",
-            "keyword2",
-            "flat_text",
-            "meta_basic",
-            "meta_detail",
-            "org_nm",
-            "org_name_norm",
-            "pjt_id",
-            "stan_yr",
-            "start_dt",
-            "end_dt",
-            "dt1",
-            "dt2",
-            "urls",
-            "systems",
-        ])
+        _hydrate_points_payload(qdr, reranked[: max(1, max_items)])
 
     # build context
     t0 = time.time()
@@ -1959,10 +1934,10 @@ def _run_rag_with_vectors(
         f"ctx={timings.get('build_context',0):.4f}s, total={timings.get('total',0):.4f}s"
     )
 
-    # timings에 per_col_stats도 넣고 싶으면(옵션)
     for col, st in per_col_stats.items():
         for k, v in st.items():
             timings[f"col_{col}_{k}"] = float(v)
+        timings["hydrate_full_payload"] = time.time() - t0
 
     return RagResult(
         stack=stack,

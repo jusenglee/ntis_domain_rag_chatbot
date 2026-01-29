@@ -90,30 +90,50 @@ def _qdrant_sparse_search(
         vector=sv,
     )
     logger.warning(
-        "[retrieval] sparse_search query_points args types: using=%r(%s) limit=%r(%s) timeout=%r(%s) query_len=%r",
+        "[retrieval] sparse_search query_points args types: "
+        "using=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
         sparse_vector_name, type(sparse_vector_name).__name__,
-        query_filter, type(query_filter).__name__,
+        limit, type(limit).__name__,
         _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
         with_payload, type(with_payload).__name__,
-        (len(sv) if isinstance(sv, (list, tuple)) else None),
+        qv,
+        type(query_filter).__name__,
     )
     # qdrant-client API differs by version: filter vs query_filter
     try:
-        return client.query_points(
+        res = client.query_points(
             collection_name=collection_name,
-            query=sv,                         # ✅ NamedSparseVector 말고 SparseVector
-            using=str(sparse_vector_name),     # ✅ 여기로 bm25 지정
+            query=qv,
+            using=str(sparse_vector_name),
             limit=int(limit),
             with_payload=with_payload,
             with_vectors=False,
             query_filter=query_filter,
-            timeout=int(_DEFAULT_QDRANT_TIMEOUT),  # ✅ int 캐스팅
+            timeout=int(_DEFAULT_QDRANT_TIMEOUT),
         )
+        return list(getattr(res, "points", []) or [])
     except Exception as e:  # pragma: no cover
         logger.warning(f"[retrieval] client.search failed: {e}")
         return None
 
+def fetch_full_payloads(client: QdrantClient, collection_name: str, points):
+    ids = [p.id for p in points if getattr(p, "id", None) is not None]
+    if not ids:
+        return points
 
+    got = client.retrieve(
+        collection_name=collection_name,
+        ids=ids,
+        with_payload=True,
+        with_vectors=False,
+    )
+    # id -> payload 맵
+    mp = {str(x.id): x.payload for x in (got or [])}
+    for p in points:
+        pid = str(p.id)
+        if pid in mp:
+            p.payload = mp[pid]
+    return points
 
 logger = logging.getLogger("RAG_Retrieval")
 
@@ -172,6 +192,7 @@ _PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()  
 # 후보 단계에 필요한 최소 키들(메타/본문 제외)
 _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_MIN_FIELDS",
+    "id,"
     "doc_id,"
     "tag,"
     "title_text,"
@@ -184,28 +205,6 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "prtcp_org[].org_nm,"
     "org_nm,"
     "pjt_id"
-).split(",") if s.strip()]
-
-# 최종 컨텍스트용(필요하면 meta/content 포함)
-_PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
-    "RAG_PAYLOAD_FULL_FIELDS",
-    "doc_id,"
-    "tag,"
-    "title_text,"
-    "title1,"
-    "title2,"
-    "content_text,"
-    "content1,"
-    "content2,"
-    "keyword_text,"
-    "keyword1,"
-    "keyword2,"
-    "flat_text,"
-    "category,"
-    "prtcp_mp,"
-    "prtcp_org,"
-    "meta_basic,"
-    "meta_detail"
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
@@ -1006,7 +1005,7 @@ def dense_retrieve_hybrid_multi(
 
         lex_filter = models.Filter(should=should_conds)
         final_filter = _combine_filters(query_filter, lex_filter)
-        lex_base_fields = _PAYLOAD_FULL_FIELDS if _PAYLOAD_MODE_LEX == "full" else _PAYLOAD_MIN_FIELDS
+        lex_base_fields = _PAYLOAD_MIN_FIELDS
         with_payload_lex = _with_payload_selector(
             _PAYLOAD_MODE_LEX,
             lex_base_fields,
@@ -1088,67 +1087,6 @@ def dense_retrieve_hybrid_multi(
 
 def _rrf_score(rank: int, rrf_k: int) -> float:
     return 1.0 / float(rrf_k + rank)
-
-
-def rrf_rerank_multi(
-        search_res: Dict[str, Any],
-        *,
-        k: int = _DEFAULT_RERANK_K,
-        rrf_k: int = _DEFAULT_RRF_K,
-        w_dense_map: Optional[Dict[str, float]] = None,
-        w_lex: float = 0.25,
-        query_text: str = "",
-) -> List[models.ScoredPoint]:
-    """RRF across dense(vecs) and lexical list."""
-    w_dense_map = dict(w_dense_map or {"e5i_qa": 1.0, "e5_qa": 0.8})
-    dense_map: Dict[str, List[Any]] = search_res.get("dense") or {}
-    lexical_list: List[Any] = search_res.get("lexical") or []
-
-    acc: Dict[Tuple[str, str], Tuple[float, models.ScoredPoint]] = {}
-
-    def _key(p: Any) -> Tuple[str, str]:
-        pl = p.payload if isinstance(getattr(p, "payload", None), dict) else {}
-        doc_id = str(pl.get("doc_id") or "")
-        col = str(pl.get("_collection") or "")
-        if doc_id:
-            return ("doc", doc_id)
-        return (col, str(getattr(p, "id", "")))
-
-    # dense
-    for dense_name, pts in dense_map.items():
-        if not pts:
-            continue
-        vec_name = str(dense_name).split("@", 1)[0]
-        w = float(w_dense_map.get(vec_name, 1.0))
-        for i, p in enumerate(pts, start=1):
-            kk = _key(p)
-            add = w * _rrf_score(i, rrf_k)
-            if kk in acc:
-                s0, p0 = acc[kk]
-                acc[kk] = (s0 + add, p0)
-            else:
-                acc[kk] = (add, p)
-
-    # lexical
-    for i, p in enumerate(lexical_list, start=1):
-        kk = _key(p)
-        add = float(w_lex) * _rrf_score(i, rrf_k)
-        if kk in acc:
-            s0, p0 = acc[kk]
-            acc[kk] = (s0 + add, p0)
-        else:
-            acc[kk] = (add, p)
-
-    ranked = sorted(acc.values(), key=lambda x: x[0], reverse=True)
-    out: List[models.ScoredPoint] = []
-    for s, p in ranked[: int(k)]:
-        try:
-            p.score = float(s)
-        except Exception:
-            pass
-        out.append(p)
-    return out
-
 
 # =========================
 # Context builder (docstyle)

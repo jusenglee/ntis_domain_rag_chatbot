@@ -79,7 +79,7 @@ def _normalize_pjt_id(v: Any) -> Optional[str]:
 
 
 def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    """Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다."""
+    """Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다. (PJT_ID는 payload 최상위에만 존재)"""
     out: List[str] = []
     seen = set()
 
@@ -91,40 +91,14 @@ def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
         if not payload:
             continue
 
-        meta = _get_meta(payload)
-
-        # 1) meta에서 먼저 찾기
-        for k in _PJT_ID_KEYS:
-            if k in meta:
-                pid = _normalize_pjt_id(meta.get(k))
-                if pid and pid not in seen:
-                    out.append(pid)
-                    seen.add(pid)
-                    if len(out) >= max_ids:
-                        return out
-
-        # 2) payload 최상위에서도 찾기
         for k in _PJT_ID_KEYS:
             if k in payload:
-                pid = _normalize_pjt_id(payload.get(k))
+                pid = _normalize_pjt_id(payload.get(k))  # ✅ 여기만 있으면 됨
                 if pid and pid not in seen:
                     out.append(pid)
                     seen.add(pid)
                     if len(out) >= max_ids:
                         return out
-
-        # 3) meta 안에 또 다른 dict 구조가 있는 경우(희귀)
-        if isinstance(meta, dict):
-            for v in meta.values():
-                if isinstance(v, dict):
-                    for k in _PJT_ID_KEYS:
-                        if k in v:
-                            pid = _normalize_pjt_id(v.get(k))
-                            if pid and pid not in seen:
-                                out.append(pid)
-                                seen.add(pid)
-                                if len(out) >= max_ids:
-                                    return out
 
     return out
 

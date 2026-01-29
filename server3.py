@@ -44,7 +44,7 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
-def setup_file_logging(log_path="logs/server3.log"):
+def setup_file_logging(log_path="logs/server_dev.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root = logging.getLogger()
@@ -88,17 +88,24 @@ class ContentCategory(str, Enum):
     QNA = "qna"                  # 질의응답/매뉴얼
     ETC = "etc"                  # 기타
 
+class QuestionType(str, Enum):
+    DEFAULT = "default"
+    FOLLOW_UP = "follow_up"
+
 class Researcher(BaseModel):
     name: str | None = None
+    affiliation: str | None = None
     researcher_id: str | None = None
 
 # --- Pydantic Schemas for Structured Output ---
 class QuestionAnalysis(BaseModel):
     """질문 분석 결과"""
     category: list[ContentCategory] = Field(description="질문 카테고리")
+    question_type: QuestionType = Field(description="질문유형")
+    related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
     researchers: list[Researcher] = Field(default_factory=list)
     limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
-    history_summary: str = Field(description="대화 이력을 고려한 질문 요약")
+    history_summary: str = Field(description="대화 이력 기반 질문 요약")
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
 
@@ -250,6 +257,8 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
+    prev_context_str = refine_documents_rule_based(state.prev_context)
+
     system_prompt = (
         "당신은 질문 분석 전문가입니다.\n"
         "이 시스템에서 사용되는 용어는 모두 R&D 행정 및 제도 맥락으로 해석합니다.\n"
@@ -267,25 +276,34 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "- QNA: 시스템 사용법, 절차, 메뉴얼, 오류\n"
         "- ETC: 그 외 명확히 분류되지 않는 경우\n\n"
 
+        "[QuestionType 정의]\n"
+        "- DEFAULT: 기본\n"
+        "- FOLLOW_UP: 다음 중 하나라도 만족하는 경우\n"
+        "  1. 이전 질문/응답에서 언급된 동일한 대상(과제, 연구자, 성과 등)을 명시적 또는 암시적으로 재지칭하는 경우\n"
+        "  2. 질문 자체는 단독으로 성립하더라도, 대화 이력에 동일 키워드(과제명, 연구자명, 기관명)가 존재하는 경우\n"
+        '  3. "설명", "상세", "자세히", "추가로", "관련", "그", "해당" 등의 후속 탐색 의도가 명확한 표현이 포함된 경우\n'
+
         "아래 형식의 JSON 객체만 출력하십시오.\n\n"
 
         "[출력 형식]\n"
         "1. category: ContentCategory 배열\n"
-        "2. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
-        f"3. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
-        "4. history_summary: 대화 이력을 고려한 질문 핵심 요약\n"
-        "5. retrieval_query:\n"
+        "2. question_type: QuestionType\n"
+        "3. related_docs: QuestionType.FOLLOW_UP 인 경우 관련된 출처의 번호 배열 \n"
+        "4. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
+        f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
+        "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
+        "7. retrieval_query:\n"
         "   - 벡터 검색 최적화용 짧은 쿼리\n"
         "   - 핵심 개념 5개 이내\n"
         "   - 최대 120자\n"
-        "6. confidence: 분석 신뢰도 (0.0~1.0)\n\n"
+        "8. confidence: 분석 신뢰도 (0.0~1.0)\n\n"
         "{format_instructions}"
     )
 
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", "[대화 이력]\n{history}\n\n[현재 질문]\n{question}")
+        ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}[현재 질문]\n{question}")
     ])
 
     try:
@@ -293,6 +311,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         result: QuestionAnalysis = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
             "history": history_str or '없음',
+            "prev_context": prev_context_str or "없음",
             "question": state.messages[-1].content
         })
 
@@ -300,6 +319,8 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
             "QUESTION ANALYSIS",
             f"coq: {state.conversation_id}{state.question}\n"
             f"Category: {result.category}\n"
+            f"QuestionType: {result.question_type}\n"
+            f"RelatedDocs: {result.related_docs}\n"
             f"Researchers: {result.researchers}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
@@ -314,6 +335,8 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         return {
             "question_analysis": QuestionAnalysis(
                 category=[ContentCategory.ETC],
+                question_type=QuestionType.DEFAULT,
+                related_docs = [],
                 researchers=[],
                 limit=20,
                 history_summary=state.messages[-1].content,
@@ -334,7 +357,26 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    prev_context_str = refine_documents_rule_based(state.prev_context)
+
+    qa = state.question_analysis
+
+
+    prev_context_str = None
+
+    if qa.question_type == QuestionType.FOLLOW_UP:
+        if len(qa.related_docs) > 0:
+            related_context = [
+                state.prev_context[i - 1]
+                for i in qa.related_docs
+                if 1 <= i <= len(state.prev_context)
+            ]
+            prev_context_str = refine_documents_rule_based(related_context, True)
+        else:
+            # fallback: 전체 prev_context 사용
+            related_context = state.prev_context
+            prev_context_str = refine_documents_rule_based(related_context)
+
+
 
     system_prompt = (
         "당신은 지식 충분성 판단 전문가입니다.\n"
@@ -373,7 +415,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         })
 
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}"
+                    f"coq: {state.conversation_id}{state.question}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -418,7 +460,7 @@ class CustomRAGRetriever(BaseModel):
             return []
 
         documents = []
-        for hit in hits[:self.top_k]:
+        for idx, hit in enumerate(hits[:self.top_k], start=1):
             if hasattr(hit, "payload"):
                 hit_data = hit.payload
                 score = getattr(hit, "score", 0.0)
@@ -430,9 +472,10 @@ class CustomRAGRetriever(BaseModel):
                 score = 0.0
 
             rag_data = {
+                "source_index" : idx,
                 "tag" : hit_data.get("tag"),
-                "meta_basic" : hit_data.get("meta_basic"),
-                "meta_detail" : hit_data.get("meta_detail"),
+                "meta_basic" : hit_data.get("meta_basic", {}),
+                "meta_detail" : hit_data.get("meta_detail", {}),
                 "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
 
@@ -476,9 +519,9 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             func=retriever.retrieve
         )
 
-        # docs = await asyncio.to_thread(rag_tool.func, query)
+        docs = await asyncio.to_thread(rag_tool.func, query)
         from sample_data import SAMPLE_DATA
-        docs = SAMPLE_DATA
+        # docs = SAMPLE_DATA
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -526,10 +569,27 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    context_text = refine_documents_rule_based(state.context)
+    qa = state.question_analysis
+
+    context_text = None
+
+    if qa.question_type == QuestionType.FOLLOW_UP:
+        if len(qa.related_docs) > 0:
+            related_context = [
+                state.prev_context[i - 1]
+                for i in qa.related_docs
+                if 1 <= i <= len(state.prev_context)
+            ]
+            context_text = refine_documents_rule_based(related_context, True)
+        else:
+            # fallback: 전체 context 사용
+            related_context = state.context
+            context_text = refine_documents_rule_based(related_context)
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
+
+    logger.info(context_text)
 
     human_prompt = (
         f"[제공된 정보]\n{context_text or '없음'}\n\n"
@@ -662,18 +722,17 @@ def build_advanced_workflow():
     def route_after_rule(state: AgentState):
         if state.rule_decision and state.rule_decision.action == "direct_answer":
             return "direct_answer"
-        return ["analyze_question", "knowledge_sufficiency"]
+        return "analyze_question"
 
     workflow.add_conditional_edges(
         "rule_precheck",
         route_after_rule, {
             "direct_answer": "direct_answer",
-            "analyze_question": "analyze_question",
-            "knowledge_sufficiency": "knowledge_sufficiency"
+            "analyze_question": "analyze_question"
         }
     )
 
-    workflow.add_edge("analyze_question", "join_analysis")
+    workflow.add_edge("analyze_question", "knowledge_sufficiency")
     workflow.add_edge("knowledge_sufficiency", "join_analysis")
 
     def route_after_join_analysis(state: AgentState):
@@ -717,31 +776,35 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document]) -> str:
-    """문서 정제 유틸"""
+def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
     context_chunks: List[str] = []
 
-    for idx, doc in enumerate(docs, start=1):
-        metadata = doc.metadata or {}
-        ref = metadata.get("ref") or {}
-        title = (ref.get("title") or "").strip()
-        if title_only:
-            if not title:
-                continue
-            context_chunks.append(f"## 문서 {idx}. {title}\n")
-            continue
-
+    for doc in docs:
         mapped_doc = RagMapper.map(doc)
 
-        title = mapped_doc["title"]
-        refined_text = format_metadata(mapped_doc["meta_basic"])
+        source_idx = doc.get("source_index")
+        title = mapped_doc.get("title", "제목 없음")
+
+        refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
+        if is_detail:
+            refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
+
+        researcher_lines = RagMapper.get_researcher_info(mapped_doc)
+        researcher_block = ""
+        if researcher_lines:
+            researcher_block = (
+                    "\n- 연구원 목록:\n"
+                    + "\n".join(researcher_lines)
+            )
 
         context_chunks.append(
-            f"## 출처 {idx}. {title}\n"
-            f"{refined_text}\n"
+            f"## 출처 {source_idx}. {title}\n"
+            f"{refined_text}"
+            f"{researcher_block}\n"
         )
 
     return "\n\n".join(context_chunks)
+
 
 def format_metadata(metadata: Dict[str, Any]) -> str:
     """metadata dict → bullet list 텍스트 변환"""
@@ -758,7 +821,7 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
 
         lines.append(f"- {key}: {value}")
 
-    return "\n".join(lines) if lines else "- 없음"
+    return "\n".join(lines) if lines else ""
 
 
 def sanitize_llm_json(msg) -> str:
@@ -859,9 +922,11 @@ async def query_stream(payload: QueryRequest):
                     documents_used.extend(docs)
 
             ref_docs = []
+
             for d in documents_used:
                 ref_docs.append(RagMapper.get_references(d))
-            log_section("REF PUSH", f"coq: {conversation_id}{question}\n{ref_docs}")
+
+            log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
@@ -935,4 +1000,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8008, access_log=False)
+    uvicorn.run(app, host="0.0.0.0", port=8007, access_log=False)

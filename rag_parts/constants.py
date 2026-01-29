@@ -7,11 +7,11 @@ import re
 # -----------------------------
 # Common keys / collections
 # -----------------------------
-KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name_norm").strip() or "org_name_norm")
+KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name").strip() or "org_name")
 
-COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project").strip() or "ntis_project")
-COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf").strip() or "ntis_perf")
-COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_supports").strip() or "ntis_supports")
+COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project_v2").strip() or "ntis_project_v2")
+COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_project_v2").strip() or "ntis_project_v2")
+COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_project_v2").strip() or "ntis_project_v2")
 
 # -----------------------------
 # Regex
