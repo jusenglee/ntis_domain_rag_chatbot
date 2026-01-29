@@ -861,7 +861,7 @@ def _hydrate_points_payload(
 ) -> None:
     """
     Always hydrate points with FULL payload from Qdrant (with_payload=True).
-    - 내부 메타(_collection/_rrf/_final_*) 보존하지 않음 (요구사항)
+    - 내부 메타(_collection/_rrf/_final_*)는 보존하지 않고 DB payload로 덮어씀
     - include_fields는 호환용으로만 두고 무시
     """
     if not points:
@@ -917,67 +917,6 @@ def _hydrate_points_payload(
                 key = str(pid)
                 if key in rec_payload:
                     _set(p, "payload", rec_payload[key])
-
-
-    # collection별로 나눠서 retrieve 호출 최소화
-    # points[i].payload["_collection"] (혹은 points[i]._collection)을 사용한다고 가정(현재 파이프라인 패턴)
-    buckets = {}
-    for p in points:
-        payload = _get(p, "payload", {}) or {}
-        col = None
-        if isinstance(payload, dict):
-            col = payload.get("_collection")
-        if not col:
-            col = _get(p, "_collection", None)
-        if not col:
-            # collection을 모르겠으면 건너뜀(안전)
-            continue
-        buckets.setdefault(col, []).append(p)
-
-    for collection_name, plist in buckets.items():
-        # chunk retrieve
-        for i in range(0, len(plist), max(1, int(chunk_size))):
-            chunk = plist[i : i + max(1, int(chunk_size))]
-            ids = []
-            old_payload_by_id = {}
-
-            for p in chunk:
-                pid = _get(p, "id", None)
-                if pid is None:
-                    continue
-                ids.append(pid)
-                old_payload_by_id[str(pid)] = _get(p, "payload", {}) or {}
-
-            if not ids:
-                continue
-
-            recs = qdr.retrieve(
-                collection_name=collection_name,
-                ids=ids,
-                with_payload=True,   # ✅ 항상 full payload
-                with_vectors=False,
-            )
-
-            # id -> payload
-            rec_payload = {}
-            for r in (recs or []):
-                rid = _get(r, "id", None)
-                if rid is None:
-                    continue
-                rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-
-            # points 갱신(내부 메타 보존)
-            for p in chunk:
-                pid = _get(p, "id", None)
-                if pid is None:
-                    continue
-                key = str(pid)
-                if key not in rec_payload:
-                    continue
-
-                new_pl = rec_payload.get(key, {}) or {}
-
-                _set(p, "payload", new_pl)
 
 
 def _run_rag_with_vectors(
