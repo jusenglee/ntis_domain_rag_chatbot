@@ -125,6 +125,7 @@ def normalize_intent(
     query: str,
     keywords: List[str],
     hint_people_terms: Optional[List[str]] = None,
+    hint_org_terms: Optional[List[str]] = None,
     hint_org_role: Optional[str] = None,
 ) -> NormalizedIntent:
     ids_map = _normalize_ids_map(getattr(intent, "ids_map", None) or getattr(intent, "ids", None) or {})
@@ -133,7 +134,9 @@ def normalize_intent(
         ids_flat = _flatten_ids(ids_map)
 
     org_terms = _normalize_terms(getattr(intent, "org_terms", None) or [])
-    if not org_terms:
+    if hint_org_terms:
+        org_terms = _normalize_terms(list(hint_org_terms))
+    elif not org_terms:
         org_terms = _normalize_terms(extract_org_terms(query, keywords))
 
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])

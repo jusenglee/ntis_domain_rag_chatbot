@@ -975,6 +975,8 @@ def _run_rag_with_vectors(
             return "perf"
         if norm == {"researcher"}:
             return "people"
+        if norm in ({"org"}, {"organization"}, {"기관"}, {"institution"}):
+            return "org"
         if norm in ({"qna"}, {"qnt"}, {"qna "}, {"q&a"}):
             return "support"
 
@@ -1074,7 +1076,7 @@ def _run_rag_with_vectors(
     timings["kw_det"] = time.time() - t0
 
     # intent (hint는 query_intent에서 흡수)
-    domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support") else None
+    domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
     raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
     qa_researchers = _get_attr(qa, "researchers", None) or []
     if isinstance(qa_researchers, str):
@@ -1104,12 +1106,16 @@ def _run_rag_with_vectors(
         if rid not in (None, ""):
             hint_people_ids.append(rid)
     hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+    hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
+    if isinstance(hint_org_terms, str):
+        hint_org_terms = [hint_org_terms]
 
     it = normalize_intent(
         raw_intent,
         query=q,
         keywords=kws,
         hint_people_terms=hint_people_terms,
+        hint_org_terms=hint_org_terms,
         hint_org_role=hint_org_role,
     )
     action = it.action
