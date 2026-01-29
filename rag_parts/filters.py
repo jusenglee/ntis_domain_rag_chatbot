@@ -289,7 +289,15 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
             break
 
     if filter_fields and "min_should" in filter_fields:
-        return qmodels.Filter(should=should, min_should=1)
+        min_should_cls = getattr(qmodels, "MinShould", None)
+        if min_should_cls is not None:
+            try:
+                min_should_value = min_should_cls(min_should=1)
+            except Exception:
+                min_should_value = min_should_cls(value=1)
+        else:
+            min_should_value = {"min_should": 1}
+        return qmodels.Filter(should=should, min_should=min_should_value)
 
     return qmodels.Filter(should=should)
 
