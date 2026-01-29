@@ -391,23 +391,24 @@ def _call_dense_retrieve_hybrid_multi(
         timings_out: Dict[str, float],
 ) -> Dict[str, Any]:
     params = set(_DENSE_MULTI_SIG.parameters.keys()) if _DENSE_MULTI_SIG else set()
-    hybrid_once = os.getenv("RAG_HYBRID_QUERY_ONCE", "1") == "1"
+    common_kwargs = {
+        "emb_map": emb_map,
+        "top_k_dense": top_k_dense,
+        "top_k_lexical_candidates": top_k_lex_cand,
+        "top_k_lexical": top_k_lex,
+        "sparse_vector_name": sparse_vector_name,
+        "sparse_topk": sparse_topk,
+        "timings": timings_out,
+    }
 
     if "client" in params and "collection_name" in params:
         return dense_retrieve_hybrid_multi(
             client=qdr,
-            emb_map=emb_map,
             expanded_text=qtext,
             keywords=kws,
             collection_name=collection,
-            top_k_dense=top_k_dense,
-            top_k_lexical_candidates=top_k_lex_cand,
-            top_k_lexical=top_k_lex,
-            sparse_vector_name=sparse_vector_name,
-            sparse_topk=sparse_topk,
             query_filter=query_filter,
-            timings=timings_out,
-            hybrid_once=hybrid_once if "hybrid_once" in params else None,
+            **common_kwargs,
         )
 
     if "qdr" in params and "collection" in params:
@@ -416,32 +417,18 @@ def _call_dense_retrieve_hybrid_multi(
             collection=collection,
             query_text=qtext,
             keywords=kws,
-            emb_map=emb_map,
-            top_k_dense=top_k_dense,
-            top_k_lexical_candidates=top_k_lex_cand,
-            top_k_lexical=top_k_lex,
-            sparse_vector_name=sparse_vector_name,
-            sparse_topk=sparse_topk,
             filter_obj=query_filter,
-            timings=timings_out,
-            hybrid_once=hybrid_once if "hybrid_once" in params else None,
+            **common_kwargs,
         )
 
     # last resort
     return dense_retrieve_hybrid_multi(
         client=qdr,
-        emb_map=emb_map,
         expanded_text=qtext,
         keywords=kws,
         collection_name=collection,
-        top_k_dense=top_k_dense,
-        top_k_lexical_candidates=top_k_lex_cand,
-        top_k_lexical=top_k_lex,
-        sparse_vector_name=sparse_vector_name,
-        sparse_topk=sparse_topk,
         query_filter=query_filter,
-        timings=timings_out,
-        hybrid_once=hybrid_once if "hybrid_once" in params else None,
+        **common_kwargs,
     )
 
 def _ensure_collection_mark(points: List[Any], col: str) -> None:
