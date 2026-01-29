@@ -1791,85 +1791,126 @@ def _run_rag_with_vectors(
             timings_out=local_timings,
         )
 
-        _ensure_collection_mark((sr.get("lexical") or []), col)
-        for _, lst in (sr.get("dense") or {}).items():
-            _ensure_collection_mark(lst or [], col)
+        hybrid_points = sr.get("hybrid") or []
+        if hybrid_points:
+            _ensure_collection_mark(hybrid_points, col)
+        else:
+            _ensure_collection_mark((sr.get("lexical") or []), col)
+            for _, lst in (sr.get("dense") or {}).items():
+                _ensure_collection_mark(lst or [], col)
 
         sr_by_col[col] = sr
 
         dense_vec_stats: Dict[str, Dict[str, float]] = {}
-        for vname, lst in (sr.get("dense") or {}).items():
-            if not lst:
-                continue
+        if not hybrid_points:
+            for vname, lst in (sr.get("dense") or {}).items():
+                if not lst:
+                    continue
+                top_score = None
+                try:
+                    top_score = float(getattr(lst[0], "score", 0.0))
+                except Exception:
+                    top_score = None
+                dense_vec_stats[str(vname)] = {
+                    "hits": float(len(lst)),
+                    "top_score": float(top_score) if top_score is not None else -1.0,
+                }
+
+            lex_top_score = None
+            if sr.get("lexical"):
+                try:
+                    lex_top_score = float(getattr(sr["lexical"][0], "score", 0.0))
+                except Exception:
+                    lex_top_score = None
+
+            log_section(
+                "RAG.COL.RESULTS",
+                {
+                    "col": col,
+                    "dense": dense_vec_stats,
+                    "lexical": {
+                        "hits": float(len(sr.get("lexical") or [])),
+                        "top_score": float(lex_top_score) if lex_top_score is not None else -1.0,
+                    },
+                },
+            )
+        else:
             top_score = None
             try:
-                top_score = float(getattr(lst[0], "score", 0.0))
+                top_score = float(getattr(hybrid_points[0], "score", 0.0))
             except Exception:
                 top_score = None
-            dense_vec_stats[str(vname)] = {
-                "hits": float(len(lst)),
-                "top_score": float(top_score) if top_score is not None else -1.0,
-            }
-
-        lex_top_score = None
-        if sr.get("lexical"):
-            try:
-                lex_top_score = float(getattr(sr["lexical"][0], "score", 0.0))
-            except Exception:
-                lex_top_score = None
-
-        log_section(
-            "RAG.COL.RESULTS",
-            {
-                "col": col,
-                "dense": dense_vec_stats,
-                "lexical": {
-                    "hits": float(len(sr.get("lexical") or [])),
-                    "top_score": float(lex_top_score) if lex_top_score is not None else -1.0,
+            log_section(
+                "RAG.COL.RESULTS",
+                {
+                    "col": col,
+                    "hybrid": {
+                        "hits": float(len(hybrid_points)),
+                        "top_score": float(top_score) if top_score is not None else -1.0,
+                    },
                 },
-            },
-        )
+            )
 
         dense_topn = int(os.getenv("RAG_LOG_TOPN_COL_DENSE", "4"))
-        for vname, lst in (sr.get("dense") or {}).items():
-            log_top_points(f"RAG.COL.DENSE.TOP.{col}.{vname}", lst or [], topn=dense_topn)
+        if not hybrid_points:
+            for vname, lst in (sr.get("dense") or {}).items():
+                log_top_points(f"RAG.COL.DENSE.TOP.{col}.{vname}", lst or [], topn=dense_topn)
 
         lex_topn = int(os.getenv("RAG_LOG_TOPN_COL_LEX", "4"))
-        log_top_points(f"RAG.COL.LEX.TOP.{col}", sr.get("lexical") or [], topn=lex_topn)
+        if not hybrid_points:
+            log_top_points(f"RAG.COL.LEX.TOP.{col}", sr.get("lexical") or [], topn=lex_topn)
+        else:
+            log_top_points(f"RAG.COL.HYBRID.TOP.{col}", hybrid_points, topn=lex_topn)
 
         # stats
-        d_hit = sum(len(lst or []) for lst in (sr.get("dense") or {}).values())
-        l_hit = len(sr.get("lexical") or [])
-        best_dense = None
-        for lst in (sr.get("dense") or {}).values():
-            if lst:
-                s0 = getattr(lst[0], "score", None)
-                try:
-                    best_dense = max(best_dense or -1.0, float(s0) if s0 is not None else -1.0)
-                except Exception:
-                    pass
+        if not hybrid_points:
+            d_hit = sum(len(lst or []) for lst in (sr.get("dense") or {}).values())
+            l_hit = len(sr.get("lexical") or [])
+            best_dense = None
+            for lst in (sr.get("dense") or {}).values():
+                if lst:
+                    s0 = getattr(lst[0], "score", None)
+                    try:
+                        best_dense = max(best_dense or -1.0, float(s0) if s0 is not None else -1.0)
+                    except Exception:
+                        pass
 
-        per_col_stats[col] = {
-            "dense_hits": float(d_hit),
-            "lex_hits": float(l_hit),
-            "best_dense": float(best_dense) if best_dense is not None else -1.0,
-            "total": float(local_timings.get("total", 0.0)),
-        }
+            per_col_stats[col] = {
+                "dense_hits": float(d_hit),
+                "lex_hits": float(l_hit),
+                "best_dense": float(best_dense) if best_dense is not None else -1.0,
+                "total": float(local_timings.get("total", 0.0)),
+            }
 
-        log_kv(
-            "RAG.COL.STATS",
-            col=col,
-            dense_hits=int(d_hit),
-            lex_hits=int(l_hit),
-            best_dense=float(best_dense) if best_dense is not None else -1.0,
-            timings=local_timings,
-        )
+            log_kv(
+                "RAG.COL.STATS",
+                col=col,
+                dense_hits=int(d_hit),
+                lex_hits=int(l_hit),
+                best_dense=float(best_dense) if best_dense is not None else -1.0,
+                timings=local_timings,
+            )
+        else:
+            per_col_stats[col] = {
+                "hybrid_hits": float(len(hybrid_points)),
+                "total": float(local_timings.get("total", 0.0)),
+            }
+            log_kv(
+                "RAG.COL.STATS",
+                col=col,
+                hybrid_hits=int(len(hybrid_points)),
+                timings=local_timings,
+            )
 
     timings["dense_search"] = time.time() - t0
 
     # federated RRF merge sources
     sources: List[_RankSource] = []
     for col, sr in sr_by_col.items():
+        hybrid_points = sr.get("hybrid") or []
+        if hybrid_points:
+            sources.append(_RankSource(name=f"{col}:hybrid", weight=1.0, points=hybrid_points))
+            continue
         for vname, lst in (sr.get("dense") or {}).items():
             sources.append(_RankSource(name=f"{col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
         sources.append(_RankSource(name=f"{col}:lex", weight=float(sparse_weight_eff), points=sr.get("lexical") or []))
