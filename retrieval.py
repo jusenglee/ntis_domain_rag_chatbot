@@ -16,7 +16,6 @@ NTIS/일반 문서형 RAG 검색 모듈.
 from __future__ import annotations
 
 import logging
-import math
 import os
 import re
 import time
@@ -25,18 +24,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-try:
-    from rapidfuzz import fuzz
-except Exception:  # pragma: no cover
-    fuzz = None
-
 
 _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 # ---------------------------------------------------------------------
 # Sparse (BM25) query support
 # - If Qdrant has a named sparse vector (e.g., "bm25"), we can query it directly.
 # - Query sparse vector is generated via fastembed (if available).
-# - If fastembed is unavailable, we gracefully fall back to legacy "scroll + client-side scoring".
+# - If fastembed is unavailable, we return empty sparse results (no legacy lexical fallback).
 # ---------------------------------------------------------------------
 _SPARSE_ENCODER = None
 
@@ -164,26 +158,6 @@ _DEFAULT_QDRANT_TIMEOUT = int(os.getenv("RAG_QDRANT_TIMEOUT", "300"))
 
 
 # =========================
-# Exact-match helpers for ID-like queries
-# =========================
-
-# long numeric ids (exclude years)
-_ID_NUM_RE = re.compile(r"\b\d{6,}\b")
-# hyphen/slash ids (biz reg etc.)
-_ID_HYPHEN_RE = re.compile(r"\b\d{2,}[-/]\d{2,}[-/]\d{2,}\b")
-# ISSN
-_ID_ISSN_RE = re.compile(r"\b\d{4}-\d{3}[0-9Xx]\b")
-# DOI core form
-_ID_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s;]+", re.IGNORECASE)
-# common NTIS-ish RST_ID style (e.g., JNL-2019-00111061650)
-_ID_RST_RE = re.compile(r"\b[A-Za-z]{2,5}-\d{2,6}-\d{6,}\b")
-
-# DOI full URL prefix
-_DOI_URL_PREFIX_RE = re.compile(r"^https?://(dx\.)?doi\.org/", re.IGNORECASE)
-
-
-
-# =========================
 # Payload selector (min/full)
 # =========================
 _PAYLOAD_MODE_DENSE = os.getenv("RAG_PAYLOAD_MODE_DENSE", "min").strip().lower()  # min|full|true
@@ -236,116 +210,6 @@ def _with_payload_selector(
         logger.warning(f"[retrieval] _with_payload_selector failed: {e}")
         return None
 
-
-
-def _extract_id_tokens(q: str, *, cap: int = 8) -> List[str]:
-    """Extract ID-like tokens from query text for exact matching.
-
-    - 필드 열거 없이(flat_text 등) 동작하도록 토큰 기반으로 설계.
-    - ISSN 하이픈/무하이픈, DOI URL/코어형을 같이 인식합니다.
-    """
-    q = (q or "").strip()
-    if not q:
-        return []
-
-    toks: List[str] = []
-
-    # DOI: allow URL form too (normalize later)
-    for m in _ID_DOI_RE.finditer(q):
-        toks.append(m.group(0))
-
-    # also capture doi.org/... if user pasted full URL
-    for m in re.finditer(r"https?://(dx\.)?doi\.org/[^\s;]+", q, flags=re.IGNORECASE):
-        toks.append(m.group(0))
-
-    # ISSN / RST / hyphen ids
-    toks += [m.group(0) for m in _ID_ISSN_RE.finditer(q)]
-    toks += [m.group(0) for m in _ID_RST_RE.finditer(q)]
-    toks += [m.group(0) for m in _ID_HYPHEN_RE.finditer(q)]
-
-    # long numeric ids
-    for m in _ID_NUM_RE.finditer(q):
-        t = m.group(0)
-        # ignore year-like numbers
-        if len(t) == 4 and t.isdigit() and 1900 <= int(t) <= 2099:
-            continue
-        toks.append(t)
-
-    # normalize / de-dup while preserving order
-    seen = set()
-    out: List[str] = []
-    for t in toks:
-        t = t.strip()
-        if not t:
-            continue
-
-        # DOI normalize: url -> core
-        if _DOI_URL_PREFIX_RE.search(t):
-            t = _DOI_URL_PREFIX_RE.sub("", t).strip()
-        # strip trailing punctuation
-        t = t.rstrip(").,;]}>")
-
-        key = t.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(t)
-        # ISSN normalization: 하이픈 포함/미포함 변형을 동시에 넣지 않는다(오탐 방지).
-
-        # DOI normalization: add url form? (not needed for exact; we normalize text too)
-        if _ID_DOI_RE.fullmatch(t):
-            # also add lowercase variant for safety (matching will be case-insensitive)
-            tl = t.lower()
-            if tl not in seen:
-                seen.add(tl)
-                out.append(tl)
-
-        if len(out) >= cap:
-            break
-
-    return out
-
-
-def _contains_token_exact(text: str, token: str) -> bool:
-    """True if token appears in text under "identifier-safe" equivalence.
-
-    - ISSN: hyphen/none-hyphen equivalence
-    - DOI: doi.org URL prefix equivalence, case-insensitive
-    - Digits: enforce digit boundaries to avoid substring matches
-    """
-    if not text or not token:
-        return False
-
-    t = token.strip()
-    if not t:
-        return False
-
-    # ISSN equivalence: 1738-2270 <-> 17382270
-    if _ID_ISSN_RE.fullmatch(t) or (t.isdigit() and len(t) == 8):
-        t_norm = t.replace("-", "")
-        text_norm = text.replace("-", "")
-        return t_norm in text_norm
-
-    # DOI equivalence: https://doi.org/10.... <-> 10....
-    # We compare in lowercase and strip URL prefix in both sides.
-    t_l = t.lower()
-    if _DOI_URL_PREFIX_RE.search(t_l):
-        t_l = _DOI_URL_PREFIX_RE.sub("", t_l).strip()
-    if _ID_DOI_RE.fullmatch(t_l) or t_l.startswith("10."):
-        text_l = text.lower()
-        text_l = text_l.replace("dx.doi.org/", "doi.org/")  # minor normalization
-        text_l2 = _DOI_URL_PREFIX_RE.sub("", text_l)
-        return (t_l in text_l) or (t_l in text_l2)
-
-    # Pure digits: boundary-safe
-    if t.isdigit():
-        return re.search(rf"(?<!\d){re.escape(t)}(?!\d)", text) is not None
-
-    # General tokens: try non-alnum boundaries; fall back to substring
-    return (
-            re.search(rf"(?<![0-9A-Za-z]){re.escape(t)}(?![0-9A-Za-z])", text) is not None
-            or t in text
-    )
 
 
 def _safe_str(x: Any, *, max_chars: Optional[int] = None) -> str:
@@ -408,63 +272,6 @@ def _payload_get(pl: Dict[str, Any], key: str, default: Any = "") -> Any:
     if not leaves:
         return default
     return " ".join(leaves)
-
-
-def _id_exact_score(
-        query_text: str,
-        payload: Dict[str, Any],
-        fields: Sequence[str],
-        weights: Dict[str, float],
-) -> float:
-    """Exact-match score for ID-like queries using only payload fields (flat_text etc.).
-
-    로직(중요):
-    - ID 토큰이 존재하는 질의는 *fuzzy*로 내려가면 오염(허위 양성)이 급증함.
-    - 따라서 "동치 정규화 포함 exact"만으로 점수화하고,
-      exact=0이면 0으로 종료하는 상위 로직을 권장.
-    """
-    toks = _extract_id_tokens(query_text)
-    if not toks:
-        return 0.0
-
-    found = {t: False for t in toks}
-    base = 0.0
-
-    for f in fields:
-        txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-        if not txt:
-            continue
-        w = float(weights.get(f, 1.0))
-
-        any_hit = False
-        kv_hit = False
-
-        for t in toks:
-            if found[t]:
-                continue
-            if _contains_token_exact(txt, t):
-                found[t] = True
-                any_hit = True
-                # KV style bonus: "...: <token>"
-                if re.search(rf":\s*{re.escape(t)}(?![0-9A-Za-z])", txt, flags=re.IGNORECASE):
-                    kv_hit = True
-
-        if any_hit:
-            base += 0.9 * w
-            if kv_hit:
-                base += 0.2 * w
-
-    hit_cnt = sum(1 for v in found.values() if v)
-    if hit_cnt == 0:
-        return 0.0
-
-    # if all tokens matched somewhere, bump confidence.
-    if hit_cnt == len(found):
-        base *= 1.5
-    else:
-        base *= (0.6 + 0.4 * (hit_cnt / max(1, len(found))))
-
-    return float(base)
 
 
 # =========================
@@ -618,159 +425,6 @@ def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
     return
 
 # =========================
-# Lexical scoring
-# =========================
-
-_TOKEN_RE = re.compile(r"[A-Za-z]+|[0-9]+|[가-힣]+", re.UNICODE)
-
-
-def _tokenize_simple(text: str) -> List[str]:
-    if not text:
-        return []
-    return [m.group(0).lower() for m in _TOKEN_RE.finditer(text)]
-
-
-def _fuzzy_ratio(a: str, b: str) -> float:
-    if not a or not b:
-        return 0.0
-    if fuzz is None:
-        aset = set(a.lower().split())
-        bset = set(b.lower().split())
-        if not aset or not bset:
-            return 0.0
-        return len(aset & bset) / len(aset | bset)
-    return float(fuzz.partial_ratio(a, b)) / 100.0
-
-
-def lexical_score_weighted(
-        query_text: str,
-        payload: Dict[str, Any],
-        fields: Sequence[str],
-        weights: Dict[str, float],
-        *,
-        systems_hint: Optional[Sequence[str]] = None,
-        lexical_scoring_mode: str = "bm25",
-) -> float:
-    """Compute a weighted lexical score.
-
-    로직(중요):
-    - ID 토큰(ISSN/DOI/긴 숫자/하이픈 번호/RST_ID 등)이 있는 질의는
-      fuzzy 점수를 허용하면 허위 양성이 급증하므로,
-      *동치 정규화 포함 exact 매칭*만 허용합니다.
-    """
-    qt = normalize_query(query_text)
-    if not qt:
-        return 0.0
-
-    id_toks = _extract_id_tokens(qt)
-    if id_toks:
-        exact = _id_exact_score(qt, payload, fields, weights)
-        if exact > 0.0:
-            # small system hint boost
-            if systems_hint:
-                ql = qt.lower()
-                for s in systems_hint:
-                    if s and s.lower() in ql:
-                        exact += 0.05
-                        break
-            return float(exact)
-        # ✅ ID 질의인데 exact=0이면 fuzzy로 내려가지 않는다.
-        return 0.0
-
-    mode = (lexical_scoring_mode or "bm25").strip().lower()
-    query_tokens = _tokenize_simple(qt)
-    if not query_tokens:
-        return 0.0
-
-    field_tokens: Dict[str, List[str]] = {}
-    field_counts: Dict[str, Dict[str, int]] = {}
-    for f in fields:
-        txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-        tokens = _tokenize_simple(txt)
-        if not tokens:
-            continue
-        field_tokens[f] = tokens
-        counts: Dict[str, int] = {}
-        for t in tokens:
-            counts[t] = counts.get(t, 0) + 1
-        field_counts[f] = counts
-
-    if not field_tokens:
-        return 0.0
-
-    def _score_for_query(qtext: str, qtokens: List[str]) -> float:
-        num_fields = len(field_tokens)
-        avg_dl = sum(len(toks) for toks in field_tokens.values()) / float(max(1, num_fields))
-        df: Dict[str, int] = {}
-        for t in set(qtokens):
-            df[t] = sum(1 for toks in field_tokens.values() if t in toks)
-
-        k1 = 1.2
-        b = 0.75
-
-        bm25_score = 0.0
-        qtf: Dict[str, int] = {}
-        for t in qtokens:
-            qtf[t] = qtf.get(t, 0) + 1
-
-        for f, counts in field_counts.items():
-            dl = float(len(field_tokens.get(f, [])))
-            if dl <= 0:
-                continue
-            w = float(weights.get(f, 1.0))
-            denom_norm = k1 * (1.0 - b + b * (dl / max(1.0, avg_dl)))
-            for t, qt_count in qtf.items():
-                tf = float(counts.get(t, 0))
-                if tf <= 0:
-                    continue
-                df_t = float(df.get(t, 0))
-                idf = math.log(1.0 + (num_fields - df_t + 0.5) / (df_t + 0.5))
-                bm25_score += w * idf * ((tf * (k1 + 1.0)) / (tf + denom_norm)) * float(qt_count)
-
-        base_score = 0.0
-        if mode in ("bm25", "bm25_only"):
-            base_score = bm25_score
-        elif mode in ("mix", "hybrid", "bm25_fuzzy"):
-            fuzzy_score = 0.0
-            total_w = 0.0
-            for f in fields:
-                txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-                if not txt:
-                    continue
-                w = float(weights.get(f, 1.0))
-                total_w += w
-                fuzzy_score += w * _fuzzy_ratio(qtext, txt)
-            fuzzy_norm = fuzzy_score / max(1.0, total_w)
-            bm25_norm = bm25_score / (1.0 + bm25_score)
-            base_score = (0.65 * bm25_norm) + (0.35 * fuzzy_norm)
-        else:
-            # fallback: fuzzy only
-            for f in fields:
-                txt = _safe_str(_payload_get(payload, f, ""), max_chars=_SNIP_MAX_CHARS)
-                if not txt:
-                    continue
-                w = float(weights.get(f, 1.0))
-                base_score += w * _fuzzy_ratio(qtext, txt)
-        return float(base_score)
-
-    base = _score_for_query(qt, query_tokens)
-    qt_nospace = _strip_whitespace_korean(qt)
-    if qt_nospace and qt_nospace != qt:
-        aux_tokens = _tokenize_simple(qt_nospace)
-        if aux_tokens:
-            base += 0.15 * _score_for_query(qt_nospace, aux_tokens)
-
-    if systems_hint:
-        ql = qt.lower()
-        for s in systems_hint:
-            if s and s.lower() in ql:
-                base += 0.05
-                break
-
-    return float(base)
-
-
-# =========================
 # Search result model
 # =========================
 
@@ -815,24 +469,24 @@ def _combine_filters(base: Optional[models.Filter], extra: Optional[models.Filte
 # =========================
 
 def dense_retrieve_hybrid_multi(
-        *,
-        client: QdrantClient,
-        emb_map: Dict[str, Any],
-        expanded_text: str,
-        keywords: List[str],
-        collection_name: str,
-        lexical_fields: Optional[List[str]] = None,
-        lexical_field_weights: Optional[Dict[str, float]] = None,
-        lexical_scoring_mode: str = "bm25",
-        top_k_dense: int = _DEFAULT_TOPK_DENSE,
-        top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
-        top_k_lexical: int = _DEFAULT_TOPK_LEX,
-        sparse_vector_name: Optional[str] = None,
-        sparse_topk: Optional[int] = None,
-        query_filter: Optional[models.Filter] = None,
-        timings: Optional[Dict[str, float]] = None,
+    *,
+    client: QdrantClient,
+    emb_map: Dict[str, Any],
+    expanded_text: str,
+    keywords: List[str],
+    collection_name: str,
+    lexical_fields: Optional[List[str]] = None,
+    lexical_field_weights: Optional[Dict[str, float]] = None,
+    lexical_scoring_mode: str = "bm25",
+    top_k_dense: int = _DEFAULT_TOPK_DENSE,
+    top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
+    top_k_lexical: int = _DEFAULT_TOPK_LEX,
+    sparse_vector_name: Optional[str] = None,
+    sparse_topk: Optional[int] = None,
+    query_filter: Optional[models.Filter] = None,
+    timings: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """Run dense retrieval for multiple named vectors + lexical retrieval."""
+    """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
     with_payload_dense_spase = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
     q = normalize_query(expanded_text)
@@ -914,7 +568,7 @@ def dense_retrieve_hybrid_multi(
     timings["dense_points"] = float(dense_points)
 
     # -----------------------
-    # Lexical retrieval (MatchText filter + client-side scoring)
+    # Sparse retrieval (named sparse vector search only)
     # -----------------------
     if sparse_topk is not None:
         try:
@@ -927,36 +581,26 @@ def dense_retrieve_hybrid_multi(
     lex_points: List[models.ScoredPoint] = []
 
     lexical_fields_eff = list(
-        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "category", "prtcp_mp[].hm_nm", "prtcp_mp[].blng_org_nm", "prtcp_org[].org_nm"]
+        lexical_fields
+        or [
+            "title_text",
+            "content_text",
+            "keyword_text",
+            "flat_text",
+            "category",
+            "prtcp_mp[].hm_nm",
+            "prtcp_mp[].blng_org_nm",
+            "prtcp_org[].org_nm",
+        ]
     )
-    lex_base_fields = _PAYLOAD_MIN_FIELDS
     with_payload_lex = _with_payload_selector(
         _PAYLOAD_MODE_LEX,
-        lex_base_fields,
+        _PAYLOAD_MIN_FIELDS,
         lexical_fields_eff,
     )
-    lexical_weights_eff = dict(
-        lexical_field_weights
-        or {
-            "title_text": 5.0,
-            "content_text": 3.0,
-            "keyword_text": 3.0,
-            "flat_text": 2.0,
-            "category": 5.0,
-            "prtcp_mp[].hm_nm": 5.0,
-            "prtcp_mp[].blng_org_nm": 5.0,
-            "prtcp_org[].org_nm": 5.0,
-        }
-    )
 
-    t_scroll = 0.0
-    t_score = 0.0
+    t_sparse0 = time.perf_counter()
     lex_cand = 0
-    lex_scored = 0
-
-    # Prefer Qdrant named sparse-vector search (e.g., "bm25") when available.
-    # If query sparse embedding cannot be produced (fastembed missing), fall back to legacy MatchText+scroll path.
-    skip_legacy_lexical = False
     if sparse_vector_name:
         try:
             top_k_lexical_candidates_eff = int(top_k_lexical_candidates)
@@ -973,110 +617,10 @@ def dense_retrieve_hybrid_multi(
         )
         if sp_hits:
             lex_points = list(sp_hits)[: int(top_k_lexical)]
-            skip_legacy_lexical = True
-
-    if (not skip_legacy_lexical) and (not keywords):
-        fallback_tokens = _tokenize_simple(q)
-        if fallback_tokens:
-            keywords = fallback_tokens[:8]
-        else:
-            keywords = [q]
-
-    if (not skip_legacy_lexical) and keywords:
-        t0 = time.perf_counter()
-
-        # ID 토큰이 있으면: scroll 단계에서도 "AND 문자열"이 아니라 "OR 토큰"으로 후보를 모은다.
-        id_toks = _extract_id_tokens(q, cap=4)
-
-        if id_toks:
-            top_k_lexical_candidates_eff = min(int(top_k_lexical_candidates), 120)
-        else:
-            top_k_lexical_candidates_eff = int(top_k_lexical_candidates)
-
-        should_conds: List[models.FieldCondition] = []
-
-        if id_toks:
-            # ✅ 필드×토큰으로 should(OR) 구성
-            for f in lexical_fields_eff:
-                for t in id_toks:
-                    should_conds.append(models.FieldCondition(key=f, match=models.MatchText(text=str(t)[:128])))
-        else:
-            query_text = " ".join(keywords[:12]).strip() or q
-            if len(query_text) > 128:
-                query_text = query_text[:128]
-            query_text_nospace = _strip_whitespace_korean(query_text)
-            for f in lexical_fields_eff:
-                should_conds.append(models.FieldCondition(key=f, match=models.MatchText(text=query_text)))
-                if query_text_nospace and query_text_nospace != query_text:
-                    should_conds.append(models.FieldCondition(key=f, match=models.MatchText(text=query_text_nospace)))
-
-        lex_filter = models.Filter(should=should_conds)
-        final_filter = _combine_filters(query_filter, lex_filter)
-        try:
-            try:
-                scroll_res, _ = client.scroll(
-                    collection_name=collection_name,
-                    scroll_filter=final_filter,
-                    limit=int(top_k_lexical_candidates_eff),
-                    with_payload=with_payload_lex,
-                    with_vectors=False,
-                    timeout=_DEFAULT_QDRANT_TIMEOUT,
-                )
-            except TypeError:
-                scroll_res, _ = client.scroll(
-                    collection_name=collection_name,
-                    scroll_filter=final_filter,
-                    limit=int(top_k_lexical_candidates_eff),
-                    with_payload=with_payload_lex,
-                    with_vectors=False,
-                )
-            cand = list(scroll_res or [])
-        except Exception as e:  # pragma: no cover
-            logger.warning(f"[retrieval] lexical scroll failed: col={collection_name}: {e}")
-            cand = []
-
-        t_scroll = time.perf_counter() - t0
-        timings["lexical_scroll"] = t_scroll
-        lex_cand = len(cand)
-
-        # scoring
-        t0 = time.perf_counter()
-
-        systems_hint = None
-        for p in cand:
-            if not isinstance(getattr(p, "payload", None), dict):
-                continue
-            systems_hint = p.payload.get("systems") if isinstance(p.payload.get("systems"), list) else None
-            break
-
-        scored: List[models.ScoredPoint] = []
-        for p in cand:
-            pl = p.payload if isinstance(p.payload, dict) else {}
-            if not pl:
-                continue
-            s = lexical_score_weighted(
-                q,
-                pl,
-                lexical_fields_eff,
-                lexical_weights_eff,
-                systems_hint=systems_hint,
-                lexical_scoring_mode=lexical_scoring_mode,
-            )
-            if s <= 0:
-                continue
-            sp = _make_scored_point_from_payload(pid=p.id, payload=pl, score=s, version=getattr(p, "version", 0))
-            _set_payload_hint(sp, collection_name, "lex")
-            scored.append(sp)
-
-        scored.sort(key=lambda x: float(getattr(x, "score", 0.0)), reverse=True)
-        lex_points = scored[: int(top_k_lexical)]
-
-        t_score = time.perf_counter() - t0
-        timings["lexical_score"] = t_score
-        lex_scored = len(scored)
-
+            lex_cand = len(sp_hits)
+    timings["lexical_sparse"] = time.perf_counter() - t_sparse0
     timings["lexical_candidates"] = float(lex_cand)
-    timings["lexical_scored"] = float(lex_scored)
+    timings["lexical_scored"] = float(len(lex_points))
     timings["lexical_total"] = time.perf_counter() - t_lex0
 
     return {"dense": dense, "lexical": lex_points}
