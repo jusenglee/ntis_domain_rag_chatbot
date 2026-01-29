@@ -1701,7 +1701,7 @@ def _run_rag_with_vectors(
             return perf_tag_filter
 
         # (선택) org_filter는 project 컬렉션에서만
-        if col == COL_PROJECT and org_terms:
+        if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
             if org_role == "participant":
                 return participant_org_filter or org_filter
             if org_filter:
@@ -1717,7 +1717,13 @@ def _run_rag_with_vectors(
                 return _and_filter(tag_filter_local, participant_org_filter or org_filter) if (participant_org_filter or org_filter) else tag_filter_local
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
-                return _build_tag_only_filter([TAG_PJT_INFO])
+                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                combined_filter = tag_filter_local
+                if people_filter:
+                    combined_filter = _and_filter(combined_filter, people_filter)
+                if participant_org_filter or org_filter:
+                    combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
+                return combined_filter
 
         if col == COL_PERF and base_route == "perf" and perf_tag_filter:
             return perf_tag_filter
