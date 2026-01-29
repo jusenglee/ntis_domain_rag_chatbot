@@ -40,7 +40,6 @@ from retrieval import (
 # rag_parts imports
 # -------------------------
 from rag_parts.constants import (
-    KEY_ORG_NORM,
     COL_SUPPORT,
     COL_PROJECT,
     COL_PERF,
@@ -410,9 +409,9 @@ def _call_dense_retrieve_hybrid_multi(
         qtext: str,
         kws: List[str],
         collection: str,
-        lexical_fields: List[str],
-        lexical_field_weights: Dict[str, float],
-        lexical_scoring_mode: str,
+        sparse_vector_name: Optional[str],
+        sparse_topk: Optional[int],
+        sparse_weight: Optional[float],
         top_k_dense: int,
         top_k_lex_cand: int,
         top_k_lex: int,
@@ -428,12 +427,12 @@ def _call_dense_retrieve_hybrid_multi(
             expanded_text=qtext,
             keywords=kws,
             collection_name=collection,
-            lexical_fields=lexical_fields,
-            lexical_field_weights=lexical_field_weights,
-            lexical_scoring_mode=lexical_scoring_mode,
             top_k_dense=top_k_dense,
             top_k_lexical_candidates=top_k_lex_cand,
             top_k_lexical=top_k_lex,
+            sparse_vector_name=sparse_vector_name,
+            sparse_topk=sparse_topk,
+            sparse_weight=sparse_weight,
             query_filter=query_filter,
             timings=timings_out,
         )
@@ -445,12 +444,12 @@ def _call_dense_retrieve_hybrid_multi(
             query_text=qtext,
             keywords=kws,
             emb_map=emb_map,
-            lexical_fields=lexical_fields,
-            lexical_field_weights=lexical_field_weights,
-            lexical_scoring_mode=lexical_scoring_mode,
             top_k_dense=top_k_dense,
             top_k_lexical_candidates=top_k_lex_cand,
             top_k_lexical=top_k_lex,
+            sparse_vector_name=sparse_vector_name,
+            sparse_topk=sparse_topk,
+            sparse_weight=sparse_weight,
             filter_obj=query_filter,
             timings=timings_out,
         )
@@ -462,12 +461,12 @@ def _call_dense_retrieve_hybrid_multi(
         expanded_text=qtext,
         keywords=kws,
         collection_name=collection,
-        lexical_fields=lexical_fields,
-        lexical_field_weights=lexical_field_weights,
-        lexical_scoring_mode=lexical_scoring_mode,
         top_k_dense=top_k_dense,
         top_k_lexical_candidates=top_k_lex_cand,
         top_k_lexical=top_k_lex,
+        sparse_vector_name=sparse_vector_name,
+        sparse_topk=sparse_topk,
+        sparse_weight=sparse_weight,
         query_filter=query_filter,
         timings=timings_out,
     )
@@ -999,9 +998,10 @@ def _run_rag_with_vectors(
         stack: str,
         vector_names: List[str],
         w_dense_map: Dict[str, float],
-        lexical_fields: Optional[List[str]] = None,
         lexical_field_weights: Optional[Dict[str, float]] = None,
-        lexical_scoring_mode: Optional[str] = None,
+        sparse_vector_name: Optional[str] = None,
+        sparse_topk: Optional[int] = None,
+        sparse_weight: Optional[float] = None,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, float] = {}
@@ -1190,14 +1190,17 @@ def _run_rag_with_vectors(
 
     # preset (topK etc)
     preset: _SearchPreset = _build_search_preset(it)
-    lexical_fields_eff = list(lexical_fields) if lexical_fields is not None else list(preset.lexical_fields)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
-    lex_scoring_mode_eff = (lexical_scoring_mode or preset.lexical_scoring_mode or "bm25").strip().lower()
 
     if hinted_limit > 0:
         preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
+        preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
+
+    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "sparse").strip()
+    sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
+    sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or extract_org_terms(q, kws) or []) if str(t).strip()]
     it.org_terms = org_terms
@@ -1313,11 +1316,12 @@ def _run_rag_with_vectors(
         top_k_dense=int(preset.top_k_dense),
         top_k_lex_cand=int(preset.top_k_lex_cand),
         top_k_lex=int(preset.top_k_lex),
-        w_lex=float(preset.w_lex),
+        sparse_vector_name=sparse_vector_name_eff,
+        sparse_topk=int(sparse_topk_eff),
+        sparse_weight=float(sparse_weight_eff),
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
         max_ctx_items=int(preset.max_ctx_items),
-        lexical_scoring_mode=lex_scoring_mode_eff,
         ctx_budget=int(ctx_budget),
     )
 
@@ -1473,9 +1477,9 @@ def _run_rag_with_vectors(
                     qtext=hop1_q,
                     kws=kws,
                     collection=hop1_col,
-                    lexical_fields=lexical_fields_eff,
-                    lexical_field_weights=lex_w_eff,
-                    lexical_scoring_mode=lex_scoring_mode_eff,
+                    sparse_vector_name=sparse_vector_name_eff,
+                    sparse_topk=min(hop1_k_base, 80),
+                    sparse_weight=sparse_weight_eff,
                     top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
@@ -1490,7 +1494,7 @@ def _run_rag_with_vectors(
                 sources_h1: List[_RankSource] = []
                 for vname, lst in (sr1.get("dense") or {}).items():
                     sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
-                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(preset.w_lex), points=sr1.get("lexical") or []))
+                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
                 h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
 
                 h1_rrf = _dedup_by_doc_id(h1_rrf)
@@ -1600,9 +1604,9 @@ def _run_rag_with_vectors(
                 qtext=hop2_q,
                 kws=kws,
                 collection=hop2_col,
-                lexical_fields=lexical_fields_eff,
-                lexical_field_weights=lex_w_eff,
-                lexical_scoring_mode=lex_scoring_mode_eff,
+                sparse_vector_name=sparse_vector_name_eff,
+                sparse_topk=min(hop2_k_base, 120),
+                sparse_weight=sparse_weight_eff,
                 top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
@@ -1617,7 +1621,7 @@ def _run_rag_with_vectors(
             sources_h2: List[_RankSource] = []
             for vname, lst in (sr2.get("dense") or {}).items():
                 sources_h2.append(_RankSource(name=f"{hop2_col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
-            sources_h2.append(_RankSource(name=f"{hop2_col}:lex", weight=float(preset.w_lex), points=sr2.get("lexical") or []))
+            sources_h2.append(_RankSource(name=f"{hop2_col}:lex", weight=float(sparse_weight_eff), points=sr2.get("lexical") or []))
             h2_rrf = _rrf_merge(sources_h2, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=800)
             h2_rrf = _dedup_by_doc_id(h2_rrf)
 
@@ -1671,7 +1675,7 @@ def _run_rag_with_vectors(
     # topK caps
     topk_dense = int(preset.top_k_dense)
     topk_lex_cand = min(int(preset.top_k_lex_cand), int(os.getenv("RAG_FED_LEX_CAND_CAP", "260")))
-    topk_lex = int(preset.top_k_lex)
+    topk_lex = int(sparse_topk_eff)
 
     def _build_emb_map_for_collection(col: str) -> Dict[str, Any]:
         vec_avail = _named_vectors_in_collection(qdr, col)
@@ -1681,22 +1685,6 @@ def _run_rag_with_vectors(
             pe = pre_vecs.get(vname)
             out[vname] = pe if pe is not None else fallback_emb.get(vname)
         return {k: v for k, v in out.items() if v is not None}
-
-    def _lex_params_for_collection(col: str) -> Tuple[List[str], Dict[str, float]]:
-        # 기관 질의가 보이면 project만 org_norm에 강가중
-        if col == COL_PROJECT and org_terms:
-            lf = list(dict.fromkeys(list(lexical_fields_eff) + [KEY_ORG_NORM, "org_nm", "flat_text"]))
-            lw = dict(lex_w_eff)
-            lw.setdefault("title_text", float(os.getenv("RAG_W_TITLE", "5.0")))
-            lw.setdefault("title", float(os.getenv("RAG_W_TITLE", "5.0")))
-            lw.setdefault("content_text", float(os.getenv("RAG_W_CONTENT", "3.0")))
-            lw.setdefault("keyword_text", float(os.getenv("RAG_W_KEYWORD_TEXT", "3.0")))
-            lw.setdefault("cetegory", float(os.getenv("RAG_W_CETEGORY", "5.0")))
-            lw[KEY_ORG_NORM] = float(os.getenv("RAG_W_ORG_NORM", "3.0"))
-            lw.setdefault("org_nm", lw.get(KEY_ORG_NORM, 3.0))
-            lw.setdefault("flat_text", float(os.getenv("RAG_W_FLAT_TEXT", "2.0")))
-            return lf, lw
-        return lexical_fields_eff, lex_w_eff
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
@@ -1748,7 +1736,6 @@ def _run_rag_with_vectors(
         emb_map_col = _build_emb_map_for_collection(col)
         use_dense_k = topk_dense if emb_map_col else 0
 
-        lf, lw = _lex_params_for_collection(col)
         qfilter = _server_filter_for_col(col)
 
         log_kv(
@@ -1758,9 +1745,11 @@ def _run_rag_with_vectors(
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,
+            sparse_vector_name=sparse_vector_name_eff,
+            sparse_topk=int(sparse_topk_eff),
+            sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
-            lex_fields=lf,
-            lex_w_preview={k: float(lw.get(k)) for k in list(lw.keys())[:8]},
+            lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
         )
 
@@ -1771,9 +1760,9 @@ def _run_rag_with_vectors(
             qtext=q,
             kws=kws,
             collection=col,
-            lexical_fields=lf,
-            lexical_field_weights=lw,
-            lexical_scoring_mode=lex_scoring_mode_eff,
+            sparse_vector_name=sparse_vector_name_eff,
+            sparse_topk=sparse_topk_eff,
+            sparse_weight=sparse_weight_eff,
             top_k_dense=use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,
@@ -1862,7 +1851,7 @@ def _run_rag_with_vectors(
     for col, sr in sr_by_col.items():
         for vname, lst in (sr.get("dense") or {}).items():
             sources.append(_RankSource(name=f"{col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
-        sources.append(_RankSource(name=f"{col}:lex", weight=float(preset.w_lex), points=sr.get("lexical") or []))
+        sources.append(_RankSource(name=f"{col}:lex", weight=float(sparse_weight_eff), points=sr.get("lexical") or []))
 
     log_section("RAG.PER_COL_STATS", per_col_stats)
 
@@ -2001,7 +1990,6 @@ def run_rag_once(query: str, model_name: str = DEFAULT_MODEL_NAME, hint: Any = N
         stack="M",
         vector_names=["e5i_qa", "e5_qa"],
         w_dense_map={"e5i_qa": 1.0, "e5_qa": 0.8},
-        lexical_fields=None,
         lexical_field_weights=None,
     )
 
