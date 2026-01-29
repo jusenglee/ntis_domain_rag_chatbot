@@ -683,6 +683,9 @@ def dense_retrieve_hybrid_multi(
         top_k_dense: int = _DEFAULT_TOPK_DENSE,
         top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
         top_k_lexical: int = _DEFAULT_TOPK_LEX,
+        sparse_vector_name: Optional[str] = None,
+        sparse_topk: Optional[int] = None,
+        sparse_weight: Optional[float] = None,
         query_filter: Optional[models.Filter] = None,
         timings: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
@@ -769,6 +772,11 @@ def dense_retrieve_hybrid_multi(
     # -----------------------
     # Lexical retrieval (MatchText filter + client-side scoring)
     # -----------------------
+    if sparse_topk is not None:
+        try:
+            top_k_lexical = int(sparse_topk)
+        except Exception:
+            top_k_lexical = int(top_k_lexical)
     t_lex0 = time.perf_counter()
     lex_points: List[models.ScoredPoint] = []
 

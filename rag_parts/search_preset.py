@@ -33,7 +33,9 @@ class SearchPreset:
     # lexical config
     lexical_fields: List[str] = field(default_factory=list)
     lexical_field_weights: Dict[str, float] = field(default_factory=dict)
-    lexical_scoring_mode: str = "bm25"
+    sparse_vector_name: str = "sparse"
+    sparse_topk: int = 0
+    sparse_weight: float = 0.0
 
     # fallback / threshold
     use_dense_threshold: bool = True
@@ -66,7 +68,9 @@ class SearchPreset:
             "w_lex": self.w_lex,
             "lexical_fields": self.lexical_fields,
             "lexical_field_weights": self.lexical_field_weights,
-            "lexical_scoring_mode": self.lexical_scoring_mode,
+            "sparse_vector_name": self.sparse_vector_name,
+            "sparse_topk": self.sparse_topk,
+            "sparse_weight": self.sparse_weight,
             "use_dense_threshold": int(self.use_dense_threshold),
             "min_dense_score": self.min_dense_score,
             "min_reranked": self.min_reranked,
@@ -103,7 +107,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
     default_cetegory_w = _f("RAG_W_CETEGORY", 5.0)
-    default_lex_mode = os.getenv("RAG_LEXICAL_SCORING_MODE", "bm25").strip().lower()
+    default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "sparse").strip()
 
     # base lexical fields
     base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
@@ -122,14 +126,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 1) Support (QnA/Manual)
     if action == "support":
+        top_k_lex = _i("RAG_TOPK_LEX_SUPPORT", _i("RAG_TOPK_LEX", 50))
+        w_lex = _f("RAG_W_LEX_SUPPORT", _f("RAG_W_LEX", 0.25))
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_SUPPORT", _i("RAG_TOPK_DENSE", 25)),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_SUPPORT", _i("RAG_TOPK_LEX_CAND", 250)),
-            top_k_lex=_i("RAG_TOPK_LEX_SUPPORT", _i("RAG_TOPK_LEX", 50)),
-            w_lex=_f("RAG_W_LEX_SUPPORT", _f("RAG_W_LEX", 0.25)),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_SUPPORT", "0") == "1"),
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_SUPPORT", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_SUPPORT", _i("RAG_MIN_RERANKED", 4)),
@@ -141,14 +149,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 2) Relation (2-hop) — hop1/hop2는 파이프라인에서 별도 조정 가능.
     if action == "relation":
+        top_k_lex = _i("RAG_TOPK_LEX_REL", 180)
+        w_lex = _f("RAG_W_LEX_REL", 0.65)
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_REL", 16),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_REL", 900),
-            top_k_lex=_i("RAG_TOPK_LEX_REL", 180),
-            w_lex=_f("RAG_W_LEX_REL", 0.65),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=False,  # 조인/필터 계열은 dense threshold 오탐 가능
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_REL", 4),
@@ -162,14 +174,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     if action == "id_exact":
         # 추측입니다: exact id는 dense보다 lex가 더 안정적일 때가 많음
         prefer_lex_only = os.getenv("RAG_ID_EXACT_LEX_ONLY", "1") == "1"
+        top_k_lex = _i("RAG_TOPK_LEX_ID_EXACT", 160)
+        w_lex = _f("RAG_W_LEX_ID_EXACT", 0.78)
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_ID_EXACT", 8),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_ID_EXACT", 1200),
-            top_k_lex=_i("RAG_TOPK_LEX_ID_EXACT", 160),
-            w_lex=_f("RAG_W_LEX_ID_EXACT", 0.78),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_ID_EXACT", 2),
@@ -183,14 +199,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 4) Fuzzy ID-like query
     if action == "id_fuzzy":
+        top_k_lex = _i("RAG_TOPK_LEX_ID", 120)
+        w_lex = _f("RAG_W_LEX_ID", 0.60)
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_ID", 12),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_ID", 600),
-            top_k_lex=_i("RAG_TOPK_LEX_ID", 120),
-            w_lex=_f("RAG_W_LEX_ID", 0.60),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_ID", 3),
@@ -204,14 +224,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     if action in ("list", "download", "stats"):
         # list/filter/stats/download는 구조 키워드 비중이 높아 lex가 유리한 경우가 많음(추측입니다)
         prefer_lex_only = os.getenv("RAG_LIST_LEX_ONLY", "0") == "1"
+        top_k_lex = _i("RAG_TOPK_LEX_FILTER", 180)
+        w_lex = _f("RAG_W_LEX_FILTER", 0.65)
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_FILTER", 16),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_FILTER", 900),
-            top_k_lex=_i("RAG_TOPK_LEX_FILTER", 180),
-            w_lex=_f("RAG_W_LEX_FILTER", 0.65),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=False,
             min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
             min_reranked=_i("RAG_MIN_RERANKED_FILTER", 4),
@@ -236,14 +260,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 6) Topic summary
     if action == "topic":
+        top_k_lex = _i("RAG_TOPK_LEX_TOPIC", 80)
+        w_lex = _f("RAG_W_LEX_TOPIC", 0.22)
         preset = SearchPreset(
             top_k_dense=_i("RAG_TOPK_DENSE_TOPIC", 45),
             top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_TOPIC", 450),
-            top_k_lex=_i("RAG_TOPK_LEX_TOPIC", 80),
-            w_lex=_f("RAG_W_LEX_TOPIC", 0.22),
+            top_k_lex=top_k_lex,
+            w_lex=w_lex,
             lexical_fields=base_fields,
             lexical_field_weights=weights,
-            lexical_scoring_mode=default_lex_mode,
+            sparse_vector_name=default_sparse_vector,
+            sparse_topk=top_k_lex,
+            sparse_weight=w_lex,
             use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_TOPIC", "1") == "1"),
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_TOPIC", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_TOPIC", 4),
@@ -254,14 +282,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return preset
 
     # 7) Detail/content (default)
+    top_k_lex = _i("RAG_TOPK_LEX", 50)
+    w_lex = _f("RAG_W_LEX", 0.25)
     preset = SearchPreset(
         top_k_dense=_i("RAG_TOPK_DENSE", 25),
         top_k_lex_cand=_i("RAG_TOPK_LEX_CAND", 250),
-        top_k_lex=_i("RAG_TOPK_LEX", 50),
-        w_lex=_f("RAG_W_LEX", 0.25),
+        top_k_lex=top_k_lex,
+        w_lex=w_lex,
         lexical_fields=base_fields,
         lexical_field_weights=weights,
-        lexical_scoring_mode=default_lex_mode,
+        sparse_vector_name=default_sparse_vector,
+        sparse_topk=top_k_lex,
+        sparse_weight=w_lex,
         use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD", "1") == "1"),
         min_dense_score=_f("RAG_MIN_DENSE_SCORE", 0.52),
         min_reranked=_i("RAG_MIN_RERANKED", 4),
