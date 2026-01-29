@@ -6,19 +6,11 @@ retrieval.py (refactored)
 NTIS/일반 문서형 RAG 검색 모듈.
 
 핵심 목표
-1) 멀티-벡터 dense 검색 + 텍스트(lexical) 후보를 결합해 RRF로 재정렬
+1) 멀티-벡터 dense 검색 + spase 키워드 벡터(vec name="bm25") 후보를 결합해 RRF로 재정렬
 2) 토큰/컨텍스트 폭발을 줄이기 위해 *컨텍스트 빌더*를 "예산 기반"으로 구성
 
 설계 포인트
-- Qdrant MatchText는 '필터' 성격이 강하므로(스코어 없음) scroll로 후보를 모은 뒤,
-  클라이언트에서 lexical_score를 계산해 가중치 합산합니다.
 - rag_pipeline.py가 S3 query_filter(qdrant Filter)를 전달할 수 있게 파라미터를 유지합니다.
-
-호환성
-- rag_pipeline.py가 import 하는 함수 이름/시그니처를 유지합니다:
-  normalize_query, extract_keywords,
-  dense_retrieve_hybrid_multi, rrf_rerank_multi,
-  build_context_mixed (alias), build_context
 """
 
 from __future__ import annotations
@@ -37,6 +29,90 @@ try:
     from rapidfuzz import fuzz
 except Exception:  # pragma: no cover
     fuzz = None
+
+
+_ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
+# ---------------------------------------------------------------------
+# Sparse (BM25) query support
+# - If Qdrant has a named sparse vector (e.g., "bm25"), we can query it directly.
+# - Query sparse vector is generated via fastembed (if available).
+# - If fastembed is unavailable, we gracefully fall back to legacy "scroll + client-side scoring".
+# ---------------------------------------------------------------------
+_SPARSE_ENCODER = None
+
+def _encode_sparse_query(text: str, *, model_name: str):
+    """Encode query text into Qdrant SparseVector using fastembed if present."""
+    if not text:
+        return None
+    try:
+        from fastembed import SparseTextEmbedding  # type: ignore
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] SparseText encode failed: {e}")
+        return None
+
+    global _SPARSE_ENCODER
+    try:
+        if _SPARSE_ENCODER is None or getattr(_SPARSE_ENCODER, "model_name", None) != model_name:
+            _SPARSE_ENCODER = SparseTextEmbedding(model_name=model_name)
+
+        # fastembed expects a list[str] and yields SparseEmbedding (indices/values)
+        emb = next(_SPARSE_ENCODER.embed([text]))
+        idx = emb.indices.tolist() if hasattr(emb.indices, "tolist") else list(emb.indices)
+        val = emb.values.tolist() if hasattr(emb.values, "tolist") else list(emb.values)
+        if not idx or not val:
+            return None
+        return models.SparseVector(indices=idx, values=val)
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] SparseText encode failed: {e}")
+        return None
+
+
+def _qdrant_sparse_search(
+    client: Any,
+    *,
+    collection_name: str,
+    query_text: str,
+    sparse_vector_name: str,
+    limit: int,
+    query_filter: Any = None,
+    with_payload: Any = True,
+):
+    """Search Qdrant using a named sparse vector (BM25) if possible."""
+    if not sparse_vector_name:
+        return []
+    model_name = str(os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
+    sv = _encode_sparse_query(query_text, model_name=model_name)
+    if sv is None:
+        return []
+
+    qv = models.NamedSparseVector(
+        name=str(sparse_vector_name),
+        vector=sv,
+    )
+    logger.warning(
+        "[retrieval] sparse_search query_points args types: using=%r(%s) limit=%r(%s) timeout=%r(%s) query_len=%r",
+        sparse_vector_name, type(sparse_vector_name).__name__,
+        query_filter, type(query_filter).__name__,
+        _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
+        with_payload, type(with_payload).__name__,
+        (len(sv) if isinstance(sv, (list, tuple)) else None),
+    )
+    # qdrant-client API differs by version: filter vs query_filter
+    try:
+        return client.query_points(
+            collection_name=collection_name,
+            query=sv,                         # ✅ NamedSparseVector 말고 SparseVector
+            using=str(sparse_vector_name),     # ✅ 여기로 bm25 지정
+            limit=int(limit),
+            with_payload=with_payload,
+            with_vectors=False,
+            query_filter=query_filter,
+            timeout=int(_DEFAULT_QDRANT_TIMEOUT),  # ✅ int 캐스팅
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] client.search failed: {e}")
+        return None
+
 
 
 logger = logging.getLogger("RAG_Retrieval")
@@ -64,7 +140,7 @@ _CTX_META_MAX_FIELDS = int(os.getenv("RAG_CTX_META_MAX_FIELDS", "12"))
 _CTX_INCLUDE_META_LONG = os.getenv("RAG_CTX_INCLUDE_META_LONG", "0") == "1"
 
 # Qdrant call timeout (seconds)
-_DEFAULT_QDRANT_TIMEOUT = float(os.getenv("RAG_QDRANT_TIMEOUT", "12.0"))
+_DEFAULT_QDRANT_TIMEOUT = int(os.getenv("RAG_QDRANT_TIMEOUT", "300"))
 
 
 # =========================
@@ -96,7 +172,18 @@ _PAYLOAD_MODE_LEX   = os.getenv("RAG_PAYLOAD_MODE_LEX", "min").strip().lower()  
 # 후보 단계에 필요한 최소 키들(메타/본문 제외)
 _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
     "RAG_PAYLOAD_MIN_FIELDS",
-    "doc_id,tag,title_text,title,title1,title2,content_text,keyword_text,flat_text,category,org_nm,org_name_norm,pjt_id,meta_basic,meta_detail,urls,systems"
+    "doc_id,"
+    "tag,"
+    "title_text,"
+    "content_text,"
+    "keyword_text,"
+    "flat_text,"
+    "category,"
+    "prtcp_mp[].hm_nm,"
+    "prtcp_mp[].blng_org_nm,"
+    "prtcp_org[].org_nm,"
+    "org_nm,"
+    "pjt_id"
 ).split(",") if s.strip()]
 
 # 최종 컨텍스트용(필요하면 meta/content 포함)
@@ -115,6 +202,8 @@ _PAYLOAD_FULL_FIELDS = [s.strip() for s in os.getenv(
     "keyword2,"
     "flat_text,"
     "category,"
+    "prtcp_mp,"
+    "prtcp_org,"
     "meta_basic,"
     "meta_detail"
 ).split(",") if s.strip()]
@@ -136,13 +225,15 @@ def _with_payload_selector(
     if m in ("full",):
         try:
             return models.PayloadSelectorInclude(include=merged_fields)
-        except Exception:
-            return True
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[retrieval] _with_payload_selector failed: {e}")
+            return None
     # default: min
     try:
         return models.PayloadSelectorInclude(include=merged_fields)
-    except Exception:
-        return True
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] _with_payload_selector failed: {e}")
+        return None
 
 
 
@@ -266,19 +357,56 @@ def _safe_str(x: Any, *, max_chars: Optional[int] = None) -> str:
 
 
 def _payload_get(pl: Dict[str, Any], key: str, default: Any = "") -> Any:
-    """Get nested payload value. (meta_basic/meta_detail 지원)"""
-    if not isinstance(pl, dict):
+    """
+    Supports:
+      - a.b.c
+      - a[].b
+      - a[].b.c
+    For [] paths, returns space-joined string of leaf values by default.
+    """
+    if not isinstance(pl, dict) or not key:
         return default
-    if "." not in key:
-        return pl.get(key, default)
-    cur: Any = pl
-    for part in key.split("."):
-        if not isinstance(cur, dict):
+
+    parts = key.split(".")
+    curs: List[Any] = [pl]
+
+    for part in parts:
+        m = _ARRAY_PART_RE.match(part)
+        next_curs: List[Any] = []
+
+        if m:
+            arr_key = m.group("k")
+            for cur in curs:
+                if isinstance(cur, dict):
+                    arr = cur.get(arr_key)
+                    if isinstance(arr, list):
+                        next_curs.extend(arr)
+            curs = next_curs
+            continue
+
+        for cur in curs:
+            if isinstance(cur, dict) and part in cur:
+                next_curs.append(cur[part])
+        curs = next_curs
+
+        if not curs:
             return default
-        cur = cur.get(part)
-        if cur is None:
-            return default
-    return cur
+
+    # leaf flatten -> text join
+    leaves: List[str] = []
+    for c in curs:
+        if c is None:
+            continue
+        if isinstance(c, (dict, list)):
+            # dict/list는 문자열화하지 않고 무시(원하면 json dump로 바꿔도 됨)
+            continue
+        s = str(c).strip()
+        if s:
+            leaves.append(s)
+
+    if not leaves:
+        return default
+    return " ".join(leaves)
 
 
 def _id_exact_score(
@@ -476,16 +604,17 @@ def ensure_keyword_index(
 # =========================
 
 def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
-    """Annotate payload with collection/vector hints for debug/dedup."""
-    try:
-        if not isinstance(point.payload, dict):
-            return
-        point.payload.setdefault("_collection", collection)
-        if vec_name:
-            point.payload.setdefault("_vec", vec_name)
-    except Exception:
-        return
-
+    # """Annotate payload with collection/vector hints for debug/dedup."""
+    # try:
+    #     if not isinstance(point.payload, dict):
+    #         return
+    #     point.payload.setdefault("_collection", collection)
+    #     if vec_name:
+    #         point.payload.setdefault("_vec", vec_name)
+    # except Exception as e:  # pragma: no cover
+    #     logger.warning(f"[retrieval] _set_payload_hint failed: {e}")
+        #return None
+    return
 
 # =========================
 # Lexical scoring
@@ -705,7 +834,7 @@ def dense_retrieve_hybrid_multi(
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + lexical retrieval."""
     timings = timings if timings is not None else {}
-
+    with_payload_dense_spase = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
     q = normalize_query(expanded_text)
     if not q:
         return {"dense": {}, "lexical": []}
@@ -735,7 +864,14 @@ def dense_retrieve_hybrid_multi(
             continue
 
         t0 = time.perf_counter()
-        with_payload_dense = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
+        logger.warning(
+            "[retrieval] query_points args types: using=%r(%s) limit=%r(%s) timeout=%r(%s) query_len=%r",
+            vec_name, type(vec_name).__name__,
+            top_k_dense, type(top_k_dense).__name__,
+            _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
+            (len(v) if isinstance(v, (list, tuple)) else None),
+        )
+
         try:
             try:
                 res = client.query_points(
@@ -743,21 +879,15 @@ def dense_retrieve_hybrid_multi(
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
-                    with_payload=with_payload_dense,
+                    with_payload=with_payload_dense_spase,
                     with_vectors=False,
                     query_filter=query_filter,
                     timeout=_DEFAULT_QDRANT_TIMEOUT,
                 )
-            except TypeError:
-                res = client.query_points(
-                    collection_name=collection_name,
-                    query=v,
-                    using=vec_name,
-                    limit=int(top_k_dense),
-                    with_payload=with_payload_dense,
-                    with_vectors=False,
-                    query_filter=query_filter,
-                )
+            except Exception as e:  # pragma: no cover
+                logger.warning(f"[retrieval] query_points failed: {e}")
+                continue
+
             t_q = time.perf_counter() - t0
             t_qdrant_sum += t_q
             timings[f"dense_qdrant_{vec_name}"] = t_q
@@ -789,13 +919,15 @@ def dense_retrieve_hybrid_multi(
     if sparse_topk is not None:
         try:
             top_k_lexical = int(sparse_topk)
-        except Exception:
+        except Exception as e:
             top_k_lexical = int(top_k_lexical)
+            logger.warning(f"[retrieval] [sparse_topk is failed] -> top_k_lexical = int(top_k_lexical) : {e}")
+
     t_lex0 = time.perf_counter()
     lex_points: List[models.ScoredPoint] = []
 
     lexical_fields_eff = list(
-        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
+        lexical_fields or ["title_text", "content_text", "keyword_text", "flat_text", "category", "prtcp_mp[].hm_nm", "prtcp_mp[].blng_org_nm", "prtcp_org[].org_nm"]
     )
     lexical_weights_eff = dict(
         lexical_field_weights
@@ -804,8 +936,10 @@ def dense_retrieve_hybrid_multi(
             "content_text": 3.0,
             "keyword_text": 3.0,
             "flat_text": 2.0,
-            "cetegory": 5.0,
-            "title": 5.0,
+            "category": 5.0,
+            "prtcp_mp[].hm_nm": 5.0,
+            "prtcp_mp[].blng_org_nm": 5.0,
+            "prtcp_org[].org_nm": 5.0,
         }
     )
 
@@ -814,14 +948,35 @@ def dense_retrieve_hybrid_multi(
     lex_cand = 0
     lex_scored = 0
 
-    if not keywords:
+    # Prefer Qdrant named sparse-vector search (e.g., "bm25") when available.
+    # If query sparse embedding cannot be produced (fastembed missing), fall back to legacy MatchText+scroll path.
+    skip_legacy_lexical = False
+    if sparse_vector_name:
+        try:
+            top_k_lexical_candidates_eff = int(top_k_lexical_candidates)
+        except Exception:
+            top_k_lexical_candidates_eff = int(top_k_lexical)
+        sp_hits = _qdrant_sparse_search(
+            client,
+            collection_name=collection_name,
+            query_text=q,
+            sparse_vector_name=str(sparse_vector_name),
+            limit=max(int(top_k_lexical_candidates_eff), int(top_k_lexical)),
+            query_filter=query_filter,
+            with_payload=with_payload_dense_spase, #임베딩 벡터 - 스파서 벡터는 동일 필드 지정되어있음
+        )
+        if sp_hits:
+            lex_points = list(sp_hits)[: int(top_k_lexical)]
+            skip_legacy_lexical = True
+
+    if (not skip_legacy_lexical) and (not keywords):
         fallback_tokens = _tokenize_simple(q)
         if fallback_tokens:
             keywords = fallback_tokens[:8]
         else:
             keywords = [q]
 
-    if keywords:
+    if (not skip_legacy_lexical) and keywords:
         t0 = time.perf_counter()
 
         # ID 토큰이 있으면: scroll 단계에서도 "AND 문자열"이 아니라 "OR 토큰"으로 후보를 모은다.

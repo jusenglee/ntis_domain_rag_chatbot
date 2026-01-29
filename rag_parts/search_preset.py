@@ -33,7 +33,7 @@ class SearchPreset:
     # lexical config
     lexical_fields: List[str] = field(default_factory=list)
     lexical_field_weights: Dict[str, float] = field(default_factory=dict)
-    sparse_vector_name: str = "sparse"
+    sparse_vector_name: str = "bm25"
     sparse_topk: int = 0
     sparse_weight: float = 0.0
 
@@ -107,7 +107,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
     default_cetegory_w = _f("RAG_W_CETEGORY", 5.0)
-    default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "sparse").strip()
+    default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
     base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]

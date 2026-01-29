@@ -732,7 +732,7 @@ def _default_target_collections() -> list[str]:
     allow_list = list(RAG_COLLECTION_ALLOWLIST)
     if allow_list:
         return allow_list
-    return [COL_PROJECT, COL_PERF, COL_SUPPORT]
+    return [COL_PROJECT]
 
 def _final_rerank(
         cands: List[Any],
@@ -955,13 +955,9 @@ def _hydrate_points_payload(
                     with_payload=selector,
                     with_vectors=False,
                 )
-            except TypeError:
-                recs = qdr.retrieve(
-                    collection_name=col,
-                    ids=sub,
-                    with_payload=selector,
-                    with_vectors=False,
-                )
+            except Exception as e:
+                logger.warning(f"[RAG] hydrate retrieve failed col={col} n={len(sub)} err={e}")
+                continue
 
             # id -> payload
             mp: Dict[str, Dict[str, Any]] = {}
@@ -1057,11 +1053,6 @@ def _run_rag_with_vectors(
 
         col_map = {
             "project": COL_PROJECT,
-            "projects": COL_PROJECT,
-            "perf": COL_PERF,
-            "performance": COL_PERF,
-            "support": COL_SUPPORT,
-            "supports": COL_SUPPORT,
         }
 
         out: List[str] = []
@@ -1117,7 +1108,10 @@ def _run_rag_with_vectors(
     # ✅ 표준 q 확정
     q = q_for_retrieval
 
+    force_cols = _normalize_target_collections(os.getenv("RAG_SEARCH_COLLECTIONS", ""))
     allow_cols = _normalize_target_collections(RAG_COLLECTION_ALLOWLIST)
+
+    effective_allow = force_cols or allow_cols  # force 있으면 force가 최우선
 
     # -------------------------
     # ids_map / ids_flat 안전 접근 유틸
@@ -1198,7 +1192,7 @@ def _run_rag_with_vectors(
         preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
 
-    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "sparse").strip()
+    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
     sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
@@ -1360,9 +1354,10 @@ def _run_rag_with_vectors(
     if hinted_cols:
         plan.target_collections = hinted_cols
 
-    if allow_cols:
-        filtered = _pick_collections((plan.target_collections or []), allow_cols)
-        plan.target_collections = filtered if filtered else list(allow_cols)
+    # allow 적용 (force/allow)
+    if effective_allow:
+        filtered = _pick_collections((plan.target_collections or []), effective_allow)
+        plan.target_collections = filtered if filtered else list(effective_allow)
 
     log_kv(
         "RAG.ROUTE/PLAN",
