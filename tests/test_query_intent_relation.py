@@ -2,11 +2,14 @@ import unittest
 
 from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO
 from rag_parts.filters import extract_org_terms as extract_org_terms_filters
+from rag_parts.pipeline_steps import normalize_intent
 from rag_parts.query_intent import (
     classify_query,
     get_relation_route,
     extract_org_terms as extract_org_terms_intent,
+    pick_domain_hint_from_categories,
     relation_target_collections,
+    QueryIntent,
 )
 
 
@@ -71,6 +74,31 @@ class QueryIntentRelationTests(unittest.TestCase):
 
         self.assertNotEqual(intent.base_route, "people")
         self.assertEqual(intent.people_terms, [])
+
+    def test_pick_domain_hint_from_categories_org(self) -> None:
+        hint = pick_domain_hint_from_categories(["organization"])
+
+        self.assertEqual(hint, "org")
+
+    def test_normalize_intent_uses_hint_org_terms(self) -> None:
+        intent = QueryIntent(
+            base_route="project",
+            relation=None,
+            intent="content",
+            action="content",
+            is_id_query=False,
+            long_query=False,
+            rare_ratio=0.0,
+        )
+
+        normalized = normalize_intent(
+            intent,
+            query="농업생명과학연구원 과제",
+            keywords=["농업생명과학연구원", "과제"],
+            hint_org_terms=["농업생명과학연구원"],
+        )
+
+        self.assertEqual(normalized.org_terms, ["농업생명과학연구원"])
 
 
 if __name__ == "__main__":

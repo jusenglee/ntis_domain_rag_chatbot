@@ -752,7 +752,7 @@ def pick_domain_hint_from_categories(cats: list[str]) -> str | None:
     # 너 시스템 기준: researcher -> people
     if any(c in ("researcher", "people") for c in cats):
         return "people"
-    if any(c in ("org", "organization") for c in cats):
+    if any(c in ("org", "organization", "institution", "기관") for c in cats):
         return "org"
     if "project" in cats:
         return "project"
