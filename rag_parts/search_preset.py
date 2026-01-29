@@ -106,18 +106,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_content_w = _f("RAG_W_CONTENT", 3.0)
     default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
-    default_cetegory_w = _f("RAG_W_CETEGORY", 5.0)
+    default_category_w = _f("RAG_W_CATEGORY", _f("RAG_W_CETEGORY", 5.0))
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
-    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title"]
+    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "category", "title"]
 
     weights = {
         "title_text": default_title_w,
         "content_text": default_content_w,
         "keyword_text": default_keyword_w,
         "flat_text": default_flat_w,
-        "cetegory": default_cetegory_w,
+        "category": default_category_w,
         "title": default_title_w,
     }
 
@@ -253,7 +253,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             preset.org_lex_boost = True
             # org_name_norm을 lexical에 포함(가중치 부여)
             if KEY_ORG_NORM not in preset.lexical_fields:
-                preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "cetegory", "title", KEY_ORG_NORM, "org_nm"]
+                preset.lexical_fields = ["title_text", "content_text", "keyword_text", "flat_text", "category", "title", KEY_ORG_NORM, "org_nm"]
             preset.lexical_field_weights[KEY_ORG_NORM] = _f("RAG_W_ORG_NORM", 3.0)
             preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights[KEY_ORG_NORM])
         return preset
