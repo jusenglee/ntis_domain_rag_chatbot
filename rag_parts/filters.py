@@ -1,12 +1,11 @@
 import os
-import re
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .constants import (
-    ORG_RE, KEY_ORG_NORM,
+    KEY_ORG_NORM,
     PERF_TAGS,
     TAG_RI_PAPER, TAG_RI_IPR, TAG_RI_RSCH_RPT, TAG_RI_FCLT_EQUIP, TAG_RI_TECH_INFO,
     TAG_RI_SW, TAG_RI_NVR, TAG_RI_COMPOUND, TAG_RI_ORGSM_INFO, TAG_RI_ORGSM_RES,
@@ -43,46 +42,6 @@ try:
 except Exception:  # pragma: no cover
     qmodels = None
 
-_ORG_TERM_STOPWORDS = {
-    "이력",
-    "현황",
-    "목록",
-    "정보",
-    "과제",
-    "과제정보",
-    "과제명",
-    "리스트",
-    "조회",
-    "명단",
-    "안내",
-    "내용",
-    "상세",
-}
-_ORG_SUFFIXES = ("대학교", "대학", "연구원", "연구소")
-
-
-def _normalize_org_term(term: str) -> str:
-    return re.sub(r"\s+", " ", (term or "")).strip()
-
-
-def _is_stopword_org_term(term: str) -> bool:
-    t = _normalize_org_term(term).replace(" ", "")
-    return t in _ORG_TERM_STOPWORDS
-
-
-def _is_valid_org_term(term: str, *, require_suffix: bool = False) -> bool:
-    t = _normalize_org_term(term)
-    if not t or _is_stopword_org_term(t):
-        return False
-    if require_suffix:
-        for suf in _ORG_SUFFIXES:
-            if t == suf:
-                return False
-            if t.endswith(suf):
-                return len(t) > (len(suf) + 1)
-        return False
-    return True
-
 def make_match_any(values: List[str]):
     try:
         return qmodels.MatchAny(any=values)
@@ -95,31 +54,9 @@ def make_match_any(values: List[str]):
             return qmodels.MatchValue(value="")
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
-    q = (q or "").strip()
-    if not q:
-        return []
+    from .query_intent import extract_org_terms as extract_org_terms_llm
 
-    cands: List[str] = []
-    for m in ORG_RE.finditer(q):
-        s = (m.group(1) or "").strip()
-        s = _normalize_org_term(s)
-        if s and not _is_stopword_org_term(s) and s not in cands:
-            cands.append(s)
-        if len(cands) >= max_terms:
-            return cands
-
-    for kw in (kws or []):
-        t = (kw or "").strip()
-        if not t:
-            continue
-        t = _normalize_org_term(t)
-        if _is_valid_org_term(t, require_suffix=True):
-            if t not in cands:
-                cands.append(t)
-            if len(cands) >= max_terms:
-                break
-
-    return cands[:max_terms]
+    return extract_org_terms_llm(q, kws, max_terms=max_terms)
 
 def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     if qmodels is None or not spec.terms:

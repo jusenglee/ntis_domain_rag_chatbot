@@ -49,7 +49,7 @@ from rag_parts.query_intent import (
     QueryIntent,
     classify_query as _classify_query,
     get_relation_route,
-    relation_target_collections, extract_org_terms,
+    relation_target_collections,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -1217,7 +1217,7 @@ def _run_rag_with_vectors(
     # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(it.org_terms or []) or extract_org_terms(q, kws) or []) if str(t).strip()]
+    org_terms = [t.strip() for t in (list(it.org_terms or []) or []) if str(t).strip()]
     it.org_terms = org_terms
     org_filter = build_org_filter(OrgFilterInput(org_terms)) if org_terms else None
     org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None

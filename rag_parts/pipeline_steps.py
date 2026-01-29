@@ -17,7 +17,6 @@ from .filters import (
     build_people_filter,
     build_prtcp_org_nested_filter,
     build_tag_only_filter,
-    extract_org_terms,
 )
 from .query_intent import QueryIntent, classify_query as _classify_query
 
@@ -136,8 +135,6 @@ def normalize_intent(
     org_terms = _normalize_terms(getattr(intent, "org_terms", None) or [])
     if hint_org_terms:
         org_terms = _normalize_terms(list(hint_org_terms))
-    elif not org_terms:
-        org_terms = _normalize_terms(extract_org_terms(query, keywords))
 
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])
 
