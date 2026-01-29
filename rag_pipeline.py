@@ -384,7 +384,6 @@ def _call_dense_retrieve_hybrid_multi(
         collection: str,
         sparse_vector_name: Optional[str],
         sparse_topk: Optional[int],
-        sparse_weight: Optional[float],
         top_k_dense: int,
         top_k_lex_cand: int,
         top_k_lex: int,
@@ -405,7 +404,6 @@ def _call_dense_retrieve_hybrid_multi(
             top_k_lexical=top_k_lex,
             sparse_vector_name=sparse_vector_name,
             sparse_topk=sparse_topk,
-            sparse_weight=sparse_weight,
             query_filter=query_filter,
             timings=timings_out,
         )
@@ -422,7 +420,6 @@ def _call_dense_retrieve_hybrid_multi(
             top_k_lexical=top_k_lex,
             sparse_vector_name=sparse_vector_name,
             sparse_topk=sparse_topk,
-            sparse_weight=sparse_weight,
             filter_obj=query_filter,
             timings=timings_out,
         )
@@ -439,7 +436,6 @@ def _call_dense_retrieve_hybrid_multi(
         top_k_lexical=top_k_lex,
         sparse_vector_name=sparse_vector_name,
         sparse_topk=sparse_topk,
-        sparse_weight=sparse_weight,
         query_filter=query_filter,
         timings=timings_out,
     )
@@ -1136,6 +1132,7 @@ def _run_rag_with_vectors(
 
     sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
     sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
+    # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or extract_org_terms(q, kws) or []) if str(t).strip()]
@@ -1416,7 +1413,6 @@ def _run_rag_with_vectors(
                     collection=hop1_col,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
-                    sparse_weight=sparse_weight_eff,
                     top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
@@ -1543,7 +1539,6 @@ def _run_rag_with_vectors(
                 collection=hop2_col,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
-                sparse_weight=sparse_weight_eff,
                 top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
@@ -1712,7 +1707,6 @@ def _run_rag_with_vectors(
             collection=col,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=sparse_topk_eff,
-            sparse_weight=sparse_weight_eff,
             top_k_dense=use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,

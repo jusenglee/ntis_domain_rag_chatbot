@@ -827,7 +827,6 @@ def dense_retrieve_hybrid_multi(
         top_k_lexical: int = _DEFAULT_TOPK_LEX,
         sparse_vector_name: Optional[str] = None,
         sparse_topk: Optional[int] = None,
-        sparse_weight: Optional[float] = None,
         query_filter: Optional[models.Filter] = None,
         timings: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
