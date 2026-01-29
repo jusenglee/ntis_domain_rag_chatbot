@@ -1593,6 +1593,7 @@ def _run_rag_with_vectors(
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
+            hop2_dense_enabled = False
             log_kv(
                 "RAG.JOIN.HOP2",
                 hop2_col=hop2_col, hop2_kind=hop2_kind, hop2_q=hop2_q,
@@ -1611,6 +1612,8 @@ def _run_rag_with_vectors(
                 pe = pre_vecs_h2.get(vname)
                 emb_map_h2[vname] = pe if pe is not None else fallback_emb.get(vname)
             emb_map_h2 = {k: v for k, v in emb_map_h2.items() if v is not None}
+            if not hop2_dense_enabled:
+                emb_map_h2 = {}
 
             local_timings_h2: Dict[str, float] = {}
             sr2 = _call_dense_retrieve_hybrid_multi(
@@ -1673,9 +1676,10 @@ def _run_rag_with_vectors(
             )
             t0 = time.time()
             # 검색단계에서 최소 페아로드 -> server3.py 에는 전체 페이로드를 전달하기 위해 선정된 정보들 페이로드 채우기
+            hydrate_points = hop2_reranked
             _hydrate_points_payload(
                 qdr,
-                hop2_reranked,  # len == final_keep
+                hydrate_points,  # len == final_keep
                 chunk_size=int(os.getenv("RAG_HYDRATE_FULL_CHUNK", "64")),
             )
             timings["hydrate_full_payload"] = time.time() - t0
