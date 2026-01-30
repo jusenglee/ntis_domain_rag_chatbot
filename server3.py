@@ -44,7 +44,7 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
-def setup_file_logging(log_path="logs/server3.log"):
+def setup_file_logging(log_path="logs/server.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root = logging.getLogger()
@@ -104,12 +104,6 @@ class QuestionAnalysis(BaseModel):
     question_type: QuestionType = Field(description="질문유형")
     related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
     researchers: list[Researcher] = Field(default_factory=list)
-    organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
-    mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
-    head: str | None = Field(default=None, description="project | perf | people | org | support")
-    relation: str | None = Field(default=None, description="project_perf | people_project 등")
-    ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
-    filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
     history_summary: str = Field(description="대화 이력 기반 질문 요약")
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
@@ -296,12 +290,6 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "2. question_type: QuestionType\n"
         "3. related_docs: QuestionType.FOLLOW_UP 인 경우 관련된 출처의 번호 배열 \n"
         "4. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
-        "4-1. organizations: 질문에서 특정 기관이 식별되는 경우만 포함\n"
-        "4-2. mode: SEARCH | LOOKUP | JOIN\n"
-        "4-3. head: project | perf | people | org | support\n"
-        "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
-        "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
-        "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
         "7. retrieval_query:\n"
@@ -334,12 +322,6 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
             f"QuestionType: {result.question_type}\n"
             f"RelatedDocs: {result.related_docs}\n"
             f"Researchers: {result.researchers}\n"
-            f"Organizations: {result.organizations}\n"
-            f"Mode: {result.mode}\n"
-            f"Head: {result.head}\n"
-            f"Relation: {result.relation}\n"
-            f"IdsMap: {result.ids_map}\n"
-            f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -356,12 +338,6 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
                 question_type=QuestionType.DEFAULT,
                 related_docs = [],
                 researchers=[],
-                organizations=[],
-                mode=None,
-                head=None,
-                relation=None,
-                ids_map={},
-                filters={},
                 limit=20,
                 history_summary=state.messages[-1].content,
                 retrieval_query=state.messages[-1].content[:120],
@@ -503,7 +479,8 @@ class CustomRAGRetriever(BaseModel):
                 "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
 
-            documents.append(rag_data)
+            if hit_data.get("tag") is not None:
+                documents.append(rag_data)
 
         return documents
 
@@ -525,12 +502,6 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             "researchers": [
                 {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
             ] if qa else [],
-            "organizations": list(qa.organizations or []) if qa else [],
-            "mode": (qa.mode if qa else None),
-            "head": (qa.head if qa else None),
-            "relation": (qa.relation if qa else None),
-            "ids_map": dict(qa.ids_map or {}) if qa else {},
-            "filters": dict(qa.filters or {}) if qa else {},
             "limit": int(search_num),
             "history_summary": (qa.history_summary if qa else ""),
             "retrieval_query": query,
@@ -550,6 +521,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
+        from sample_data import SAMPLE_DATA
+        # docs = SAMPLE_DATA
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -560,8 +533,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         log_section("RAG SEARCH",
                     f"coq: {state.conversation_id}{state.question}\n"
                     f"Query: {query}\n"
-                    f"Found: {len(docs)} docs\n"
-                    f"{'─'*40}\n" + "\n".join(doc_previews))
+                    f"Found: {len(docs)} docs\n")
 
         return {"context": docs}
 
@@ -601,18 +573,19 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     context_text = None
 
-    if qa.question_type == QuestionType.FOLLOW_UP:
-        if len(qa.related_docs) > 0:
-            related_context = [
-                state.prev_context[i - 1]
-                for i in qa.related_docs
-                if 1 <= i <= len(state.prev_context)
-            ]
-            context_text = refine_documents_rule_based(related_context, True)
-        else:
-            # fallback: 전체 context 사용
-            related_context = state.context
-            context_text = refine_documents_rule_based(related_context)
+
+    if qa.question_type == QuestionType.FOLLOW_UP and len(qa.related_docs) > 0:
+        related_context = [
+            state.prev_context[i - 1]
+            for i in qa.related_docs
+            if 1 <= i <= len(state.prev_context)
+        ]
+        context_text = refine_documents_rule_based(related_context, True)
+    else:
+        # fallback: 전체 context 사용
+        related_context = state.context
+        context_text = refine_documents_rule_based(related_context)
+
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
@@ -652,6 +625,8 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     ks = state.knowledge_sufficiency
+
+    logger.info(refine_documents_rule_based(state.context))
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
@@ -711,9 +686,6 @@ def node_join_analysis(state: AgentState):
     return { "context" : state.prev_context }
 
 
-def node_join_answers(state: AgentState):
-    """Refined Answer 노드들 완료 대기"""
-    return {}
 
 # --- Graph Construction ---
 def build_advanced_workflow():
@@ -733,7 +705,6 @@ def build_advanced_workflow():
     # 두 모델 각각의 Refined Answer 노드
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
     workflow.add_node("generate_answer_gpt", node_generate_answer_gpt)
-    workflow.add_node("join_answers", node_join_answers)
 
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
@@ -784,15 +755,11 @@ def build_advanced_workflow():
     workflow.add_edge("rag_search", "generate_answer_gemma")
     workflow.add_edge("rag_search", "generate_answer_gpt")
 
-    # Refined Answer 완료 후 join
-    workflow.add_edge("generate_answer_gemma", "join_answers")
-    workflow.add_edge("generate_answer_gpt", "join_answers")
-
-    # Refined answers join도 merge로
-    workflow.add_edge("join_answers", "merge_answers")
+    # Answer 완료 후 merge
+    workflow.add_edge("generate_answer_gemma", "merge_answers")
+    workflow.add_edge("generate_answer_gpt", "merge_answers")
 
 
-    # Direct answer also goes to save
     workflow.add_edge("direct_answer", "save_history")
     workflow.add_edge("merge_answers", "save_history")
 
@@ -802,7 +769,7 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
+def refine_documents_rule_based(docs: List[Dict], is_detail=False) -> str:
     context_chunks: List[str] = []
 
     for doc in docs:

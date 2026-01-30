@@ -863,7 +863,6 @@ def _hydrate_points_payload(
         qdr,
         points,
         *,
-        include_fields=None,  # ✅ 호환용(무시됨)
         chunk_size: int = 128,
 ) -> None:
     """

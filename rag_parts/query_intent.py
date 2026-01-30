@@ -894,9 +894,12 @@ def _plan_with_llm(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, dom
         "1-1) IDs(과제번호/DOI/ISSN/특허등록번호 등)는 ids_map을 그대로 참고하고, 새로 생성/복원하지 않습니다.\n"
         "2) base_route는 support|project|perf|people|org 중 하나.\n"
         "3) relation은 project_perf|project_people|project_org|people_project|people_perf|org_project|org_perf|perf_project|perf_people|perf_org 또는 null.\n"
-        "4) intent는 support|id|filter|topic|content 중 하나.\n"
-        "5) action은 support|id_exact|id_fuzzy|list|stats|topic|detail|content|relation 중 하나.\n"
-        "6) tag_filters는 아래 허용 목록 내에서만 선택:\n"
+        "4-1) mode는 search|lookup|join 중 하나.\n"
+        "4-2) ✅ people_project 또는 org_project 관계면 mode는 반드시 lookup.\n"
+        "4-3) ✅ perf_project 관계면 mode는 join(또는 lookup) 중 하나(설계에 맞게).\n"
+        "5) intent는 support|id|filter|topic|content 중 하나.\n"
+        "6) action은 support|id_exact|id_fuzzy|list|stats|topic|detail|content|relation 중 하나.\n"
+        "7) tag_filters는 아래 허용 목록 내에서만 선택:\n"
         f"   - project_tag_filters: {sorted(PROJECT_TAGS)}\n"
         f"   - perf_tag_filters: {sorted(PERF_TAGS)}\n"
         "7) category는 project|performance|researcher|qna|etc 중에서 선택(복수 가능).\n"
@@ -914,6 +917,7 @@ def _plan_with_llm(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, dom
         '  "category": ["project"],\n'
         '  "base_route": "project",\n'
         '  "relation": "project_perf",\n'
+        '  "mode": "lookup",\n'
         '  "intent": "filter",\n'
         '  "action": "list",\n'
         '  "people_terms": [],\n'

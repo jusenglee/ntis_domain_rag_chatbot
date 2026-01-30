@@ -14,6 +14,7 @@ NTIS/일반 문서형 RAG 검색 모듈.
 """
 
 from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 import logging
@@ -34,89 +35,161 @@ _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 # - If fastembed is unavailable, we return empty sparse results (no legacy lexical fallback).
 # ---------------------------------------------------------------------
 _SPARSE_ENCODER = None
+# -*- coding: utf-8 -*-
 
-def _encode_sparse_query(text: str, *, model_name: str):
-    """Encode query text into Qdrant SparseVector using fastembed if present."""
+import os
+import threading
+from typing import Any, Optional, List
+
+from qdrant_client.http import models
+
+# ---- globals ----
+_SPARSE_ENCODERS: dict[str, Any] = {}
+_SPARSE_LOCK = threading.Lock()
+
+_DEFAULT_QDRANT_TIMEOUT = int(os.getenv("RAG_QDRANT_TIMEOUT", "30"))
+
+# logger는 기존 그대로 쓴다고 가정
+# logger = logging.getLogger("RAG_Retrieval")
+
+
+def _get_sparse_encoder(model_name: str):
+    """Per-model cached SparseTextEmbedding encoder (thread-safe)."""
+    # fastembed import는 여기서 한 번만 시도
+    from fastembed import SparseTextEmbedding  # type: ignore
+
+    with _SPARSE_LOCK:
+        enc = _SPARSE_ENCODERS.get(model_name)
+        if enc is None:
+            enc = SparseTextEmbedding(model_name=model_name)
+            _SPARSE_ENCODERS[model_name] = enc
+        return enc
+
+
+def _encode_sparse_query(text: str, *, model_name: str) -> Optional[models.SparseVector]:
+    """
+    Encode query text into Qdrant SparseVector using fastembed.
+
+    Contract:
+    - returns models.SparseVector or None only
+    - NEVER returns QueryRequest / dict / tuple etc.
+    """
     if not text:
         return None
-    try:
-        from fastembed import SparseTextEmbedding  # type: ignore
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"[retrieval] SparseText encode failed: {e}")
-        return None
 
-    global _SPARSE_ENCODER
     try:
-        if _SPARSE_ENCODER is None or getattr(_SPARSE_ENCODER, "model_name", None) != model_name:
-            _SPARSE_ENCODER = SparseTextEmbedding(model_name=model_name)
-
-        # fastembed expects a list[str] and yields SparseEmbedding (indices/values)
-        emb = next(_SPARSE_ENCODER.embed([text]))
+        enc = _get_sparse_encoder(model_name)
+        # fastembed expects list[str] and yields SparseEmbedding (indices/values)
+        emb = next(enc.embed([text]))
         idx = emb.indices.tolist() if hasattr(emb.indices, "tolist") else list(emb.indices)
         val = emb.values.tolist() if hasattr(emb.values, "tolist") else list(emb.values)
+
         if not idx or not val:
             return None
+
+        # indices/values 길이 안 맞는 케이스 방어
+        if len(idx) != len(val):
+            m = min(len(idx), len(val))
+            idx, val = idx[:m], val[:m]
+            if not idx:
+                return None
+
         return models.SparseVector(indices=idx, values=val)
+
     except Exception as e:  # pragma: no cover
         logger.warning(f"[retrieval] SparseText encode failed: {e}")
         return None
+
+
+def _qdrant_query_points_sparse(
+        client: Any,
+        *,
+        collection_name: str,
+        sparse_vector: models.SparseVector,
+        sparse_vector_name: str,
+        limit: int,
+        query_filter: Any = None,
+        with_payload: Any = True,
+        timeout: int = _DEFAULT_QDRANT_TIMEOUT,
+) -> List[Any]:
+    """
+    Qdrant sparse search compat layer.
+
+    Tries:
+    1) client.query_points(query=SparseVector, using="bm25")
+    2) fallback: client.search(query_vector=(name, SparseVector))
+    """
+    # 디버깅에 필요한 정보만 남김 (nnz=non-zero terms)
+    nnz = len(getattr(sparse_vector, "indices", []) or [])
+    logger.warning(
+        "[retrieval] sparse_query: col=%s using=%s limit=%d nnz=%d filter=%s payload=%s",
+        collection_name, sparse_vector_name, int(limit), int(nnz),
+        type(query_filter).__name__, type(with_payload).__name__,
+    )
+
+    # 1) new-style
+    try:
+        res = client.query_points(
+            collection_name=collection_name,
+            query=sparse_vector,              # ✅ 반드시 SparseVector만
+            using=str(sparse_vector_name),    # ✅ named sparse vector (e.g., "bm25")
+            limit=int(limit),
+            with_payload=with_payload,
+            with_vectors=False,
+            query_filter=query_filter,        # query_points 쪽 파라미터명
+            timeout=int(timeout),
+        )
+        return list(res or [])
+    except TypeError:
+        # 2) old-style
+        try:
+            res = client.search(
+                collection_name=collection_name,
+                query_vector=(str(sparse_vector_name), sparse_vector),
+                limit=int(limit),
+                with_payload=with_payload,
+                with_vectors=False,
+                filter=query_filter,          # search 쪽 파라미터명
+            )
+            return list(res or [])
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[retrieval] sparse client.search failed: {e}")
+            return []
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"[retrieval] sparse query_points failed: {e}")
+        return []
 
 
 def _qdrant_sparse_search(
-    client: Any,
-    *,
-    collection_name: str,
-    query_text: str,
-    sparse_vector_name: str,
-    limit: int,
-    query_filter: Any = None,
-    with_payload: Any = True,
-):
-    """Search Qdrant using a named sparse vector (BM25) if possible."""
+        client: Any,
+        *,
+        collection_name: str,
+        query_text: str,
+        sparse_vector_name: str,
+        limit: int,
+        query_filter: Any = None,
+        with_payload: Any = True,
+) -> List[Any]:
+    """Public sparse search entry (bm25)."""
     if not sparse_vector_name:
         return []
-    model_name = str(os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
+
+    model_name = (os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25") or "").strip() or "Qdrant/bm25"
     sv = _encode_sparse_query(query_text, model_name=model_name)
     if sv is None:
         return []
 
-    logger.warning(
-        "[retrieval] sparse_search search args types: "
-        "name=%r(%s) limit=%r(%s) timeout=%r(%s) with_payload=%r(%s) nnz=%r filter=%s",
-        sparse_vector_name, type(sparse_vector_name).__name__,
-        limit, type(limit).__name__,
-        _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
-        with_payload, type(with_payload).__name__,
-        sv,
-        type(query_filter).__name__,
+    return _qdrant_query_points_sparse(
+        client,
+        collection_name=collection_name,
+        sparse_vector=sv,
+        sparse_vector_name=str(sparse_vector_name),
+        limit=int(limit),
+        query_filter=query_filter,
+        with_payload=with_payload,
+        timeout=_DEFAULT_QDRANT_TIMEOUT,
     )
-    try:
-        res = client.search(
-            collection_name=collection_name,
-            query_vector=(str(sparse_vector_name), sv),
-            limit=int(limit),
-            with_payload=with_payload,
-            with_vectors=False,
-            query_filter=query_filter,
-        )
-        return list(res or [])
-    except TypeError:
-        try:
-            res = client.search(
-                collection_name=collection_name,
-                query_vector=(str(sparse_vector_name), sv),
-                limit=int(limit),
-                with_payload=with_payload,
-                with_vectors=False,
-                filter=query_filter,
-            )
-            return list(res or [])
-        except Exception as e:  # pragma: no cover
-            logger.warning(f"[retrieval] client.search failed: {e}")
-            return []
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"[retrieval] client.search failed: {e}")
-        return []
+
 
 def _prefetch_supports_using() -> bool:
     prefetch_cls = getattr(models, "Prefetch", None)
