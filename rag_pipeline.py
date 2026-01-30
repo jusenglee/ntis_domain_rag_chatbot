@@ -43,6 +43,8 @@ from rag_parts.constants import (
     COL_SUPPORT,
     COL_PROJECT,
     COL_PERF,
+    PROJECT_TAGS,
+    PERF_TAGS,
     TAG_PJT_INFO,
 )
 from rag_parts.query_intent import (
@@ -681,6 +683,16 @@ def _family_bonus(p: Any, base_route: str) -> float:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         return 0.0
+
+    tag = str(pl.get("tag") or "")
+    if tag:
+        if base_route == "support":
+            return 0.0
+        if base_route in ("project", "people", "org") and tag in PROJECT_TAGS:
+            return 4.0
+        if base_route == "perf" and tag in PERF_TAGS:
+            return 4.0
+
     col = str(pl.get("_collection") or "")
     if base_route == "support" and col == COL_SUPPORT:
         return 6.0
