@@ -80,6 +80,15 @@ try:
     from qdrant_client.http import models as qmodels
 except Exception:
     qmodels = None
+
+def _normalize_tag_value(tag: object) -> str:
+    if tag is None:
+        return ""
+    t = str(tag).strip().upper()
+    return t[4:] if t.startswith("IRD_") else t
+
+PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
+PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -684,13 +693,13 @@ def _family_bonus(p: Any, base_route: str) -> float:
     if not isinstance(pl, dict):
         return 0.0
 
-    tag = str(pl.get("tag") or "")
+    tag = _normalize_tag_value(pl.get("tag"))
     if tag:
         if base_route == "support":
             return 0.0
-        if base_route in ("project", "people", "org") and tag in PROJECT_TAGS:
+        if base_route in ("project", "people", "org") and tag in PROJECT_TAGS_NORM:
             return 4.0
-        if base_route == "perf" and tag in PERF_TAGS:
+        if base_route == "perf" and tag in PERF_TAGS_NORM:
             return 4.0
 
     col = str(pl.get("_collection") or "")
