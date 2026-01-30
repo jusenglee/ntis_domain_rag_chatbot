@@ -43,6 +43,8 @@ from rag_parts.constants import (
     COL_SUPPORT,
     COL_PROJECT,
     COL_PERF,
+    PROJECT_TAGS,
+    PERF_TAGS,
     TAG_PJT_INFO,
 )
 from rag_parts.query_intent import (
@@ -78,6 +80,15 @@ try:
     from qdrant_client.http import models as qmodels
 except Exception:
     qmodels = None
+
+def _normalize_tag_value(tag: object) -> str:
+    if tag is None:
+        return ""
+    t = str(tag).strip().upper()
+    return t[4:] if t.startswith("IRD_") else t
+
+PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
+PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -681,6 +692,16 @@ def _family_bonus(p: Any, base_route: str) -> float:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         return 0.0
+
+    tag = _normalize_tag_value(pl.get("tag"))
+    if tag:
+        if base_route == "support":
+            return 0.0
+        if base_route in ("project", "people", "org") and tag in PROJECT_TAGS_NORM:
+            return 4.0
+        if base_route == "perf" and tag in PERF_TAGS_NORM:
+            return 4.0
+
     col = str(pl.get("_collection") or "")
     if base_route == "support" and col == COL_SUPPORT:
         return 6.0
