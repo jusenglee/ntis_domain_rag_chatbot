@@ -675,6 +675,46 @@ def pick_org_role(q: str) -> Optional[str]:
     return None
 
 
+def _extract_people_terms_for_affiliation(q: str) -> List[str]:
+    text = (q or "")
+    out: List[str] = []
+    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE, re.compile(r"([가-힣]{2,4})\s*(?:의)?\s*소속")):
+        for match in pattern.finditer(text):
+            name = (match.group(1) or "").strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def _apply_affiliation_intent(
+    q: str,
+    *,
+    org_role: Optional[str],
+    people_terms: List[str],
+    org_terms: List[str],
+    ids_map: Dict[str, List[str]],
+    relation: Optional[Tuple[str, str]],
+) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
+    if org_role != "affiliation":
+        return people_terms, org_terms, relation
+
+    tl = (q or "").lower()
+    has_people_signal = (
+        bool(people_terms)
+        or bool(ids_map.get("person_no"))
+        or bool(_NAME_NEAR_CUE_RE.search(q or ""))
+        or bool(_NAME_LABEL_RE.search(q or ""))
+        or _has_any_cue(tl, PEOPLE_CUES)
+    )
+    if not has_people_signal:
+        return people_terms, org_terms, relation
+
+    if not people_terms:
+        people_terms = _extract_people_terms_for_affiliation(q)
+
+    return people_terms, org_terms, ("people", "org")
+
+
 @dataclass
 class QueryIntent:
     # core
@@ -1109,6 +1149,8 @@ def _classify_query_heuristic(
     org_terms = extract_org_terms(q, kws)
     org_role = extract_org_role(q)
     years = extract_years(q)
+    if org_role == "affiliation":
+        people_terms = _extract_people_terms_for_affiliation(q)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
@@ -1128,6 +1170,14 @@ def _classify_query_heuristic(
         has_perf=has_perf,
         has_people=has_people,
         has_org=has_org,
+    )
+    people_terms, org_terms, relation = _apply_affiliation_intent(
+        q,
+        org_role=org_role,
+        people_terms=people_terms,
+        org_terms=org_terms,
+        ids_map=ids_map,
+        relation=relation,
     )
 
     intent = pick_structured_intent(base_route, q, is_id_query=is_id_query)
@@ -1319,6 +1369,8 @@ def classify_query(
         org_role = extract_org_role(q)
     if not years:
         years = extract_years(q)
+    if org_role == "affiliation" and not people_terms:
+        people_terms = _extract_people_terms_for_affiliation(q)
 
     project_tag_filters = _normalize_tag_filters(plan.get("project_tag_filters"), PROJECT_TAGS)
     perf_tag_filters = _normalize_tag_filters(plan.get("perf_tag_filters"), PERF_TAGS)
@@ -1335,6 +1387,15 @@ def classify_query(
 
     rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
+
+    people_terms, org_terms, relation = _apply_affiliation_intent(
+        q,
+        org_role=org_role,
+        people_terms=people_terms,
+        org_terms=org_terms,
+        ids_map=ids_map,
+        relation=relation,
+    )
 
     return QueryIntent(
         base_route=base_route,
