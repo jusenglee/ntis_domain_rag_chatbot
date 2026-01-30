@@ -261,6 +261,18 @@ REL_PEOPLE_CUES = PEOPLE_CUES[:]  # join relation용
 REL_ORG_CUES = ORG_CUES[:]
 PERF_TO_PROJECT_CUES = ["어느 과제", "어떤 과제", "관련 과제", "소속 과제", "과제 정보", "과제번호", "pjt_id", "pjt id", "project id"]
 
+ID_QUERY_CUES = [
+    "pjt_id",
+    "pjt id",
+    "pjt_no",
+    "pjt no",
+    "project id",
+    "project no",
+    "과제 고유번호",
+    "과제번호",
+    "과제 번호",
+]
+
 FILTER_CUES = ["목록", "리스트", "현황", "통계", "건수", "몇건", "기간", "시작", "종료", "연도", "년도", "기관", "주관", "참여", "상태", "단계", "추출", "다운로드", "엑셀"]
 TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", "이슈", "기술", "연구", "r&d", "rd", "사례", "핵심", "정리", "요약", "분석"]
 
@@ -1158,6 +1170,7 @@ def _classify_query_heuristic(
         or bool(_PATENT_REG_NO_RE.search(q))
         or bool(_PJT_ID_NUM_RE.search(q))
         or bool(_PJT_NO_LABEL_RE.search(q))
+        or _has_any_cue(tl, ID_QUERY_CUES)
         or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
