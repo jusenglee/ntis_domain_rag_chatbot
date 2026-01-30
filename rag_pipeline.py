@@ -43,6 +43,8 @@ from rag_parts.constants import (
     COL_SUPPORT,
     COL_PROJECT,
     COL_PERF,
+    PROJECT_TAGS,
+    PERF_TAGS,
     TAG_PJT_INFO,
 )
 from rag_parts.query_intent import (
@@ -70,6 +72,7 @@ from rag_parts.filters import (
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
+    build_project_id_filter,
     JoinFilterInput,
     PerfFilterInput, PeopleFilterInput, OrgFilterInput,
 )
@@ -78,6 +81,15 @@ try:
     from qdrant_client.http import models as qmodels
 except Exception:
     qmodels = None
+
+def _normalize_tag_value(tag: object) -> str:
+    if tag is None:
+        return ""
+    t = str(tag).strip().upper()
+    return t[4:] if t.startswith("IRD_") else t
+
+PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
+PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -681,6 +693,16 @@ def _family_bonus(p: Any, base_route: str) -> float:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         return 0.0
+
+    tag = _normalize_tag_value(pl.get("tag"))
+    if tag:
+        if base_route == "support":
+            return 0.0
+        if base_route in ("project", "people", "org") and tag in PROJECT_TAGS_NORM:
+            return 4.0
+        if base_route == "perf" and tag in PERF_TAGS_NORM:
+            return 4.0
+
     col = str(pl.get("_collection") or "")
     if base_route == "support" and col == COL_SUPPORT:
         return 6.0
@@ -796,6 +818,16 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     action = it.action
     base_route = it.base_route
     rel = it.relation
+
+    if bool(it.is_id_query):
+        return QueryPlan(
+            mode="lookup",
+            base_route=base_route,
+            action=action,
+            relation=None,
+            target_collections=_default_target_collections(),
+            filters={},
+        )
 
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         target_cols = relation_target_collections(rel)
@@ -930,6 +962,7 @@ def _run_rag_with_vectors(
         query: str,
         model_name: str,
         hint: Any = None,
+        intent_payload: Any = None,
         stack: str,
         vector_names: List[str],
         w_dense_map: Dict[str, float],
@@ -1069,56 +1102,119 @@ def _run_rag_with_vectors(
         model_name=model_name,
         stack=stack,
         vector_names=vector_names,
+        intent_payload=bool(intent_payload),
     )
 
     # keywords
     t0 = time.time()
-    kws = extract_keywords(q)
+    payload_kws = _get_attr(intent_payload, "keywords", None)
+    if isinstance(payload_kws, (list, tuple)) and payload_kws:
+        kws = list(payload_kws)
+    else:
+        kws = extract_keywords(q)
     timings["kw_det"] = time.time() - t0
 
-    # intent (hint는 query_intent에서 흡수)
-    domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
-    raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
-    qa_researchers = _get_attr(qa, "researchers", None) or []
-    if isinstance(qa_researchers, str):
-        qa_researchers = [qa_researchers]
+    def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
+        if isinstance(raw, NormalizedIntent):
+            return raw
+        if isinstance(raw, dict):
+            try:
+                return NormalizedIntent(**raw)
+            except Exception:
+                return None
+        return None
 
-    hint_people_terms: List[str] = []
-    hint_people_ids: List[Any] = []
+    intent_from_payload = False
+    it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
+    if it is not None:
+        intent_from_payload = True
+    else:
+        raw_intent = _get_attr(intent_payload, "query_intent", None) or _get_attr(intent_payload, "raw_intent", None)
+        if raw_intent is not None:
+            qa_researchers = _get_attr(qa, "researchers", None) or []
+            if isinstance(qa_researchers, str):
+                qa_researchers = [qa_researchers]
 
-    for r in (qa_researchers or []):
-        name = None
-        rid = None
+            hint_people_terms: List[str] = []
+            hint_people_ids: List[Any] = []
 
-        if isinstance(r, str):
-            name = r.strip()
-        elif isinstance(r, Mapping):
-            # dict hint 대응
-            name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
-            rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
+            for r in (qa_researchers or []):
+                name = None
+                rid = None
+
+                if isinstance(r, str):
+                    name = r.strip()
+                elif isinstance(r, Mapping):
+                    # dict hint 대응
+                    name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
+                    rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
+                else:
+                    name = _get_attr(r, "name", None)
+                    if isinstance(name, str):
+                        name = name.strip()
+                    rid = _get_attr(r, "researcher_id", None)
+
+                if name:
+                    hint_people_terms.append(name)
+                if rid not in (None, ""):
+                    hint_people_ids.append(rid)
+            hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+            hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
+            if isinstance(hint_org_terms, str):
+                hint_org_terms = [hint_org_terms]
+
+            it = normalize_intent(
+                raw_intent,
+                query=q,
+                keywords=kws,
+                hint_people_terms=hint_people_terms,
+                hint_org_terms=hint_org_terms,
+                hint_org_role=hint_org_role,
+            )
         else:
-            name = _get_attr(r, "name", None)
-            if isinstance(name, str):
-                name = name.strip()
-            rid = _get_attr(r, "researcher_id", None)
+            # intent (hint는 query_intent에서 흡수)
+            domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
+            raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+            qa_researchers = _get_attr(qa, "researchers", None) or []
+            if isinstance(qa_researchers, str):
+                qa_researchers = [qa_researchers]
 
-        if name:
-            hint_people_terms.append(name)
-        if rid not in (None, ""):
-            hint_people_ids.append(rid)
-    hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
-    hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
-    if isinstance(hint_org_terms, str):
-        hint_org_terms = [hint_org_terms]
+            hint_people_terms = []
+            hint_people_ids: List[Any] = []
 
-    it = normalize_intent(
-        raw_intent,
-        query=q,
-        keywords=kws,
-        hint_people_terms=hint_people_terms,
-        hint_org_terms=hint_org_terms,
-        hint_org_role=hint_org_role,
-    )
+            for r in (qa_researchers or []):
+                name = None
+                rid = None
+
+                if isinstance(r, str):
+                    name = r.strip()
+                elif isinstance(r, Mapping):
+                    # dict hint 대응
+                    name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
+                    rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
+                else:
+                    name = _get_attr(r, "name", None)
+                    if isinstance(name, str):
+                        name = name.strip()
+                    rid = _get_attr(r, "researcher_id", None)
+
+                if name:
+                    hint_people_terms.append(name)
+                if rid not in (None, ""):
+                    hint_people_ids.append(rid)
+            hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+            hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
+            if isinstance(hint_org_terms, str):
+                hint_org_terms = [hint_org_terms]
+
+            it = normalize_intent(
+                raw_intent,
+                query=q,
+                keywords=kws,
+                hint_people_terms=hint_people_terms,
+                hint_org_terms=hint_org_terms,
+                hint_org_role=hint_org_role,
+            )
 
     def _normalize_hint_terms(values: Any) -> List[str]:
         if values is None:
@@ -1167,32 +1263,33 @@ def _run_rag_with_vectors(
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
-    if hint_head in ("project", "perf", "people", "org", "support"):
-        it.base_route = hint_head
-    if hint_relation:
-        it.relation = hint_relation
-    if hint_ids_map:
-        merged_ids = dict(it.ids_map or {})
-        for key, values in hint_ids_map.items():
-            merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
-        it.ids_map = merged_ids
-    if isinstance(hint_filters, dict):
-        org_terms_hint = _normalize_hint_terms(hint_filters.get("org_name") or hint_filters.get("org"))
-        if org_terms_hint:
-            it.org_terms = org_terms_hint
-        people_terms_hint = _normalize_hint_terms(
-            hint_filters.get("researcher_name") or hint_filters.get("people_name")
-        )
-        if people_terms_hint:
-            it.people_terms = people_terms_hint
-        year_terms_hint = _normalize_hint_terms(
-            [hint_filters.get("year_from"), hint_filters.get("year_to")]
-        )
-        if year_terms_hint:
-            it.years = year_terms_hint
-        tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
-        if tag_filters_hint:
-            it.tag_filters = tag_filters_hint
+    if not intent_from_payload:
+        if hint_head in ("project", "perf", "people", "org", "support"):
+            it.base_route = hint_head
+        if hint_relation:
+            it.relation = hint_relation
+        if hint_ids_map:
+            merged_ids = dict(it.ids_map or {})
+            for key, values in hint_ids_map.items():
+                merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
+            it.ids_map = merged_ids
+        if isinstance(hint_filters, dict):
+            org_terms_hint = _normalize_hint_terms(hint_filters.get("org_name") or hint_filters.get("org"))
+            if org_terms_hint:
+                it.org_terms = org_terms_hint
+            people_terms_hint = _normalize_hint_terms(
+                hint_filters.get("researcher_name") or hint_filters.get("people_name")
+            )
+            if people_terms_hint:
+                it.people_terms = people_terms_hint
+            year_terms_hint = _normalize_hint_terms(
+                [hint_filters.get("year_from"), hint_filters.get("year_to")]
+            )
+            if year_terms_hint:
+                it.years = year_terms_hint
+            tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
+            if tag_filters_hint:
+                it.tag_filters = tag_filters_hint
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1218,16 +1315,18 @@ def _run_rag_with_vectors(
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or []) if str(t).strip()]
     it.org_terms = org_terms
-    org_filter = build_org_filter(OrgFilterInput(org_terms)) if org_terms else None
-    org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    org_role = str(org_role or "").strip().lower() or None
+    org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
-        build_prtcp_org_nested_filter(OrgFilterInput(org_terms)) if org_terms else None
+        build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
+        if org_terms and org_role == "participant"
+        else None
     )
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
     gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
-    org_role = getattr(it, "org_role", None)
     people_org_terms: List[str] = []
     if org_role == "affiliation" and org_terms:
         people_org_terms = list(org_terms)
@@ -1272,7 +1371,6 @@ def _run_rag_with_vectors(
             seen_ids.add(pid)
             deduped_ids.append(pid)
         people_ids = deduped_ids
-    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
@@ -1590,7 +1688,14 @@ def _run_rag_with_vectors(
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
-                hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
+                hop2_filter = build_join_filter(
+                    JoinFilterInput(
+                        join_ids=join_ids,
+                        tag_filters=hop2_tag_filters,
+                        people_terms=people_terms,
+                        org_terms=org_terms,
+                    )
+                )
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
@@ -1722,9 +1827,11 @@ def _run_rag_with_vectors(
 
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        if pjt_ids:
-            # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-            return build_join_filter(JoinFilterInput(join_ids=pjt_ids, tag_filters=None))
+        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
+        if pjt_filter is not None:
+            # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
+            return pjt_filter
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
@@ -2032,17 +2139,28 @@ def _run_rag_with_vectors(
 # -------------------------
 # Public entry
 # -------------------------
-def run_rag_once(query: str, model_name: str = DEFAULT_MODEL_NAME, hint: Any = None) -> RagResult:
+def run_rag_once(
+    query: str,
+    model_name: str = DEFAULT_MODEL_NAME,
+    hint: Any = None,
+    intent_payload: Any = None,
+) -> RagResult:
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
         hint=hint,
+        intent_payload=intent_payload,
         stack="M",
         vector_names=["e5i_qa", "e5_qa"],
         w_dense_map={"e5i_qa": 1.0, "e5_qa": 0.8},
         lexical_field_weights=None,
     )
 
-def run_rag_ab_compare(query: str, model_name: str = DEFAULT_MODEL_NAME, hint: Any = None) -> Dict[str, RagResult]:
-    res_m = run_rag_once(query=query, model_name=model_name, hint=hint)
+def run_rag_ab_compare(
+    query: str,
+    model_name: str = DEFAULT_MODEL_NAME,
+    hint: Any = None,
+    intent_payload: Any = None,
+) -> Dict[str, RagResult]:
+    res_m = run_rag_once(query=query, model_name=model_name, hint=hint, intent_payload=intent_payload)
     return {"M": res_m}

@@ -32,6 +32,9 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
+from rag_parts.pipeline_steps import normalize_intent
+from rag_parts.query_intent import classify_query as classify_query_intent
+from retrieval import extract_keywords
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
 
@@ -44,7 +47,7 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
-def setup_file_logging(log_path="logs/server.log"):
+def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root = logging.getLogger()
@@ -104,6 +107,12 @@ class QuestionAnalysis(BaseModel):
     question_type: QuestionType = Field(description="질문유형")
     related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
     researchers: list[Researcher] = Field(default_factory=list)
+    organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
+    mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
+    head: str | None = Field(default=None, description="project | perf | people | org | support")
+    relation: str | None = Field(default=None, description="project_perf | people_project 등")
+    ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
+    filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
     history_summary: str = Field(description="대화 이력 기반 질문 요약")
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
@@ -147,6 +156,7 @@ class AgentState(BaseModel):
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
     knowledge_sufficiency: Optional[KnowledgeSufficiency] = None
+    intent_payload: Optional[Dict[str, Any]] = None
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
         """병렬 노드에서 latencies가 동시에 업데이트될 때 병합"""
@@ -250,14 +260,34 @@ async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
 @measure_latency("analyze_question")
 async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     """질문 분석: 카테고리, 후속 질문 유형, 이력 요약"""
+    if state.question_analysis:
+        return {"question_analysis": state.question_analysis}
+    if state.intent_payload and state.intent_payload.get("question_analysis"):
+        return {"question_analysis": state.intent_payload["question_analysis"]}
 
-    llm = TritonChatModel(model_name="gpt_oss_0") # GPT
+    result = await _run_question_analysis(
+        question=state.messages[-1].content,
+        conversation_id=state.conversation_id,
+        chat_history=state.chat_history,
+        prev_context=state.prev_context,
+    )
+    return {"question_analysis": result}
+
+
+async def _run_question_analysis(
+        *,
+        question: str,
+        conversation_id: str,
+        chat_history: List[BaseMessage],
+        prev_context: List[Dict[str, Any]],
+) -> QuestionAnalysis:
+    llm = TritonChatModel(model_name="gpt_oss_0")  # GPT
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
-    history = state.chat_history[-6:]
+    history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    prev_context_str = refine_documents_rule_based(state.prev_context)
+    prev_context_str = refine_documents_rule_based(prev_context)
 
     system_prompt = (
         "당신은 질문 분석 전문가입니다.\n"
@@ -290,6 +320,12 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "2. question_type: QuestionType\n"
         "3. related_docs: QuestionType.FOLLOW_UP 인 경우 관련된 출처의 번호 배열 \n"
         "4. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
+        "4-1. organizations: 질문에서 특정 기관이 식별되는 경우만 포함\n"
+        "4-2. mode: SEARCH | LOOKUP | JOIN\n"
+        "4-3. head: project | perf | people | org | support\n"
+        "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
+        "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
+        "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
         "7. retrieval_query:\n"
@@ -300,7 +336,6 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         "{format_instructions}"
     )
 
-
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}[현재 질문]\n{question}")
@@ -310,40 +345,50 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         chain = prompt | llm | sanitize_llm_json | parser
         result: QuestionAnalysis = await chain.ainvoke({
             "format_instructions": parser.get_format_instructions(),
-            "history": history_str or '없음',
+            "history": history_str or "없음",
             "prev_context": prev_context_str or "없음",
-            "question": state.messages[-1].content
+            "question": question
         })
 
         log_section(
             "QUESTION ANALYSIS",
-            f"coq: {state.conversation_id}{state.question}\n"
+            f"coq: {conversation_id}{question}\n"
             f"Category: {result.category}\n"
             f"QuestionType: {result.question_type}\n"
             f"RelatedDocs: {result.related_docs}\n"
             f"Researchers: {result.researchers}\n"
+            f"Organizations: {result.organizations}\n"
+            f"Mode: {result.mode}\n"
+            f"Head: {result.head}\n"
+            f"Relation: {result.relation}\n"
+            f"IdsMap: {result.ids_map}\n"
+            f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
             f"Confidence: {result.confidence:.2f}"
         )
 
-        return {"question_analysis": result}
+        return result
 
     except Exception as e:
         logger.error(f"Question Analysis Error: {e}")
-        return {
-            "question_analysis": QuestionAnalysis(
-                category=[ContentCategory.ETC],
-                question_type=QuestionType.DEFAULT,
-                related_docs = [],
-                researchers=[],
-                limit=20,
-                history_summary=state.messages[-1].content,
-                retrieval_query=state.messages[-1].content[:120],
-                confidence=0.5
-            )
-        }
+        return QuestionAnalysis(
+            category=[ContentCategory.ETC],
+            question_type=QuestionType.DEFAULT,
+            related_docs=[],
+            researchers=[],
+            organizations=[],
+            mode=None,
+            head=None,
+            relation=None,
+            ids_map={},
+            filters={},
+            limit=20,
+            history_summary=question,
+            retrieval_query=question[:120],
+            confidence=0.5
+        )
 
 
 # --- Node 4: Knowledge Sufficiency Judge ---
@@ -442,13 +487,19 @@ class CustomRAGRetriever(BaseModel):
     top_k: int = 5
 
     hint: Optional[Dict[str, Any]] = None
+    intent_payload: Optional[Dict[str, Any]] = None
 
     class Config:
         arbitrary_types_allowed = True
 
     def retrieve(self, query: str) -> List[Dict]:
         """동기 검색 함수"""
-        res_map = run_rag_ab_compare(query=query, model_name=self.model_name, hint=self.hint)
+        res_map = run_rag_ab_compare(
+            query=query,
+            model_name=self.model_name,
+            hint=self.hint,
+            intent_payload=self.intent_payload,
+        )
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
         hits = getattr(res_m, "reranked_hits", []) or []
@@ -479,8 +530,7 @@ class CustomRAGRetriever(BaseModel):
                 "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
 
-            if hit_data.get("tag") is not None:
-                documents.append(rag_data)
+            documents.append(rag_data)
 
         return documents
 
@@ -502,6 +552,12 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             "researchers": [
                 {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
             ] if qa else [],
+            "organizations": list(qa.organizations or []) if qa else [],
+            "mode": (qa.mode if qa else None),
+            "head": (qa.head if qa else None),
+            "relation": (qa.relation if qa else None),
+            "ids_map": dict(qa.ids_map or {}) if qa else {},
+            "filters": dict(qa.filters or {}) if qa else {},
             "limit": int(search_num),
             "history_summary": (qa.history_summary if qa else ""),
             "retrieval_query": query,
@@ -512,6 +568,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             top_k=search_num,
             model_name="gemma_vllm_0",
             hint=hint,
+            intent_payload=state.intent_payload,
         )
 
         rag_tool = Tool(
@@ -521,8 +578,6 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
-        from sample_data import SAMPLE_DATA
-        # docs = SAMPLE_DATA
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -533,7 +588,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         log_section("RAG SEARCH",
                     f"coq: {state.conversation_id}{state.question}\n"
                     f"Query: {query}\n"
-                    f"Found: {len(docs)} docs\n")
+                    f"Found: {len(docs)} docs\n"
+                    f"{'─'*40}\n" + "\n".join(doc_previews))
 
         return {"context": docs}
 
@@ -573,19 +629,18 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     context_text = None
 
-
-    if qa.question_type == QuestionType.FOLLOW_UP and len(qa.related_docs) > 0:
-        related_context = [
-            state.prev_context[i - 1]
-            for i in qa.related_docs
-            if 1 <= i <= len(state.prev_context)
-        ]
-        context_text = refine_documents_rule_based(related_context, True)
-    else:
-        # fallback: 전체 context 사용
-        related_context = state.context
-        context_text = refine_documents_rule_based(related_context)
-
+    if qa.question_type == QuestionType.FOLLOW_UP:
+        if len(qa.related_docs) > 0:
+            related_context = [
+                state.prev_context[i - 1]
+                for i in qa.related_docs
+                if 1 <= i <= len(state.prev_context)
+            ]
+            context_text = refine_documents_rule_based(related_context, True)
+        else:
+            # fallback: 전체 context 사용
+            related_context = state.context
+            context_text = refine_documents_rule_based(related_context)
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
@@ -625,8 +680,6 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     ks = state.knowledge_sufficiency
-
-    logger.info(refine_documents_rule_based(state.context))
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
@@ -686,6 +739,69 @@ def node_join_analysis(state: AgentState):
     return { "context" : state.prev_context }
 
 
+def node_join_answers(state: AgentState):
+    """Refined Answer 노드들 완료 대기"""
+    return {}
+
+async def _load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessage], List[Dict[str, Any]]]:
+    loaded_history: List[BaseMessage] = []
+    ctx_list: List[Dict[str, Any]] = []
+
+    if redis_client:
+        try:
+            raw_hist = await redis_client.get(f"conversation:{conversation_id}:history")
+            if raw_hist:
+                hist_list = json.loads(raw_hist)
+                for msg in hist_list:
+                    role = HumanMessage if msg["type"] == "human" else AIMessage
+                    loaded_history.append(role(content=msg["content"]))
+
+            raw_ctx = await redis_client.get(f"conversation:{conversation_id}:last_context")
+            if raw_ctx:
+                ctx_list = json.loads(raw_ctx)
+        except Exception as e:
+            logger.error(f"Redis Load Error: {e}")
+
+    return loaded_history, ctx_list
+
+async def build_intent_payload(question: str, conversation_id: str) -> Dict[str, Any]:
+    chat_history, prev_context = await _load_conversation_memory(conversation_id)
+    question_analysis = await _run_question_analysis(
+        question=question,
+        conversation_id=conversation_id,
+        chat_history=chat_history,
+        prev_context=prev_context,
+    )
+
+    kws = extract_keywords(question)
+    hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name]
+    hint_org_terms = list(question_analysis.organizations or [])
+    hint_org_role = None
+    if isinstance(question_analysis.filters, dict):
+        hint_org_role = question_analysis.filters.get("org_role")
+
+    raw_intent = classify_query_intent(
+        question,
+        kws,
+        domain_hint=question_analysis.head,
+        hint=question_analysis.dict(),
+    )
+
+    normalized_intent = normalize_intent(
+        raw_intent,
+        query=question,
+        keywords=kws,
+        hint_people_terms=hint_people_terms,
+        hint_org_terms=hint_org_terms,
+        hint_org_role=hint_org_role,
+    )
+
+    return {
+        "question_analysis": question_analysis,
+        "query_intent": raw_intent,
+        "normalized_intent": normalized_intent,
+        "keywords": kws,
+    }
 
 # --- Graph Construction ---
 def build_advanced_workflow():
@@ -705,6 +821,7 @@ def build_advanced_workflow():
     # 두 모델 각각의 Refined Answer 노드
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
     workflow.add_node("generate_answer_gpt", node_generate_answer_gpt)
+    workflow.add_node("join_answers", node_join_answers)
 
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
@@ -755,11 +872,15 @@ def build_advanced_workflow():
     workflow.add_edge("rag_search", "generate_answer_gemma")
     workflow.add_edge("rag_search", "generate_answer_gpt")
 
-    # Answer 완료 후 merge
-    workflow.add_edge("generate_answer_gemma", "merge_answers")
-    workflow.add_edge("generate_answer_gpt", "merge_answers")
+    # Refined Answer 완료 후 join
+    workflow.add_edge("generate_answer_gemma", "join_answers")
+    workflow.add_edge("generate_answer_gpt", "join_answers")
+
+    # Refined answers join도 merge로
+    workflow.add_edge("join_answers", "merge_answers")
 
 
+    # Direct answer also goes to save
     workflow.add_edge("direct_answer", "save_history")
     workflow.add_edge("merge_answers", "save_history")
 
@@ -769,7 +890,7 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Dict], is_detail=False) -> str:
+def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
     context_chunks: List[str] = []
 
     for doc in docs:
@@ -867,15 +988,18 @@ async def query_stream(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
-    inputs = {
-        "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)]
-    }
-
     graph = app.state.graph
 
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
+
+        intent_payload = await build_intent_payload(question, conversation_id)
+        inputs = {
+            "conversation_id": conversation_id,
+            "messages": [HumanMessage(content=question)],
+            "intent_payload": intent_payload,
+            "question_analysis": intent_payload.get("question_analysis"),
+        }
 
         log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
 
@@ -943,9 +1067,58 @@ async def query_debug(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
+    intent_payload = await build_intent_payload(question, conversation_id)
+
     inputs = {
         "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)]
+        "messages": [HumanMessage(content=question)],
+        "intent_payload": intent_payload,
+        "question_analysis": intent_payload.get("question_analysis"),
+
+async def _run_question_analysis(
+    *,
+    question: str,
+    conversation_id: str,
+    chat_history: List[BaseMessage],
+    prev_context: List[Dict[str, Any]],
+) -> QuestionAnalysis:
+    llm = TritonChatModel(model_name="gpt_oss_0")  # GPT
+    history = chat_history[-6:]
+    prev_context_str = refine_documents_rule_based(prev_context)
+            "history": history_str or "없음",
+            "question": question
+            f"coq: {conversation_id}{question}\n"
+        return result
+        return QuestionAnalysis(
+            category=[ContentCategory.ETC],
+            question_type=QuestionType.DEFAULT,
+            related_docs=[],
+            researchers=[],
+            organizations=[],
+            mode=None,
+            head=None,
+            relation=None,
+            ids_map={},
+            filters={},
+            limit=20,
+            history_summary=question,
+            retrieval_query=question[:120],
+            confidence=0.5
+        )
+        res_map = run_rag_ab_compare(
+            query=query,
+            model_name=self.model_name,
+            hint=self.hint,
+            intent_payload=self.intent_payload,
+        )
+        from sample_data import SAMPLE_DATA
+        # docs = SAMPLE_DATA
+
+    logger.info(refine_documents_rule_based(state.context))
+
+        "messages": [HumanMessage(content=question)],
+        "intent_payload": intent_payload,
+        "question_analysis": intent_payload.get("question_analysis"),
     }
 
     graph = app.state.graph

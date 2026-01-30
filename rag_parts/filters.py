@@ -15,6 +15,7 @@ from .constants import (
 @dataclass(frozen=True)
 class OrgFilterInput:
     terms: List[str] = field(default_factory=list)
+    role: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class PeopleFilterInput:
 class JoinFilterInput:
     join_ids: List[str] = field(default_factory=list)
     tag_filters: Optional[List[str]] = None
+    people_terms: List[str] = field(default_factory=list)
+    org_terms: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -61,18 +64,30 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
 def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     if qmodels is None or not spec.terms:
         return None
+    role = (spec.role or "").strip().lower() or None
+    if role == "participant":
+        return build_prtcp_org_nested_filter(spec)
+
     keys = [
-        KEY_ORG_NORM,
         "org_nm",
-        "prtcp_org[].org_nm",
-        "prtcp_mp[].blng_org_nm",
-        "meta_basic.pjt_prfrm_org_nm",
     ]
+    if role is None:
+        keys = [
+            KEY_ORG_NORM,
+            "org_nm",
+            "prtcp_org[].org_nm",
+            "prtcp_mp[].blng_org_nm",
+            "meta_basic.pjt_prfrm_org_nm",
+        ]
     should: List["qmodels.Condition"] = []
     for key in keys:
         if not key:
             continue
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(spec.terms)))
+    if role is None:
+        nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
+        if nested_mp_org is not None:
+            should.append(nested_mp_org)
     if not should:
         return None
     return qmodels.Filter(should=should)
@@ -87,9 +102,6 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
 
     nested_keys = [
         "org_nm",
-        KEY_ORG_NORM,
-        "org_name",
-        "org_name_raw",
     ]
     should: List["qmodels.Condition"] = []
     for key in nested_keys:
@@ -99,7 +111,20 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
     if not should:
         return None
     nested_filter = qmodels.Filter(should=should)
-    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_org", nested_filter)
+    nested_conditions: List[Any] = []
+    nested_org = _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_org", nested_filter)
+    if nested_org is not None:
+        nested_conditions.append(nested_org)
+
+    nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
+    if nested_mp_org is not None:
+        nested_conditions.append(nested_mp_org)
+
+    if not nested_conditions:
+        return None
+    if len(nested_conditions) == 1:
+        return nested_conditions[0]
+    return qmodels.Filter(should=nested_conditions)
 
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     if qmodels is None:
@@ -155,6 +180,18 @@ def _build_prtcp_mp_nested_filter(
     return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", qmodels.Filter(must=base_must))
 
 
+def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
+    if qmodels is None or not terms:
+        return None
+    nested_cls = getattr(qmodels, "NestedCondition", None)
+    nested_filter_cls = getattr(qmodels, "NestedFilter", None)
+    if nested_cls is None:
+        return None
+    org_cond = qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(terms))
+    nested_filter = qmodels.Filter(must=[org_cond])
+    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", nested_filter)
+
+
 def _make_nested_condition(nested_cls, nested_filter_cls, key: str, flt):
     if nested_filter_cls is not None:
         try:
@@ -198,6 +235,9 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
         ]
         for key in org_keys:
             should.append(qmodels.FieldCondition(key=key, match=make_match_any(orgs)))
+        nested_mp_org = _build_prtcp_mp_org_nested_filter(orgs)
+        if nested_mp_org is not None:
+            should.append(nested_mp_org)
 
     nested_filter = _build_prtcp_mp_nested_filter(
         people_terms=terms,
@@ -304,6 +344,46 @@ def pick_perf_tag_filters(q: str) -> List[str]:
 
     return tags
 
+
+def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[Any]:
+    """PJT_ID/PJT_NO 기반 서버단 필터를 구성합니다."""
+    if qmodels is None:
+        return None
+
+    id_values: List[str] = []
+    for val in (pjt_ids or []):
+        sval = str(val).strip()
+        if sval and sval not in id_values:
+            id_values.append(sval)
+    for val in (pjt_nos or []):
+        sval = str(val).strip()
+        if sval and sval not in id_values:
+            id_values.append(sval)
+
+    if not id_values:
+        return None
+
+    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    key_cands: List[str] = []
+    for k in [
+        primary_id,
+        primary_no,
+        "meta_basic.pjt_id",
+        "meta_basic.pjt_no",
+        "pjt_id",
+        "pjt_no",
+    ]:
+        if k and k not in key_cands:
+            key_cands.append(k)
+
+    return qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(key=k, match=make_match_any(id_values))
+            for k in key_cands
+        ]
+    )
+
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 
@@ -315,6 +395,9 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     join_ids = list(spec.join_ids)
     if not join_ids:
         return qmodels.Filter(must=[])
+
+    people_terms = list(spec.people_terms or [])
+    org_terms = list(spec.org_terms or [])
 
     primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     key_cands = []
@@ -338,6 +421,15 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     )
 
     must: List["qmodels.Condition"] = [join_any]
+
+    nested_people_org = _build_prtcp_mp_nested_filter(
+        people_terms=people_terms,
+        person_ids=[],
+        gender_terms=[],
+        org_terms=org_terms,
+    )
+    if nested_people_org is not None:
+        must.append(nested_people_org)
 
     if spec.tag_filters:
         must.append(

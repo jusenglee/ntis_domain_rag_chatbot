@@ -250,14 +250,28 @@ ORG_ROLE_AFFILIATION_CUES = [
 ]
 ORG_ROLE_PARTICIPANT_CUES = [
     "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+    "공동", "협력", "컨소시엄",
 ]
 ORG_ROLE_PERFORMER_CUES = [
     "수행기관", "수행 기관", "주관기관", "주관 기관", "과제수행기관", "과제 수행기관",
+    "주관", "수행", "대표", "전담", "총괄",
 ]
 
 REL_PEOPLE_CUES = PEOPLE_CUES[:]  # join relation용
 REL_ORG_CUES = ORG_CUES[:]
 PERF_TO_PROJECT_CUES = ["어느 과제", "어떤 과제", "관련 과제", "소속 과제", "과제 정보", "과제번호", "pjt_id", "pjt id", "project id"]
+
+ID_QUERY_CUES = [
+    "pjt_id",
+    "pjt id",
+    "pjt_no",
+    "pjt no",
+    "project id",
+    "project no",
+    "과제 고유번호",
+    "과제번호",
+    "과제 번호",
+]
 
 FILTER_CUES = ["목록", "리스트", "현황", "통계", "건수", "몇건", "기간", "시작", "종료", "연도", "년도", "기관", "주관", "참여", "상태", "단계", "추출", "다운로드", "엑셀"]
 TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", "이슈", "기술", "연구", "r&d", "rd", "사례", "핵심", "정리", "요약", "분석"]
@@ -416,6 +430,13 @@ def extract_org_role(q: str) -> Optional[str]:
     if not t:
         return None
 
+    if any(x in t for x in ("소속기관", "소속 기관")) and any(x in t for x in ("과제", "project", "pjt")):
+        if _hit_count(t, ORG_ROLE_PARTICIPANT_CUES) > 0:
+            return "participant"
+        if _hit_count(t, ORG_ROLE_PERFORMER_CUES) > 0:
+            return "performer"
+        return "performer"
+
     role_scores = {
         "affiliation": _hit_count(t, ORG_ROLE_AFFILIATION_CUES),
         "performer": _hit_count(t, ORG_ROLE_PERFORMER_CUES),
@@ -567,6 +588,9 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if is_support_query(tl, has_project=has_project, has_perf=has_perf, has_people=has_people, has_org=has_org):
         return "support"
 
+    if has_project and any(x in tl for x in ("소속기관", "소속 기관")):
+        return "project"
+
     # 사람/기관 + 과제/성과 요청이면 head로 승격(조인 플로우를 타기 쉬움)
     if has_people and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
         return "people"
@@ -666,6 +690,13 @@ def pick_org_role(q: str) -> Optional[str]:
     if not t.strip():
         return None
 
+    if any(x in t for x in ("소속기관", "소속 기관")) and any(x in t for x in ("과제", "project", "pjt")):
+        if any(c in t for c in ORG_ROLE_PARTICIPANT_CUES):
+            return "participant"
+        if any(c in t for c in ORG_ROLE_PERFORMER_CUES):
+            return "performer"
+        return "performer"
+
     if any(c in t for c in ORG_ROLE_AFFILIATION_CUES):
         return "affiliation"
     if any(c in t for c in ORG_ROLE_PARTICIPANT_CUES):
@@ -673,6 +704,46 @@ def pick_org_role(q: str) -> Optional[str]:
     if any(c in t for c in ORG_ROLE_PERFORMER_CUES):
         return "performer"
     return None
+
+
+def _extract_people_terms_for_affiliation(q: str) -> List[str]:
+    text = (q or "")
+    out: List[str] = []
+    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE, re.compile(r"([가-힣]{2,4})\s*(?:의)?\s*소속")):
+        for match in pattern.finditer(text):
+            name = (match.group(1) or "").strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def _apply_affiliation_intent(
+    q: str,
+    *,
+    org_role: Optional[str],
+    people_terms: List[str],
+    org_terms: List[str],
+    ids_map: Dict[str, List[str]],
+    relation: Optional[Tuple[str, str]],
+) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
+    if org_role != "affiliation":
+        return people_terms, org_terms, relation
+
+    tl = (q or "").lower()
+    has_people_signal = (
+        bool(people_terms)
+        or bool(ids_map.get("person_no"))
+        or bool(_NAME_NEAR_CUE_RE.search(q or ""))
+        or bool(_NAME_LABEL_RE.search(q or ""))
+        or _has_any_cue(tl, PEOPLE_CUES)
+    )
+    if not has_people_signal:
+        return people_terms, org_terms, relation
+
+    if not people_terms:
+        people_terms = _extract_people_terms_for_affiliation(q)
+
+    return people_terms, org_terms, ("people", "org")
 
 
 @dataclass
@@ -1103,6 +1174,7 @@ def _classify_query_heuristic(
         or bool(_PATENT_REG_NO_RE.search(q))
         or bool(_PJT_ID_NUM_RE.search(q))
         or bool(_PJT_NO_LABEL_RE.search(q))
+        or _has_any_cue(tl, ID_QUERY_CUES)
         or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
@@ -1113,6 +1185,8 @@ def _classify_query_heuristic(
     org_terms = extract_org_terms(q, kws)
     org_role = extract_org_role(q)
     years = extract_years(q)
+    if org_role == "affiliation":
+        people_terms = _extract_people_terms_for_affiliation(q)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
@@ -1132,6 +1206,14 @@ def _classify_query_heuristic(
         has_perf=has_perf,
         has_people=has_people,
         has_org=has_org,
+    )
+    people_terms, org_terms, relation = _apply_affiliation_intent(
+        q,
+        org_role=org_role,
+        people_terms=people_terms,
+        org_terms=org_terms,
+        ids_map=ids_map,
+        relation=relation,
     )
 
     intent = pick_structured_intent(base_route, q, is_id_query=is_id_query)
@@ -1323,6 +1405,8 @@ def classify_query(
         org_role = extract_org_role(q)
     if not years:
         years = extract_years(q)
+    if org_role == "affiliation" and not people_terms:
+        people_terms = _extract_people_terms_for_affiliation(q)
 
     project_tag_filters = _normalize_tag_filters(plan.get("project_tag_filters"), PROJECT_TAGS)
     perf_tag_filters = _normalize_tag_filters(plan.get("perf_tag_filters"), PERF_TAGS)
@@ -1339,6 +1423,15 @@ def classify_query(
 
     rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
+
+    people_terms, org_terms, relation = _apply_affiliation_intent(
+        q,
+        org_role=org_role,
+        people_terms=people_terms,
+        org_terms=org_terms,
+        ids_map=ids_map,
+        relation=relation,
+    )
 
     return QueryIntent(
         base_route=base_route,
