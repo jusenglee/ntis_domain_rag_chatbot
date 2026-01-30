@@ -250,9 +250,11 @@ ORG_ROLE_AFFILIATION_CUES = [
 ]
 ORG_ROLE_PARTICIPANT_CUES = [
     "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+    "공동", "협력", "컨소시엄",
 ]
 ORG_ROLE_PERFORMER_CUES = [
     "수행기관", "수행 기관", "주관기관", "주관 기관", "과제수행기관", "과제 수행기관",
+    "주관", "수행", "대표", "전담", "총괄",
 ]
 
 REL_PEOPLE_CUES = PEOPLE_CUES[:]  # join relation용
@@ -416,6 +418,13 @@ def extract_org_role(q: str) -> Optional[str]:
     if not t:
         return None
 
+    if any(x in t for x in ("소속기관", "소속 기관")) and any(x in t for x in ("과제", "project", "pjt")):
+        if _hit_count(t, ORG_ROLE_PARTICIPANT_CUES) > 0:
+            return "participant"
+        if _hit_count(t, ORG_ROLE_PERFORMER_CUES) > 0:
+            return "performer"
+        return "performer"
+
     role_scores = {
         "affiliation": _hit_count(t, ORG_ROLE_AFFILIATION_CUES),
         "performer": _hit_count(t, ORG_ROLE_PERFORMER_CUES),
@@ -567,6 +576,9 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if is_support_query(tl, has_project=has_project, has_perf=has_perf, has_people=has_people, has_org=has_org):
         return "support"
 
+    if has_project and any(x in tl for x in ("소속기관", "소속 기관")):
+        return "project"
+
     # 사람/기관 + 과제/성과 요청이면 head로 승격(조인 플로우를 타기 쉬움)
     if has_people and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
         return "people"
@@ -665,6 +677,13 @@ def pick_org_role(q: str) -> Optional[str]:
     t = (q or "").lower()
     if not t.strip():
         return None
+
+    if any(x in t for x in ("소속기관", "소속 기관")) and any(x in t for x in ("과제", "project", "pjt")):
+        if any(c in t for c in ORG_ROLE_PARTICIPANT_CUES):
+            return "participant"
+        if any(c in t for c in ORG_ROLE_PERFORMER_CUES):
+            return "performer"
+        return "performer"
 
     if any(c in t for c in ORG_ROLE_AFFILIATION_CUES):
         return "affiliation"
