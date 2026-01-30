@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, get_origin
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -133,13 +133,44 @@ def _prefetch_supports_using() -> bool:
     return "using" in signature.parameters
 
 
+def _supports_qdrant_query_model() -> bool:
+    query_model = getattr(models, "Query", None)
+    if query_model is not None:
+        if inspect.isclass(query_model):
+            return True
+        if get_origin(query_model) is not None:
+            return True
+        return True
+    query_request_cls = getattr(models, "QueryRequest", None)
+    return inspect.isclass(query_request_cls)
+
+
 def _supports_qdrant_hybrid_query() -> bool:
-    required = ("Prefetch", "Query", "Fusion")
+    required = ("Prefetch", "Fusion")
     if not all(hasattr(models, name) for name in required):
+        return False
+    if not _supports_qdrant_query_model():
         return False
     if _prefetch_supports_using():
         return True
     return all(hasattr(models, name) for name in ("NamedVector", "NamedSparseVector"))
+
+
+def _build_hybrid_query_model(
+    *,
+    prefetch: Sequence[Any],
+    fusion: Any,
+) -> Any:
+    query_model = getattr(models, "Query", None)
+    if inspect.isclass(query_model):
+        return query_model(prefetch=prefetch, query=fusion)
+    query_request_cls = getattr(models, "QueryRequest", None)
+    if inspect.isclass(query_request_cls):
+        return query_request_cls(prefetch=prefetch, query=fusion)
+    return {
+        "prefetch": prefetch,
+        "query": fusion,
+    }
 
 
 def _get_fusion_rrf() -> Any:
@@ -172,8 +203,6 @@ def _qdrant_hybrid_query_once(
         return None
 
     supports_using = _prefetch_supports_using()
-    if not supports_using:
-        return None
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")
     logger.debug(
@@ -274,13 +303,11 @@ def _qdrant_hybrid_query_once(
         lexical_fields_eff,
     )
 
+    query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
     try:
         res = client.query_points(
             collection_name=collection_name,
-            query=models.Query(
-                prefetch=prefetch,
-                query=fusion,
-            ),
+            query=query_model,
             limit=int(max(int(top_k_dense), int(top_k_lexical))),
             with_payload=with_payload,
             with_vectors=False,
