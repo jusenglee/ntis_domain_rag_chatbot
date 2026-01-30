@@ -176,8 +176,12 @@ def build_filter_bundle(intent: NormalizedIntent) -> FilterBundle:
     if org_role == "affiliation" and org_terms:
         people_org_terms = list(org_terms)
 
-    org_filter = build_org_filter(OrgFilterInput(org_terms)) if org_terms else None
-    participant_org_filter = build_prtcp_org_nested_filter(OrgFilterInput(org_terms)) if org_terms else None
+    org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
+    participant_org_filter = (
+        build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
+        if org_terms and org_role == "participant"
+        else None
+    )
 
     people_filter = (
         build_people_filter(

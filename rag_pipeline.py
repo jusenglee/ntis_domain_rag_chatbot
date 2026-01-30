@@ -1240,16 +1240,18 @@ def _run_rag_with_vectors(
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(it.org_terms or []) or []) if str(t).strip()]
     it.org_terms = org_terms
-    org_filter = build_org_filter(OrgFilterInput(org_terms)) if org_terms else None
-    org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    org_role = str(org_role or "").strip().lower() or None
+    org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
-        build_prtcp_org_nested_filter(OrgFilterInput(org_terms)) if org_terms else None
+        build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
+        if org_terms and org_role == "participant"
+        else None
     )
 
     # people terms/filter (필요 시)
     people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
     gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
-    org_role = getattr(it, "org_role", None)
     people_org_terms: List[str] = []
     if org_role == "affiliation" and org_terms:
         people_org_terms = list(org_terms)
@@ -1294,7 +1296,6 @@ def _run_rag_with_vectors(
             seen_ids.add(pid)
             deduped_ids.append(pid)
         people_ids = deduped_ids
-    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_spec = PeopleFilterInput(
         people_terms=people_terms,

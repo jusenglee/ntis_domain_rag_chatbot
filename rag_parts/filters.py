@@ -15,6 +15,7 @@ from .constants import (
 @dataclass(frozen=True)
 class OrgFilterInput:
     terms: List[str] = field(default_factory=list)
+    role: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -63,21 +64,30 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
 def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     if qmodels is None or not spec.terms:
         return None
+    role = (spec.role or "").strip().lower() or None
+    if role == "participant":
+        return build_prtcp_org_nested_filter(spec)
+
     keys = [
-        KEY_ORG_NORM,
         "org_nm",
-        "prtcp_org[].org_nm",
-        "prtcp_mp[].blng_org_nm",
-        "meta_basic.pjt_prfrm_org_nm",
     ]
+    if role is None:
+        keys = [
+            KEY_ORG_NORM,
+            "org_nm",
+            "prtcp_org[].org_nm",
+            "prtcp_mp[].blng_org_nm",
+            "meta_basic.pjt_prfrm_org_nm",
+        ]
     should: List["qmodels.Condition"] = []
     for key in keys:
         if not key:
             continue
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(spec.terms)))
-    nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
-    if nested_mp_org is not None:
-        should.append(nested_mp_org)
+    if role is None:
+        nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
+        if nested_mp_org is not None:
+            should.append(nested_mp_org)
     if not should:
         return None
     return qmodels.Filter(should=should)
@@ -92,9 +102,6 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
 
     nested_keys = [
         "org_nm",
-        KEY_ORG_NORM,
-        "org_name",
-        "org_name_raw",
     ]
     should: List["qmodels.Condition"] = []
     for key in nested_keys:
