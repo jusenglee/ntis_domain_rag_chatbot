@@ -22,7 +22,7 @@ import time
 import inspect
 import json
 from pprint import pformat
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
@@ -66,6 +66,7 @@ from rag_parts.post_policy import (
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
     sanitize_query_by_terms as _sanitize_query_by_terms,
+    normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
@@ -1071,6 +1072,11 @@ def _run_rag_with_vectors(
     hinted_cols: List[str] = _normalize_target_collections(
         _get_attr(qa, "target_collections", None) or _get_attr(qa, "collections", None)
     )
+    payload_target_cols = _normalize_target_collections(
+        _get_attr(intent_payload, "target_collections", None) or _get_attr(intent_payload, "collections", None)
+    )
+    if payload_target_cols:
+        hinted_cols = payload_target_cols
 
     if qa and qa_conf >= float(os.getenv("RAG_HINT_MIN_CONF", "0.55")):
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
@@ -1098,6 +1104,7 @@ def _run_rag_with_vectors(
         hinted_base=hinted_base,
         hinted_limit=hinted_limit,
         hinted_cols=hinted_cols,
+        payload_target_cols=payload_target_cols,
         allow_cols=allow_cols,
         model_name=model_name,
         stack=stack,
@@ -1114,18 +1121,89 @@ def _run_rag_with_vectors(
         kws = extract_keywords(q)
     timings["kw_det"] = time.time() - t0
 
+    def _normalize_hint_terms(values: Any) -> List[str]:
+        if values is None:
+            return []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, (list, tuple, set)):
+            values = [values]
+        out: List[str] = []
+        seen: set[str] = set()
+        for v in values:
+            s = str(v).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+        return out
+
+    def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
+        if not isinstance(raw, dict):
+            return {}
+        out: Dict[str, List[str]] = {}
+        for key, values in raw.items():
+            norm = _normalize_hint_terms(values)
+            if norm:
+                out[str(key)] = norm
+        return out
+
     def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
         if isinstance(raw, NormalizedIntent):
             return raw
-        if isinstance(raw, dict):
-            try:
-                return NormalizedIntent(**raw)
-            except Exception:
-                return None
-        return None
+        if raw is None:
+            return None
+
+        if isinstance(raw, Mapping):
+            getter = raw.get
+        else:
+            getter = lambda key, default=None: getattr(raw, key, default)
+
+        data: Dict[str, Any] = {}
+        for field in fields(NormalizedIntent):
+            val = getter(field.name, None)
+            if val is not None:
+                data[field.name] = val
+
+        if not data:
+            return None
+
+        if "relation" in data:
+            data["relation"] = _normalize_relation_hint(data.get("relation"))
+
+        for key in (
+            "years",
+            "people_terms",
+            "gender_terms",
+            "org_terms",
+            "perf_tag_filters",
+            "project_tag_filters",
+            "tag_filters",
+            "ids_flat",
+            "remove_terms_for_head",
+        ):
+            if key in data:
+                data[key] = _normalize_hint_terms(data.get(key))
+
+        if "ids_map" in data:
+            data["ids_map"] = _normalize_hint_ids_map(data.get("ids_map"))
+
+        if "is_id_query" in data:
+            data["is_id_query"] = bool(data.get("is_id_query"))
+
+        required = {"action", "base_route", "is_id_query"}
+        if not required.issubset(data.keys()):
+            return None
+
+        try:
+            return NormalizedIntent(**data)
+        except Exception:
+            return None
 
     intent_from_payload = False
     it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
+    if it is None:
+        it = _normalize_payload_intent(intent_payload)
     if it is not None:
         intent_from_payload = True
     else:
@@ -1216,50 +1294,9 @@ def _run_rag_with_vectors(
                 hint_org_role=hint_org_role,
             )
 
-    def _normalize_hint_terms(values: Any) -> List[str]:
-        if values is None:
-            return []
-        if isinstance(values, str):
-            values = [values]
-        if not isinstance(values, (list, tuple, set)):
-            values = [values]
-        out: List[str] = []
-        seen: set[str] = set()
-        for v in values:
-            s = str(v).strip()
-            if not s or s in seen:
-                continue
-            seen.add(s)
-            out.append(s)
-        return out
-
-    def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
-        if not isinstance(raw, dict):
-            return {}
-        out: Dict[str, List[str]] = {}
-        for key, values in raw.items():
-            norm = _normalize_hint_terms(values)
-            if norm:
-                out[str(key)] = norm
-        return out
-
-    def _parse_relation_hint(value: Any) -> Optional[Tuple[str, str]]:
-        if not value:
-            return None
-        if isinstance(value, (list, tuple)) and len(value) == 2:
-            return (str(value[0]).strip().lower(), str(value[1]).strip().lower())
-        text = str(value).strip().lower()
-        if not text:
-            return None
-        if "_" in text:
-            parts = [p.strip() for p in text.split("_") if p.strip()]
-            if len(parts) == 2:
-                return (parts[0], parts[1])
-        return None
-
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
     hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
-    hint_relation = _parse_relation_hint(_get_attr(qa, "relation", None))
+    hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
@@ -1290,6 +1327,30 @@ def _run_rag_with_vectors(
             tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
             if tag_filters_hint:
                 it.tag_filters = tag_filters_hint
+
+    payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
+    payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
+    payload_people_terms = _normalize_hint_terms(_get_attr(intent_payload, "people_terms", None))
+    payload_project_terms = _normalize_hint_terms(_get_attr(intent_payload, "project_terms", None))
+    payload_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "tag_filters", None))
+    payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
+    payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
+    payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
+
+    if payload_relation:
+        it.relation = payload_relation
+    if payload_is_id_query is not None:
+        it.is_id_query = bool(payload_is_id_query)
+    if payload_org_terms:
+        it.org_terms = payload_org_terms
+    if payload_people_terms:
+        it.people_terms = payload_people_terms
+    if payload_tag_filters:
+        it.tag_filters = payload_tag_filters
+    if payload_perf_tag_filters:
+        it.perf_tag_filters = payload_perf_tag_filters
+    if payload_project_tag_filters:
+        it.project_tag_filters = payload_project_tag_filters
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1694,6 +1755,7 @@ def _run_rag_with_vectors(
                         tag_filters=hop2_tag_filters,
                         people_terms=people_terms,
                         org_terms=org_terms,
+                        relation=relation,
                     )
                 )
                 if hop2_kind in ("project", "org") and org_filter:
@@ -1828,6 +1890,8 @@ def _run_rag_with_vectors(
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        if payload_project_terms:
+            pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제

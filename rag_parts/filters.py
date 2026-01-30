@@ -32,6 +32,7 @@ class JoinFilterInput:
     tag_filters: Optional[List[str]] = None
     people_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
+    relation: Optional[tuple[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,7 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
     people_terms = list(spec.people_terms or [])
     org_terms = list(spec.org_terms or [])
+    relation = spec.relation
 
     primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     key_cands = []
@@ -422,14 +424,19 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
     must: List["qmodels.Condition"] = [join_any]
 
-    nested_people_org = _build_prtcp_mp_nested_filter(
-        people_terms=people_terms,
-        person_ids=[],
-        gender_terms=[],
-        org_terms=org_terms,
-    )
-    if nested_people_org is not None:
-        must.append(nested_people_org)
+    apply_people_org = True
+    if relation:
+        apply_people_org = any(part in ("people", "org") for part in relation)
+
+    if apply_people_org:
+        nested_people_org = _build_prtcp_mp_nested_filter(
+            people_terms=people_terms,
+            person_ids=[],
+            gender_terms=[],
+            org_terms=org_terms,
+        )
+        if nested_people_org is not None:
+            must.append(nested_people_org)
 
     if spec.tag_filters:
         must.append(

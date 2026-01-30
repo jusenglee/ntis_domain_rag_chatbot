@@ -16,7 +16,7 @@ JOIN(2-hop)에서 Hop1 결과(예: 과제/참여인력/기관 등)로부터 join
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _PJT_ID_KEYS = (
@@ -118,3 +118,18 @@ def sanitize_query_by_terms(q: str, remove_terms: Optional[List[str]] = None) ->
 
     out = re.sub(r"\s+", " ", out).strip()
     return out or q.strip()
+
+
+def normalize_relation_hint(value: Any) -> Optional[Tuple[str, str]]:
+    if not value:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (str(value[0]).strip().lower(), str(value[1]).strip().lower())
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if "_" in text:
+        parts = [p.strip() for p in text.split("_") if p.strip()]
+        if len(parts) == 2:
+            return (parts[0], parts[1])
+    return None
