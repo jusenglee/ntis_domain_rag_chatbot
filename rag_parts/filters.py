@@ -344,6 +344,46 @@ def pick_perf_tag_filters(q: str) -> List[str]:
 
     return tags
 
+
+def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[Any]:
+    """PJT_ID/PJT_NO 기반 서버단 필터를 구성합니다."""
+    if qmodels is None:
+        return None
+
+    id_values: List[str] = []
+    for val in (pjt_ids or []):
+        sval = str(val).strip()
+        if sval and sval not in id_values:
+            id_values.append(sval)
+    for val in (pjt_nos or []):
+        sval = str(val).strip()
+        if sval and sval not in id_values:
+            id_values.append(sval)
+
+    if not id_values:
+        return None
+
+    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    key_cands: List[str] = []
+    for k in [
+        primary_id,
+        primary_no,
+        "meta_basic.pjt_id",
+        "meta_basic.pjt_no",
+        "pjt_id",
+        "pjt_no",
+    ]:
+        if k and k not in key_cands:
+            key_cands.append(k)
+
+    return qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(key=k, match=make_match_any(id_values))
+            for k in key_cands
+        ]
+    )
+
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 

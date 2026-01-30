@@ -72,6 +72,7 @@ from rag_parts.filters import (
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
+    build_project_id_filter,
     JoinFilterInput,
     PerfFilterInput, PeopleFilterInput, OrgFilterInput,
 )
@@ -817,6 +818,16 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     action = it.action
     base_route = it.base_route
     rel = it.relation
+
+    if bool(it.is_id_query):
+        return QueryPlan(
+            mode="lookup",
+            base_route=base_route,
+            action=action,
+            relation=None,
+            target_collections=_default_target_collections(),
+            filters={},
+        )
 
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         target_cols = relation_target_collections(rel)
@@ -1752,16 +1763,11 @@ def _run_rag_with_vectors(
 
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        if pjt_ids:
-            # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-            return build_join_filter(
-                JoinFilterInput(
-                    join_ids=pjt_ids,
-                    tag_filters=None,
-                    people_terms=people_terms,
-                    org_terms=org_terms,
-                )
-            )
+        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
+        if pjt_filter is not None:
+            # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
+            return pjt_filter
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
