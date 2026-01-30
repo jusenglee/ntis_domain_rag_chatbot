@@ -1612,7 +1612,14 @@ def _run_rag_with_vectors(
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
-                hop2_filter = build_join_filter(JoinFilterInput(join_ids=join_ids, tag_filters=hop2_tag_filters))
+                hop2_filter = build_join_filter(
+                    JoinFilterInput(
+                        join_ids=join_ids,
+                        tag_filters=hop2_tag_filters,
+                        people_terms=people_terms,
+                        org_terms=org_terms,
+                    )
+                )
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
 
@@ -1746,7 +1753,14 @@ def _run_rag_with_vectors(
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         if pjt_ids:
             # PJT_ID는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 PJT_ID만 먼저 강제
-            return build_join_filter(JoinFilterInput(join_ids=pjt_ids, tag_filters=None))
+            return build_join_filter(
+                JoinFilterInput(
+                    join_ids=pjt_ids,
+                    tag_filters=None,
+                    people_terms=people_terms,
+                    org_terms=org_terms,
+                )
+            )
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
