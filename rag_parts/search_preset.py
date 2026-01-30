@@ -22,7 +22,14 @@ from typing import Dict, List, Optional
 from .constants import KEY_ORG_NORM
 from .query_intent import QueryIntent
 
-PEOPLE_ORG_FIELDS = ["prtcp_mp[].hm_nm", "prtcp_mp[].blng_org_nm", "prtcp_org[].org_nm"]
+PEOPLE_ORG_FIELDS = [
+    "prtcp_mp[].hm_nm",
+    "prtcp_mp.hm_nm",
+    "prtcp_mp[].blng_org_nm",
+    "prtcp_mp.blng_org_nm",
+    "prtcp_org[].org_nm",
+    "prtcp_org.org_nm",
+]
 PJT_NO_FIELDS = ["pjt_no", "meta_basic.pjt_no"]
 
 
@@ -147,9 +154,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
     default_category_w = _f("RAG_W_CATEGORY", _f("RAG_W_CETEGORY", 5.0))
     default_pjt_no_w = _f("RAG_W_PJT_NO", default_title_w)
-    default_prtcp_person_w = _f("RAG_W_PJT_NO", default_title_w)
-    default_prtcp_org_w = _f("RAG_W_PJT_NO", default_title_w)
-    default_prtcp_org_w = _f("RAG_W_PJT_NO", default_title_w)
+    default_prtcp_person_w = max(_f("RAG_W_PRTCP_PERSON", default_title_w), default_title_w)
+    default_prtcp_org_w = max(_f("RAG_W_PRTCP_ORG", default_title_w), default_title_w)
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
@@ -165,8 +171,11 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         "pjt_no": default_pjt_no_w,
         "meta_basic.pjt_no": default_pjt_no_w,
         "prtcp_mp[].hm_nm": default_prtcp_person_w,
+        "prtcp_mp.hm_nm": default_prtcp_person_w,
         "prtcp_mp[].blng_org_nm": default_prtcp_org_w,
+        "prtcp_mp.blng_org_nm": default_prtcp_org_w,
         "prtcp_org[].org_nm": default_prtcp_org_w,
+        "prtcp_org.org_nm": default_prtcp_org_w,
     }
 
     # ---- action presets ----
