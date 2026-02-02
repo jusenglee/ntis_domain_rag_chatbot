@@ -984,11 +984,27 @@ _META_CORE_KEYS = [
     "eng_kywd",
     "rsch_abstract",
     "rsch_goal_abstract",
+    "rst_id",
+    "paper_nm",
+    "abstract_str",
+    "jrnl_nm",
+    "paper_regist_no",
+    "paper_type_slct_nm",
+    "dmabr_slct_nm",
+    "prcd_nm",
+    "prcd_venue_nat_nm",
+    "prcd_pst_dt",
+    "jrnl_pub_dt",
+    "jrnl_vol_no",
+    "issn",
+    "sci_slct_nm",
+    "doi",
 ]
 
 _META_LONG_KEYS = {
     "rsch_abstract",
     "rsch_goal_abstract",
+    "abstract_str",
 }
 
 
