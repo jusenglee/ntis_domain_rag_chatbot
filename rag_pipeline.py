@@ -2238,9 +2238,10 @@ def _run_rag_with_vectors(
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
         if plan.mode != "lookup":
-            if plan.mode == "search" and col == COL_PROJECT and base_route == "people" and people_filter:
-                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _and_filter(tag_filter_local, people_filter)
+            if plan.mode == "search" and col == COL_PROJECT and people_filter:
+                if base_route == "people" or relation == ("people", "project"):
+                    tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                    return _and_filter(tag_filter_local, people_filter)
             return None
 
         ids_map = getattr(it, "ids_map", {}) or {}
