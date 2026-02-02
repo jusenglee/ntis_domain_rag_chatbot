@@ -239,6 +239,19 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
+def _approx_token_len(text: str) -> int:
+    """토크나이저 없이 예산 기반 컷오프용 근사치."""
+    if not text:
+        return 0
+    words = len(text.split())
+    return max(words, int(len(text) / 4))
+
+def _get_ctx_hard_limit() -> int:
+    return max(1, int(os.getenv("RAG_CTX_HARD_LIMIT", "200")))
+
+def _get_list_ctx_token_budget() -> int:
+    return int(os.getenv("RAG_LIST_CTX_TOKEN_BUDGET", os.getenv("CTX_TOKEN_BUDGET", "2048")))
+
 def _pick_first(*vals: object) -> str:
     for v in vals:
         if v is None:
@@ -275,11 +288,14 @@ def build_context_list_light(
         kind: str,
         max_items: int,
         query_text: str = "",
+        token_budget: Optional[int] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """목록/통계형 질의용 경량 컨텍스트."""
     items: List[str] = []
     kind = (kind or "").lower().strip() or "project"
     date_year_pattern = re.compile(r"^(\d{4})-\d{2}-\d{2}$")
+    token_budget = _get_list_ctx_token_budget() if token_budget is None else int(token_budget)
+    total_tok = 0
 
     def _normalize_year(value: Any) -> Any:
         if value is None:
@@ -316,7 +332,11 @@ def build_context_list_light(
             if org: extra.append(_clean_one_line(org, 60))
             if year: extra.append(str(year))
             if extra: line += " (" + ", ".join(extra) + ")"
+            tok = _approx_token_len(line)
+            if total_tok + tok > token_budget:
+                break
             items.append(line)
+            total_tok += tok
             continue
 
         if kind == "people":
@@ -330,7 +350,11 @@ def build_context_list_light(
             if org: extra.append(_clean_one_line(org, 50))
             if pjt_id: extra.append(f"PJT_ID={pjt_id}")
             if extra: line += " (" + ", ".join(extra) + ")"
+            tok = _approx_token_len(line)
+            if total_tok + tok > token_budget:
+                break
             items.append(line)
+            total_tok += tok
             continue
 
         if kind == "org":
@@ -346,7 +370,11 @@ def build_context_list_light(
             if role: extra.append(_clean_one_line(role, 30))
             if pjt_id: extra.append(f"PJT_ID={pjt_id}")
             if extra: line += " (" + ", ".join(extra) + ")"
+            tok = _approx_token_len(line)
+            if total_tok + tok > token_budget:
+                break
             items.append(line)
+            total_tok += tok
             continue
 
         # perf default
@@ -362,9 +390,19 @@ def build_context_list_light(
         if year: extra.append(str(year))
         if pjt_name or pjt_id: extra.append(_clean_one_line(pjt_name or f"PJT_ID={pjt_id}", 60))
         if extra: line += " (" + ", ".join(extra) + ")"
+        tok = _approx_token_len(line)
+        if total_tok + tok > token_budget:
+            break
         items.append(line)
+        total_tok += tok
 
     header = f"질의: {_clean_one_line(query_text, 120)}\n" if query_text else ""
+    if header:
+        header_tok = _approx_token_len(header)
+        if header_tok + total_tok > token_budget and items:
+            header = ""
+        else:
+            total_tok += header_tok
     ctx = header + ("\n".join(items) if items else "(후보 없음)")
     return ctx, points
 
@@ -1132,6 +1170,7 @@ def _run_rag_with_vectors(
     resources = build_rag_objects()
     qdr = resources.qdrant_client
     timings["stack_init"] = time.time() - t0
+    ctx_hard_limit = _get_ctx_hard_limit()
 
     fallback_emb: Dict[str, Any] = {
         "e5i_qa": resources.embed_e5i,
@@ -1851,6 +1890,9 @@ def _run_rag_with_vectors(
                         if len(head_filtered) >= min_keep:
                             hop1_reranked = head_filtered
 
+                if len(hop1_reranked) > ctx_hard_limit:
+                    hop1_reranked = hop1_reranked[:ctx_hard_limit]
+
                 hop1_top = hop1_reranked[: max(1, hop1_keep)]
                 if not hop1_top:
                     log_kv(
@@ -1861,7 +1903,10 @@ def _run_rag_with_vectors(
                     )
                 else:
                     # ✅ hop1 결과에 meta_basic 포함 payload 보강
-                    hydrate_keep = max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20)
+                    hydrate_keep = min(
+                        max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
+                        ctx_hard_limit,
+                    )
                     _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
 
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
@@ -1970,6 +2015,8 @@ def _run_rag_with_vectors(
                 tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
             )
             hop2_reranked = _dedup_by_doc_id(hop2_reranked)
+            if len(hop2_reranked) > ctx_hard_limit:
+                hop2_reranked = hop2_reranked[:ctx_hard_limit]
             hop2_top = hop2_reranked[: max(1, hop2_keep)]
 
             log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")))
@@ -1992,7 +2039,8 @@ def _run_rag_with_vectors(
             )
             t0 = time.time()
             # 검색단계에서 최소 페아로드 -> server3.py 에는 전체 페이로드를 전달하기 위해 선정된 정보들 페이로드 채우기
-            hydrate_points = hop2_reranked
+            hydrate_limit = min(max(1, hop2_keep), ctx_hard_limit)
+            hydrate_points = hop2_reranked[:hydrate_limit]
             _hydrate_points_payload(
                 qdr,
                 hydrate_points,  # len == final_keep
@@ -2276,6 +2324,8 @@ def _run_rag_with_vectors(
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
     )
     reranked = _dedup_by_doc_id(reranked)
+    if len(reranked) > ctx_hard_limit:
+        reranked = reranked[:ctx_hard_limit]
     timings["final_rerank"] = time.time() - t0
 
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
@@ -2290,19 +2340,21 @@ def _run_rag_with_vectors(
 
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
     if not fallback_chat:
-        max_items = int(preset.max_ctx_items)
-        _hydrate_points_payload(qdr, reranked[: max(1, max_items)])
+        max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
+        reranked_for_hydrate = reranked[: max(1, max_items)]
+        _hydrate_points_payload(qdr, reranked_for_hydrate)
 
     # build context
     t0 = time.time()
     if fallback_chat:
         context, refs = "", []
     else:
-        max_items = int(preset.max_ctx_items)
+        max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
+        reranked_for_ctx = reranked[: max(1, max_items)]
         if action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org"):
-            context, refs = build_context_list_light(reranked, kind=base_route, max_items=max_items, query_text=q)
+            context, refs = build_context_list_light(reranked_for_ctx, kind=base_route, max_items=max_items, query_text=q)
         else:
-            context, refs = build_context_mixed(reranked, max_items=max_items, query_text=q)
+            context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
 
     timings["build_context"] = time.time() - t0
     timings["total"] = time.time() - t_all0
@@ -2311,7 +2363,7 @@ def _run_rag_with_vectors(
         "RAG.CTX",
         ctx_len=len(context or ""),
         refs=len(refs or []),
-        max_items=int(preset.max_ctx_items),
+        max_items=int(min(int(preset.max_ctx_items), ctx_hard_limit)),
         fallback_chat=fallback_chat,
     )
 
