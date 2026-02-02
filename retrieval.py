@@ -20,7 +20,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, get_origin
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, get_origin
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -1001,7 +1001,12 @@ def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
-def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
+def _select_meta_fields(
+    meta: Dict[str, Any],
+    query_text: str,
+    *,
+    include_meta_long: Optional[bool] = None,
+) -> List[str]:
     if not isinstance(meta, dict) or not meta:
         return []
 
@@ -1044,7 +1049,8 @@ def _select_meta_fields(meta: Dict[str, Any], query_text: str) -> List[str]:
         _add("eng_kywd")
         _add("keyword_text")
 
-    if _CTX_INCLUDE_META_LONG:
+    include_long = _CTX_INCLUDE_META_LONG if include_meta_long is None else bool(include_meta_long)
+    if include_long:
         for k in list(meta.keys()):
             if k in _META_LONG_KEYS:
                 _add(k)
@@ -1070,12 +1076,24 @@ def build_context_docstyle(
         token_budget: int = _CTX_TOKEN_BUDGET,
         per_doc_char_budget: int = _CTX_PER_DOC_CHARS,
         query_text: str = "",
+        output_type: Optional[str] = None,
+        fieldset_keys: Optional[Iterable[str]] = None,
+        meta_source: Optional[str] = None,
+        include_meta_long: Optional[bool] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     out_chunks: List[str] = []
     refs: List[Dict[str, Any]] = []
 
     total_tok = 0
     used = 0
+    output_type_norm = (output_type or "").strip().lower() or None
+    fieldset = {k for k in (fieldset_keys or []) if k}
+    include_content = output_type_norm not in ("list", "stats")
+    include_meta = True
+    if fieldset:
+        include_meta = any(k in fieldset for k in ("meta", "meta_basic", "meta_detail", "summary"))
+        if "content" not in fieldset and "content_text" not in fieldset:
+            include_content = False
 
     for p in points or []:
         if used >= int(max_items):
@@ -1085,7 +1103,12 @@ def build_context_docstyle(
         if not pl:
             continue
 
-        meta = _merge_meta(pl)
+        meta_basic = pl.get("meta_basic") if isinstance(pl.get("meta_basic"), dict) else {}
+        meta_detail = pl.get("meta_detail") if isinstance(pl.get("meta_detail"), dict) else {}
+        if meta_source == "detail_only" or (fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset):
+            meta = dict(meta_detail)
+        else:
+            meta = _merge_meta(pl)
         title = _safe_str(
             pl.get("title_text")
             or pl.get("title")
@@ -1100,19 +1123,28 @@ def build_context_docstyle(
         systems = pl.get("systems") if isinstance(pl.get("systems"), list) else []
         urls = pl.get("urls") if isinstance(pl.get("urls"), list) else []
 
-        content_text = _safe_str(
-            pl.get("content_text")
-            or pl.get("content1")
-            or pl.get("content2")
-            or "",
-            max_chars=per_doc_char_budget,
-        )
-        meta_full = dict(meta)
-        for key in ("category", "cetegory", "org_nm", "stan_yr", "start_dt", "end_dt", "dt1", "dt2", "keyword_text"):
-            if key not in meta_full and key in pl and pl.get(key) not in (None, ""):
-                meta_full[key] = pl.get(key)
-        meta_keys = _select_meta_fields(meta_full, query_text=query_text)
-        meta_lines = _format_meta_lines(meta_full, meta_keys)
+        content_text = ""
+        if include_content:
+            content_text = _safe_str(
+                pl.get("content_text")
+                or pl.get("content1")
+                or pl.get("content2")
+                or "",
+                max_chars=per_doc_char_budget,
+            )
+        meta_lines = ""
+        if include_meta:
+            meta_full = dict(meta)
+            if not fieldset or "meta_basic" in fieldset or "meta" in fieldset:
+                for key in ("category", "cetegory", "org_nm", "stan_yr", "start_dt", "end_dt", "dt1", "dt2", "keyword_text"):
+                    if key not in meta_full and key in pl and pl.get(key) not in (None, ""):
+                        meta_full[key] = pl.get(key)
+            meta_keys = _select_meta_fields(
+                meta_full,
+                query_text=query_text,
+                include_meta_long=include_meta_long,
+            )
+            meta_lines = _format_meta_lines(meta_full, meta_keys)
 
         chunk_parts: List[str] = []
         header = f"[DOC] {title}" if title else "[DOC]"
@@ -1177,6 +1209,10 @@ def build_context_mixed(
         query_text: str = "",
         token_budget: int = _CTX_TOKEN_BUDGET,
         per_doc_char_budget: int = _CTX_PER_DOC_CHARS,
+        output_type: Optional[str] = None,
+        fieldset_keys: Optional[Iterable[str]] = None,
+        meta_source: Optional[str] = None,
+        include_meta_long: Optional[bool] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     return build_context_docstyle(
         points,
@@ -1184,4 +1220,8 @@ def build_context_mixed(
         token_budget=token_budget,
         per_doc_char_budget=per_doc_char_budget,
         query_text=query_text,
+        output_type=output_type,
+        fieldset_keys=fieldset_keys,
+        meta_source=meta_source,
+        include_meta_long=include_meta_long,
     )
