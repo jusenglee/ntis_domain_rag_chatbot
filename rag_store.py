@@ -71,7 +71,7 @@ def build_rag_objects() -> RagResources:
     )
 
     # Triton warm-up
-    get_triton_client()
+    triton_client = get_triton_client()
 
     _resources = RagResources(
         qdrant_client=qdr,
