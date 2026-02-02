@@ -713,6 +713,66 @@ def _family_bonus(p: Any, base_route: str) -> float:
         return 4.0
     return 0.0
 
+def _score_stats(values: List[float]) -> Dict[str, float]:
+    if not values:
+        return {}
+    vals = sorted(values)
+    n = len(vals)
+    mean = sum(vals) / max(1, n)
+    var = sum((v - mean) ** 2 for v in vals) / max(1, n)
+    std = var ** 0.5
+
+    def pct(p: float) -> float:
+        if n == 1:
+            return vals[0]
+        idx = int(round((n - 1) * p))
+        return vals[max(0, min(n - 1, idx))]
+
+    return {
+        "min": vals[0],
+        "max": vals[-1],
+        "mean": mean,
+        "std": std,
+        "p50": pct(0.5),
+        "p90": pct(0.9),
+    }
+
+def _normalize_values(values: List[float], policy: str) -> List[float]:
+    if not values:
+        return []
+    policy = (policy or "minmax").strip().lower()
+    if policy == "none":
+        return list(values)
+    if policy == "zscore":
+        mean = sum(values) / max(1, len(values))
+        var = sum((v - mean) ** 2 for v in values) / max(1, len(values))
+        std = var ** 0.5
+        if std == 0:
+            return [0.5 for _ in values]
+        return [1 / (1 + pow(2.718281828, -((v - mean) / std))) for v in values]
+
+    vmin = min(values)
+    vmax = max(values)
+    if vmax == vmin:
+        return [0.5 for _ in values]
+    return [(v - vmin) / (vmax - vmin) for v in values]
+
+def _rerank_compare_summary(points: List[Any], total_key: str, *, topn: int) -> List[Dict[str, Any]]:
+    out = []
+    for p in (points or [])[: max(1, topn)]:
+        pl = getattr(p, "payload", None) or {}
+        if not isinstance(pl, dict):
+            pl = {}
+        out.append({
+            "doc_id": pl.get("doc_id") or getattr(p, "id", None),
+            "col": pl.get("_collection"),
+            "tag": pl.get("tag"),
+            total_key: pl.get(total_key),
+            "_final_total": pl.get("_final_total"),
+            "title": _clip_text(pl.get("title_text") or pl.get("title") or "", 120),
+        })
+    return out
+
 def _pick_collections(all_cols: list[str], allow: Optional[Iterable[str]] = None) -> list[str]:
     allow_list = list(allow) if allow is not None else list(RAG_COLLECTION_ALLOWLIST)
     if not allow_list:
@@ -750,18 +810,32 @@ def _final_rerank(
                 if len(matched) >= min_keep:
                     cands = matched
 
-    # mode별 가중치 (경험적으로 튜닝 가능)
+    legacy_weights = {
+        "lookup": (0.55, 0.70, 1.35),
+        "join": (0.45, 0.65, 1.60),
+        "search": (0.85, 1.00, 0.75),
+    }
+    compare_legacy = str(os.getenv("RAG_RERANK_COMPARE", "0")).strip().lower() in ("1", "true", "yes", "y")
+    score_norm_policy = os.getenv("RAG_SCORE_NORM", "minmax")
+    score_sample = int(os.getenv("RAG_SCORE_SAMPLE", "200"))
+
+    # mode별 가중치 (정규화 스코어 기준)
     if mode == "lookup":
-        w_rrf, w_kw, w_f = 0.55, 0.70, 1.35
+        w_rrf, w_kw, w_f = 0.30, 0.25, 0.45
         strict_ids = True
     elif mode == "join":
-        w_rrf, w_kw, w_f = 0.45, 0.65, 1.60
+        w_rrf, w_kw, w_f = 0.25, 0.25, 0.50
         strict_ids = True
     else:  # search
-        w_rrf, w_kw, w_f = 0.85, 1.00, 0.75
+        w_rrf, w_kw, w_f = 0.45, 0.35, 0.20
         strict_ids = False
 
-    scored = []
+    raw_rrf = []
+    raw_kw = []
+    raw_f = []
+    raw_fam = []
+    raw_tag = []
+    raw_items = []
     for idx, p in enumerate(cands):
         pl = getattr(p, "payload", None)
         rrf_sc = float(pl.get("_rrf", 0.0)) if isinstance(pl, dict) else 0.0
@@ -774,19 +848,89 @@ def _final_rerank(
             boost=tag_boost,
             mismatch_penalty=tag_mismatch_penalty,
         )
-        tot = (w_rrf * rrf_sc) + (w_kw * kw_sc) + (w_f * f_sc) + fam + tag_sc
+        raw_rrf.append(rrf_sc)
+        raw_kw.append(kw_sc)
+        raw_f.append(f_sc)
+        raw_fam.append(fam)
+        raw_tag.append(tag_sc)
+        raw_items.append((idx, p, rrf_sc, kw_sc, f_sc, fam, tag_sc))
 
+    sample_slice = slice(0, max(0, min(score_sample, len(raw_items))))
+    log_section(
+        "RAG.RERANK.SCORE_RANGE_RAW",
+        {
+            "_rrf": _score_stats(raw_rrf[sample_slice]),
+            "_keyword_score": _score_stats(raw_kw[sample_slice]),
+            "_filter_score": _score_stats(raw_f[sample_slice]),
+            "_family_bonus": _score_stats(raw_fam[sample_slice]),
+            "_tag_match_bonus": _score_stats(raw_tag[sample_slice]),
+        },
+    )
+
+    norm_rrf = _normalize_values(raw_rrf, score_norm_policy)
+    norm_kw = _normalize_values(raw_kw, score_norm_policy)
+    norm_f = _normalize_values(raw_f, score_norm_policy)
+    norm_fam = _normalize_values(raw_fam, score_norm_policy)
+    norm_tag = _normalize_values(raw_tag, score_norm_policy)
+
+    log_section(
+        "RAG.RERANK.SCORE_RANGE_NORM",
+        {
+            "policy": score_norm_policy,
+            "_rrf": _score_stats(norm_rrf[sample_slice]),
+            "_keyword_score": _score_stats(norm_kw[sample_slice]),
+            "_filter_score": _score_stats(norm_f[sample_slice]),
+            "_family_bonus": _score_stats(norm_fam[sample_slice]),
+            "_tag_match_bonus": _score_stats(norm_tag[sample_slice]),
+        },
+    )
+
+    legacy_w_rrf, legacy_w_kw, legacy_w_f = legacy_weights.get(mode, legacy_weights["search"])
+    scored = []
+    legacy_scored = []
+    for i, (idx, p, rrf_sc, kw_sc, f_sc, fam, tag_sc) in enumerate(raw_items):
+        tot = (
+            (w_rrf * norm_rrf[i])
+            + (w_kw * norm_kw[i])
+            + (w_f * norm_f[i])
+            + norm_fam[i]
+            + norm_tag[i]
+        )
+        legacy_tot = (legacy_w_rrf * rrf_sc) + (legacy_w_kw * kw_sc) + (legacy_w_f * f_sc) + fam + tag_sc
+
+        pl = getattr(p, "payload", None)
         if isinstance(pl, dict):
-            pl["_final_rrf"] = rrf_sc
-            pl["_final_kw"] = kw_sc
-            pl["_final_f"] = f_sc
-            pl["_final_tag"] = tag_sc
+            pl["_raw_rrf"] = rrf_sc
+            pl["_raw_kw"] = kw_sc
+            pl["_raw_f"] = f_sc
+            pl["_raw_family"] = fam
+            pl["_raw_tag"] = tag_sc
+            pl["_final_rrf"] = norm_rrf[i]
+            pl["_final_kw"] = norm_kw[i]
+            pl["_final_f"] = norm_f[i]
+            pl["_final_family"] = norm_fam[i]
+            pl["_final_tag"] = norm_tag[i]
             pl["_final_total"] = tot
+            pl["_legacy_total"] = legacy_tot
 
         scored.append((-tot, idx, p))
+        legacy_scored.append((-legacy_tot, idx, p))
 
     scored.sort(key=lambda x: (x[0], x[1]))
     out = [x[2] for x in scored[: max(1, int(keep))]]
+
+    if compare_legacy:
+        legacy_scored.sort(key=lambda x: (x[0], x[1]))
+        compare_topn = int(os.getenv("RAG_RERANK_COMPARE_TOPN", "8"))
+        log_section(
+            "RAG.RERANK.COMPARE_LEGACY_TOP",
+            _rerank_compare_summary([x[2] for x in legacy_scored], "_legacy_total", topn=compare_topn),
+        )
+        log_section(
+            "RAG.RERANK.COMPARE_NEW_TOP",
+            _rerank_compare_summary(out, "_final_total", topn=compare_topn),
+        )
+
     return out
 
 # -------------------------
