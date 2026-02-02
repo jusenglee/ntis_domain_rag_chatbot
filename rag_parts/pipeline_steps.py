@@ -80,6 +80,7 @@ class NormalizedIntent:
     base_route: str
     relation: Optional[Tuple[str, str]]
     is_id_query: bool
+    output_type: Optional[str] = None
     years: List[str] = field(default_factory=list)
     people_terms: List[str] = field(default_factory=list)
     gender_terms: List[str] = field(default_factory=list)
@@ -149,6 +150,21 @@ def normalize_intent(
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
     relation = getattr(intent, "relation", None)
+    wants_count = bool(getattr(intent, "wants_count", False))
+    wants_list = bool(getattr(intent, "wants_list", False))
+    wants_detail = bool(getattr(intent, "wants_detail", False))
+    output_type = str(getattr(intent, "output_type", "") or "").strip().lower() or None
+    if output_type not in ("stats", "list", "detail", "relation", "summary"):
+        if wants_count:
+            output_type = "stats"
+        elif wants_list:
+            output_type = "list"
+        elif wants_detail:
+            output_type = "detail"
+        elif relation is not None:
+            output_type = "relation"
+        else:
+            output_type = "summary"
     valid_routes = {"support", "project", "perf", "people", "org"}
     valid_actions = {
         "support",
@@ -175,6 +191,7 @@ def normalize_intent(
         base_route=base_route,
         relation=relation,
         is_id_query=bool(getattr(intent, "is_id_query", False)),
+        output_type=output_type,
         years=_normalize_terms(getattr(intent, "years", None) or []),
         people_terms=people_terms,
         gender_terms=gender_terms,

@@ -1059,6 +1059,7 @@ class QueryPlan:
     base_route: str
     action: str
     relation: Optional[Tuple[str, str]]
+    output_type: Optional[str]
     target_collections: List[str]
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
@@ -1122,6 +1123,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     action = it.action
     base_route = it.base_route
     rel = it.relation
+    output_type = getattr(it, "output_type", None)
 
     if bool(it.is_id_query):
         return QueryPlan(
@@ -1129,6 +1131,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=None,
+            output_type=output_type,
             target_collections=_default_target_collections(),
             filters={},
         )
@@ -1140,6 +1143,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=rel,
+            output_type=output_type,
             target_collections=target_cols if target_cols else _default_target_collections(),
             filters={},
         )
@@ -1151,6 +1155,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=rel,
+            output_type=output_type,
             target_collections=target_cols if target_cols else _default_target_collections(),
             filters={},
         )
@@ -1161,6 +1166,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             base_route=base_route,
             action=action,
             relation=None,
+            output_type=output_type,
             target_collections=_default_target_collections(),
             filters={},
         )
@@ -1170,6 +1176,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
         base_route=base_route,
         action=action,
         relation=None,
+        output_type=output_type,
         target_collections=_default_target_collections(),
         filters={},
     )
@@ -1897,6 +1904,7 @@ def _run_rag_with_vectors(
         base_route=base_route,
         action=action,
         relation=relation,
+        output_type=getattr(plan, "output_type", None),
         target_cols=list(getattr(plan, "target_collections", []) or []),
     )
     log_kv(
@@ -1905,6 +1913,7 @@ def _run_rag_with_vectors(
         base_route=plan.base_route,
         action=plan.action,
         relation=plan.relation,
+        output_type=getattr(plan, "output_type", None),
         target_cols=plan.target_collections,
     )
 
