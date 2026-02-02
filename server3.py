@@ -39,6 +39,7 @@ from retrieval import extract_keywords
 from settings import REDIS_URL, REDIS_TTL, MAX_TOP_K_SIZE
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
+from views import make_payload_view
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -99,6 +100,37 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
+
+def resolve_view_type(
+    action: Optional[str],
+    head: Optional[str],
+    relation: Optional[str],
+    output_type: Optional[str],
+) -> str:
+    action_norm = (action or "").strip().lower()
+    head_norm = (head or "").strip().lower()
+    relation_norm = (relation or "").strip().lower()
+    output_norm = (output_type or "").strip().lower()
+
+    if action_norm in ("stats",) or output_norm in ("stats",):
+        return "stats_view"
+    if action_norm in ("export", "download") or output_norm in ("export", "download"):
+        return "export_view"
+    if action_norm in ("detail",) or output_norm in ("detail",):
+        if head_norm in ("perf", "performance"):
+            return "perf_detail_view"
+        if head_norm in ("support",):
+            return "support_detail_view"
+        return "project_detail_view"
+    if action_norm in ("relation",) or output_norm in ("relation",) or relation_norm:
+        if head_norm in ("people", "researcher", "mp"):
+            return "mp_view"
+        if head_norm in ("org", "organization"):
+            return "org_view"
+    if action_norm in ("list",) or output_norm in ("list",):
+        return "meta_basic_view"
+
+    return "meta_basic_view"
 
 def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
@@ -162,6 +194,10 @@ class QuestionAnalysis(BaseModel):
         default_factory=list,
         description="출력 타입에 맞춰 포함해야 할 필드 키 목록",
     )
+    view_type: str | None = Field(
+        default=None,
+        description="응답 view 타입 (meta_basic_view/mp_view/org_view/project_detail_view/perf_detail_view/support_detail_view/stats_view/export_view)",
+    )
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -184,6 +220,7 @@ class SearchHint(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     output_type: str | None = None
     output_fields: list[str] = Field(default_factory=list)
+    view_type: str | None = None
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -591,6 +628,12 @@ async def _run_question_analysis(
         result.output_type = _normalize_output_type(result.output_type) or _infer_output_type_from_question(
             question, result
         )
+        result.view_type = resolve_view_type(
+            action=None,
+            head=result.head,
+            relation=result.relation,
+            output_type=result.output_type,
+        )
 
         log_section(
             "QUESTION ANALYSIS",
@@ -607,6 +650,7 @@ async def _run_question_analysis(
             f"Filters: {result.filters}\n"
             f"OutputType: {result.output_type}\n"
             f"OutputFields: {result.output_fields}\n"
+            f"ViewType: {result.view_type}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -629,6 +673,7 @@ async def _run_question_analysis(
             filters={},
             output_type=None,
             output_fields=[],
+            view_type=None,
             limit=20,
             history_summary=question,
             retrieval_query=question[:120],
@@ -847,9 +892,23 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
     try:
 
+        action = None
+        if state.intent_payload:
+            intent_obj = state.intent_payload.get("normalized_intent") or state.intent_payload.get("query_intent")
+            if isinstance(intent_obj, dict):
+                action = intent_obj.get("action")
+            else:
+                action = getattr(intent_obj, "action", None)
+
         query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or state.question
         search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
         search_num = min(int(search_num), MAX_TOP_K_SIZE)
+        view_type = (qa.view_type if qa and qa.view_type else resolve_view_type(
+            action=action,
+            head=(qa.head if qa else None),
+            relation=(qa.relation if qa else None),
+            output_type=(qa.output_type if qa else None),
+        ))
 
         hint = SearchHint(
             coq=f"{state.conversation_id}{state.question}",
@@ -864,6 +923,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             ids_map=dict(qa.ids_map or {}) if qa else {},
             filters=dict(qa.filters or {}) if qa else {},
             output_type=(qa.output_type if qa else None),
+            view_type=view_type,
             limit=search_num,
             history_summary=(qa.history_summary if qa else ""),
             retrieval_query=query,
@@ -886,6 +946,16 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
+        output_fields = list(getattr(qa, "output_fields", []) or []) if qa else None
+        docs = [
+            make_payload_view(
+                doc,
+                view_type,
+                include_collection_score=False,
+                output_fields=output_fields,
+            )
+            for doc in docs
+        ]
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -991,7 +1061,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             is_detail,
             output_type=output_type,
             max_items=max_items,
-            output_fields=output_fields,
         )
         if docs_for_ctx
         else "없음"
@@ -1175,6 +1244,16 @@ async def build_intent_payload(
     )
 
     _apply_question_analysis_to_intent(normalized_intent, question_analysis)
+    if question_analysis:
+        head = question_analysis.head or getattr(normalized_intent, "base_route", None)
+        relation = question_analysis.relation or getattr(normalized_intent, "relation", None)
+        output_type = question_analysis.output_type or getattr(normalized_intent, "output_type", None)
+        question_analysis.view_type = resolve_view_type(
+            action=getattr(normalized_intent, "action", None),
+            head=head,
+            relation=relation,
+            output_type=output_type,
+        )
 
     return {
         "question_analysis": question_analysis,
@@ -1380,64 +1459,54 @@ def refine_documents_rule_based(
         *,
         output_type: Optional[str] = None,
         max_items: Optional[int] = None,
-        output_fields: Optional[List[str]] = None,
 ) -> str:
     context_chunks: List[str] = []
     output_type = (output_type or "").strip().lower()
     detail_mode = is_detail or output_type == "detail"
 
-    list_meta_keys = [
-        "title",
-        "kor_pjt_nm",
-        "eng_pjt_nm",
-        "pjt_id",
-        "pjt_no",
-        "org_nm",
-        "pjt_prfrm_org_nm",
-        "stan_yr",
-        "year",
-        "tag",
-        "dt1",
-        "dt2",
-        "doi",
-        "issn",
-        "patent_reg_no",
-        "rst_id",
-    ]
-    preferred_fields = [f for f in (output_fields or []) if str(f).strip()]
-    allowed_keys = preferred_fields or list_meta_keys
-
     items = docs[: max_items] if max_items else docs
-    for doc in items:
-        mapped_doc = RagMapper.map(doc)
+    for idx, doc in enumerate(items, 1):
+        source_idx = doc.get("source_index") or idx
+        title = doc.get("title") or "제목 없음"
 
-        source_idx = doc.get("source_index")
-        title = mapped_doc.get("title", "제목 없음")
+        meta_basic = doc.get("meta_basic", {})
+        if not isinstance(meta_basic, dict):
+            meta_basic = {}
+        if not meta_basic:
+            header_keys = {"doc_id", "tag", "_collection", "score", "source_index"}
+            meta_basic = {
+                key: value
+                for key, value in doc.items()
+                if key not in header_keys
+                and key not in ("meta_basic", "meta_detail", "prtcp_mp", "prtcp_org")
+            }
 
-        if output_type in ("list", "table", "json", "compare", "timeline"):
-            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=allowed_keys)
-        else:
-            refined_text = (
-                format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=preferred_fields)
-                if preferred_fields
-                else format_metadata(mapped_doc.get("meta_basic", {}))
-            )
+        refined_text = format_metadata(meta_basic)
 
         if detail_mode:
-            refined_text += (
-                format_metadata(mapped_doc.get("meta_detail", {}), allowed_keys=preferred_fields)
-                if preferred_fields
-                else format_metadata(mapped_doc.get("meta_detail", {}))
-            )
+            meta_detail = doc.get("meta_detail", {})
+            if isinstance(meta_detail, dict):
+                detail_text = format_metadata(meta_detail)
+                if detail_text:
+                    refined_text = f"{refined_text}\n{detail_text}" if refined_text else detail_text
 
         researcher_block = ""
         if output_type not in ("list", "stats", "table", "json"):
-            researcher_lines = RagMapper.get_researcher_info(mapped_doc)
-            if researcher_lines:
-                researcher_block = (
-                        "\n- 연구원 목록:\n"
-                        + "\n".join(researcher_lines)
-                )
+            researchers = doc.get("prtcp_mp", [])
+            if isinstance(researchers, list):
+                researcher_lines = []
+                for researcher in researchers:
+                    if not isinstance(researcher, dict):
+                        continue
+                    name = researcher.get("hm_nm")
+                    org = researcher.get("blng_org_nm") or "소속미상"
+                    if name:
+                        researcher_lines.append(f"- {name}({org})")
+                if researcher_lines:
+                    researcher_block = (
+                            "\n- 연구원 목록:\n"
+                            + "\n".join(researcher_lines)
+                    )
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
