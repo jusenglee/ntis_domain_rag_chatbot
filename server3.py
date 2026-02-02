@@ -188,11 +188,11 @@ class QuestionAnalysis(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     output_type: str | None = Field(
         default=None,
-        description="응답 출력 타입 (list/detail/relation/summary/table/json/compare/timeline/faq)"
+        description="응답 출력 타입 (list/detail/relation/summary/table/json/compare/timeline)"
     )
     output_fields: list[str] = Field(
         default_factory=list,
-        description="출력 타입에 맞춰 포함해야 할 필드 키 목록",
+        description="meta_basic",
     )
     view_type: str | None = Field(
         default=None,
@@ -563,7 +563,7 @@ async def _run_question_analysis(
         "====================\n"
         f"- limit는 1~{MAX_TOP_K_SIZE} 범위 정수\n"
         "- 사용자가 '상위 N개' 등 명시하면 반영(단, MAX 초과 금지)\n"
-        "- 불명확하면 20\n\n"
+        "- 불명확하면 {MAX_TOP_K_SIZE}\n\n"
     
         "====================\n"
         "[history_summary 규칙]\n"
@@ -598,7 +598,7 @@ async def _run_question_analysis(
         "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
         "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
         "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
-        "4-7. output_type: list | detail | relation | summary | table | json | compare | timeline | faq\n"
+        "4-7. output_type: list | detail | relation | summary | table | json | compare | timeline \n"
         "4-8. output_fields: 출력에 포함해야 할 메타 필드 키 배열 (필요 없으면 빈 배열)\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
@@ -672,7 +672,7 @@ async def _run_question_analysis(
             ids_map={},
             filters={},
             output_type=None,
-            output_fields=[],
+            output_fields=["meta_basic"],
             view_type=None,
             limit=20,
             history_summary=question,
@@ -793,7 +793,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         ("system", system_prompt),
         ("human",
          "[대화 이력]\n{history}\n\n"
-         "[참고 문서]\n{prev_context}\n\n"
+         "[검색 조건]\n{prev_context}\n\n"
+         "[참고 문서]\n{state.intent_payload}\n\n"
          "[현재 질문]\n{question}")
     ])
 

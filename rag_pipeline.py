@@ -529,8 +529,8 @@ _OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
 
 _OUTPUT_TYPE_MAX_CTX_ITEMS: Dict[str, int] = {
     "detail": 1,
-    "list": 5,
-    "table": 5,
+    "list": 40,
+    "table": 20,
 }
 
 

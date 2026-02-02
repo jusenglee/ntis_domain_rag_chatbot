@@ -29,9 +29,13 @@ def _split_csv(value: str | None, default: list[str]) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+# RAG_COLLECTION_ALLOWLIST = _split_csv(
+#     os.getenv("RAG_COLLECTION_ALLOWLIST"),
+#     ["ntis_project_v2", "ntis_perf_v2"],
+# )
 RAG_COLLECTION_ALLOWLIST = _split_csv(
     os.getenv("RAG_COLLECTION_ALLOWLIST"),
-    ["ntis_project_v2", "ntis_perf_v2"],
+    ["ntis_project_v2"]
 )
 
 # Triton
@@ -58,7 +62,7 @@ SNIPPET_MAX_CHARS = 8000
 # MAX_TOP_K_SIZE: 검색/응답에 사용할 최대 문서 수
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis8:6379")
 REDIS_TTL = int(os.getenv("REDIS_TTL", "3600"))
-MAX_TOP_K_SIZE = int(os.getenv("MAX_TOP_K_SIZE", "20"))
+MAX_TOP_K_SIZE = int(os.getenv("MAX_TOP_K_SIZE", "40"))
 
 PROMPT_OVERHEAD_TOKENS = int(os.getenv("RAG_PROMPT_OVERHEAD_TOKENS", "900"))
 CTX_SAFETY_MARGIN = int(os.getenv("RAG_CTX_SAFETY_MARGIN", "256"))
