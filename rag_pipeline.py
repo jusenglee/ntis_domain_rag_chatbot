@@ -377,7 +377,7 @@ def build_context_list_light(
         return value
 
     def _pjt_id(meta, pl):
-        return _pick_first(pl.get("pjt_id"), meta.get("pjt_id"), meta.get("pjt_no"))
+        return _pick_first(pl.get("pjt_id"), meta.get("pjt_id"))
 
     for p in (points or [])[: max(0, int(max_items))]:
         pl = getattr(p, "payload", None) or {}
