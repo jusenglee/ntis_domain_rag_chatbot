@@ -39,6 +39,7 @@ from retrieval import extract_keywords
 from settings import REDIS_URL, REDIS_TTL, MAX_TOP_K_SIZE
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
+from views import make_payload_view
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -99,6 +100,29 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
+
+def _resolve_view_type(output_type: Optional[str], head: Optional[str]) -> str:
+    output_norm = (output_type or "").strip().lower()
+    head_norm = (head or "").strip().lower()
+
+    if output_norm in ("stats",):
+        return "stats"
+    if output_norm in ("export", "download"):
+        return "export"
+    if output_norm in ("detail",):
+        if head_norm in ("perf", "performance"):
+            return "perf_detail"
+        if head_norm in ("support",):
+            return "support_detail"
+        return "project_detail"
+    if output_norm in ("list", "table", "json", "compare", "timeline"):
+        if head_norm in ("people", "researcher", "mp"):
+            return "mp"
+        if head_norm in ("org", "organization"):
+            return "org"
+        return "meta_basic"
+
+    return "meta_basic"
 
 def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
@@ -886,6 +910,11 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
+        view_type = _resolve_view_type(
+            qa.output_type if qa else None,
+            qa.head if qa else None,
+        )
+        docs = [make_payload_view(doc, view_type, include_collection_score=False) for doc in docs]
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
