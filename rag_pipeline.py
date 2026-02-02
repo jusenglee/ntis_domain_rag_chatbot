@@ -91,6 +91,43 @@ def _normalize_tag_value(tag: object) -> str:
     t = str(tag).strip().upper()
     return t[4:] if t.startswith("IRD_") else t
 
+def resolve_view_type(
+    action: Optional[str],
+    head: Optional[str],
+    relation: Optional[Tuple[str, str] | str],
+    output_type: Optional[str],
+) -> str:
+    action_norm = (action or "").strip().lower()
+    head_norm = (head or "").strip().lower()
+    output_norm = (output_type or "").strip().lower()
+    relation_norm = ""
+    if relation:
+        if isinstance(relation, (list, tuple)) and len(relation) == 2:
+            relation_norm = f"{relation[0]}_{relation[1]}"
+        else:
+            relation_norm = str(relation)
+        relation_norm = relation_norm.strip().lower()
+
+    if action_norm in ("stats",) or output_norm in ("stats",):
+        return "stats_view"
+    if action_norm in ("export", "download") or output_norm in ("export", "download"):
+        return "export_view"
+    if action_norm in ("detail",) or output_norm in ("detail",):
+        if head_norm in ("perf", "performance"):
+            return "perf_detail_view"
+        if head_norm in ("support",):
+            return "support_detail_view"
+        return "project_detail_view"
+    if action_norm in ("relation",) or output_norm in ("relation",) or relation_norm:
+        if head_norm in ("people", "researcher", "mp"):
+            return "mp_view"
+        if head_norm in ("org", "organization"):
+            return "org_view"
+    if action_norm in ("list",) or output_norm in ("list",):
+        return "meta_basic_view"
+
+    return "meta_basic_view"
+
 PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
 PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
 # =====================================================================
@@ -1995,6 +2032,12 @@ def _run_rag_with_vectors(
         filtered = _pick_collections((plan.target_collections or []), effective_allow)
         plan.target_collections = filtered if filtered else list(effective_allow)
 
+    view_type = resolve_view_type(
+        action=action,
+        head=base_route,
+        relation=relation,
+        output_type=getattr(plan, "output_type", None),
+    )
     log_kv(
         "RAG.ROUTE/PLAN",
         mode=plan.mode,
@@ -2003,6 +2046,7 @@ def _run_rag_with_vectors(
         action=action,
         relation=relation,
         output_type=getattr(plan, "output_type", None),
+        view_type=view_type,
         target_cols=list(getattr(plan, "target_collections", []) or []),
     )
     log_kv(
@@ -2012,6 +2056,7 @@ def _run_rag_with_vectors(
         action=plan.action,
         relation=plan.relation,
         output_type=getattr(plan, "output_type", None),
+        view_type=view_type,
         target_cols=plan.target_collections,
     )
 
@@ -2728,6 +2773,7 @@ def _run_rag_with_vectors(
         fallback_chat=fallback_chat,
         fallback_reason=timings.get("info.fallback_reason"),
         output_type=plan.output_type,
+        view_type=view_type,
         fieldset_keys=list(ctx_fieldset or []),
     )
 
