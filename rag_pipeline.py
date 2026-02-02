@@ -218,6 +218,72 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
     log_section(title, arr, level=level)
 
 # =====================================================================
+# Timings 규칙
+# - phase.*: 파이프라인 단계 소요 시간(초)
+# - col.<collection>.stats.*: 컬렉션별 통계(힛/스코어/합계)
+# - col.<collection>.phase.*: 컬렉션별 검색 단계 소요 시간(초)
+# - metric.*: 품질 측정 지표(점수 등)
+# - flag.*: bool/indicator (0.0/1.0)
+# - info.*: 메타 정보(예: fallback_reason, ctx_budget)
+# - event.*: 오류/예외 표시(0.0/1.0)
+# =====================================================================
+
+_TIMING_DEFAULTS: Dict[str, Any] = {
+    "phase.stack_init": 0.0,
+    "phase.kw_det": 0.0,
+    "phase.dense_search": 0.0,
+    "phase.rrf_merge": 0.0,
+    "phase.final_rerank": 0.0,
+    "phase.build_context": 0.0,
+    "phase.hydrate_full_payload": 0.0,
+    "phase.hop_total": 0.0,
+    "phase.total": 0.0,
+    "info.ctx_budget": 0.0,
+    "info.fallback_reason": "",
+    "metric.final_score_avg": 0.0,
+    "metric.final_score_max": 0.0,
+    "flag.fallback_chat": 0.0,
+    "flag.fallback_summary_context": 0.0,
+    "event.embed_precompute_error": 0.0,
+}
+
+def _init_timings() -> Dict[str, Any]:
+    return dict(_TIMING_DEFAULTS)
+
+def _timing_put(timings: Dict[str, Any], key: str, value: Any) -> None:
+    if key in timings:
+        default_val = _TIMING_DEFAULTS.get(key, None)
+        if key in _TIMING_DEFAULTS and timings[key] == default_val:
+            timings[key] = value
+            return
+        if timings[key] == value:
+            return
+        idx = 2
+        next_key = f"{key}.dup{idx}"
+        while next_key in timings:
+            idx += 1
+            next_key = f"{key}.dup{idx}"
+        timings[next_key] = value
+        return
+    timings[key] = value
+
+def _record_col_timings(
+    timings: Dict[str, Any],
+    col: str,
+    *,
+    stats: Dict[str, float],
+    local_timings: Dict[str, float],
+) -> None:
+    prefix = f"col.{col}"
+    for k, v in (stats or {}).items():
+        _timing_put(timings, f"{prefix}.stats.{k}", float(v))
+    for k, v in (local_timings or {}).items():
+        try:
+            _timing_put(timings, f"{prefix}.phase.{k}", float(v))
+        except Exception:
+            continue
+
+# =====================================================================
 
 # -------------------------
 # Lightweight list/stats context
@@ -1198,20 +1264,23 @@ def _run_rag_with_vectors(
         domain_hint: Optional[str] = None,
 ) -> RagResult:
     t_all0 = time.time()
-    timings: Dict[str, float] = {}
+    timings: Dict[str, Any] = _init_timings()
 
     q = normalize_query(query)
     if not q:
+        _timing_put(timings, "phase.total", 0.0)
+        _timing_put(timings, "flag.fallback_chat", 1.0)
+        _timing_put(timings, "info.fallback_reason", "empty_query")
         return RagResult(
             stack=stack, keywords=[], hits=[], reranked_hits=[], context="", refs=[],
-            timings={"total": 0.0, "fallback_chat": 1.0, "fallback_reason": "empty_query"}
+            timings=timings,
         )
 
     # shared objects
     t0 = time.time()
     resources = build_rag_objects()
     qdr = resources.qdrant_client
-    timings["stack_init"] = time.time() - t0
+    _timing_put(timings, "phase.stack_init", time.time() - t0)
     ctx_hard_limit = _get_ctx_hard_limit()
 
     fallback_emb: Dict[str, Any] = {
@@ -1348,7 +1417,7 @@ def _run_rag_with_vectors(
         kws = list(payload_kws)
     else:
         kws = extract_keywords(q)
-    timings["kw_det"] = time.time() - t0
+    _timing_put(timings, "phase.kw_det", time.time() - t0)
 
     def _normalize_hint_terms(values: Any) -> List[str]:
         if values is None:
@@ -1586,7 +1655,7 @@ def _run_rag_with_vectors(
 
     # budget (for ctx builder)
     ctx_budget = int(get_ctx_token_budget(model_name, max_output_tokens=MAX_TOKENS))
-    timings["ctx_budget"] = float(ctx_budget)
+    _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # preset (topK etc)
     preset: _SearchPreset = _build_search_preset(it)
@@ -1748,7 +1817,7 @@ def _run_rag_with_vectors(
                     v = v.tolist()
                 out["e5_qa"] = _PrecomputedEmbedding(list(v))
         except Exception as e:
-            timings["embed_precompute_error"] = 1.0
+            _timing_put(timings, "event.embed_precompute_error", 1.0)
             logger.warning(f"[RAG] embed precompute failed (q='{qtext[:40]}'): {e}")
             out = {}
 
@@ -1975,8 +2044,8 @@ def _run_rag_with_vectors(
                     f"### [Hop2] {hop2_label}\n- 필터 PJT_ID 후보: (없음)\n\n"
                     "(조인 키(PJT_ID)를 추출하지 못해 Hop2를 생략했습니다.)"
                 )
-                timings["hop_total"] = time.time() - t_hop0
-                timings["total"] = time.time() - t_all0
+                _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
+                _timing_put(timings, "phase.total", time.time() - t_all0)
                 hits = hop1_top[: max(1, hop1_keep)]
                 return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=hop1_refs, timings=timings)
 
@@ -2088,10 +2157,10 @@ def _run_rag_with_vectors(
                 hydrate_points,  # len == final_keep
                 chunk_size=int(os.getenv("RAG_HYDRATE_FULL_CHUNK", "64")),
             )
-            timings["hydrate_full_payload"] = time.time() - t0
+            _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
             refs = (hop1_refs or []) + (hop2_refs or [])
-            timings["hop_total"] = time.time() - t_hop0
-            timings["total"] = time.time() - t_all0
+            _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
+            _timing_put(timings, "phase.total", time.time() - t_all0)
             hits = (hop1_top or []) + (hop2_top or [])
             return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=refs, timings=timings)
 
@@ -2313,6 +2382,12 @@ def _run_rag_with_vectors(
                 best_dense=float(best_dense) if best_dense is not None else -1.0,
                 timings=local_timings,
             )
+            _record_col_timings(
+                timings,
+                col,
+                stats=per_col_stats[col],
+                local_timings=local_timings,
+            )
         else:
             per_col_stats[col] = {
                 "hybrid_hits": float(len(hybrid_points)),
@@ -2324,8 +2399,14 @@ def _run_rag_with_vectors(
                 hybrid_hits=int(len(hybrid_points)),
                 timings=local_timings,
             )
+            _record_col_timings(
+                timings,
+                col,
+                stats=per_col_stats[col],
+                local_timings=local_timings,
+            )
 
-    timings["dense_search"] = time.time() - t0
+    _timing_put(timings, "phase.dense_search", time.time() - t0)
 
     # federated RRF merge sources
     sources: List[_RankSource] = []
@@ -2347,7 +2428,7 @@ def _run_rag_with_vectors(
         keep=int(os.getenv("RAG_MERGED_KEEP", "1200")),
     )
     merged_rrf = _dedup_by_doc_id(merged_rrf)
-    timings["rrf_merge"] = time.time() - t0
+    _timing_put(timings, "phase.rrf_merge", time.time() - t0)
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
@@ -2368,7 +2449,7 @@ def _run_rag_with_vectors(
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
-    timings["final_rerank"] = time.time() - t0
+    _timing_put(timings, "phase.final_rerank", time.time() - t0)
 
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
@@ -2399,22 +2480,24 @@ def _run_rag_with_vectors(
             if score_vals:
                 score_avg = sum(score_vals) / max(1, len(score_vals))
                 score_max = max(score_vals)
-                timings["final_score_avg"] = float(score_avg)
-                timings["final_score_max"] = float(score_max)
+                _timing_put(timings, "metric.final_score_avg", float(score_avg))
+                _timing_put(timings, "metric.final_score_max", float(score_max))
                 if (min_final_avg > 0 and score_avg < min_final_avg) or (min_final_max > 0 and score_max < min_final_max):
                     fallback_chat = True
                     fallback_reason = "low_score"
 
     if fallback_chat and fallback_reason:
-        timings["fallback_reason"] = fallback_reason
+        _timing_put(timings, "info.fallback_reason", fallback_reason)
 
-    timings["fallback_chat"] = 1.0 if fallback_chat else 0.0
+    _timing_put(timings, "flag.fallback_chat", 1.0 if fallback_chat else 0.0)
 
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
     if not fallback_chat:
         max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
         reranked_for_hydrate = reranked[: max(1, max_items)]
+        t0 = time.time()
         _hydrate_points_payload(qdr, reranked_for_hydrate)
+        _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
 
     # build context
     t0 = time.time()
@@ -2428,7 +2511,7 @@ def _run_rag_with_vectors(
                 context, refs = build_context_list_light(reranked_for_ctx, kind=base_route, max_items=max_items, query_text=q)
             else:
                 context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
-            timings["fallback_summary_context"] = 1.0
+            _timing_put(timings, "flag.fallback_summary_context", 1.0)
         else:
             context, refs = "", []
     else:
@@ -2439,8 +2522,8 @@ def _run_rag_with_vectors(
         else:
             context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
 
-    timings["build_context"] = time.time() - t0
-    timings["total"] = time.time() - t_all0
+    _timing_put(timings, "phase.build_context", time.time() - t0)
+    _timing_put(timings, "phase.total", time.time() - t_all0)
 
     log_kv(
         "RAG.CTX",
@@ -2448,7 +2531,7 @@ def _run_rag_with_vectors(
         refs=len(refs or []),
         max_items=int(min(int(preset.max_ctx_items), ctx_hard_limit)),
         fallback_chat=fallback_chat,
-        fallback_reason=timings.get("fallback_reason"),
+        fallback_reason=timings.get("info.fallback_reason"),
     )
 
     # merged raw hits (for trace)
@@ -2464,15 +2547,10 @@ def _run_rag_with_vectors(
 
     logger.info(
         f"[PERF][{stack}] mode={plan.mode} base={base_route} action={action} rel={relation} "
-        f"kw_det={timings.get('kw_det',0):.4f}s, search={timings.get('dense_search',0):.4f}s, "
-        f"rrf={timings.get('rrf_merge',0):.4f}s, rerank={timings.get('final_rerank',0):.4f}s, "
-        f"ctx={timings.get('build_context',0):.4f}s, total={timings.get('total',0):.4f}s"
+        f"kw_det={timings.get('phase.kw_det',0):.4f}s, search={timings.get('phase.dense_search',0):.4f}s, "
+        f"rrf={timings.get('phase.rrf_merge',0):.4f}s, rerank={timings.get('phase.final_rerank',0):.4f}s, "
+        f"ctx={timings.get('phase.build_context',0):.4f}s, total={timings.get('phase.total',0):.4f}s"
     )
-
-    for col, st in per_col_stats.items():
-        for k, v in st.items():
-            timings[f"col_{col}_{k}"] = float(v)
-        timings["hydrate_full_payload"] = time.time() - t0
 
     return RagResult(
         stack=stack,
