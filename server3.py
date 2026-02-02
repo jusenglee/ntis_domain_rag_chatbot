@@ -33,7 +33,7 @@ from rag_store import build_rag_objects_dual
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
-from rag_parts.query_intent import classify_query as classify_query_intent
+from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from retrieval import extract_keywords
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
@@ -766,25 +766,28 @@ async def _load_conversation_memory(conversation_id: str) -> tuple[List[BaseMess
 
 async def build_intent_payload(question: str, conversation_id: str) -> Dict[str, Any]:
     chat_history, prev_context = await _load_conversation_memory(conversation_id)
-    question_analysis = await _run_question_analysis(
-        question=question,
-        conversation_id=conversation_id,
-        chat_history=chat_history,
-        prev_context=prev_context,
-    )
+    precheck = _cheap_precheck(question)
+    question_analysis = None
+    if not precheck:
+        question_analysis = await _run_question_analysis(
+            question=question,
+            conversation_id=conversation_id,
+            chat_history=chat_history,
+            prev_context=prev_context,
+        )
 
     kws = extract_keywords(question)
-    hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name]
-    hint_org_terms = list(question_analysis.organizations or [])
+    hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name] if question_analysis else []
+    hint_org_terms = list(question_analysis.organizations or []) if question_analysis else []
     hint_org_role = None
-    if isinstance(question_analysis.filters, dict):
+    if question_analysis and isinstance(question_analysis.filters, dict):
         hint_org_role = question_analysis.filters.get("org_role")
 
     raw_intent = classify_query_intent(
         question,
         kws,
-        domain_hint=question_analysis.head,
-        hint=question_analysis.dict(),
+        domain_hint=question_analysis.head if question_analysis else None,
+        hint=question_analysis.dict() if question_analysis else None,
     )
 
     normalized_intent = normalize_intent(
