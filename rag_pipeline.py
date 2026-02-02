@@ -46,6 +46,8 @@ from rag_parts.constants import (
     PROJECT_TAGS,
     PERF_TAGS,
     TAG_PJT_INFO,
+    TAG_PJT_MP,
+    TAG_PJT_ORG,
 )
 from rag_parts.query_intent import (
     QueryIntent,
@@ -186,7 +188,7 @@ def _point_summary(p: Any) -> Dict[str, Any]:
 
     tag = pick(pl.get("tag"))
     doc_id = pick(pl.get("doc_id"), getattr(p, "id", None))
-    col = pick(pl.get("_collection"))
+    col = pick(_resolve_collection(p, pl))
 
     sc = getattr(p, "score", None)
     try:
@@ -550,9 +552,17 @@ def _call_dense_retrieve_hybrid_multi(
 
 def _ensure_collection_mark(points: List[Any], col: str) -> None:
     for p in points or []:
+        setattr(p, "_collection", col)
         pl = getattr(p, "payload", None)
         if isinstance(pl, dict):
             pl.setdefault("_collection", col)
+
+def _resolve_collection(p: Any, payload: Optional[dict] = None) -> str:
+    pl = payload if payload is not None else getattr(p, "payload", None) or {}
+    if not isinstance(pl, dict):
+        pl = {}
+    col = pl.get("_collection") or getattr(p, "_collection", None)
+    return str(col) if col else ""
 
 # -------------------------
 # RRF (independent / stable)
@@ -567,7 +577,7 @@ def _hit_key(p: Any) -> Tuple[str, str]:
     pl = getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
         pl = {}
-    col = str(pl.get("_collection") or "")
+    col = _resolve_collection(p, pl)
     pid = str(getattr(p, "id", "") or pl.get("doc_id") or "")
     return (col, pid)
 
@@ -808,7 +818,7 @@ def _family_bonus(p: Any, base_route: str) -> float:
         if base_route == "perf" and tag in PERF_TAGS_NORM:
             return 4.0
 
-    col = str(pl.get("_collection") or "")
+    col = _resolve_collection(p, pl)
     if base_route == "support" and col == COL_SUPPORT:
         return 6.0
     if base_route in ("project", "people", "org") and col == COL_PROJECT:
@@ -869,7 +879,7 @@ def _rerank_compare_summary(points: List[Any], total_key: str, *, topn: int) -> 
             pl = {}
         out.append({
             "doc_id": pl.get("doc_id") or getattr(p, "id", None),
-            "col": pl.get("_collection"),
+            "col": _resolve_collection(p, pl),
             "tag": pl.get("tag"),
             total_key: pl.get(total_key),
             "_final_total": pl.get("_final_total"),
@@ -1201,6 +1211,42 @@ def _hydrate_points_payload(
 
     def _set(p, k, v):
         setattr(p, k, v)
+
+    def _infer_collection_from_payload(payload: dict) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        candidate_tags = []
+        tag_value = payload.get("tag")
+        if tag_value:
+            candidate_tags.append(tag_value)
+        tags_value = payload.get("tags")
+        if isinstance(tags_value, list):
+            candidate_tags.extend([t for t in tags_value if t])
+        for t in candidate_tags:
+            norm = _normalize_tag_value(t)
+            if norm in PROJECT_TAGS_NORM:
+                return COL_PROJECT
+            if norm in PERF_TAGS_NORM:
+                return COL_PERF
+        return None
+
+    def _fallback_collection() -> Optional[str]:
+        allow_list = list(RAG_COLLECTION_ALLOWLIST)
+        if len(allow_list) == 1:
+            return allow_list[0]
+        return None
+
+    def _normalize_project_tag(payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        tag_value = payload.get("tag")
+        if tag_value in {TAG_PJT_MP, TAG_PJT_ORG}:
+            payload["tag"] = TAG_PJT_INFO
+        tags_value = payload.get("tags")
+        if isinstance(tags_value, list):
+            payload["tags"] = [
+                TAG_PJT_INFO if t in {TAG_PJT_MP, TAG_PJT_ORG} else t for t in tags_value
+            ]
     # collection별로 묶어서 retrieve 호출 수를 줄임
     buckets = {}
     for p in points:
@@ -1210,6 +1256,10 @@ def _hydrate_points_payload(
             col = payload.get("_collection")
         if not col:
             col = _get(p, "_collection", None)
+        if not col:
+            col = _infer_collection_from_payload(payload)
+        if not col:
+            col = _fallback_collection()
         if not col:
             # collection을 모르면 hydrate 불가(안전 스킵)
             continue
@@ -1244,6 +1294,7 @@ def _hydrate_points_payload(
                     continue
                 key = str(pid)
                 if key in rec_payload:
+                    _normalize_project_tag(rec_payload[key])
                     _set(p, "payload", rec_payload[key])
 
             # ✅✅✅ 여기서 “전체 payload pretty” 로그 (chunk 단위)
@@ -2471,11 +2522,7 @@ def _run_rag_with_vectors(
         pid = getattr(p, "id", None)
         score = getattr(p, "score", None)
 
-        col = None
-        if isinstance(pl, dict):
-            col = pl.get("_collection")
-        if not col:
-            col = getattr(p, "_collection", None)
+        col = _resolve_collection(p, pl)
 
         try:
             pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
