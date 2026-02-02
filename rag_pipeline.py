@@ -1286,7 +1286,6 @@ def _hydrate_points_payload(
                 if rid is None:
                     continue
                 rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-                aaaa=r.get("payload")
             # payload를 "그대로" 덮어씀 (내부 메타 유지 X)
             for p in chunk:
                 pid = _get(p, "id", None)
@@ -1296,19 +1295,6 @@ def _hydrate_points_payload(
                 if key in rec_payload:
                     _normalize_project_tag(rec_payload[key])
                     _set(p, "payload", rec_payload[key])
-
-            # ✅✅✅ 여기서 “전체 payload pretty” 로그 (chunk 단위)
-            for p in chunk:
-                pl = _get(p, "payload", {}) or {}
-                pid = _get(p, "id", None)
-
-                # 보기 좋게 JSON pretty print
-                try:
-                    pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
-                except Exception:
-                    pretty = str(pl)
-
-                logger.info(f"[PAYLOAD] col={collection_name} id={pid}\n{pretty}")
 
 
 def _run_rag_with_vectors(
