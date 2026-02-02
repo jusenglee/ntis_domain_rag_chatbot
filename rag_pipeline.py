@@ -998,6 +998,48 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
     return False
 
 def _build_plan(it: NormalizedIntent) -> QueryPlan:
+    # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
+    # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
+    # 2) 교집합이 비면 allowlist를 우선(fallback) 적용한다.
+    # 3) allowlist가 없으면 relation target을 그대로 사용한다.
+    def _resolve_relation_target_cols(rel: Tuple[str, str], *, reason: str) -> List[str]:
+        relation_cols = list(relation_target_collections(rel) or [])
+        allowlist = list(RAG_COLLECTION_ALLOWLIST)
+        policy = "relation_only"
+        fallback_reason = None
+
+        if allowlist:
+            if relation_cols:
+                intersection = [c for c in relation_cols if c in allowlist]
+                if intersection:
+                    selected = intersection
+                    policy = "relation_intersect_allowlist"
+                else:
+                    selected = allowlist
+                    policy = "allowlist_fallback"
+                    fallback_reason = "relation_allowlist_disjoint"
+            else:
+                selected = allowlist
+                policy = "allowlist_only"
+                fallback_reason = "relation_empty"
+        else:
+            selected = relation_cols or _default_target_collections()
+            policy = "relation_only" if relation_cols else "default_only"
+            if not relation_cols:
+                fallback_reason = "relation_empty"
+
+        log_kv(
+            "RAG.PLAN.COLLECTION_POLICY",
+            reason=reason,
+            relation=rel,
+            allowlist=allowlist,
+            relation_target_cols=relation_cols,
+            selected_cols=selected,
+            policy=policy,
+            fallback_reason=fallback_reason,
+        )
+        return selected
+
     action = it.action
     base_route = it.base_route
     rel = it.relation
@@ -1013,7 +1055,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
         )
 
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
-        target_cols = relation_target_collections(rel)
+        target_cols = _resolve_relation_target_cols(rel, reason="people_project_lookup")
         return QueryPlan(
             mode="lookup",
             base_route=base_route,
@@ -1024,7 +1066,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
         )
 
     if rel:
-        target_cols = relation_target_collections(rel)
+        target_cols = _resolve_relation_target_cols(rel, reason="join_relation")
         return QueryPlan(
             mode="join",
             base_route=base_route,
