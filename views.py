@@ -117,13 +117,23 @@ def _apply_output_allowlist(result: Dict[str, Any], allowlist: Iterable[str]) ->
     if not allowed:
         return result
     filtered = dict(result)
-    for key in ("meta_basic", "meta_detail"):
-        if isinstance(filtered.get(key), dict):
-            filtered[key] = _pick_fields(filtered[key], allowed)
+    if isinstance(filtered.get("meta_detail"), dict):
+        filtered["meta_detail"] = _pick_fields(filtered["meta_detail"], allowed)
     for key in ("prtcp_mp", "prtcp_org"):
         if isinstance(filtered.get(key), list):
             filtered[key] = _filter_list_entries(filtered[key], allowed)
     return filtered
+
+
+def _ensure_meta_basic(result: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if "meta_basic" in result:
+        return result
+    meta_basic = payload.get("meta_basic")
+    if isinstance(meta_basic, dict):
+        updated = dict(result)
+        updated["meta_basic"] = meta_basic
+        return updated
+    return result
 
 
 def meta_basic_view(payload: Dict[str, Any], *, include_collection_score: bool = True) -> Dict[str, Any]:
@@ -205,7 +215,7 @@ def export_view(
                 if key in ("_collection", "score") and not include_collection_score:
                     continue
                 result[key] = data.get(key)
-        return result
+        return _ensure_meta_basic(result, data)
 
     result = _build_header(data, include_collection_score)
     for key, value in data.items():
@@ -216,7 +226,7 @@ def export_view(
         if key.startswith("prtcp_"):
             continue
         result[key] = value
-    return result
+    return _ensure_meta_basic(result, data)
 
 
 def make_payload_view(
@@ -254,36 +264,57 @@ def make_payload_view(
         if isinstance(meta_basic, dict):
             _enforce_text_range(meta_basic, "summary")
             _enforce_text_range(meta_basic, "keywords")
-        return _apply_output_allowlist(result, output_fields)
+        return _ensure_meta_basic(
+            _apply_output_allowlist(result, output_fields),
+            canonicalize_keys(payload),
+        )
     if view_type_normalized == "mp":
         result = mp_view(payload, include_collection_score=include_collection_score)
         allowed = {"doc_id", "tag", "title", "year", "prtcp_mp"}
-        return _apply_output_allowlist(
-            {key: value for key, value in result.items() if key in allowed},
-            output_fields,
+        return _ensure_meta_basic(
+            _apply_output_allowlist(
+                {key: value for key, value in result.items() if key in allowed},
+                output_fields,
+            ),
+            canonicalize_keys(payload),
         )
     if view_type_normalized == "org":
         result = org_view(payload, include_collection_score=include_collection_score)
         allowed = {"doc_id", "tag", "title", "year", "prtcp_org"}
-        return _apply_output_allowlist(
-            {key: value for key, value in result.items() if key in allowed},
-            output_fields,
+        return _ensure_meta_basic(
+            _apply_output_allowlist(
+                {key: value for key, value in result.items() if key in allowed},
+                output_fields,
+            ),
+            canonicalize_keys(payload),
         )
     if view_type_normalized == "project_detail":
         result = project_detail_view(payload, include_collection_score=include_collection_score)
-        return _apply_output_allowlist(result, output_fields)
+        return _ensure_meta_basic(
+            _apply_output_allowlist(result, output_fields),
+            canonicalize_keys(payload),
+        )
     if view_type_normalized == "perf_detail":
         result = perf_detail_view(payload, include_collection_score=include_collection_score)
-        return _apply_output_allowlist(result, output_fields)
+        return _ensure_meta_basic(
+            _apply_output_allowlist(result, output_fields),
+            canonicalize_keys(payload),
+        )
     if view_type_normalized == "support_detail":
         result = support_detail_view(payload, include_collection_score=include_collection_score)
-        return _apply_output_allowlist(result, output_fields)
+        return _ensure_meta_basic(
+            _apply_output_allowlist(result, output_fields),
+            canonicalize_keys(payload),
+        )
     if view_type_normalized == "stats":
         result = stats_view(payload, include_collection_score=include_collection_score)
         allowed = {"dimension", "metrics", "top_items"}
-        return _apply_output_allowlist(
-            {key: value for key, value in result.items() if key in allowed},
-            output_fields,
+        return _ensure_meta_basic(
+            _apply_output_allowlist(
+                {key: value for key, value in result.items() if key in allowed},
+                output_fields,
+            ),
+            canonicalize_keys(payload),
         )
     if view_type_normalized == "export":
         result = export_view(
@@ -296,8 +327,12 @@ def make_payload_view(
                 result.pop(key, None)
         if output_fields:
             selected_set = {str(k).strip() for k in output_fields if str(k).strip()}
-            return {key: value for key, value in result.items() if key in selected_set}
-        return _apply_output_allowlist(result, output_fields)
+            filtered = {key: value for key, value in result.items() if key in selected_set}
+            return _ensure_meta_basic(filtered, canonicalize_keys(payload))
+        return _ensure_meta_basic(
+            _apply_output_allowlist(result, output_fields),
+            canonicalize_keys(payload),
+        )
 
     result = meta_basic_view(payload, include_collection_score=include_collection_score)
     for key in ("prtcp_mp", "prtcp_org", "meta_detail"):
@@ -308,4 +343,7 @@ def make_payload_view(
     if isinstance(meta_basic, dict):
         _enforce_text_range(meta_basic, "summary")
         _enforce_text_range(meta_basic, "keywords")
-    return _apply_output_allowlist(result, output_fields)
+    return _ensure_meta_basic(
+        _apply_output_allowlist(result, output_fields),
+        canonicalize_keys(payload),
+    )
