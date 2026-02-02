@@ -118,6 +118,22 @@ class QuestionAnalysis(BaseModel):
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
 
+class SearchHint(BaseModel):
+    """RAG 검색 힌트"""
+    coq: str = ""
+    category: list[str] = Field(default_factory=list)
+    researchers: list[dict[str, str | None]] = Field(default_factory=list)
+    organizations: list[str] = Field(default_factory=list)
+    mode: str | None = None
+    head: str | None = None
+    relation: str | None = None
+    ids_map: dict[str, list[str]] = Field(default_factory=dict)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
+    history_summary: str = ""
+    retrieval_query: str = ""
+    confidence: float = 0.0
+
 class KnowledgeSufficiency(BaseModel):
     """지식 충분성 판단 결과"""
     requires_new_knowledge: Literal["low", "medium", "high"] = Field(
@@ -537,7 +553,7 @@ class CustomRAGRetriever(BaseModel):
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
-    hint: Optional[Dict[str, Any]] = None
+    hint: Optional[SearchHint] = None
     intent_payload: Optional[Dict[str, Any]] = None
 
     class Config:
@@ -597,23 +613,23 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or state.question
         search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
 
-        hint = {
-            "coq": f"{state.conversation_id}{state.question}",
-            "category": [c.value if hasattr(c, "value") else str(c) for c in (qa.category or [])] if qa else [],
-            "researchers": [
+        hint = SearchHint(
+            coq=f"{state.conversation_id}{state.question}",
+            category=[c.value if hasattr(c, "value") else str(c) for c in (qa.category or [])] if qa else [],
+            researchers=[
                 {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
             ] if qa else [],
-            "organizations": list(qa.organizations or []) if qa else [],
-            "mode": (qa.mode if qa else None),
-            "head": (qa.head if qa else None),
-            "relation": (qa.relation if qa else None),
-            "ids_map": dict(qa.ids_map or {}) if qa else {},
-            "filters": dict(qa.filters or {}) if qa else {},
-            "limit": int(search_num),
-            "history_summary": (qa.history_summary if qa else ""),
-            "retrieval_query": query,
-            "confidence": float(qa.confidence if qa else 0.0)
-        }
+            organizations=list(qa.organizations or []) if qa else [],
+            mode=(qa.mode if qa else None),
+            head=(qa.head if qa else None),
+            relation=(qa.relation if qa else None),
+            ids_map=dict(qa.ids_map or {}) if qa else {},
+            filters=dict(qa.filters or {}) if qa else {},
+            limit=int(search_num),
+            history_summary=(qa.history_summary if qa else ""),
+            retrieval_query=query,
+            confidence=float(qa.confidence if qa else 0.0),
+        )
 
         retriever = CustomRAGRetriever(
             top_k=search_num,
