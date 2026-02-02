@@ -77,7 +77,7 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
     avail = model_ctx - PROMPT_OVERHEAD_TOKENS - int(max_output_tokens) - CTX_SAFETY_MARGIN
 
     budget = int(avail)
-    logger.info(budget)
+    logger.debug("CTX token budget calculated: %s", budget)
     return max(int(CTX_MIN_BUDGET), budget)
 
 MODEL_MAX_CONTEXT = {
