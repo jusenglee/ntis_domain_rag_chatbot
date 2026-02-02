@@ -396,15 +396,66 @@ async def _run_question_analysis(
 async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     """지식 충분성 판단: 새로운 검색 필요 여부"""
 
-    llm = TritonChatModel(model_name="gemma_vllm_0")
-    parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
-
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-
     qa = state.question_analysis
 
+    retrieval_query = (qa.retrieval_query if qa else None) or state.messages[-1].content
+
+    query_intent = None
+    if state.intent_payload:
+        query_intent = state.intent_payload.get("query_intent")
+    action = None
+    if query_intent:
+        if isinstance(query_intent, dict):
+            action = query_intent.get("action")
+        else:
+            action = getattr(query_intent, "action", None)
+
+    search_required_actions = {
+        "list",
+        "detail",
+        "relation",
+        "stats",
+        "id_exact",
+        "id_fuzzy",
+        "topic",
+        "content",
+    }
+
+    if qa and qa.question_type == QuestionType.DEFAULT and not state.prev_context:
+        result = KnowledgeSufficiency(
+            requires_new_knowledge="high",
+            search_intent="이전 문맥이 없어 새로운 검색이 필요함",
+            retrieval_query=retrieval_query,
+            confidence=1.0,
+        )
+        log_section("KNOWLEDGE SUFFICIENCY",
+                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"Requires New: {result.requires_new_knowledge}\n"
+                    f"Search Intent: {result.search_intent}\n"
+                    f"Query: {result.retrieval_query}\n"
+                    f"Confidence: {result.confidence:.2f}")
+        return {"knowledge_sufficiency": result}
+
+    if action in search_required_actions:
+        result = KnowledgeSufficiency(
+            requires_new_knowledge="high",
+            search_intent=f"query_intent action={action} 검색이 필요함",
+            retrieval_query=retrieval_query,
+            confidence=1.0,
+        )
+        log_section("KNOWLEDGE SUFFICIENCY",
+                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"Requires New: {result.requires_new_knowledge}\n"
+                    f"Search Intent: {result.search_intent}\n"
+                    f"Query: {result.retrieval_query}\n"
+                    f"Confidence: {result.confidence:.2f}")
+        return {"knowledge_sufficiency": result}
+
+    llm = TritonChatModel(model_name="gemma_vllm_0")
+    parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
 
     prev_context_str = None
 
