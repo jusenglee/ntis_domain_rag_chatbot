@@ -1,6 +1,7 @@
 # rag_store.py
 # -*- coding: utf-8 -*-
 
+from dataclasses import dataclass
 from typing import Tuple, Optional, Any
 from qdrant_client import QdrantClient
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -10,38 +11,27 @@ from settings import (
     QDRANT_PORT,
     EMBED_MODEL,      # e5-large-instruct
     EMBED_MODEL_B,    # e5-large
-    logger,
 )
-from rag_parts.constants import (
-    COL_PERF,
-    COL_PROJECT,
-    COL_SUPPORT,
-    KEY_ORG_NORM,
-)
-from retrieval import ensure_keyword_index, ensure_text_index
 from triton_client import get_triton_client
 
-_qdr: Optional[QdrantClient] = None
-_emb_e5i: Optional[HuggingFaceEmbedding] = None
-_emb_e5: Optional[HuggingFaceEmbedding] = None
-
-def build_rag_objects_dual() -> Tuple[
-    QdrantClient, HuggingFaceEmbedding, Any,
-    QdrantClient, HuggingFaceEmbedding, Any,
-]:
-    """
-    single collection + multi-vector
-      - e5i_qa: multilingual-e5-large-instruct
-      - e5_qa : multilingual-e5-large
-    반환 형태는 기존 main.py 호환을 위해 (qdr, embA, None, qdr, embB, None)
-    """
-    global _qdr, _emb_e5i, _emb_e5
-
-    if _qdr and _emb_e5i and _emb_e5:
-        return _qdr, _emb_e5i, None, _qdr, _emb_e5, None
+@dataclass(frozen=True)
+class RagResources:
+    qdrant_client: QdrantClient
+    embed_e5i: HuggingFaceEmbedding
+    embed_e5: HuggingFaceEmbedding
+    triton_client: Any
 
 
-    _qdr = QdrantClient(
+_rag_resources: Optional[RagResources] = None
+
+
+def build_rag_objects() -> RagResources:
+    global _rag_resources
+
+    if _rag_resources is not None:
+        return _rag_resources
+
+    qdr = QdrantClient(
         host=QDRANT_HOST,
         grpc_port=QDRANT_PORT,
         prefer_grpc=True,
@@ -49,7 +39,7 @@ def build_rag_objects_dual() -> Tuple[
     )
 
     # e5-large-instruct (e5i_qa)
-    _emb_e5i = HuggingFaceEmbedding(
+    emb_e5i = HuggingFaceEmbedding(
         model_name=EMBED_MODEL,
         device="cuda",
         embed_batch_size=32,
@@ -67,7 +57,7 @@ def build_rag_objects_dual() -> Tuple[
     )
 
     # e5-large (e5_qa)
-    _emb_e5 = HuggingFaceEmbedding(
+    emb_e5 = HuggingFaceEmbedding(
         model_name=EMBED_MODEL_B,
         device="cuda",              # 필요 시 조정
         embed_batch_size=32,
@@ -77,6 +67,32 @@ def build_rag_objects_dual() -> Tuple[
     )
 
     # Triton warm-up
-    get_triton_client()
+    triton_client = get_triton_client()
 
-    return _qdr, _emb_e5i, None, _qdr, _emb_e5, None
+    _rag_resources = RagResources(
+        qdrant_client=qdr,
+        embed_e5i=emb_e5i,
+        embed_e5=emb_e5,
+        triton_client=triton_client,
+    )
+    return _rag_resources
+
+def build_rag_objects_dual() -> Tuple[
+    QdrantClient, HuggingFaceEmbedding, Any,
+    QdrantClient, HuggingFaceEmbedding, Any,
+]:
+    """
+    single collection + multi-vector
+      - e5i_qa: multilingual-e5-large-instruct
+      - e5_qa : multilingual-e5-large
+    반환 형태는 기존 main.py 호환을 위해 (qdr, embA, None, qdr, embB, None)
+    """
+    resources = build_rag_objects()
+    return (
+        resources.qdrant_client,
+        resources.embed_e5i,
+        None,
+        resources.qdrant_client,
+        resources.embed_e5,
+        None,
+    )

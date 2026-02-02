@@ -29,7 +29,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 # --- User Modules ---
-from rag_store import build_rag_objects_dual
+from rag_store import build_rag_objects
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
@@ -1140,7 +1140,7 @@ async def lifespan(app: FastAPI):
     global redis_client
 
     # RAG 초기화
-    build_rag_objects_dual()
+    build_rag_objects()
 
     # Redis 연결
     redis_client = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
