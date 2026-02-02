@@ -946,13 +946,13 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
-        selected_fields = list(getattr(qa, "output_fields", []) or []) if qa else None
+        output_fields = list(getattr(qa, "output_fields", []) or []) if qa else None
         docs = [
             make_payload_view(
                 doc,
                 view_type,
                 include_collection_score=False,
-                selected_fields=selected_fields,
+                output_fields=output_fields,
             )
             for doc in docs
         ]
@@ -1061,7 +1061,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             is_detail,
             output_type=output_type,
             max_items=max_items,
-            output_fields=output_fields,
         )
         if docs_for_ctx
         else "없음"
@@ -1460,64 +1459,54 @@ def refine_documents_rule_based(
         *,
         output_type: Optional[str] = None,
         max_items: Optional[int] = None,
-        output_fields: Optional[List[str]] = None,
 ) -> str:
     context_chunks: List[str] = []
     output_type = (output_type or "").strip().lower()
     detail_mode = is_detail or output_type == "detail"
 
-    list_meta_keys = [
-        "title",
-        "kor_pjt_nm",
-        "eng_pjt_nm",
-        "pjt_id",
-        "pjt_no",
-        "org_nm",
-        "pjt_prfrm_org_nm",
-        "stan_yr",
-        "year",
-        "tag",
-        "dt1",
-        "dt2",
-        "doi",
-        "issn",
-        "patent_reg_no",
-        "rst_id",
-    ]
-    preferred_fields = [f for f in (output_fields or []) if str(f).strip()]
-    allowed_keys = preferred_fields or list_meta_keys
-
     items = docs[: max_items] if max_items else docs
-    for doc in items:
-        mapped_doc = RagMapper.map(doc)
+    for idx, doc in enumerate(items, 1):
+        source_idx = doc.get("source_index") or idx
+        title = doc.get("title") or "제목 없음"
 
-        source_idx = doc.get("source_index")
-        title = mapped_doc.get("title", "제목 없음")
+        meta_basic = doc.get("meta_basic", {})
+        if not isinstance(meta_basic, dict):
+            meta_basic = {}
+        if not meta_basic:
+            header_keys = {"doc_id", "tag", "_collection", "score", "source_index"}
+            meta_basic = {
+                key: value
+                for key, value in doc.items()
+                if key not in header_keys
+                and key not in ("meta_basic", "meta_detail", "prtcp_mp", "prtcp_org")
+            }
 
-        if output_type in ("list", "table", "json", "compare", "timeline"):
-            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=allowed_keys)
-        else:
-            refined_text = (
-                format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=preferred_fields)
-                if preferred_fields
-                else format_metadata(mapped_doc.get("meta_basic", {}))
-            )
+        refined_text = format_metadata(meta_basic)
 
         if detail_mode:
-            refined_text += (
-                format_metadata(mapped_doc.get("meta_detail", {}), allowed_keys=preferred_fields)
-                if preferred_fields
-                else format_metadata(mapped_doc.get("meta_detail", {}))
-            )
+            meta_detail = doc.get("meta_detail", {})
+            if isinstance(meta_detail, dict):
+                detail_text = format_metadata(meta_detail)
+                if detail_text:
+                    refined_text = f"{refined_text}\n{detail_text}" if refined_text else detail_text
 
         researcher_block = ""
         if output_type not in ("list", "stats", "table", "json"):
-            researcher_lines = RagMapper.get_researcher_info(mapped_doc)
-            if researcher_lines:
-                researcher_block = (
-                        "\n- 연구원 목록:\n"
-                        + "\n".join(researcher_lines)
-                )
+            researchers = doc.get("prtcp_mp", [])
+            if isinstance(researchers, list):
+                researcher_lines = []
+                for researcher in researchers:
+                    if not isinstance(researcher, dict):
+                        continue
+                    name = researcher.get("hm_nm")
+                    org = researcher.get("blng_org_nm") or "소속미상"
+                    if name:
+                        researcher_lines.append(f"- {name}({org})")
+                if researcher_lines:
+                    researcher_block = (
+                            "\n- 연구원 목록:\n"
+                            + "\n".join(researcher_lines)
+                    )
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
