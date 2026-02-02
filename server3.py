@@ -154,6 +154,14 @@ class QuestionAnalysis(BaseModel):
     relation: str | None = Field(default=None, description="project_perf | people_project 등")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
+    output_type: str | None = Field(
+        default=None,
+        description="응답 출력 타입 (list/detail/relation/summary/table/json/compare/timeline/faq)"
+    )
+    output_fields: list[str] = Field(
+        default_factory=list,
+        description="출력 타입에 맞춰 포함해야 할 필드 키 목록",
+    )
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -174,6 +182,8 @@ class SearchHint(BaseModel):
     relation: str | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
+    output_type: str | None = None
+    output_fields: list[str] = Field(default_factory=list)
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -371,6 +381,8 @@ async def _run_question_analysis(
         "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
         "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
         "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
+        "4-7. output_type: list | detail | relation | summary | table | json | compare | timeline | faq\n"
+        "4-8. output_fields: 출력에 포함해야 할 메타 필드 키 배열 (필요 없으면 빈 배열)\n"
         f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
         "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
         "7. retrieval_query:\n"
@@ -409,6 +421,8 @@ async def _run_question_analysis(
             f"Relation: {result.relation}\n"
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
+            f"OutputType: {result.output_type}\n"
+            f"OutputFields: {result.output_fields}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -429,6 +443,8 @@ async def _run_question_analysis(
             relation=None,
             ids_map={},
             filters={},
+            output_type=None,
+            output_fields=[],
             limit=20,
             history_summary=question,
             retrieval_query=question[:120],
@@ -728,6 +744,37 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
+    def _infer_output_type() -> str:
+        question_text = (state.messages[-1].content or "").strip().lower()
+        if any(token in question_text for token in ("표", "테이블", "table")):
+            return "table"
+        if any(token in question_text for token in ("json", "스키마", "키값", "키-값")):
+            return "json"
+        if any(token in question_text for token in ("비교", "대조", "차이", "vs", "versus")):
+            return "compare"
+        if any(token in question_text for token in ("타임라인", "연혁", "연도별", "기간별")):
+            return "timeline"
+        if any(token in question_text for token in ("faq", "질문답변", "qna")):
+            return "faq"
+        if qa and qa.question_type == QuestionType.FOLLOW_UP:
+            return "detail"
+        if qa and qa.mode and qa.mode.lower() == "lookup":
+            return "detail"
+        if qa and qa.ids_map and any(qa.ids_map.values()):
+            return "detail"
+        if any(token in question_text for token in ("상세", "자세", "자세히", "세부", "스펙")):
+            return "detail"
+        if any(token in question_text for token in ("목록", "리스트", "전체", "나열")):
+            return "list"
+        if qa and qa.mode and qa.mode.lower() == "search":
+            return "list"
+        if qa and qa.relation:
+            return "relation"
+        return "summary"
+
+    output_type = (qa.output_type if qa and qa.output_type else _infer_output_type())
+    output_fields = list(getattr(qa, "output_fields", []) or [])
+
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
@@ -743,13 +790,47 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             ]
             docs_for_ctx = related_context or docs_for_ctx
 
-    context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
+    max_items = None
+    if output_type == "detail":
+        max_items = 1
+    elif output_type in ("list", "table", "compare", "timeline"):
+        max_items = min(5, len(docs_for_ctx))
+
+    context_text = (
+        refine_documents_rule_based(
+            docs_for_ctx,
+            is_detail,
+            output_type=output_type,
+            max_items=max_items,
+            output_fields=output_fields,
+        )
+        if docs_for_ctx
+        else "없음"
+    )
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
+    output_instructions = {
+        "list": "요청한 항목을 제목 중심의 간단 목록으로 답변하세요. 항목당 1줄, 최대 5개.",
+        "detail": "하나의 항목만 상세히 답변하세요. 핵심 요약과 주요 메타 정보를 bullet로 정리하세요.",
+        "relation": "관계 중심으로 간단한 목록 또는 표 형태로 답변하세요.",
+        "table": "표 형태로 요약하세요. 열은 제목/기관/연도/ID 중심으로 구성하세요.",
+        "json": "JSON 배열로 답변하세요. 각 항목은 제목/기관/연도/ID 키를 포함하세요.",
+        "compare": "비교 요약 형식으로 답변하세요. 공통점/차이점을 bullet로 정리하세요.",
+        "timeline": "연도 순 타임라인으로 요약하세요. 연도별 핵심 이벤트만 간단히 나열하세요.",
+        "faq": "질문-답변 형식으로 3~5개 이내로 정리하세요.",
+        "summary": "핵심 요약 중심으로 답변하세요.",
+    }
+
+    output_fields_line = ""
+    if output_fields:
+        output_fields_line = f"[출력 필드]\n{', '.join(output_fields)}\n\n"
+
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
+        f"[출력 형식]\n{output_instructions.get(output_type, output_instructions['summary'])}\n\n"
+        f"{output_fields_line}"
         f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
@@ -1101,26 +1182,70 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
+def refine_documents_rule_based(
+        docs: List[Document],
+        is_detail: bool = False,
+        *,
+        output_type: Optional[str] = None,
+        max_items: Optional[int] = None,
+        output_fields: Optional[List[str]] = None,
+) -> str:
     context_chunks: List[str] = []
+    output_type = (output_type or "").strip().lower()
+    detail_mode = is_detail or output_type == "detail"
 
-    for doc in docs:
+    list_meta_keys = [
+        "title",
+        "kor_pjt_nm",
+        "eng_pjt_nm",
+        "pjt_id",
+        "pjt_no",
+        "org_nm",
+        "pjt_prfrm_org_nm",
+        "stan_yr",
+        "year",
+        "tag",
+        "dt1",
+        "dt2",
+        "doi",
+        "issn",
+        "patent_reg_no",
+        "rst_id",
+    ]
+    preferred_fields = [f for f in (output_fields or []) if str(f).strip()]
+    allowed_keys = preferred_fields or list_meta_keys
+
+    items = docs[: max_items] if max_items else docs
+    for doc in items:
         mapped_doc = RagMapper.map(doc)
 
         source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
-        refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
-        if is_detail:
-            refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
-
-        researcher_lines = RagMapper.get_researcher_info(mapped_doc)
-        researcher_block = ""
-        if researcher_lines:
-            researcher_block = (
-                    "\n- 연구원 목록:\n"
-                    + "\n".join(researcher_lines)
+        if output_type in ("list", "table", "json", "compare", "timeline"):
+            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=allowed_keys)
+        else:
+            refined_text = (
+                format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=preferred_fields)
+                if preferred_fields
+                else format_metadata(mapped_doc.get("meta_basic", {}))
             )
+
+        if detail_mode:
+            refined_text += (
+                format_metadata(mapped_doc.get("meta_detail", {}), allowed_keys=preferred_fields)
+                if preferred_fields
+                else format_metadata(mapped_doc.get("meta_detail", {}))
+            )
+
+        researcher_block = ""
+        if output_type not in ("list", "stats", "table", "json"):
+            researcher_lines = RagMapper.get_researcher_info(mapped_doc)
+            if researcher_lines:
+                researcher_block = (
+                        "\n- 연구원 목록:\n"
+                        + "\n".join(researcher_lines)
+                )
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
@@ -1131,9 +1256,24 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
     return "\n\n".join(context_chunks)
 
 
-def format_metadata(metadata: Dict[str, Any]) -> str:
+def format_metadata(metadata: Dict[str, Any], allowed_keys: Optional[List[str]] = None) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
+    allowed_set = set(allowed_keys or [])
+
+    if allowed_keys:
+        for key in allowed_keys:
+            if key not in metadata:
+                continue
+            value = metadata.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                value = ", ".join(map(str, value))
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)
+            lines.append(f"- {key}: {value}")
+        return "\n".join(lines) if lines else ""
 
     for key, value in metadata.items():
         if value is None:
