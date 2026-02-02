@@ -217,33 +217,13 @@ def measure_latency(node_name: str):
 async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     """Redis에서 대화 이력 및 이전 컨텍스트 로드"""
     cid = state.conversation_id
-    key_hist = f"conversation:{cid}:history"
-    key_ctx = f"conversation:{cid}:last_context"
-
-    loaded_history = []
-    ctx_list = []
-
-    if redis_client:
-        try:
-            raw_hist = await redis_client.get(key_hist)
-            if raw_hist:
-                hist_list = json.loads(raw_hist)
-                for msg in hist_list:
-                    role = HumanMessage if msg["type"] == "human" else AIMessage
-                    loaded_history.append(role(content=msg["content"]))
-
-            raw_ctx = await redis_client.get(key_ctx)
-            if raw_ctx:
-                ctx_list = json.loads(raw_ctx)
-        except Exception as e:
-            logger.error(f"Redis Load Error: {e}")
-
+    loaded_history, ctx_list = await load_conversation_memory(cid)
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
                 f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
-        "question" : state.messages[-1].content,
+        "question": state.messages[-1].content,
         "chat_history": current_full_history,
         "prev_context": ctx_list
     }
@@ -825,7 +805,7 @@ def node_join_answers(state: AgentState):
     """Refined Answer 노드들 완료 대기"""
     return {}
 
-async def _load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessage], List[Dict[str, Any]]]:
+async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessage], List[Dict[str, Any]]]:
     loaded_history: List[BaseMessage] = []
     ctx_list: List[Dict[str, Any]] = []
 
@@ -846,8 +826,12 @@ async def _load_conversation_memory(conversation_id: str) -> tuple[List[BaseMess
 
     return loaded_history, ctx_list
 
-async def build_intent_payload(question: str, conversation_id: str) -> Dict[str, Any]:
-    chat_history, prev_context = await _load_conversation_memory(conversation_id)
+async def build_intent_payload(
+    question: str,
+    conversation_id: str,
+    chat_history: List[BaseMessage],
+    prev_context: List[Dict[str, Any]],
+) -> Dict[str, Any]:
     precheck = _cheap_precheck(question)
     question_analysis = None
     if not precheck:
@@ -1181,7 +1165,14 @@ async def query_stream(payload: QueryRequest):
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
 
-        intent_payload = await build_intent_payload(question, conversation_id)
+        loaded_history, prev_context = await load_conversation_memory(conversation_id)
+        chat_history = loaded_history + [HumanMessage(content=question)]
+        intent_payload = await build_intent_payload(
+            question,
+            conversation_id,
+            chat_history,
+            prev_context,
+        )
         inputs = {
             "conversation_id": conversation_id,
             "messages": [HumanMessage(content=question)],
@@ -1255,7 +1246,14 @@ async def query_debug(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
-    intent_payload = await build_intent_payload(question, conversation_id)
+    loaded_history, prev_context = await load_conversation_memory(conversation_id)
+    chat_history = loaded_history + [HumanMessage(content=question)]
+    intent_payload = await build_intent_payload(
+        question,
+        conversation_id,
+        chat_history,
+        prev_context,
+    )
 
     inputs = {
         "conversation_id": conversation_id,
