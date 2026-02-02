@@ -9,7 +9,7 @@ rag_pipeline.py (redesigned)
 - JOIN(2-hop): Hop1=SEARCH로 join-key 확보 -> Hop2=JOIN 필터로 강제 제한 + 소프트 랭킹
 
 의존
-- build_rag_objects_dual(): qdr/emb 2종
+- build_rag_objects(): qdr/emb 2종
 - dense_retrieve_hybrid_multi(): dense+lexical 후보를 dict로 반환
 - build_context_mixed(): 문서형 컨텍스트 빌더
 - (옵션) rag_parts/* 유틸들
@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget, RAG_COLLECTION_ALLOWLIST
 from rag_types import RagResult
-from rag_store import build_rag_objects_dual
+from rag_store import build_rag_objects
 from retrieval import (
     normalize_query,
     extract_keywords,
@@ -985,11 +985,14 @@ def _run_rag_with_vectors(
 
     # shared objects
     t0 = time.time()
-    qdr_a, emb_a, _, qdr_b, emb_b, _ = build_rag_objects_dual()
-    qdr = qdr_a
+    resources = build_rag_objects()
+    qdr = resources.qdrant_client
     timings["stack_init"] = time.time() - t0
 
-    fallback_emb: Dict[str, Any] = {"e5i_qa": emb_a, "e5_qa": emb_b}
+    fallback_emb: Dict[str, Any] = {
+        "e5i_qa": resources.embed_e5i,
+        "e5_qa": resources.embed_e5,
+    }
 
     def _get_attr(obj: Any, name: str, default=None):
         if obj is None:
