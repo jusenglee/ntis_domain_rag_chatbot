@@ -351,39 +351,45 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if qmodels is None:
         return None
 
-    id_values: List[str] = []
+    pjt_id_values: List[str] = []
     for val in (pjt_ids or []):
         sval = str(val).strip()
-        if sval and sval not in id_values:
-            id_values.append(sval)
+        if sval and sval not in pjt_id_values:
+            pjt_id_values.append(sval)
+    pjt_no_values: List[str] = []
     for val in (pjt_nos or []):
         sval = str(val).strip()
-        if sval and sval not in id_values:
-            id_values.append(sval)
+        if sval and sval not in pjt_no_values:
+            pjt_no_values.append(sval)
 
-    if not id_values:
+    if not pjt_id_values and not pjt_no_values:
         return None
 
     primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-    key_cands: List[str] = []
-    for k in [
-        primary_id,
-        primary_no,
-        "meta_basic.pjt_id",
-        "meta_basic.pjt_no",
-        "pjt_id",
-        "pjt_no",
-    ]:
-        if k and k not in key_cands:
-            key_cands.append(k)
+    id_key_cands: List[str] = []
+    for k in [primary_id, "meta_basic.pjt_id", "pjt_id"]:
+        if k and k not in id_key_cands:
+            id_key_cands.append(k)
 
-    return qmodels.Filter(
-        should=[
-            qmodels.FieldCondition(key=k, match=make_match_any(id_values))
-            for k in key_cands
-        ]
-    )
+    no_key_cands: List[str] = []
+    for k in [primary_no, "meta_basic.pjt_no", "pjt_no"]:
+        if k and k not in no_key_cands:
+            no_key_cands.append(k)
+
+    should: List["qmodels.Condition"] = []
+    if pjt_id_values:
+        should.extend(
+            qmodels.FieldCondition(key=k, match=make_match_any(pjt_id_values))
+            for k in id_key_cands
+        )
+    if pjt_no_values:
+        should.extend(
+            qmodels.FieldCondition(key=k, match=make_match_any(pjt_no_values))
+            for k in no_key_cands
+        )
+
+    return qmodels.Filter(should=should)
 
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
@@ -401,26 +407,36 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     org_terms = list(spec.org_terms or [])
     relation = spec.relation
 
-    primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    key_cands = []
-    for k in [
-        primary,
-        "meta_basic.pjt_id",
-        "meta_basic.pjt_no",
-        "pjt_id",
-    ]:
-        if k and k not in key_cands:
-            key_cands.append(k)
+    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    id_key_cands = []
+    for k in [primary_id, "meta_basic.pjt_id", "pjt_id"]:
+        if k and k not in id_key_cands:
+            id_key_cands.append(k)
+    no_key_cands = []
+    for k in [primary_no, "meta_basic.pjt_no", "pjt_no"]:
+        if k and k not in no_key_cands:
+            no_key_cands.append(k)
 
-    join_any = qmodels.Filter(
-        should=[
+    join_should: List["qmodels.Condition"] = []
+    if id_key_cands:
+        join_should.extend(
             qmodels.FieldCondition(
                 key=k,
                 match=qmodels.MatchAny(any=join_ids),
             )
-            for k in key_cands
-        ]
-    )
+            for k in id_key_cands
+        )
+    if no_key_cands:
+        join_should.extend(
+            qmodels.FieldCondition(
+                key=k,
+                match=qmodels.MatchAny(any=join_ids),
+            )
+            for k in no_key_cands
+        )
+
+    join_any = qmodels.Filter(should=join_should)
 
     must: List["qmodels.Condition"] = [join_any]
 
