@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 retrieval.py (refactored)
 
@@ -14,12 +13,12 @@ NTIS/일반 문서형 RAG 검색 모듈.
 """
 
 from __future__ import annotations
-from __future__ import annotations
 
 import inspect
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, get_origin
 
@@ -34,14 +33,6 @@ _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 # - Query sparse vector is generated via fastembed (if available).
 # - If fastembed is unavailable, we return empty sparse results (no legacy lexical fallback).
 # ---------------------------------------------------------------------
-_SPARSE_ENCODER = None
-# -*- coding: utf-8 -*-
-
-import os
-import threading
-from typing import Any, Optional, List
-
-from qdrant_client.http import models
 
 # ---- globals ----
 _SPARSE_ENCODERS: dict[str, Any] = {}
