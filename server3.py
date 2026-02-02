@@ -354,7 +354,7 @@ async def _run_question_analysis(
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}[현재 질문]\n{question}")
+        ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
     try:
