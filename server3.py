@@ -113,7 +113,11 @@ class QuestionAnalysis(BaseModel):
     relation: str | None = Field(default=None, description="project_perf | people_project 등")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
-    limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
+    limit: int = Field(
+        MAX_TOP_K_SIZE,
+        description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
+        le=MAX_TOP_K_SIZE,
+    )
     history_summary: str = Field(description="대화 이력 기반 질문 요약")
     retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
@@ -129,7 +133,11 @@ class SearchHint(BaseModel):
     relation: str | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
-    limit: int = Field(MAX_TOP_K_SIZE, description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})")
+    limit: int = Field(
+        MAX_TOP_K_SIZE,
+        description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
+        le=MAX_TOP_K_SIZE,
+    )
     history_summary: str = ""
     retrieval_query: str = ""
     confidence: float = 0.0
@@ -365,6 +373,7 @@ async def _run_question_analysis(
             "prev_context": prev_context_str or "없음",
             "question": question
         })
+        result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
         log_section(
             "QUESTION ANALYSIS",
@@ -384,7 +393,6 @@ async def _run_question_analysis(
             f"Query: {result.retrieval_query}\n"
             f"Confidence: {result.confidence:.2f}"
         )
-
         return result
 
     except Exception as e:
@@ -618,6 +626,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or state.question
         search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
+        search_num = min(int(search_num), MAX_TOP_K_SIZE)
 
         hint = SearchHint(
             coq=f"{state.conversation_id}{state.question}",
@@ -631,7 +640,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             relation=(qa.relation if qa else None),
             ids_map=dict(qa.ids_map or {}) if qa else {},
             filters=dict(qa.filters or {}) if qa else {},
-            limit=int(search_num),
+            limit=search_num,
             history_summary=(qa.history_summary if qa else ""),
             retrieval_query=query,
             confidence=float(qa.confidence if qa else 0.0),
