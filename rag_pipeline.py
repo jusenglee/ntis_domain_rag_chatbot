@@ -971,10 +971,10 @@ def _run_rag_with_vectors(
         sparse_vector_name: Optional[str] = None,
         sparse_topk: Optional[int] = None,
         sparse_weight: Optional[float] = None,
+        domain_hint: Optional[str] = None,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, float] = {}
-    domain_hint: Optional[str] = None
 
     q = normalize_query(query)
     if not q:
@@ -2220,6 +2220,7 @@ def run_rag_once(
         vector_names=["e5i_qa", "e5_qa"],
         w_dense_map={"e5i_qa": 1.0, "e5_qa": 0.8},
         lexical_field_weights=None,
+        domain_hint=domain_hint,
     )
 
 def run_rag_ab_compare(
