@@ -838,7 +838,7 @@ async def build_intent_payload(question: str, conversation_id: str) -> Dict[str,
         question,
         kws,
         domain_hint=question_analysis.head if question_analysis else None,
-        hint=question_analysis.dict() if question_analysis else None,
+        hint=question_analysis.model_dump() if question_analysis else None,
     )
 
     normalized_intent = normalize_intent(
@@ -1247,8 +1247,8 @@ async def query_debug(payload: QueryRequest):
             "answer_gemma": final_state.get("answer_gemma"),
             "answer_gpt": final_state.get("answer_gpt"),
             "output_message": final_state["messages"][-1].content,
-            "question_analysis": question_analysis.dict() if question_analysis else None,
-            "knowledge_sufficiency": knowledge_sufficiency.dict() if knowledge_sufficiency else None,
+            "question_analysis": question_analysis.model_dump() if question_analysis else None,
+            "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
             "documents_used": len(final_state.get("context", [])),
             "latencies": final_state.get("latencies", {}),
             "total_time": sum(final_state.get("latencies", {}).values()),
