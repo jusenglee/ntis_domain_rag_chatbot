@@ -477,6 +477,67 @@ def build_context_list_light(
     ctx = header + ("\n".join(items) if items else "(후보 없음)")
     return ctx, points
 
+
+# -------------------------
+# Output type -> fieldset
+# -------------------------
+_OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
+    "list": ("title", "org", "year", "id"),
+    "detail": ("title", "meta_detail", "summary"),
+    "stats": ("aggregation_keys",),
+    "summary": ("title", "meta_basic", "summary", "content"),
+    "relation": ("title", "relation", "id"),
+}
+
+
+def _normalize_output_type(output_type: Optional[str]) -> Optional[str]:
+    ot = (output_type or "").strip().lower()
+    return ot or None
+
+
+def _resolve_output_fieldset(output_type: Optional[str]) -> Tuple[str, ...]:
+    ot = _normalize_output_type(output_type) or "summary"
+    return _OUTPUT_TYPE_FIELDSETS.get(ot, _OUTPUT_TYPE_FIELDSETS["summary"])
+
+
+def _should_use_list_context(
+    *,
+    action: str,
+    base_route: str,
+    output_type: Optional[str],
+) -> bool:
+    ot = _normalize_output_type(output_type)
+    if ot in ("list", "stats"):
+        return base_route in ("project", "perf", "people", "org")
+    return action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org")
+
+
+def _build_context_with_output_type(
+    points: List[Any],
+    *,
+    action: str,
+    base_route: str,
+    output_type: Optional[str],
+    max_items: int,
+    query_text: str,
+) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
+    fieldset = _resolve_output_fieldset(output_type)
+    if _should_use_list_context(action=action, base_route=base_route, output_type=output_type):
+        context, refs = build_context_list_light(points, kind=base_route, max_items=max_items, query_text=query_text)
+        return context, refs, fieldset
+    meta_source = "detail_only" if _normalize_output_type(output_type) == "detail" else None
+    include_meta_long = _normalize_output_type(output_type) == "detail"
+    context, refs = build_context_mixed(
+        points,
+        max_items=max_items,
+        query_text=query_text,
+        output_type=output_type,
+        fieldset_keys=fieldset,
+        meta_source=meta_source,
+        include_meta_long=include_meta_long,
+    )
+    return context, refs, fieldset
+
 # -------------------------
 # Precomputed embedding wrapper
 # -------------------------
@@ -2093,10 +2154,14 @@ def _run_rag_with_vectors(
             # Hop1 context
             hop1_ctx, hop1_refs = ("", [])
             if hop1_top:
-                if action in ("list", "stats", "download"):
-                    hop1_ctx, hop1_refs = build_context_list_light(hop1_top, kind=hop1_kind, max_items=max(1, hop1_keep), query_text=hop1_q)
-                else:
-                    hop1_ctx, hop1_refs = build_context_mixed(hop1_top[: max(1, hop1_keep)], max_items=max(1, hop1_keep), query_text=hop1_q)
+                hop1_ctx, hop1_refs, _ = _build_context_with_output_type(
+                    hop1_top[: max(1, hop1_keep)],
+                    action=action,
+                    base_route=hop1_kind,
+                    output_type=plan.output_type,
+                    max_items=max(1, hop1_keep),
+                    query_text=hop1_q,
+                )
 
             # join_ids 없으면 종료
             if not join_ids:
@@ -2198,10 +2263,14 @@ def _run_rag_with_vectors(
             )
 
             # Hop2 context
-            if action in ("list", "stats", "download"):
-                hop2_ctx, hop2_refs = build_context_list_light(hop2_top, kind=hop2_kind, max_items=max(1, hop2_keep), query_text=hop2_q)
-            else:
-                hop2_ctx, hop2_refs = build_context_mixed(hop2_top, max_items=max(1, hop2_keep), query_text=hop2_q)
+            hop2_ctx, hop2_refs, _ = _build_context_with_output_type(
+                hop2_top,
+                action=action,
+                base_route=hop2_kind,
+                output_type=plan.output_type,
+                max_items=max(1, hop2_keep),
+                query_text=hop2_q,
+            )
 
             context = (
                 f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
@@ -2587,20 +2656,29 @@ def _run_rag_with_vectors(
         if allow_fallback_summary and reranked:
             max_items = min(fallback_summary_max_items, ctx_hard_limit)
             reranked_for_ctx = reranked[: max(1, max_items)]
-            if action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org"):
-                context, refs = build_context_list_light(reranked_for_ctx, kind=base_route, max_items=max_items, query_text=q)
-            else:
-                context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
+            context, refs, ctx_fieldset = _build_context_with_output_type(
+                reranked_for_ctx,
+                action=action,
+                base_route=base_route,
+                output_type=plan.output_type,
+                max_items=max_items,
+                query_text=q,
+            )
             _timing_put(timings, "flag.fallback_summary_context", 1.0)
         else:
             context, refs = "", []
+            ctx_fieldset = _resolve_output_fieldset(plan.output_type)
     else:
         max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
         reranked_for_ctx = reranked[: max(1, max_items)]
-        if action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org"):
-            context, refs = build_context_list_light(reranked_for_ctx, kind=base_route, max_items=max_items, query_text=q)
-        else:
-            context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
+        context, refs, ctx_fieldset = _build_context_with_output_type(
+            reranked_for_ctx,
+            action=action,
+            base_route=base_route,
+            output_type=plan.output_type,
+            max_items=max_items,
+            query_text=q,
+        )
 
     _timing_put(timings, "phase.build_context", time.time() - t0)
     _timing_put(timings, "phase.total", time.time() - t_all0)
@@ -2612,6 +2690,8 @@ def _run_rag_with_vectors(
         max_items=int(min(int(preset.max_ctx_items), ctx_hard_limit)),
         fallback_chat=fallback_chat,
         fallback_reason=timings.get("info.fallback_reason"),
+        output_type=plan.output_type,
+        fieldset_keys=list(ctx_fieldset or []),
     )
 
     # merged raw hits (for trace)
