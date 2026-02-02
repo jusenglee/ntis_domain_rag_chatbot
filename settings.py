@@ -52,6 +52,14 @@ SCORE_THRESHOLD  = 0.20
 FUZZ_MIN         = 55
 SNIPPET_MAX_CHARS = 8000
 
+# Redis / 검색 제한 설정
+# REDIS_URL: Redis 연결 문자열 (예: redis://localhost:6379)
+# REDIS_TTL: Redis 캐시 TTL(초)
+# MAX_TOP_K_SIZE: 검색/응답에 사용할 최대 문서 수
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis8:6379")
+REDIS_TTL = int(os.getenv("REDIS_TTL", "3600"))
+MAX_TOP_K_SIZE = int(os.getenv("MAX_TOP_K_SIZE", "20"))
+
 PROMPT_OVERHEAD_TOKENS = int(os.getenv("RAG_PROMPT_OVERHEAD_TOKENS", "900"))
 CTX_SAFETY_MARGIN = int(os.getenv("RAG_CTX_SAFETY_MARGIN", "256"))
 CTX_MIN_BUDGET = int(os.getenv("RAG_CTX_MIN_BUDGET", "512"))

@@ -36,6 +36,7 @@ from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from retrieval import extract_keywords
+from settings import REDIS_URL, REDIS_TTL, MAX_TOP_K_SIZE
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
 
@@ -78,11 +79,7 @@ setup_file_logging()
 templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
-REDIS_URL = "redis://redis8:6379"
-REDIS_TTL = 3600
 redis_client: Optional[redis.Redis] = None
-
-MAX_TOP_K_SIZE = 20
 
 class ContentCategory(str, Enum):
 
