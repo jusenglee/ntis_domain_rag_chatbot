@@ -100,7 +100,7 @@ def _qdrant_query_points_sparse(
         limit: int,
         query_filter: Any = None,
         with_payload: Any = True,
-        timeout: int = _DEFAULT_QDRANT_TIMEOUT,
+        timeout: int = 3000,
 ) -> List[Any]:
     """
     Qdrant sparse search compat layer.

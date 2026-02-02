@@ -376,8 +376,11 @@ def build_context_list_light(
             return match.group(1)
         return value
 
-    def _pjt_id(meta, pl):
-        return _pick_first(pl.get("pjt_id"), meta.get("pjt_id"))
+    def _pjt_id(pl):
+        meta_basic = pl.get("meta_basic")
+        if not isinstance(meta_basic, dict):
+            meta_basic = {}
+        return _pick_first(meta_basic.get("pjt_id"))
 
     for p in (points or [])[: max(0, int(max_items))]:
         pl = getattr(p, "payload", None) or {}
@@ -387,7 +390,7 @@ def build_context_list_light(
 
         if kind == "project":
             title = _payload_title(pl, meta)
-            pjt_id = _pjt_id(meta, pl)
+            pjt_id = _pjt_id(pl)
             org = _pick_first(
                 pl.get("org_nm"),
                 meta.get("pjt_prfrm_org_nm"),
@@ -411,7 +414,7 @@ def build_context_list_light(
             name = _pick_nested_first(pl, "prtcp_mp", "hm_nm")
             role = _pick_nested_first(pl, "prtcp_mp", "role_slct_nm")
             org = _pick_nested_first(pl, "prtcp_mp", "blng_org_nm")
-            pjt_id = _pjt_id(meta, pl)
+            pjt_id = _pjt_id(pl)
             line = f"- {_clean_one_line(name or '(이름없음)', 80)}"
             extra: List[str] = []
             if role: extra.append(_clean_one_line(role, 30))
@@ -432,7 +435,7 @@ def build_context_list_light(
                 _pick_nested_first(pl, "prtcp_org", "org_nm"),
             )
             role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
-            pjt_id = _pjt_id(meta, pl)
+            pjt_id = _pjt_id(pl)
             line = f"- {_clean_one_line(org or '(기관없음)', 100)}"
             extra: List[str] = []
             if role: extra.append(_clean_one_line(role, 30))
@@ -448,7 +451,7 @@ def build_context_list_light(
         # perf default
         title = _payload_title(pl, meta)
         pjt_name = _pick_first(meta.get("kor_pjt_nm"), meta.get("eng_pjt_nm"))
-        pjt_id = _pjt_id(meta, pl)
+        pjt_id = _pjt_id(pl)
         perf_type = _pick_first(pl.get("tag"))
         year = _pick_first(pl.get("dt1"), pl.get("dt2"), pl.get("stan_yr"), meta.get("stan_yr"))
 
@@ -2495,28 +2498,6 @@ def _run_rag_with_vectors(
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
     )
-
-    # ✅ 검색-리랭크 직후 payload 전체 덤프 (hydrate 전)-----------------
-    dump_n = int(os.getenv("RAG_DEBUG_DUMP_N", "20"))  # 너무 크면 로그 폭발 방지
-    logger.info(
-        f"[POST-RERANK] n={len(reranked)} dump_top={min(len(reranked), dump_n)} "
-        f"mode={plan.mode} base_route={base_route}"
-    )
-
-    for rank, p in enumerate(reranked[:dump_n], start=1):
-        pl = getattr(p, "payload", {}) or {}
-        pid = getattr(p, "id", None)
-        score = getattr(p, "score", None)
-
-        col = _resolve_collection(p, pl)
-
-        try:
-            pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
-        except Exception:
-            pretty = str(pl)
-
-        logger.info(f"[POST-RERANK_PAYLOAD] rank={rank} col={col} id={pid} score={score}\n{pretty}")
-    #---------------------------------------------------------------------
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
