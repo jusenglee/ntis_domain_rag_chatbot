@@ -2374,9 +2374,39 @@ def _run_rag_with_vectors(
 
     # fallback policy
     fallback_chat = False
+    fallback_reason = None
+
     if not reranked:
         fallback_chat = True
-        timings["fallback_reason"] = "no_reranked"
+        fallback_reason = "no_reranked"
+    else:
+        min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
+        if min_reranked and len(reranked) < min_reranked:
+            fallback_chat = True
+            fallback_reason = "insufficient_hits"
+
+        min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
+        min_final_max = float(os.getenv("RAG_FALLBACK_MIN_FINAL_MAX", "0"))
+        score_topn = max(1, int(os.getenv("RAG_FALLBACK_SCORE_TOPN", "5")))
+        if (min_final_avg > 0 or min_final_max > 0) and not fallback_chat:
+            score_vals: List[float] = []
+            for p in reranked[:score_topn]:
+                pl = getattr(p, "payload", None) or {}
+                try:
+                    score_vals.append(float(pl.get("_final_total")))
+                except Exception:
+                    continue
+            if score_vals:
+                score_avg = sum(score_vals) / max(1, len(score_vals))
+                score_max = max(score_vals)
+                timings["final_score_avg"] = float(score_avg)
+                timings["final_score_max"] = float(score_max)
+                if (min_final_avg > 0 and score_avg < min_final_avg) or (min_final_max > 0 and score_max < min_final_max):
+                    fallback_chat = True
+                    fallback_reason = "low_score"
+
+    if fallback_chat and fallback_reason:
+        timings["fallback_reason"] = fallback_reason
 
     timings["fallback_chat"] = 1.0 if fallback_chat else 0.0
 
@@ -2389,7 +2419,18 @@ def _run_rag_with_vectors(
     # build context
     t0 = time.time()
     if fallback_chat:
-        context, refs = "", []
+        allow_fallback_summary = str(os.getenv("RAG_FALLBACK_SUMMARY_CONTEXT", "0")).strip().lower() in ("1", "true", "yes", "y")
+        fallback_summary_max_items = max(1, int(os.getenv("RAG_FALLBACK_SUMMARY_MAX_ITEMS", "3")))
+        if allow_fallback_summary and reranked:
+            max_items = min(fallback_summary_max_items, ctx_hard_limit)
+            reranked_for_ctx = reranked[: max(1, max_items)]
+            if action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org"):
+                context, refs = build_context_list_light(reranked_for_ctx, kind=base_route, max_items=max_items, query_text=q)
+            else:
+                context, refs = build_context_mixed(reranked_for_ctx, max_items=max_items, query_text=q)
+            timings["fallback_summary_context"] = 1.0
+        else:
+            context, refs = "", []
     else:
         max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
         reranked_for_ctx = reranked[: max(1, max_items)]
@@ -2407,6 +2448,7 @@ def _run_rag_with_vectors(
         refs=len(refs or []),
         max_items=int(min(int(preset.max_ctx_items), ctx_hard_limit)),
         fallback_chat=fallback_chat,
+        fallback_reason=timings.get("fallback_reason"),
     )
 
     # merged raw hits (for trace)
