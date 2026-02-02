@@ -238,12 +238,16 @@ def _build_hybrid_query_model(
 
 
 def _get_fusion_rrf() -> Any:
-    fusion_cls = getattr(models, "Fusion", None)
-    if fusion_cls is None:
+    fusion_enum = getattr(models, "Fusion", None)
+    fusion_query_cls = getattr(models, "FusionQuery", None)
+    if fusion_enum is None or fusion_query_cls is None:
         return None
-    for attr in ("RRF", "rrf"):
-        if hasattr(fusion_cls, attr):
-            return getattr(fusion_cls, attr)
+
+    # Fusion.RRF / Fusion.rrf 둘 다 방어
+    if hasattr(fusion_enum, "RRF"):
+        return fusion_query_cls(fusion=fusion_enum.RRF)
+    if hasattr(fusion_enum, "rrf"):
+        return fusion_query_cls(fusion=getattr(fusion_enum, "rrf"))
     return None
 
 
@@ -367,11 +371,16 @@ def _qdrant_hybrid_query_once(
         lexical_fields_eff,
     )
 
+    fusion_query = _get_fusion_rrf()
+    if fusion_query is None:
+        return None
+
     query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
     try:
         res = client.query_points(
             collection_name=collection_name,
-            query=query_model,
+            prefetch=prefetch,  # ✅ 여기!
+            query=fusion_query, # ✅ 여기!
             limit=int(max(int(top_k_dense), int(top_k_lexical))),
             with_payload=with_payload,
             with_vectors=False,

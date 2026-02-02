@@ -625,6 +625,7 @@ class CustomRAGRetriever(BaseModel):
                 score = 0.0
 
             rag_data = {
+                "title": hit_data.get("title1") or hit_data.get("title_text"),
                 "source_index" : idx,
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
@@ -632,7 +633,8 @@ class CustomRAGRetriever(BaseModel):
                 "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
 
-            documents.append(rag_data)
+            if hit_data.get("tag") is not None:
+                documents.append(rag_data)
 
         return documents
 
@@ -691,9 +693,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         log_section("RAG SEARCH",
                     f"coq: {state.conversation_id}{state.question}\n"
                     f"Query: {query}\n"
-                    f"Found: {len(docs)} docs\n"
-                    f"{'─'*40}\n" + "\n".join(doc_previews))
-
+                    f"Found: {len(docs)} docs\n")
         return {"context": docs}
 
     except Exception as e:
@@ -721,52 +721,47 @@ async def load_system_prompt(path: Path) -> str:
         return await f.read()
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    """공통 Refined Answer 생성 로직"""
-
     llm = TritonChatModel(model_name=model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    qa = state.question_analysis
+    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
+    docs_for_ctx = state.context or state.prev_context or []
+    is_detail = False
 
-    context_text = None
-
-    if qa.question_type == QuestionType.FOLLOW_UP:
-        if len(qa.related_docs) > 0:
+    # ✅ 2) FOLLOW_UP이면 필요한 것만 좁히고(detail로)
+    if qa and qa.question_type == QuestionType.FOLLOW_UP:
+        is_detail = True
+        if qa.related_docs:
             related_context = [
                 state.prev_context[i - 1]
                 for i in qa.related_docs
                 if 1 <= i <= len(state.prev_context)
             ]
-            context_text = refine_documents_rule_based(related_context, True)
-        else:
-            # fallback: 전체 context 사용
-            related_context = state.context
-            context_text = refine_documents_rule_based(related_context)
+            docs_for_ctx = related_context or docs_for_ctx
+
+    context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
     human_prompt = (
-        f"[제공된 정보]\n{context_text or '없음'}\n\n"
-        f"[질문 요약]\n{qa.history_summary}\n\n"
+        f"[제공된 정보]\n{context_text}\n\n"
+        f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_prompt)
-    ]
-
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     response = await llm.ainvoke(messages)
     final_answer = response.content.replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
-                f"Level: {ks.requires_new_knowledge}\n"
+                f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
+                f"ctx_chars={len(context_text)}\n"
                 f"{final_answer[:100]}")
+    return {final_field: final_answer}
 
-    return { final_field : final_answer }
 
 # --- Node 8: Direct Answer (Rule-based) ---
 async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
@@ -1288,6 +1283,11 @@ async def query_stream(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
+    inputs = {
+        "conversation_id": conversation_id,
+        "messages": [HumanMessage(content=question)]
+    }
+
     graph = app.state.graph
 
     async def event_generator():
@@ -1317,7 +1317,6 @@ async def query_stream(payload: QueryRequest):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-
                 # Answer 스트리밍 - GPT
                 if kind == "on_chat_model_stream" and node == "generate_answer_gpt":
                     chunk = data.get("chunk")

@@ -1201,7 +1201,6 @@ def _hydrate_points_payload(
 
     def _set(p, k, v):
         setattr(p, k, v)
-
     # collection별로 묶어서 retrieve 호출 수를 줄임
     buckets = {}
     for p in points:
@@ -1237,7 +1236,7 @@ def _hydrate_points_payload(
                 if rid is None:
                     continue
                 rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-
+                aaaa=r.get("payload")
             # payload를 "그대로" 덮어씀 (내부 메타 유지 X)
             for p in chunk:
                 pid = _get(p, "id", None)
@@ -1246,6 +1245,19 @@ def _hydrate_points_payload(
                 key = str(pid)
                 if key in rec_payload:
                     _set(p, "payload", rec_payload[key])
+
+            # ✅✅✅ 여기서 “전체 payload pretty” 로그 (chunk 단위)
+            for p in chunk:
+                pl = _get(p, "payload", {}) or {}
+                pid = _get(p, "id", None)
+
+                # 보기 좋게 JSON pretty print
+                try:
+                    pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception:
+                    pretty = str(pl)
+
+                logger.info(f"[PAYLOAD] col={collection_name} id={pid}\n{pretty}")
 
 
 def _run_rag_with_vectors(
@@ -1807,12 +1819,12 @@ def _run_rag_with_vectors(
         out: Dict[str, _PrecomputedEmbedding] = {}
         try:
             if "e5i_qa" in vector_names:
-                v = emb_a.get_query_embedding(qtext) if hasattr(emb_a, "get_query_embedding") else emb_a.get_text_embedding(qtext)
+                v = resources.embed_e5i.get_query_embedding(qtext) if hasattr(resources.embed_e5i, "get_query_embedding") else resources.embed_e5i.get_text_embedding(qtext)
                 if hasattr(v, "tolist"):
                     v = v.tolist()
                 out["e5i_qa"] = _PrecomputedEmbedding(list(v))
             if "e5_qa" in vector_names:
-                v = emb_b.get_query_embedding(qtext) if hasattr(emb_b, "get_query_embedding") else emb_b.get_text_embedding(qtext)
+                v = resources.embed_e5.get_query_embedding(qtext) if hasattr(resources.embed_e5, "get_query_embedding") else resources.embed_e5.get_text_embedding(qtext)
                 if hasattr(v, "tolist"):
                     v = v.tolist()
                 out["e5_qa"] = _PrecomputedEmbedding(list(v))
@@ -2446,6 +2458,32 @@ def _run_rag_with_vectors(
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
     )
+
+    # ✅ 검색-리랭크 직후 payload 전체 덤프 (hydrate 전)-----------------
+    dump_n = int(os.getenv("RAG_DEBUG_DUMP_N", "20"))  # 너무 크면 로그 폭발 방지
+    logger.info(
+        f"[POST-RERANK] n={len(reranked)} dump_top={min(len(reranked), dump_n)} "
+        f"mode={plan.mode} base_route={base_route}"
+    )
+
+    for rank, p in enumerate(reranked[:dump_n], start=1):
+        pl = getattr(p, "payload", {}) or {}
+        pid = getattr(p, "id", None)
+        score = getattr(p, "score", None)
+
+        col = None
+        if isinstance(pl, dict):
+            col = pl.get("_collection")
+        if not col:
+            col = getattr(p, "_collection", None)
+
+        try:
+            pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
+        except Exception:
+            pretty = str(pl)
+
+        logger.info(f"[POST-RERANK_PAYLOAD] rank={rank} col={col} id={pid} score={score}\n{pretty}")
+    #---------------------------------------------------------------------
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
@@ -2493,6 +2531,7 @@ def _run_rag_with_vectors(
 
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
     if not fallback_chat:
+
         max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
         reranked_for_hydrate = reranked[: max(1, max_items)]
         t0 = time.time()
