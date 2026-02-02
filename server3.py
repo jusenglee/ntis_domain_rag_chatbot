@@ -844,6 +844,16 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     def _infer_output_type() -> str:
         question_text = (state.messages[-1].content or "").strip().lower()
+        if any(token in question_text for token in ("표", "테이블", "table")):
+            return "table"
+        if any(token in question_text for token in ("json", "스키마", "키값", "키-값")):
+            return "json"
+        if any(token in question_text for token in ("비교", "대조", "차이", "vs", "versus")):
+            return "compare"
+        if any(token in question_text for token in ("타임라인", "연혁", "연도별", "기간별")):
+            return "timeline"
+        if any(token in question_text for token in ("faq", "질문답변", "qna")):
+            return "faq"
         if qa and qa.question_type == QuestionType.FOLLOW_UP:
             return "detail"
         if qa and qa.mode and qa.mode.lower() == "lookup":
@@ -880,7 +890,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     max_items = None
     if output_type == "detail":
         max_items = 1
-    elif output_type == "list":
+    elif output_type in ("list", "table", "compare", "timeline"):
         max_items = min(5, len(docs_for_ctx))
 
     context_text = (
@@ -901,6 +911,11 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         "list": "요청한 항목을 제목 중심의 간단 목록으로 답변하세요. 항목당 1줄, 최대 5개.",
         "detail": "하나의 항목만 상세히 답변하세요. 핵심 요약과 주요 메타 정보를 bullet로 정리하세요.",
         "relation": "관계 중심으로 간단한 목록 또는 표 형태로 답변하세요.",
+        "table": "표 형태로 요약하세요. 열은 제목/기관/연도/ID 중심으로 구성하세요.",
+        "json": "JSON 배열로 답변하세요. 각 항목은 제목/기관/연도/ID 키를 포함하세요.",
+        "compare": "비교 요약 형식으로 답변하세요. 공통점/차이점을 bullet로 정리하세요.",
+        "timeline": "연도 순 타임라인으로 요약하세요. 연도별 핵심 이벤트만 간단히 나열하세요.",
+        "faq": "질문-답변 형식으로 3~5개 이내로 정리하세요.",
         "summary": "핵심 요약 중심으로 답변하세요.",
     }
 
@@ -1295,7 +1310,7 @@ def refine_documents_rule_based(
         source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
-        if output_type == "list":
+        if output_type in ("list", "table", "json", "compare", "timeline"):
             refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=list_meta_keys)
         else:
             refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
@@ -1304,7 +1319,7 @@ def refine_documents_rule_based(
             refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
 
         researcher_block = ""
-        if output_type not in ("list", "stats"):
+        if output_type not in ("list", "stats", "table", "json"):
             researcher_lines = RagMapper.get_researcher_info(mapped_doc)
             if researcher_lines:
                 researcher_block = (
