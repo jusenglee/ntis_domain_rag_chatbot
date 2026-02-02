@@ -728,6 +728,26 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
+    def _infer_output_type() -> str:
+        question_text = (state.messages[-1].content or "").strip().lower()
+        if qa and qa.question_type == QuestionType.FOLLOW_UP:
+            return "detail"
+        if qa and qa.mode and qa.mode.lower() == "lookup":
+            return "detail"
+        if qa and qa.ids_map and any(qa.ids_map.values()):
+            return "detail"
+        if any(token in question_text for token in ("상세", "자세", "자세히", "세부", "스펙")):
+            return "detail"
+        if any(token in question_text for token in ("목록", "리스트", "전체", "나열")):
+            return "list"
+        if qa and qa.mode and qa.mode.lower() == "search":
+            return "list"
+        if qa and qa.relation:
+            return "relation"
+        return "summary"
+
+    output_type = _infer_output_type()
+
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
@@ -743,13 +763,36 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             ]
             docs_for_ctx = related_context or docs_for_ctx
 
-    context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
+    max_items = None
+    if output_type == "detail":
+        max_items = 1
+    elif output_type == "list":
+        max_items = min(5, len(docs_for_ctx))
+
+    context_text = (
+        refine_documents_rule_based(
+            docs_for_ctx,
+            is_detail,
+            output_type=output_type,
+            max_items=max_items,
+        )
+        if docs_for_ctx
+        else "없음"
+    )
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
+    output_instructions = {
+        "list": "요청한 항목을 제목 중심의 간단 목록으로 답변하세요. 항목당 1줄, 최대 5개.",
+        "detail": "하나의 항목만 상세히 답변하세요. 핵심 요약과 주요 메타 정보를 bullet로 정리하세요.",
+        "relation": "관계 중심으로 간단한 목록 또는 표 형태로 답변하세요.",
+        "summary": "핵심 요약 중심으로 답변하세요.",
+    }
+
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
+        f"[출력 형식]\n{output_instructions.get(output_type, output_instructions['summary'])}\n\n"
         f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
@@ -1101,26 +1144,59 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
+def refine_documents_rule_based(
+        docs: List[Document],
+        is_detail: bool = False,
+        *,
+        output_type: Optional[str] = None,
+        max_items: Optional[int] = None,
+) -> str:
     context_chunks: List[str] = []
+    output_type = (output_type or "").strip().lower()
+    detail_mode = is_detail or output_type == "detail"
 
-    for doc in docs:
+    list_meta_keys = [
+        "title",
+        "kor_pjt_nm",
+        "eng_pjt_nm",
+        "pjt_id",
+        "pjt_no",
+        "org_nm",
+        "pjt_prfrm_org_nm",
+        "stan_yr",
+        "year",
+        "tag",
+        "dt1",
+        "dt2",
+        "doi",
+        "issn",
+        "patent_reg_no",
+        "rst_id",
+    ]
+
+    items = docs[: max_items] if max_items else docs
+    for doc in items:
         mapped_doc = RagMapper.map(doc)
 
         source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
-        refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
-        if is_detail:
+        if output_type == "list":
+            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=list_meta_keys)
+        else:
+            refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
+
+        if detail_mode:
             refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
 
-        researcher_lines = RagMapper.get_researcher_info(mapped_doc)
         researcher_block = ""
-        if researcher_lines:
-            researcher_block = (
-                    "\n- 연구원 목록:\n"
-                    + "\n".join(researcher_lines)
-            )
+        if output_type not in ("list", "stats"):
+            researcher_lines = RagMapper.get_researcher_info(mapped_doc)
+            if researcher_lines:
+                researcher_block = (
+                        "\n- 연구원 목록:\n"
+                        + "\n".join(researcher_lines)
+                )
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
@@ -1131,9 +1207,24 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
     return "\n\n".join(context_chunks)
 
 
-def format_metadata(metadata: Dict[str, Any]) -> str:
+def format_metadata(metadata: Dict[str, Any], allowed_keys: Optional[List[str]] = None) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
+    allowed_set = set(allowed_keys or [])
+
+    if allowed_keys:
+        for key in allowed_keys:
+            if key not in metadata:
+                continue
+            value = metadata.get(key)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                value = ", ".join(map(str, value))
+            elif isinstance(value, dict):
+                value = json.dumps(value, ensure_ascii=False)
+            lines.append(f"- {key}: {value}")
+        return "\n".join(lines) if lines else ""
 
     for key, value in metadata.items():
         if value is None:
