@@ -675,6 +675,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             hint=hint,
             intent_payload=state.intent_payload,
         )
+        # NOTE: hint.limit=search_num is used by rag_pipeline hydrate upper bound,
+        # so top_k > preset.max_ctx_items still gets fully hydrated payload.
 
         rag_tool = Tool(
             name="RAG_Search",
