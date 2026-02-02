@@ -154,9 +154,14 @@ class QuestionAnalysis(BaseModel):
     relation: str | None = Field(default=None, description="project_perf | people_project 등")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
-    output_type: Optional[
-        Literal["list", "detail", "relation", "summary", "table", "json", "compare", "timeline", "faq"]
-    ] = Field(default=None, description="응답 출력 형식")
+    output_type: str | None = Field(
+        default=None,
+        description="응답 출력 타입 (list/detail/relation/summary/table/json/compare/timeline/faq)"
+    )
+    output_fields: list[str] = Field(
+        default_factory=list,
+        description="출력 타입에 맞춰 포함해야 할 필드 키 목록",
+    )
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -177,7 +182,8 @@ class SearchHint(BaseModel):
     relation: str | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
-    output_type: Optional[str] = None
+    output_type: str | None = None
+    output_fields: list[str] = Field(default_factory=list)
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -545,24 +551,25 @@ async def _run_question_analysis(
 
         "====================\n"
         "[출력 형식]\n"
-        "====================\n"
-        "아래 키를 반드시 모두 포함한 JSON 객체만 출력:\n"
-        "1) category: 배열 (PROJECT|PERFORMANCE|RESEARCHER|QNA|ETC)\n"
-        "2) question_type: (DEFAULT|FOLLOW_UP)\n"
-        "3) related_docs: int 배열\n"
-        "4) researchers: 객체 배열 (각 요소는 name, affiliation, researcher_id 키를 가짐)\n"
-        "5) organizations: 객체 배열 (각 요소는 name, org_id 키를 가짐)\n"
-        "6) mode: SEARCH | LOOKUP | JOIN\n"
-        "7) head: project | perf | people | org | support\n"
-        "8) relation: Relation enum 중 하나 또는 null\n"
-        "9) ids_map: dict\n"
-        "10) filters: dict\n"
-        "11) output_type: list|detail|relation|summary|table|json|compare|timeline|faq\n"
-        f"12) limit: int (<= {MAX_TOP_K_SIZE})\n"
-        "13) history_summary: string\n"
-        "14) retrieval_query: string\n"
-        "15) confidence: float (0.0~1.0)\n\n"
-    
+        "1. category: ContentCategory 배열\n"
+        "2. question_type: QuestionType\n"
+        "3. related_docs: QuestionType.FOLLOW_UP 인 경우 관련된 출처의 번호 배열 \n"
+        "4. researchers: 질문에서 특정 연구자가 식별되는 경우만 포함\n"
+        "4-1. organizations: 질문에서 특정 기관이 식별되는 경우만 포함\n"
+        "4-2. mode: SEARCH | LOOKUP | JOIN\n"
+        "4-3. head: project | perf | people | org | support\n"
+        "4-4. relation: project_perf | people_project | org_project | perf_project 등 (없으면 null)\n"
+        "4-5. ids_map: [pjt_id:[], doi:[], issn:[], rst_id:[], patent_reg_no:[], ...]\n"
+        "4-6. filters: [year_from, year_to, org_name, researcher_name, tag_filters, ...]\n"
+        "4-7. output_type: list | detail | relation | summary | table | json | compare | timeline | faq\n"
+        "4-8. output_fields: 출력에 포함해야 할 메타 필드 키 배열 (필요 없으면 빈 배열)\n"
+        f"5. limit: 검색에 사용할 문서 수 (최대 {MAX_TOP_K_SIZE})\n"
+        "6. history_summary: 대화 이력 기반 질문 핵심 요약\n"
+        "7. retrieval_query:\n"
+        "   - 벡터 검색 최적화용 짧은 쿼리\n"
+        "   - 핵심 개념 5개 이내\n"
+        "   - 최대 120자\n"
+        "8. confidence: 분석 신뢰도 (0.0~1.0)\n\n"
         "{format_instructions}"
     )
 
@@ -599,6 +606,7 @@ async def _run_question_analysis(
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
             f"OutputType: {result.output_type}\n"
+            f"OutputFields: {result.output_fields}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -619,7 +627,8 @@ async def _run_question_analysis(
             relation=None,
             ids_map={},
             filters={},
-            output_type=_infer_output_type_from_question(question, None),
+            output_type=None,
+            output_fields=[],
             limit=20,
             history_summary=question,
             retrieval_query=question[:120],
@@ -924,6 +933,37 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         qa,
     )
 
+    def _infer_output_type() -> str:
+        question_text = (state.messages[-1].content or "").strip().lower()
+        if any(token in question_text for token in ("표", "테이블", "table")):
+            return "table"
+        if any(token in question_text for token in ("json", "스키마", "키값", "키-값")):
+            return "json"
+        if any(token in question_text for token in ("비교", "대조", "차이", "vs", "versus")):
+            return "compare"
+        if any(token in question_text for token in ("타임라인", "연혁", "연도별", "기간별")):
+            return "timeline"
+        if any(token in question_text for token in ("faq", "질문답변", "qna")):
+            return "faq"
+        if qa and qa.question_type == QuestionType.FOLLOW_UP:
+            return "detail"
+        if qa and qa.mode and qa.mode.lower() == "lookup":
+            return "detail"
+        if qa and qa.ids_map and any(qa.ids_map.values()):
+            return "detail"
+        if any(token in question_text for token in ("상세", "자세", "자세히", "세부", "스펙")):
+            return "detail"
+        if any(token in question_text for token in ("목록", "리스트", "전체", "나열")):
+            return "list"
+        if qa and qa.mode and qa.mode.lower() == "search":
+            return "list"
+        if qa and qa.relation:
+            return "relation"
+        return "summary"
+
+    output_type = (qa.output_type if qa and qa.output_type else _infer_output_type())
+    output_fields = list(getattr(qa, "output_fields", []) or [])
+
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
@@ -951,6 +991,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             is_detail,
             output_type=output_type,
             max_items=max_items,
+            output_fields=output_fields,
         )
         if docs_for_ctx
         else "없음"
@@ -971,9 +1012,14 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         "summary": "핵심 요약 중심으로 답변하세요.",
     }
 
+    output_fields_line = ""
+    if output_fields:
+        output_fields_line = f"[출력 필드]\n{', '.join(output_fields)}\n\n"
+
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
         f"[출력 형식]\n{output_instructions.get(output_type, output_instructions['summary'])}\n\n"
+        f"{output_fields_line}"
         f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
@@ -1334,6 +1380,7 @@ def refine_documents_rule_based(
         *,
         output_type: Optional[str] = None,
         max_items: Optional[int] = None,
+        output_fields: Optional[List[str]] = None,
 ) -> str:
     context_chunks: List[str] = []
     output_type = (output_type or "").strip().lower()
@@ -1357,6 +1404,8 @@ def refine_documents_rule_based(
         "patent_reg_no",
         "rst_id",
     ]
+    preferred_fields = [f for f in (output_fields or []) if str(f).strip()]
+    allowed_keys = preferred_fields or list_meta_keys
 
     items = docs[: max_items] if max_items else docs
     for doc in items:
@@ -1366,12 +1415,20 @@ def refine_documents_rule_based(
         title = mapped_doc.get("title", "제목 없음")
 
         if output_type in ("list", "table", "json", "compare", "timeline"):
-            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=list_meta_keys)
+            refined_text = format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=allowed_keys)
         else:
-            refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
+            refined_text = (
+                format_metadata(mapped_doc.get("meta_basic", {}), allowed_keys=preferred_fields)
+                if preferred_fields
+                else format_metadata(mapped_doc.get("meta_basic", {}))
+            )
 
         if detail_mode:
-            refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
+            refined_text += (
+                format_metadata(mapped_doc.get("meta_detail", {}), allowed_keys=preferred_fields)
+                if preferred_fields
+                else format_metadata(mapped_doc.get("meta_detail", {}))
+            )
 
         researcher_block = ""
         if output_type not in ("list", "stats", "table", "json"):
