@@ -80,6 +80,49 @@ templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
 redis_client: Optional[redis.Redis] = None
+MAX_HISTORY_TURNS = 10
+HISTORY_PREVIEW_LIMIT = 100
+
+def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    if limit > 0 and len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+def _safe_json_loads(raw: Optional[str]) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
+        return None
+
+def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
+    serialized: List[Dict[str, str]] = []
+    for msg in messages:
+        role = "human" if isinstance(msg, HumanMessage) else "ai"
+        serialized.append({"type": role, "content": msg.content})
+    return serialized
+
+def _deserialize_history(payload: Any) -> List[BaseMessage]:
+    if not isinstance(payload, list):
+        return []
+    history: List[BaseMessage] = []
+    for msg in payload:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("type")
+        content = msg.get("content")
+        if not content:
+            continue
+        if role == "human":
+            history.append(HumanMessage(content=content))
+        else:
+            history.append(AIMessage(content=content))
+    return history
 
 class ContentCategory(str, Enum):
 
@@ -740,13 +783,16 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     ks = state.knowledge_sufficiency
+    strategy = ks.requires_new_knowledge if ks else "unknown"
+    gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
+    gpt_preview = _truncate_text(state.answer_gpt, HISTORY_PREVIEW_LIMIT)
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
                 f"coq: {state.conversation_id}{state.question}\n"
-                f"Strategy: {ks.requires_new_knowledge}\n"
-                f"Gemma: {state.answer_gemma[:100]}...\n"
-                f"GPT: {state.answer_gpt[:100]}...")
+                f"Strategy: {strategy}\n"
+                f"Gemma: {gemma_preview}\n"
+                f"GPT: {gpt_preview}")
 
     return {
         "messages": [AIMessage(content=state.answer_gpt)],
@@ -764,26 +810,26 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     new_turn = state.messages[-2:]  # [Human, AI]
     full_history = state.chat_history + new_turn
-    trimmed_history = full_history[-10:]
+    trimmed_history = full_history[-MAX_HISTORY_TURNS:]
 
-    serialized_hist = [
-        {"type": "human" if isinstance(msg, HumanMessage) else "ai", "content": msg.content}
-        for msg in trimmed_history
-    ]
+    serialized_hist = _serialize_history(trimmed_history)
 
     if redis_client:
-        await redis_client.set(
-            f"conversation:{cid}:history",
-            json.dumps(serialized_hist, ensure_ascii=False),
-            ex=REDIS_TTL
-        )
-
-        if state.context:
+        try:
             await redis_client.set(
-                f"conversation:{cid}:last_context",
-                json.dumps(state.context, ensure_ascii=False),
-                ex=REDIS_TTL
+                f"conversation:{cid}:history",
+                json.dumps(serialized_hist, ensure_ascii=False),
+                ex=REDIS_TTL,
             )
+
+            if state.context:
+                await redis_client.set(
+                    f"conversation:{cid}:last_context",
+                    json.dumps(state.context, ensure_ascii=False),
+                    ex=REDIS_TTL,
+                )
+        except Exception as e:
+            logger.error("Redis Save Error: %s", e, exc_info=True)
 
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
@@ -810,17 +856,15 @@ async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessa
     if redis_client:
         try:
             raw_hist = await redis_client.get(f"conversation:{conversation_id}:history")
-            if raw_hist:
-                hist_list = json.loads(raw_hist)
-                for msg in hist_list:
-                    role = HumanMessage if msg["type"] == "human" else AIMessage
-                    loaded_history.append(role(content=msg["content"]))
+            hist_list = _safe_json_loads(raw_hist)
+            loaded_history = _deserialize_history(hist_list)
 
             raw_ctx = await redis_client.get(f"conversation:{conversation_id}:last_context")
-            if raw_ctx:
-                ctx_list = json.loads(raw_ctx)
+            ctx_payload = _safe_json_loads(raw_ctx)
+            if isinstance(ctx_payload, list):
+                ctx_list = ctx_payload
         except Exception as e:
-            logger.error(f"Redis Load Error: {e}")
+            logger.error("Redis Load Error: %s", e, exc_info=True)
 
     return loaded_history, ctx_list
 
@@ -1206,8 +1250,13 @@ async def lifespan(app: FastAPI):
     build_rag_objects()
 
     # Redis 연결
-    redis_client = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-    logger.info(f"✅ Redis connected: {REDIS_URL}")
+    try:
+        redis_client = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+        await redis_client.ping()
+        logger.info("✅ Redis connected: %s", REDIS_URL)
+    except Exception as e:
+        redis_client = None
+        logger.error("❌ Redis connection failed: %s", e, exc_info=True)
 
     try:
         workflow = build_advanced_workflow().compile()
@@ -1375,8 +1424,8 @@ async def health_check():
         try:
             await redis_client.ping()
             redis_ok = True
-        except:
-            pass
+        except Exception:
+            redis_ok = False
 
     return {
         "status": "healthy",
