@@ -89,6 +89,10 @@ def _build_header(payload: Dict[str, Any], include_collection_score: bool) -> Di
     return header
 
 
+def _normalize_allowlist(output_fields: Optional[Iterable[str]]) -> List[str]:
+    return [str(k).strip() for k in (output_fields or []) if str(k).strip()]
+
+
 def _pick_fields(data: Any, allowlist: Iterable[str]) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {}
@@ -106,6 +110,20 @@ def _append_basic_fields(result: Dict[str, Any], payload: Dict[str, Any]) -> Non
     for key in ("title", "summary", "year", "pjt_id", "pjt_no"):
         if key in payload:
             result[key] = payload.get(key)
+
+
+def _apply_output_allowlist(result: Dict[str, Any], allowlist: Iterable[str]) -> Dict[str, Any]:
+    allowed = _normalize_allowlist(allowlist)
+    if not allowed:
+        return result
+    filtered = dict(result)
+    for key in ("meta_basic", "meta_detail"):
+        if isinstance(filtered.get(key), dict):
+            filtered[key] = _pick_fields(filtered[key], allowed)
+    for key in ("prtcp_mp", "prtcp_org"):
+        if isinstance(filtered.get(key), list):
+            filtered[key] = _filter_list_entries(filtered[key], allowed)
+    return filtered
 
 
 def meta_basic_view(payload: Dict[str, Any], *, include_collection_score: bool = True) -> Dict[str, Any]:
@@ -206,7 +224,7 @@ def make_payload_view(
     view_type: Optional[str],
     *,
     include_collection_score: bool = True,
-    selected_fields: Optional[Iterable[str]] = None,
+    output_fields: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     def _text_length(value: Any) -> Optional[int]:
         if isinstance(value, str):
@@ -236,38 +254,50 @@ def make_payload_view(
         if isinstance(meta_basic, dict):
             _enforce_text_range(meta_basic, "summary")
             _enforce_text_range(meta_basic, "keywords")
-        return result
+        return _apply_output_allowlist(result, output_fields)
     if view_type_normalized == "mp":
         result = mp_view(payload, include_collection_score=include_collection_score)
         allowed = {"doc_id", "tag", "title", "year", "prtcp_mp"}
-        return {key: value for key, value in result.items() if key in allowed}
+        return _apply_output_allowlist(
+            {key: value for key, value in result.items() if key in allowed},
+            output_fields,
+        )
     if view_type_normalized == "org":
         result = org_view(payload, include_collection_score=include_collection_score)
         allowed = {"doc_id", "tag", "title", "year", "prtcp_org"}
-        return {key: value for key, value in result.items() if key in allowed}
+        return _apply_output_allowlist(
+            {key: value for key, value in result.items() if key in allowed},
+            output_fields,
+        )
     if view_type_normalized == "project_detail":
-        return project_detail_view(payload, include_collection_score=include_collection_score)
+        result = project_detail_view(payload, include_collection_score=include_collection_score)
+        return _apply_output_allowlist(result, output_fields)
     if view_type_normalized == "perf_detail":
-        return perf_detail_view(payload, include_collection_score=include_collection_score)
+        result = perf_detail_view(payload, include_collection_score=include_collection_score)
+        return _apply_output_allowlist(result, output_fields)
     if view_type_normalized == "support_detail":
-        return support_detail_view(payload, include_collection_score=include_collection_score)
+        result = support_detail_view(payload, include_collection_score=include_collection_score)
+        return _apply_output_allowlist(result, output_fields)
     if view_type_normalized == "stats":
         result = stats_view(payload, include_collection_score=include_collection_score)
         allowed = {"dimension", "metrics", "top_items"}
-        return {key: value for key, value in result.items() if key in allowed}
+        return _apply_output_allowlist(
+            {key: value for key, value in result.items() if key in allowed},
+            output_fields,
+        )
     if view_type_normalized == "export":
         result = export_view(
             payload,
             include_collection_score=include_collection_score,
-            selected_fields=selected_fields,
+            selected_fields=output_fields,
         )
         for key in tuple(result.keys()):
             if key.startswith("prtcp_"):
                 result.pop(key, None)
-        if selected_fields:
-            selected_set = {str(k).strip() for k in selected_fields if str(k).strip()}
+        if output_fields:
+            selected_set = {str(k).strip() for k in output_fields if str(k).strip()}
             return {key: value for key, value in result.items() if key in selected_set}
-        return result
+        return _apply_output_allowlist(result, output_fields)
 
     result = meta_basic_view(payload, include_collection_score=include_collection_score)
     for key in ("prtcp_mp", "prtcp_org", "meta_detail"):
@@ -278,4 +308,4 @@ def make_payload_view(
     if isinstance(meta_basic, dict):
         _enforce_text_range(meta_basic, "summary")
         _enforce_text_range(meta_basic, "keywords")
-    return result
+    return _apply_output_allowlist(result, output_fields)
