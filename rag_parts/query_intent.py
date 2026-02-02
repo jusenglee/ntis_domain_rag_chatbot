@@ -755,6 +755,7 @@ class QueryIntent:
     wants_count: bool = False
     wants_list: bool = False
     wants_detail: bool = False
+    output_type: Optional[str] = None
     # planner meta
     categories: List[str] = field(default_factory=list)
     planner_limit: Optional[int] = None
@@ -783,6 +784,7 @@ class QueryIntent:
             "wants_count": self.wants_count,
             "wants_list": self.wants_list,
             "wants_detail": self.wants_detail,
+            "output_type": self.output_type,
             "categories": self.categories,
             "planner_limit": self.planner_limit,
             "retrieval_query": self.retrieval_query,
@@ -923,6 +925,7 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "wants_count": _get_attr(hint, "wants_count"),
         "wants_list": _get_attr(hint, "wants_list"),
         "wants_detail": _get_attr(hint, "wants_detail"),
+        "output_type": _get_attr(hint, "output_type"),
         "limit": _get_attr(hint, "limit"),
         "retrieval_query": _get_attr(hint, "retrieval_query"),
         "confidence": _get_attr(hint, "confidence"),
@@ -1260,6 +1263,9 @@ def classify_query(
     wants_count = bool(plan.get("wants_count", False))
     wants_list = bool(plan.get("wants_list", False))
     wants_detail = bool(plan.get("wants_detail", False))
+    output_type = str(plan.get("output_type") or "").strip().lower() or None
+    if output_type not in ("stats", "list", "detail", "relation", "summary"):
+        output_type = None
 
     action = str(plan.get("action") or "").strip().lower()
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
@@ -1360,6 +1366,7 @@ def classify_query(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        output_type=output_type,
         categories=categories,
         planner_limit=limit,
         retrieval_query=retrieval_query or None,
