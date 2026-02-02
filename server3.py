@@ -1195,6 +1195,8 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         return
     if question_analysis.head:
         normalized_intent.base_route = question_analysis.head
+    if question_analysis.output_type:
+        normalized_intent.output_type = question_analysis.output_type
     relation = _parse_relation_hint(question_analysis.relation)
     if relation:
         normalized_intent.relation = relation

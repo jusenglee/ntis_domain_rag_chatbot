@@ -487,6 +487,13 @@ _OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
     "stats": ("aggregation_keys",),
     "summary": ("title", "meta_basic", "summary", "content"),
     "relation": ("title", "relation", "id"),
+    "table": ("title", "org", "year", "id"),
+}
+
+_OUTPUT_TYPE_MAX_CTX_ITEMS: Dict[str, int] = {
+    "detail": 1,
+    "list": 5,
+    "table": 5,
 }
 
 
@@ -499,6 +506,12 @@ def _resolve_output_fieldset(output_type: Optional[str]) -> Tuple[str, ...]:
     ot = _normalize_output_type(output_type) or "summary"
     return _OUTPUT_TYPE_FIELDSETS.get(ot, _OUTPUT_TYPE_FIELDSETS["summary"])
 
+def _resolve_output_max_ctx_items(output_type: Optional[str]) -> Optional[int]:
+    ot = _normalize_output_type(output_type)
+    if not ot:
+        return None
+    return _OUTPUT_TYPE_MAX_CTX_ITEMS.get(ot)
+
 
 def _should_use_list_context(
     *,
@@ -507,7 +520,7 @@ def _should_use_list_context(
     output_type: Optional[str],
 ) -> bool:
     ot = _normalize_output_type(output_type)
-    if ot in ("list", "stats"):
+    if ot in ("list", "stats", "table"):
         return base_route in ("project", "perf", "people", "org")
     return action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org")
 
@@ -1732,6 +1745,7 @@ def _run_rag_with_vectors(
     hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
+    hint_output_type = _normalize_output_type(_get_attr(qa, "output_type", None))
 
     if not intent_from_payload:
         if hint_head in ("project", "perf", "people", "org", "support"):
@@ -1760,7 +1774,6 @@ def _run_rag_with_vectors(
             tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
             if tag_filters_hint:
                 it.tag_filters = tag_filters_hint
-
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
     payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
     payload_people_terms = _normalize_hint_terms(_get_attr(intent_payload, "people_terms", None))
@@ -1769,6 +1782,7 @@ def _run_rag_with_vectors(
     payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
     payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
     payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
+    payload_output_type = _normalize_output_type(_get_attr(intent_payload, "output_type", None))
 
     if payload_relation:
         it.relation = payload_relation
@@ -1784,6 +1798,10 @@ def _run_rag_with_vectors(
         it.perf_tag_filters = payload_perf_tag_filters
     if payload_project_tag_filters:
         it.project_tag_filters = payload_project_tag_filters
+    if payload_output_type:
+        it.output_type = payload_output_type
+    elif hint_output_type:
+        it.output_type = hint_output_type
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -1801,6 +1819,10 @@ def _run_rag_with_vectors(
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
         preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
+
+    output_ctx_limit = _resolve_output_max_ctx_items(getattr(it, "output_type", None))
+    if output_ctx_limit is not None:
+        preset.max_ctx_items = min(int(preset.max_ctx_items), int(output_ctx_limit))
 
     sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
     sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
