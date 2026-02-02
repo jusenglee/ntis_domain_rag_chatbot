@@ -974,6 +974,7 @@ def _run_rag_with_vectors(
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, float] = {}
+    domain_hint: Optional[str] = None
 
     q = normalize_query(query)
     if not q:
@@ -2209,6 +2210,7 @@ def run_rag_once(
     hint: Any = None,
     intent_payload: Any = None,
 ) -> RagResult:
+    domain_hint: Optional[str] = None
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
