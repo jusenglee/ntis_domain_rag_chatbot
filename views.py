@@ -199,6 +199,8 @@ def make_payload_view(
     include_collection_score: bool = True,
 ) -> Dict[str, Any]:
     view_type_normalized = (view_type or "").strip().lower()
+    if view_type_normalized.endswith("_view"):
+        view_type_normalized = view_type_normalized[:-5]
 
     if view_type_normalized == "meta_basic":
         return meta_basic_view(payload, include_collection_score=include_collection_score)
