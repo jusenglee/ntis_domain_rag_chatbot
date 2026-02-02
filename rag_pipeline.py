@@ -2499,28 +2499,6 @@ def _run_rag_with_vectors(
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
     )
-
-    # ✅ 검색-리랭크 직후 payload 전체 덤프 (hydrate 전)-----------------
-    dump_n = int(os.getenv("RAG_DEBUG_DUMP_N", "20"))  # 너무 크면 로그 폭발 방지
-    logger.info(
-        f"[POST-RERANK] n={len(reranked)} dump_top={min(len(reranked), dump_n)} "
-        f"mode={plan.mode} base_route={base_route}"
-    )
-
-    for rank, p in enumerate(reranked[:dump_n], start=1):
-        pl = getattr(p, "payload", {}) or {}
-        pid = getattr(p, "id", None)
-        score = getattr(p, "score", None)
-
-        col = _resolve_collection(p, pl)
-
-        try:
-            pretty = json.dumps(pl, ensure_ascii=False, indent=2, sort_keys=True)
-        except Exception:
-            pretty = str(pl)
-
-        logger.info(f"[POST-RERANK_PAYLOAD] rank={rank} col={col} id={pid} score={score}\n{pretty}")
-    #---------------------------------------------------------------------
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
