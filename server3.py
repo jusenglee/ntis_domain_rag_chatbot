@@ -946,7 +946,16 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         )
 
         docs = await asyncio.to_thread(rag_tool.func, query)
-        docs = [make_payload_view(doc, view_type, include_collection_score=False) for doc in docs]
+        selected_fields = list(getattr(qa, "output_fields", []) or []) if qa else None
+        docs = [
+            make_payload_view(
+                doc,
+                view_type,
+                include_collection_score=False,
+                selected_fields=selected_fields,
+            )
+            for doc in docs
+        ]
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
