@@ -146,10 +146,34 @@ def normalize_intent(
 
     org_role = (hint_org_role or getattr(intent, "org_role", None) or "").strip().lower() or None
 
+    base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
+    action = str(getattr(intent, "action", "") or "").strip().lower()
+    relation = getattr(intent, "relation", None)
+    valid_routes = {"support", "project", "perf", "people", "org"}
+    valid_actions = {
+        "support",
+        "id_exact",
+        "id_fuzzy",
+        "list",
+        "stats",
+        "topic",
+        "detail",
+        "content",
+        "relation",
+    }
+    if base_route not in valid_routes or action not in valid_actions:
+        fallback = classify_query_compat(query, keywords, domain_hint=base_route or None, hint=None)
+        if base_route not in valid_routes:
+            base_route = fallback.base_route
+        if action not in valid_actions:
+            action = fallback.action
+        if relation is None:
+            relation = fallback.relation
+
     return NormalizedIntent(
-        action=str(getattr(intent, "action", "") or "").strip().lower(),
-        base_route=str(getattr(intent, "base_route", "") or "").strip().lower(),
-        relation=getattr(intent, "relation", None),
+        action=action,
+        base_route=base_route,
+        relation=relation,
         is_id_query=bool(getattr(intent, "is_id_query", False)),
         years=_normalize_terms(getattr(intent, "years", None) or []),
         people_terms=people_terms,
