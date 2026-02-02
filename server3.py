@@ -477,12 +477,18 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
     if qa.question_type == QuestionType.FOLLOW_UP:
         if len(qa.related_docs) > 0:
+            related_doc_indexes = set(qa.related_docs)
             related_context = [
-                state.prev_context[i - 1]
-                for i in qa.related_docs
-                if 1 <= i <= len(state.prev_context)
+                doc
+                for doc in state.prev_context
+                if doc.get("source_index") in related_doc_indexes
             ]
-            prev_context_str = refine_documents_rule_based(related_context, True)
+            if related_context:
+                prev_context_str = refine_documents_rule_based(related_context, True)
+            else:
+                # fallback: 전체 prev_context 사용
+                related_context = state.prev_context
+                prev_context_str = refine_documents_rule_based(related_context)
         else:
             # fallback: 전체 prev_context 사용
             related_context = state.prev_context
