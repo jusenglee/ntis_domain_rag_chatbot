@@ -167,7 +167,7 @@ LLM_PLANNER_MAX_TOKENS = int(os.getenv("QUERY_INTENT_LLM_MAX_TOKENS", "1024"))
 LLM_PLANNER_MAX_LIMIT = int(os.getenv("QUERY_INTENT_MAX_LIMIT", "20"))
 LLM_PLANNER_MAX_RETRIEVAL_QUERY = int(os.getenv("QUERY_INTENT_MAX_RETRIEVAL_QUERY", "120"))
 LLM_PLANNER_MIN_CONF = float(os.getenv("QUERY_INTENT_MIN_CONF", "0.4"))
-LLM_PLANNER_ENABLED = os.getenv("QUERY_INTENT_USE_LLM", "1").strip().lower() not in ("0", "false", "no")
+LLM_PLANNER_ENABLED = False
 
 CHEAP_GREETING_CUES = [
     "안녕", "안녕하세요", "hello", "hi", "반가워", "문의드립니다", "질문이요",

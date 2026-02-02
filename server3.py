@@ -796,12 +796,115 @@ async def build_intent_payload(question: str, conversation_id: str) -> Dict[str,
         hint_org_role=hint_org_role,
     )
 
+    _apply_question_analysis_to_intent(normalized_intent, question_analysis)
+
     return {
         "question_analysis": question_analysis,
         "query_intent": raw_intent,
         "normalized_intent": normalized_intent,
         "keywords": kws,
     }
+
+
+def _parse_relation_hint(relation: Any) -> Optional[tuple[str, str]]:
+    if not relation:
+        return None
+    if isinstance(relation, (list, tuple)) and len(relation) == 2:
+        left, right = relation
+        return (str(left).strip().lower(), str(right).strip().lower())
+    text = str(relation).strip().lower()
+    if not text:
+        return None
+    if "_" in text or ">" in text:
+        text = text.replace(">", "_")
+        parts = [p.strip() for p in text.split("_") if p.strip()]
+        if len(parts) == 2:
+            return (parts[0], parts[1])
+    return None
+
+
+def _normalize_hint_terms(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _merge_ids_map(base: dict[str, list[str]], incoming: dict[str, Any]) -> dict[str, list[str]]:
+    merged = dict(base or {})
+    if not isinstance(incoming, dict):
+        return merged
+    for key, values in incoming.items():
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            values = [values]
+        norm = _normalize_hint_terms(values)
+        if not norm:
+            continue
+        merged[key] = list(dict.fromkeys(list(merged.get(key, [])) + norm))
+    return merged
+
+
+def _apply_question_analysis_to_intent(normalized_intent, question_analysis: QuestionAnalysis) -> None:
+    if not question_analysis:
+        return
+    if question_analysis.head:
+        normalized_intent.base_route = question_analysis.head
+    relation = _parse_relation_hint(question_analysis.relation)
+    if relation:
+        normalized_intent.relation = relation
+
+    normalized_intent.ids_map = _merge_ids_map(
+        getattr(normalized_intent, "ids_map", {}),
+        dict(question_analysis.ids_map or {}),
+    )
+
+    org_terms = _normalize_hint_terms(question_analysis.organizations)
+    if org_terms:
+        normalized_intent.org_terms = org_terms
+
+    people_terms = [r.name for r in (question_analysis.researchers or []) if r.name]
+    people_terms = _normalize_hint_terms(people_terms)
+    if people_terms:
+        normalized_intent.people_terms = people_terms
+
+    filters = question_analysis.filters or {}
+    if isinstance(filters, dict):
+        org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+        if org_terms_hint:
+            normalized_intent.org_terms = org_terms_hint
+        people_terms_hint = _normalize_hint_terms(
+            filters.get("researcher_name") or filters.get("people_name")
+        )
+        if people_terms_hint:
+            normalized_intent.people_terms = people_terms_hint
+        year_terms_hint = _normalize_hint_terms(
+            [filters.get("year_from"), filters.get("year_to")]
+        )
+        if year_terms_hint:
+            normalized_intent.years = year_terms_hint
+        tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
+        if tag_filters_hint:
+            normalized_intent.tag_filters = tag_filters_hint
+            if question_analysis.head == "perf":
+                normalized_intent.perf_tag_filters = tag_filters_hint
+            if question_analysis.head == "project":
+                normalized_intent.project_tag_filters = tag_filters_hint
+        org_role = filters.get("org_role")
+        if org_role:
+            normalized_intent.org_role = str(org_role).strip().lower() or None
 
 # --- Graph Construction ---
 def build_advanced_workflow():
@@ -1071,51 +1174,6 @@ async def query_debug(payload: QueryRequest):
 
     inputs = {
         "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)],
-        "intent_payload": intent_payload,
-        "question_analysis": intent_payload.get("question_analysis"),
-
-async def _run_question_analysis(
-    *,
-    question: str,
-    conversation_id: str,
-    chat_history: List[BaseMessage],
-    prev_context: List[Dict[str, Any]],
-) -> QuestionAnalysis:
-    llm = TritonChatModel(model_name="gpt_oss_0")  # GPT
-    history = chat_history[-6:]
-    prev_context_str = refine_documents_rule_based(prev_context)
-            "history": history_str or "없음",
-            "question": question
-            f"coq: {conversation_id}{question}\n"
-        return result
-        return QuestionAnalysis(
-            category=[ContentCategory.ETC],
-            question_type=QuestionType.DEFAULT,
-            related_docs=[],
-            researchers=[],
-            organizations=[],
-            mode=None,
-            head=None,
-            relation=None,
-            ids_map={},
-            filters={},
-            limit=20,
-            history_summary=question,
-            retrieval_query=question[:120],
-            confidence=0.5
-        )
-        res_map = run_rag_ab_compare(
-            query=query,
-            model_name=self.model_name,
-            hint=self.hint,
-            intent_payload=self.intent_payload,
-        )
-        from sample_data import SAMPLE_DATA
-        # docs = SAMPLE_DATA
-
-    logger.info(refine_documents_rule_based(state.context))
-
         "messages": [HumanMessage(content=question)],
         "intent_payload": intent_payload,
         "question_analysis": intent_payload.get("question_analysis"),
