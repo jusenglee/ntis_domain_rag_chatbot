@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-import json
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from .constants import (
@@ -38,9 +36,6 @@ from .constants import (
     TAG_RI_ORGSM_INFO,
     TAG_RI_ORGSM_RES,
 )
-from settings import MAX_TOKENS
-from triton_client import triton_infer
-
 logger = logging.getLogger(__name__)
 
 # -----------------------------
@@ -162,12 +157,8 @@ def _is_rare_token(tok: str) -> bool:
 # -----------------------------
 # Cue lists
 # -----------------------------
-LLM_PLANNER_MODEL = os.getenv("QUERY_INTENT_LLM_MODEL", "gpt_oss_0")
-LLM_PLANNER_MAX_TOKENS = int(os.getenv("QUERY_INTENT_LLM_MAX_TOKENS", "1024"))
-LLM_PLANNER_MAX_LIMIT = int(os.getenv("QUERY_INTENT_MAX_LIMIT", "20"))
-LLM_PLANNER_MAX_RETRIEVAL_QUERY = int(os.getenv("QUERY_INTENT_MAX_RETRIEVAL_QUERY", "120"))
-LLM_PLANNER_MIN_CONF = float(os.getenv("QUERY_INTENT_MIN_CONF", "0.4"))
-LLM_PLANNER_ENABLED = os.getenv("QUERY_INTENT_USE_LLM", "1").strip().lower() not in ("0", "false", "no")
+INTENT_MAX_LIMIT = 20
+INTENT_MAX_RETRIEVAL_QUERY = 120
 
 CHEAP_GREETING_CUES = [
     "안녕", "안녕하세요", "hello", "hi", "반가워", "문의드립니다", "질문이요",
@@ -413,17 +404,8 @@ def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
 
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
-    """질의에서 기관명 후보 추출(LLM 기반)."""
-    if not LLM_PLANNER_ENABLED:
-        return []
-    q = (q or "").strip()
-    if not q:
-        return []
-    plan = _plan_with_llm(q, list(kws or []), {}, domain_hint=None)
-    org_terms = _normalize_str_list(plan.get("org_terms") or plan.get("organizations"))
-    if not org_terms:
-        return []
-    return org_terms[:max_terms]
+    """질의에서 기관명 후보 추출(LLM 없이 서버 분석 결과를 사용)."""
+    return []
 
 def extract_org_role(q: str) -> Optional[str]:
     t = (q or "").strip().lower()
@@ -864,14 +846,6 @@ def _cheap_precheck(q: str) -> Optional[str]:
     return None
 
 
-def _extract_json(text: str) -> str:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("JSON not found")
-    return text[start:end + 1]
-
-
 def _normalize_str_list(values: Any) -> List[str]:
     if values is None:
         return []
@@ -954,70 +928,6 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "confidence": _get_attr(hint, "confidence"),
     }
     return plan
-
-
-def _plan_with_llm(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, domain_hint: Optional[str]) -> Dict[str, Any]:
-    prompt = (
-        "당신은 R&D 질의 분석용 LLM Planner입니다.\n"
-        "목표: 질문을 검색 플랜(JSON)으로 변환합니다.\n"
-        "규칙:\n"
-        "1) 출력은 JSON 객체만.\n"
-        "1-1) IDs(과제번호/DOI/ISSN/특허등록번호 등)는 ids_map을 그대로 참고하고, 새로 생성/복원하지 않습니다.\n"
-        "2) base_route는 support|project|perf|people|org 중 하나.\n"
-        "3) relation은 project_perf|project_people|project_org|people_project|people_perf|org_project|org_perf|perf_project|perf_people|perf_org 또는 null.\n"
-        "4-1) mode는 search|lookup|join 중 하나.\n"
-        "4-2) ✅ people_project 또는 org_project 관계면 mode는 반드시 lookup.\n"
-        "4-3) ✅ perf_project 관계면 mode는 join(또는 lookup) 중 하나(설계에 맞게).\n"
-        "5) intent는 support|id|filter|topic|content 중 하나.\n"
-        "6) action은 support|id_exact|id_fuzzy|list|stats|topic|detail|content|relation 중 하나.\n"
-        "7) tag_filters는 아래 허용 목록 내에서만 선택:\n"
-        f"   - project_tag_filters: {sorted(PROJECT_TAGS)}\n"
-        f"   - perf_tag_filters: {sorted(PERF_TAGS)}\n"
-        "7) category는 project|performance|researcher|qna|etc 중에서 선택(복수 가능).\n"
-        "8) retrieval_query는 핵심 키워드 5개 이내, 최대 120자.\n"
-        "9) limit는 1~20 범위에서만 출력.\n"
-        "\n"
-        "[입력]\n"
-        f"- question: {q}\n"
-        f"- keywords: {kws}\n"
-        f"- ids_map: {ids_map}\n"
-        f"- domain_hint: {domain_hint}\n"
-        "\n"
-        "[출력 JSON 스키마]\n"
-        "{\n"
-        '  "category": ["project"],\n'
-        '  "base_route": "project",\n'
-        '  "relation": "project_perf",\n'
-        '  "mode": "lookup",\n'
-        '  "intent": "filter",\n'
-        '  "action": "list",\n'
-        '  "people_terms": [],\n'
-        '  "org_terms": [],\n'
-        '  "org_role": null,\n'
-        '  "years": [],\n'
-        '  "project_tag_filters": [],\n'
-        '  "perf_tag_filters": [],\n'
-        '  "wants_count": false,\n'
-        '  "wants_list": false,\n'
-        '  "wants_detail": false,\n'
-        f'  "limit": {LLM_PLANNER_MAX_LIMIT},\n'
-        '  "retrieval_query": "",\n'
-        '  "confidence": 0.0\n'
-        "}\n"
-    )
-
-    try:
-        response = triton_infer(
-            LLM_PLANNER_MODEL,
-            prompt,
-            stream=False,
-            max_tokens=min(LLM_PLANNER_MAX_TOKENS, MAX_TOKENS),
-        )
-        payload = _extract_json(response)
-        return json.loads(payload)
-    except Exception as exc:
-        logger.warning("LLM planner failed: %s", exc)
-        return {}
 
 
 @dataclass(frozen=True)
@@ -1312,8 +1222,6 @@ def classify_query(
         )
 
     plan = _plan_from_hint(hint)
-    if not plan and LLM_PLANNER_ENABLED:
-        plan = _plan_with_llm(q, kws, ids_map, domain_hint=domain_hint)
 
     if not plan:
         return _classify_query_heuristic(q, kws, domain_hint=domain_hint, ids_map=ids_map)
@@ -1331,8 +1239,6 @@ def classify_query(
     }
     categories = [c for c in categories if c in valid_categories]
     confidence = float(plan.get("confidence") or 0.0)
-    if confidence < LLM_PLANNER_MIN_CONF and LLM_PLANNER_ENABLED:
-        logger.info("LLM planner confidence too low: %.2f", confidence)
 
     base_route = str(plan.get("base_route") or plan.get("head") or "").strip().lower()
     if base_route not in ("support", "project", "perf", "people", "org"):
@@ -1415,11 +1321,11 @@ def classify_query(
     if not perf_tag_filters and base_route in ("perf", "project"):
         perf_tag_filters = pick_perf_tag_filters(q)
 
-    limit = _coerce_int(plan.get("limit"), LLM_PLANNER_MAX_LIMIT)
-    limit = max(1, min(limit, LLM_PLANNER_MAX_LIMIT))
+    limit = _coerce_int(plan.get("limit"), INTENT_MAX_LIMIT)
+    limit = max(1, min(limit, INTENT_MAX_LIMIT))
     retrieval_query = str(plan.get("retrieval_query") or "").strip()
     if retrieval_query:
-        retrieval_query = retrieval_query[:LLM_PLANNER_MAX_RETRIEVAL_QUERY]
+        retrieval_query = retrieval_query[:INTENT_MAX_RETRIEVAL_QUERY]
 
     rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
