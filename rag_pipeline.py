@@ -2566,10 +2566,28 @@ def _run_rag_with_vectors(
     if not fallback_chat:
 
         max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
-        reranked_for_hydrate = reranked[: max(1, max_items)]
+        requested_limit = max(
+            _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
+            _coerce_int(_get_attr(hint, "limit", 0), 0),
+        )
+        hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
+        reranked_for_hydrate = reranked[:hydrate_upper]
         t0 = time.time()
         _hydrate_points_payload(qdr, reranked_for_hydrate)
         _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
+
+        check_top_k = min(len(reranked), max(1, requested_limit or max_items))
+        missing_kor = []
+        for rank, p in enumerate(reranked[:check_top_k], start=1):
+            pl = getattr(p, "payload", {}) or {}
+            meta_basic = pl.get("meta_basic") or {}
+            if not meta_basic.get("kor_pjt_nm"):
+                missing_kor.append(rank)
+        logger.info(
+            "[RAG.HYDRATE_CHECK] top_k=%s missing_meta_basic_kor_pjt_nm=%s",
+            check_top_k,
+            missing_kor or "none",
+        )
 
     # build context
     t0 = time.time()
