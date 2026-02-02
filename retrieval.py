@@ -38,7 +38,6 @@ _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 _SPARSE_ENCODERS: dict[str, Any] = {}
 _SPARSE_LOCK = threading.Lock()
 
-_DEFAULT_QDRANT_TIMEOUT = int(os.getenv("RAG_QDRANT_TIMEOUT", "30"))
 
 # logger는 기존 그대로 쓴다고 가정
 # logger = logging.getLogger("RAG_Retrieval")
@@ -112,10 +111,14 @@ def _qdrant_query_points_sparse(
     """
     # 디버깅에 필요한 정보만 남김 (nnz=non-zero terms)
     nnz = len(getattr(sparse_vector, "indices", []) or [])
-    logger.warning(
+    logger.debug(
         "[retrieval] sparse_query: col=%s using=%s limit=%d nnz=%d filter=%s payload=%s",
-        collection_name, sparse_vector_name, int(limit), int(nnz),
-        type(query_filter).__name__, type(with_payload).__name__,
+        collection_name,
+        sparse_vector_name,
+        int(limit),
+        int(nnz),
+        type(query_filter).__name__,
+        type(with_payload).__name__,
     )
 
     # 1) new-style
@@ -506,6 +509,16 @@ def _safe_str(x: Any, *, max_chars: Optional[int] = None) -> str:
     return s
 
 
+def _clamp_top_k(value: Any, *, minimum: int = 0, fallback: int = 0) -> int:
+    try:
+        val = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if val < minimum:
+        return minimum
+    return val
+
+
 def _payload_get(pl: Dict[str, Any], key: str, default: Any = "") -> Any:
     """
     Supports:
@@ -774,10 +787,18 @@ def dense_retrieve_hybrid_multi(
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
-    with_payload_dense_spase = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
+    with_payload_dense_sparse = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
     q = normalize_query(expanded_text)
     if not q:
         return {"dense": {}, "lexical": []}
+
+    top_k_dense = _clamp_top_k(top_k_dense, minimum=0, fallback=_DEFAULT_TOPK_DENSE)
+    top_k_lexical_candidates = _clamp_top_k(
+        top_k_lexical_candidates,
+        minimum=0,
+        fallback=_DEFAULT_TOPK_LEX_CAND,
+    )
+    top_k_lexical = _clamp_top_k(top_k_lexical, minimum=0, fallback=_DEFAULT_TOPK_LEX)
 
     hybrid_once_eff = _HYBRID_QUERY_ONCE if hybrid_once is None else bool(hybrid_once)
     if hybrid_once_eff and sparse_vector_name and emb_map:
@@ -824,7 +845,7 @@ def dense_retrieve_hybrid_multi(
             continue
 
         t0 = time.perf_counter()
-        logger.warning(
+        logger.debug(
             "[retrieval] query_points args types: using=%r(%s) limit=%r(%s) timeout=%r(%s) query_len=%r",
             vec_name, type(vec_name).__name__,
             top_k_dense, type(top_k_dense).__name__,
@@ -839,7 +860,7 @@ def dense_retrieve_hybrid_multi(
                     query=v,
                     using=vec_name,
                     limit=int(top_k_dense),
-                    with_payload=with_payload_dense_spase,
+                    with_payload=with_payload_dense_sparse,
                     with_vectors=False,
                     query_filter=query_filter,
                     timeout=_DEFAULT_QDRANT_TIMEOUT,
@@ -877,11 +898,11 @@ def dense_retrieve_hybrid_multi(
     # Sparse retrieval (named sparse vector search only)
     # -----------------------
     if sparse_topk is not None:
-        try:
-            top_k_lexical = int(sparse_topk)
-        except Exception as e:
-            top_k_lexical = int(top_k_lexical)
-            logger.warning(f"[retrieval] [sparse_topk is failed] -> top_k_lexical = int(top_k_lexical) : {e}")
+        top_k_lexical = _clamp_top_k(
+            sparse_topk,
+            minimum=0,
+            fallback=top_k_lexical,
+        )
 
     t_lex0 = time.perf_counter()
     lex_points: List[models.ScoredPoint] = []
