@@ -154,6 +154,9 @@ class QuestionAnalysis(BaseModel):
     relation: str | None = Field(default=None, description="project_perf | people_project 등")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
+    output_type: Optional[
+        Literal["list", "detail", "relation", "summary", "table", "json", "compare", "timeline", "faq"]
+    ] = Field(default=None, description="응답 출력 형식")
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -174,6 +177,7 @@ class SearchHint(BaseModel):
     relation: str | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
+    output_type: Optional[str] = None
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -233,6 +237,58 @@ class AgentState(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+OUTPUT_TYPE_CHOICES = {
+    "list",
+    "detail",
+    "relation",
+    "summary",
+    "table",
+    "json",
+    "compare",
+    "timeline",
+    "faq",
+}
+
+
+def _normalize_output_type(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized if normalized in OUTPUT_TYPE_CHOICES else None
+
+
+def _infer_output_type_from_question(
+    question_text: str,
+    qa: Optional[QuestionAnalysis],
+) -> str:
+    text = (question_text or "").strip().lower()
+    if any(token in text for token in ("표", "테이블", "table")):
+        return "table"
+    if any(token in text for token in ("json", "스키마", "키값", "키-값")):
+        return "json"
+    if any(token in text for token in ("비교", "대조", "차이", "vs", "versus")):
+        return "compare"
+    if any(token in text for token in ("타임라인", "연혁", "연도별", "기간별")):
+        return "timeline"
+    if any(token in text for token in ("faq", "질문답변", "qna")):
+        return "faq"
+    if qa and qa.question_type == QuestionType.FOLLOW_UP:
+        return "detail"
+    if qa and qa.mode and qa.mode.lower() == "lookup":
+        return "detail"
+    if qa and qa.ids_map and any(qa.ids_map.values()):
+        return "detail"
+    if any(token in text for token in ("상세", "자세", "자세히", "세부", "스펙")):
+        return "detail"
+    if any(token in text for token in ("목록", "리스트", "전체", "나열")):
+        return "list"
+    if qa and qa.mode and qa.mode.lower() == "search":
+        return "list"
+    if qa and qa.relation:
+        return "relation"
+    return "summary"
 
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
@@ -473,6 +529,21 @@ async def _run_question_analysis(
         "- 이력이 없으면 '이전 문맥 없음'을 반영\n\n"
     
         "====================\n"
+        "[output_type 정의]\n"
+        "====================\n"
+        "output_type은 응답 출력 형식을 의미합니다.\n"
+        "허용값: list, detail, relation, summary, table, json, compare, timeline, faq\n"
+        "- list: 간단 목록\n"
+        "- detail: 단일 항목 상세\n"
+        "- relation: 관계/연결 중심\n"
+        "- summary: 핵심 요약\n"
+        "- table: 표 형식\n"
+        "- json: JSON 형식\n"
+        "- compare: 비교 요약\n"
+        "- timeline: 연혁/타임라인\n"
+        "- faq: 질문-답변 묶음\n\n"
+
+        "====================\n"
         "[출력 형식]\n"
         "====================\n"
         "아래 키를 반드시 모두 포함한 JSON 객체만 출력:\n"
@@ -486,10 +557,11 @@ async def _run_question_analysis(
         "8) relation: Relation enum 중 하나 또는 null\n"
         "9) ids_map: dict\n"
         "10) filters: dict\n"
-        f"11) limit: int (<= {MAX_TOP_K_SIZE})\n"
-        "12) history_summary: string\n"
-        "13) retrieval_query: string\n"
-        "14) confidence: float (0.0~1.0)\n\n"
+        "11) output_type: list|detail|relation|summary|table|json|compare|timeline|faq\n"
+        f"12) limit: int (<= {MAX_TOP_K_SIZE})\n"
+        "13) history_summary: string\n"
+        "14) retrieval_query: string\n"
+        "15) confidence: float (0.0~1.0)\n\n"
     
         "{format_instructions}"
     )
@@ -509,6 +581,9 @@ async def _run_question_analysis(
             "question": question
         })
         result.limit = min(result.limit, MAX_TOP_K_SIZE)
+        result.output_type = _normalize_output_type(result.output_type) or _infer_output_type_from_question(
+            question, result
+        )
 
         log_section(
             "QUESTION ANALYSIS",
@@ -523,6 +598,7 @@ async def _run_question_analysis(
             f"Relation: {result.relation}\n"
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
+            f"OutputType: {result.output_type}\n"
             f"Limit: {result.limit}\n"
             f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
@@ -543,6 +619,7 @@ async def _run_question_analysis(
             relation=None,
             ids_map={},
             filters={},
+            output_type=_infer_output_type_from_question(question, None),
             limit=20,
             history_summary=question,
             retrieval_query=question[:120],
@@ -777,6 +854,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             relation=(qa.relation if qa else None),
             ids_map=dict(qa.ids_map or {}) if qa else {},
             filters=dict(qa.filters or {}) if qa else {},
+            output_type=(qa.output_type if qa else None),
             limit=search_num,
             history_summary=(qa.history_summary if qa else ""),
             retrieval_query=query,
@@ -841,36 +919,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
-
-    def _infer_output_type() -> str:
-        question_text = (state.messages[-1].content or "").strip().lower()
-        if any(token in question_text for token in ("표", "테이블", "table")):
-            return "table"
-        if any(token in question_text for token in ("json", "스키마", "키값", "키-값")):
-            return "json"
-        if any(token in question_text for token in ("비교", "대조", "차이", "vs", "versus")):
-            return "compare"
-        if any(token in question_text for token in ("타임라인", "연혁", "연도별", "기간별")):
-            return "timeline"
-        if any(token in question_text for token in ("faq", "질문답변", "qna")):
-            return "faq"
-        if qa and qa.question_type == QuestionType.FOLLOW_UP:
-            return "detail"
-        if qa and qa.mode and qa.mode.lower() == "lookup":
-            return "detail"
-        if qa and qa.ids_map and any(qa.ids_map.values()):
-            return "detail"
-        if any(token in question_text for token in ("상세", "자세", "자세히", "세부", "스펙")):
-            return "detail"
-        if any(token in question_text for token in ("목록", "리스트", "전체", "나열")):
-            return "list"
-        if qa and qa.mode and qa.mode.lower() == "search":
-            return "list"
-        if qa and qa.relation:
-            return "relation"
-        return "summary"
-
-    output_type = _infer_output_type()
+    output_type = _normalize_output_type(qa.output_type if qa else None) or _infer_output_type_from_question(
+        state.messages[-1].content,
+        qa,
+    )
 
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
@@ -1083,6 +1135,7 @@ async def build_intent_payload(
         "query_intent": raw_intent,
         "normalized_intent": normalized_intent,
         "keywords": kws,
+        "output_type": question_analysis.output_type if question_analysis else None,
     }
 
 
