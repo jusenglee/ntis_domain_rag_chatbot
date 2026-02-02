@@ -10,12 +10,13 @@ import re
 KEY_ORG_NORM = (os.getenv("RAG_KEY_ORG_NORM", "org_name").strip() or "org_name")
 
 COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project_v2").strip() or "ntis_project_v2")
-COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf_v2").strip() or "ntis_perf_v2")
+#COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf_v2").strip() or "ntis_perf_v2")  //아직 추가 안됨
+COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_project_v2").strip() or "ntis_project_v2")
 COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_project_v2").strip() or "ntis_project_v2")
 
 # -----------------------------
 # Regex
-# -----------------------------
+# ----------------------------- 
 RARE_TOKEN_RE = re.compile(r"[0-9]|[-_:]")
 HYPHEN_ID_RE = re.compile(r"\b[A-Za-z]{2,6}-\d{2,}(?:-\d{2,})+\b")
 ORG_RE = re.compile(
