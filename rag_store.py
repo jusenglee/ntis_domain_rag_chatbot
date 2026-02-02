@@ -12,13 +12,6 @@ from settings import (
     EMBED_MODEL_B,    # e5-large
     logger,
 )
-from rag_parts.constants import (
-    COL_PERF,
-    COL_PROJECT,
-    COL_SUPPORT,
-    KEY_ORG_NORM,
-)
-from retrieval import ensure_keyword_index, ensure_text_index
 from triton_client import get_triton_client
 
 _qdr: Optional[QdrantClient] = None
