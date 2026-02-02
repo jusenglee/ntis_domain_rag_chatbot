@@ -4,6 +4,7 @@ import uuid
 import json
 import time
 import os
+import re
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1126,13 +1127,94 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
     return "\n".join(lines) if lines else ""
 
 
+class LLMJSONExtractionError(ValueError):
+    """LLM 응답에서 JSON 객체/배열 추출 실패 시 발생."""
+
+
+def _summarize_text(text: str, head: int = 160, tail: int = 160) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= head + tail + 20:
+        return compact
+    return f"{compact[:head]} ... {compact[-tail:]}"
+
+
+def _iter_json_candidates(text: str) -> List[str]:
+    candidates: List[tuple[int, str]] = []
+
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
+        block = match.group(1).strip()
+        if block:
+            candidates.append((match.start(), block))
+
+    def find_matching_end(start_idx: int, open_ch: str, close_ch: str) -> Optional[int]:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start_idx, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+
+            if ch == "\"":
+                in_string = True
+                continue
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return None
+
+    for match in re.finditer(r"[\{\[]", text):
+        start_idx = match.start()
+        open_ch = text[start_idx]
+        close_ch = "}" if open_ch == "{" else "]"
+        end_idx = find_matching_end(start_idx, open_ch, close_ch)
+        if end_idx is None:
+            continue
+        candidates.append((start_idx, text[start_idx:end_idx + 1].strip()))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for _, candidate in sorted(candidates, key=lambda item: item[0]):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
 def sanitize_llm_json(msg) -> str:
-    text = msg.content
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("JSON not found")
-    return text[start:end+1]
+    text = msg.content if hasattr(msg, "content") else str(msg)
+    last_error: Optional[Exception] = None
+
+    for candidate in _iter_json_candidates(text):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+
+        if isinstance(parsed, (dict, list)):
+            return candidate
+
+    summary = _summarize_text(text)
+    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no_candidates"
+    logger.warning(
+        "JSON extraction failed: length=%s, preview=%s, error=%s",
+        len(text),
+        summary,
+        error_detail,
+    )
+    raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
 # --- Lifespan & App Setup ---
 @asynccontextmanager

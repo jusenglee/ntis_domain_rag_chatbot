@@ -19,17 +19,21 @@ class RagResources:
     qdrant_client: QdrantClient
     embed_e5i: HuggingFaceEmbedding
     embed_e5: HuggingFaceEmbedding
-    triton_client: Any
 
 
-_rag_resources: Optional[RagResources] = None
+_resources: Optional[RagResources] = None
 
 
 def build_rag_objects() -> RagResources:
-    global _rag_resources
+    """
+    single collection + multi-vector
+      - e5i_qa: multilingual-e5-large-instruct
+      - e5_qa : multilingual-e5-large
+    """
+    global _resources
 
-    if _rag_resources is not None:
-        return _rag_resources
+    if _resources is not None:
+        return _resources
 
     qdr = QdrantClient(
         host=QDRANT_HOST,
@@ -69,13 +73,12 @@ def build_rag_objects() -> RagResources:
     # Triton warm-up
     triton_client = get_triton_client()
 
-    _rag_resources = RagResources(
+    _resources = RagResources(
         qdrant_client=qdr,
         embed_e5i=emb_e5i,
         embed_e5=emb_e5,
-        triton_client=triton_client,
     )
-    return _rag_resources
+    return _resources
 
 def build_rag_objects_dual() -> Tuple[
     QdrantClient, HuggingFaceEmbedding, Any,
@@ -89,10 +92,6 @@ def build_rag_objects_dual() -> Tuple[
     """
     resources = build_rag_objects()
     return (
-        resources.qdrant_client,
-        resources.embed_e5i,
-        None,
-        resources.qdrant_client,
-        resources.embed_e5,
-        None,
+        resources.qdrant_client, resources.embed_e5i, None,
+        resources.qdrant_client, resources.embed_e5, None,
     )
