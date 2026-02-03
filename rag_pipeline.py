@@ -81,6 +81,9 @@ from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
     build_perf_filter as build_perf_filter,
+    build_year_range_filter,
+    build_perf_type_filter,
+    build_keyword_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     build_project_id_filter,
     JoinFilterInput,
@@ -1733,6 +1736,8 @@ def _run_rag_with_vectors(
             "people_terms",
             "gender_terms",
             "org_terms",
+            "perf_types",
+            "keywords",
             "perf_tag_filters",
             "project_tag_filters",
             "tag_filters",
@@ -1741,6 +1746,13 @@ def _run_rag_with_vectors(
         ):
             if key in data:
                 data[key] = _normalize_hint_terms(data.get(key))
+
+        if "year_from" in data:
+            year_from_terms = _normalize_hint_terms([data.get("year_from")])
+            data["year_from"] = year_from_terms[0] if year_from_terms else None
+        if "year_to" in data:
+            year_to_terms = _normalize_hint_terms([data.get("year_to")])
+            data["year_to"] = year_to_terms[0] if year_to_terms else None
 
         if "ids_map" in data:
             data["ids_map"] = _normalize_hint_ids_map(data.get("ids_map"))
@@ -1881,17 +1893,35 @@ def _run_rag_with_vectors(
             )
             if year_terms_hint:
                 it.years = year_terms_hint
+                it.year_from = year_terms_hint[0]
+                it.year_to = year_terms_hint[-1]
+            year_from = hint_filters.get("year_from")
+            year_to = hint_filters.get("year_to")
+            if year_from is not None:
+                it.year_from = str(year_from).strip() or None
+            if year_to is not None:
+                it.year_to = str(year_to).strip() or None
             tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
             if tag_filters_hint:
                 it.tag_filters = tag_filters_hint
+            perf_types_hint = _normalize_hint_terms(hint_filters.get("perf_types"))
+            if perf_types_hint:
+                it.perf_types = perf_types_hint
+            keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
+            if keywords_hint:
+                it.keywords = keywords_hint
 
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
     payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
     payload_people_terms = _normalize_hint_terms(_get_attr(intent_payload, "people_terms", None))
     payload_project_terms = _normalize_hint_terms(_get_attr(intent_payload, "project_terms", None))
+    payload_perf_types = _normalize_hint_terms(_get_attr(intent_payload, "perf_types", None))
+    payload_keywords = _normalize_hint_terms(_get_attr(intent_payload, "keywords", None))
     payload_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "tag_filters", None))
     payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
     payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
+    payload_year_from = _get_attr(intent_payload, "year_from", None)
+    payload_year_to = _get_attr(intent_payload, "year_to", None)
     payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
 
     if payload_relation:
@@ -1902,12 +1932,20 @@ def _run_rag_with_vectors(
         it.org_terms = payload_org_terms
     if payload_people_terms:
         it.people_terms = payload_people_terms
+    if payload_perf_types:
+        it.perf_types = payload_perf_types
+    if payload_keywords:
+        it.keywords = payload_keywords
     if payload_tag_filters:
         it.tag_filters = payload_tag_filters
     if payload_perf_tag_filters:
         it.perf_tag_filters = payload_perf_tag_filters
     if payload_project_tag_filters:
         it.project_tag_filters = payload_project_tag_filters
+    if payload_year_from is not None:
+        it.year_from = str(payload_year_from).strip() or None
+    if payload_year_to is not None:
+        it.year_to = str(payload_year_to).strip() or None
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -2007,6 +2045,24 @@ def _run_rag_with_vectors(
         else None
     )
 
+    year_from = str(getattr(it, "year_from", "") or "").strip() or None
+    year_to = str(getattr(it, "year_to", "") or "").strip() or None
+    if not year_from and (it.years or []):
+        year_from = str(it.years[0]).strip() or None
+    if not year_to and (it.years or []):
+        year_to = str(it.years[-1]).strip() or year_from
+    it.year_from = year_from
+    it.year_to = year_to
+    year_range_filter = build_year_range_filter(year_from, year_to) if (year_from or year_to) else None
+
+    perf_types = [t.strip() for t in (list(getattr(it, "perf_types", None) or []) or []) if str(t).strip()]
+    it.perf_types = perf_types
+    perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
+
+    keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
+    it.keywords = keyword_terms
+    keyword_filter = build_keyword_filter(keyword_terms) if keyword_terms else None
+
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
 
@@ -2018,12 +2074,19 @@ def _run_rag_with_vectors(
         people_ids=people_ids,
         gender_terms=gender_terms,
         people_org_terms=people_org_terms,
+        year_from=year_from,
+        year_to=year_to,
+        perf_types=perf_types,
+        keywords=keyword_terms,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
+        year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
+        perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
+        keyword_filter=str(keyword_filter) if keyword_filter is not None else None,
     )
 
     # -------------------------
@@ -2038,11 +2101,15 @@ def _run_rag_with_vectors(
         domain_hint=domain_hint,
         is_id_query=getattr(it, "is_id_query", None),
         years=getattr(it, "years", None),
+        year_from=getattr(it, "year_from", None),
+        year_to=getattr(it, "year_to", None),
         people_terms=list(getattr(it, "people_terms", []) or []),
         gender_terms=list(getattr(it, "gender_terms", []) or []),
         org_terms=list(getattr(it, "org_terms", []) or []),
         org_role=org_role,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        perf_types=list(getattr(it, "perf_types", []) or []),
+        keywords=list(getattr(it, "keywords", []) or []),
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         ids_flat=_flatten_ids_from_intent(it)[:20],
     )
@@ -2195,6 +2262,13 @@ def _run_rag_with_vectors(
                     hop1_filter = _and_filter(hop1_filter, people_filter)
                 if hop1_kind == "org" and org_filter:
                     hop1_filter = _and_filter(hop1_filter, org_filter)
+                if hop1_col in (COL_PROJECT, COL_PERF):
+                    if year_range_filter:
+                        hop1_filter = _and_filter(hop1_filter, year_range_filter)
+                    if keyword_filter:
+                        hop1_filter = _and_filter(hop1_filter, keyword_filter)
+                if hop1_col == COL_PERF and perf_type_filter:
+                    hop1_filter = _and_filter(hop1_filter, perf_type_filter)
 
                 log_kv(
                     "RAG.JOIN.HOP1",
@@ -2350,6 +2424,13 @@ def _run_rag_with_vectors(
                 )
                 if hop2_kind in ("project", "org") and org_filter:
                     hop2_filter = _and_filter(hop2_filter, org_filter)
+            if hop2_col in (COL_PROJECT, COL_PERF):
+                if year_range_filter:
+                    hop2_filter = _and_filter(hop2_filter, year_range_filter)
+                if keyword_filter:
+                    hop2_filter = _and_filter(hop2_filter, keyword_filter)
+            if hop2_col == COL_PERF and perf_type_filter:
+                hop2_filter = _and_filter(hop2_filter, perf_type_filter)
 
             hop2_dense_enabled = False
             log_kv(
@@ -2498,11 +2579,22 @@ def _run_rag_with_vectors(
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
+        def _apply_extra_filters(base_filter: Any) -> Any:
+            combined = base_filter
+            if col in (COL_PROJECT, COL_PERF):
+                if year_range_filter:
+                    combined = _and_filter(combined, year_range_filter)
+                if keyword_filter:
+                    combined = _and_filter(combined, keyword_filter)
+            if col == COL_PERF and perf_type_filter:
+                combined = _and_filter(combined, perf_type_filter)
+            return combined
+
         if plan.mode != "lookup":
             if plan.mode == "search" and col == COL_PROJECT and relation == ("people", "project") and people_filter:
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _and_filter(tag_filter_local, people_filter)
-            return None
+                return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
+            return _apply_extra_filters(None)
 
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
@@ -2512,31 +2604,37 @@ def _run_rag_with_vectors(
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
-            return pjt_filter
+            return _apply_extra_filters(pjt_filter)
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
-            return perf_tag_filter
+            return _apply_extra_filters(perf_tag_filter)
 
         # (선택) org_filter는 project 컬렉션에서만
         if col == COL_PROJECT and relation == ("people", "project") and people_filter:
             tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-            return _and_filter(tag_filter_local, people_filter)
+            return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
 
         if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
             if org_role == "participant":
-                return participant_org_filter or org_filter
+                return _apply_extra_filters(participant_org_filter or org_filter)
             if org_filter:
-                return org_filter
+                return _apply_extra_filters(org_filter)
 
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
+                base_filter = _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
+                return _apply_extra_filters(base_filter)
             if base_route == "org":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _and_filter(tag_filter_local, participant_org_filter or org_filter) if (participant_org_filter or org_filter) else tag_filter_local
+                base_filter = (
+                    _and_filter(tag_filter_local, participant_org_filter or org_filter)
+                    if (participant_org_filter or org_filter)
+                    else tag_filter_local
+                )
+                return _apply_extra_filters(base_filter)
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -2545,11 +2643,11 @@ def _run_rag_with_vectors(
                     combined_filter = _and_filter(combined_filter, people_filter)
                 if participant_org_filter or org_filter:
                     combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
-                return combined_filter
+                return _apply_extra_filters(combined_filter)
 
         if col == COL_PERF and base_route == "perf" and perf_tag_filter:
-            return perf_tag_filter
-        return None
+            return _apply_extra_filters(perf_tag_filter)
+        return _apply_extra_filters(None)
 
 
     # retrieve each collection

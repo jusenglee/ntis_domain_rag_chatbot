@@ -1,4 +1,5 @@
 import os
+import re
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
@@ -134,6 +135,128 @@ def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
         return None
     key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
     return qmodels.Filter(must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(tags))])
+
+def _coerce_year_value(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    match = re.search(r"(19\d{2}|20\d{2})", s)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+def _make_range_filter(gte: Any, lte: Any):
+    if qmodels is None:
+        return None
+    range_cls = getattr(qmodels, "Range", None)
+    if range_cls is None:
+        return None
+    kwargs_list = [
+        {"gte": gte, "lte": lte},
+        {"min": gte, "max": lte},
+        {"from": gte, "to": lte},
+    ]
+    for kwargs in kwargs_list:
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+        if not payload:
+            continue
+        try:
+            return range_cls(**payload)
+        except Exception:
+            continue
+    return None
+
+def build_year_range_filter(
+    year_from: Any,
+    year_to: Any,
+    *,
+    year_keys: Optional[List[str]] = None,
+    date_keys: Optional[List[str]] = None,
+) -> Optional[Any]:
+    if qmodels is None:
+        return None
+
+    y_from = _coerce_year_value(year_from)
+    y_to = _coerce_year_value(year_to)
+    if y_from is None and y_to is None:
+        return None
+    if y_from is not None and y_to is not None and y_from > y_to:
+        y_from, y_to = y_to, y_from
+
+    year_keys = year_keys or ["stan_yr", "meta_basic.stan_yr"]
+    date_keys = date_keys or [
+        "dt1",
+        "dt2",
+        "meta_basic.tot_rsch_start_dt",
+        "meta_basic.tot_rsch_end_dt",
+    ]
+
+    should: List["qmodels.Condition"] = []
+    year_range = _make_range_filter(y_from, y_to)
+    if year_range is not None:
+        for key in year_keys:
+            should.append(qmodels.FieldCondition(key=key, range=year_range))
+
+    if y_from is not None or y_to is not None:
+        date_from = f"{y_from}-01-01" if y_from is not None else None
+        date_to = f"{y_to}-12-31" if y_to is not None else None
+        date_range = _make_range_filter(date_from, date_to)
+        if date_range is not None:
+            for key in date_keys:
+                should.append(qmodels.FieldCondition(key=key, range=date_range))
+
+    if not should and y_from is not None:
+        y_values: List[str] = []
+        if y_to is None:
+            y_values = [str(y_from)]
+        else:
+            span = max(0, min(60, y_to - y_from))
+            y_values = [str(y_from + i) for i in range(span + 1)]
+        if y_values:
+            for key in year_keys:
+                should.append(qmodels.FieldCondition(key=key, match=make_match_any(y_values)))
+
+    return qmodels.Filter(should=should) if should else None
+
+def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
+    if qmodels is None or not perf_types:
+        return None
+    keys = [
+        "tag",
+        "perf_type",
+        "perf_type_nm",
+        "perf_type_cd",
+        "meta_basic.perf_type",
+        "meta_basic.perf_type_nm",
+    ]
+    should: List["qmodels.Condition"] = []
+    for key in keys:
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(perf_types)))
+    return qmodels.Filter(should=should) if should else None
+
+def build_keyword_filter(keywords: List[str]) -> Optional[Any]:
+    if qmodels is None or not keywords:
+        return None
+    keys = [
+        "keyword_text",
+        "keyword1",
+        "keyword2",
+        "kor_kywd",
+        "eng_kywd",
+        "meta_basic.kor_kywd",
+        "meta_basic.eng_kywd",
+        "keyword",
+        "keywords",
+    ]
+    should: List["qmodels.Condition"] = []
+    for key in keys:
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(keywords)))
+    return qmodels.Filter(should=should) if should else None
 
 def _build_prtcp_mp_nested_filter(
         *,
