@@ -35,7 +35,6 @@ from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
-from retrieval import extract_keywords
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -1083,7 +1082,13 @@ async def build_intent_payload(
             prev_context=prev_context,
         )
 
-    kws = extract_keywords(question)
+    kws: List[str] = []
+    if question_analysis and isinstance(question_analysis.filters, dict):
+        raw_keywords = question_analysis.filters.get("keywords")
+        if isinstance(raw_keywords, (list, tuple, set)):
+            kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            kws = [raw_keywords.strip()]
     hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name] if question_analysis else []
     hint_org_terms = list(question_analysis.organizations or []) if question_analysis else []
     hint_org_role = None

@@ -37,7 +37,6 @@ from rag_types import RagResult
 from rag_store import build_rag_objects
 from retrieval import (
     normalize_query,
-    extract_keywords,
     dense_retrieve_hybrid_multi,
     build_context_mixed,
     _payload_get,
@@ -88,7 +87,6 @@ from rag_parts.filters import (
     build_perf_filter as build_perf_filter,
     build_year_range_filter,
     build_perf_type_filter,
-    build_keyword_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     build_project_id_filter,
     JoinFilterInput,
@@ -1681,15 +1679,6 @@ def _run_rag_with_vectors(
         intent_payload=bool(intent_payload),
     )
 
-    # keywords
-    t0 = time.time()
-    payload_kws = _get_attr(intent_payload, "keywords", None)
-    if isinstance(payload_kws, (list, tuple)) and payload_kws:
-        kws = list(payload_kws)
-    else:
-        kws = extract_keywords(q)
-    _timing_put(timings, "phase.kw_det", time.time() - t0)
-
     def _normalize_hint_terms(values: Any) -> List[str]:
         if values is None:
             return []
@@ -1777,6 +1766,15 @@ def _run_rag_with_vectors(
             return NormalizedIntent(**data)
         except Exception:
             return None
+
+    # keywords (payload/hint only)
+    t0 = time.time()
+    payload_kws = _get_attr(intent_payload, "keywords", None)
+    if isinstance(payload_kws, (list, tuple)) and payload_kws:
+        kws = _normalize_hint_terms(payload_kws)
+    else:
+        kws = []
+    _timing_put(timings, "phase.kw_det", time.time() - t0)
 
     intent_from_payload = False
     planner_confidence: Optional[float] = None
@@ -2081,7 +2079,7 @@ def _run_rag_with_vectors(
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     it.keywords = keyword_terms
-    keyword_filter = build_keyword_filter(keyword_terms) if keyword_terms else None
+    kws = keyword_terms
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
@@ -2139,7 +2137,6 @@ def _run_rag_with_vectors(
         generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
-        keyword_filter=str(keyword_filter) if keyword_filter is not None else None,
     )
 
     # -------------------------
@@ -2447,8 +2444,6 @@ def _run_rag_with_vectors(
                 if hop1_col in (COL_PROJECT, COL_PERF):
                     if year_range_filter:
                         hop1_filter = _and_filter(hop1_filter, year_range_filter)
-                    if keyword_filter:
-                        hop1_filter = _and_filter(hop1_filter, keyword_filter)
                 if hop1_col == COL_PERF and perf_type_filter:
                     hop1_filter = _and_filter(hop1_filter, perf_type_filter)
 
@@ -2609,8 +2604,6 @@ def _run_rag_with_vectors(
             if hop2_col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)
-                if keyword_filter:
-                    hop2_filter = _and_filter(hop2_filter, keyword_filter)
             if hop2_col == COL_PERF and perf_type_filter:
                 hop2_filter = _and_filter(hop2_filter, perf_type_filter)
 
@@ -2810,8 +2803,6 @@ def _run_rag_with_vectors(
             if col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     combined = _and_filter(combined, year_range_filter)
-                if keyword_filter:
-                    combined = _and_filter(combined, keyword_filter)
             if col == COL_PERF and perf_type_filter:
                 combined = _and_filter(combined, perf_type_filter)
             return combined
