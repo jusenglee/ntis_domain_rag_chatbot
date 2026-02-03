@@ -2329,7 +2329,15 @@ def _run_rag_with_vectors(
             _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
             _timing_put(timings, "phase.total", time.time() - t_all0)
             hits = (hop1_top or []) + (hop2_top or [])
-            return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=refs, timings=timings)
+            return RagResult(
+                stack=stack,
+                keywords=kws,
+                hits=hits,
+                reranked_hits=hop2_top,
+                context=context,
+                refs=refs,
+                timings=timings,
+            )
 
     # -------------------------
     # Base (SEARCH / LOOKUP) federated
