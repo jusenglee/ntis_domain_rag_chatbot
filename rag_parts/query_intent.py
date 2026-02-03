@@ -1320,6 +1320,12 @@ def classify_query(
     if org_role == "affiliation" and not people_terms:
         people_terms = _extract_people_terms_for_affiliation(q)
 
+    if people_terms:
+        if any(keyword in tl for keyword in ("과제", "프로젝트", "project")):
+            base_route = "project"
+        elif "성과" in tl:
+            base_route = "perf"
+
     project_tag_filters = _normalize_tag_filters(plan.get("project_tag_filters"), PROJECT_TAGS)
     perf_tag_filters = _normalize_tag_filters(plan.get("perf_tag_filters"), PERF_TAGS)
     if not project_tag_filters and base_route in ("project", "people", "org"):
