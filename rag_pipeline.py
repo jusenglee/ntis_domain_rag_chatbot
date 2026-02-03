@@ -636,31 +636,72 @@ def _apply_dense_threshold(
     log_prefix: str,
     col: Optional[str] = None,
 ) -> None:
-    if not use_dense_threshold:
-        return
     dense_map = sr.get("dense")
     if not isinstance(dense_map, dict):
         return
     for vname, lst in dense_map.items():
         before = len(lst or [])
-        filtered: List[Any] = []
-        for p in lst or []:
+        filtered = list(lst or [])
+        if use_dense_threshold:
+            filtered = []
+            for p in lst or []:
+                score = getattr(p, "score", None)
+                try:
+                    score_val = float(score) if score is not None else None
+                except Exception:
+                    score_val = None
+                if score_val is not None and score_val >= float(min_dense_score):
+                    filtered.append(p)
+            dense_map[vname] = filtered
+            log_kv(
+                log_prefix,
+                col=col,
+                vec=str(vname),
+                before=before,
+                after=len(filtered),
+                min_dense_score=float(min_dense_score),
+            )
+
+        score_values: List[float] = []
+        for p in filtered:
             score = getattr(p, "score", None)
             try:
                 score_val = float(score) if score is not None else None
             except Exception:
                 score_val = None
-            if score_val is not None and score_val >= float(min_dense_score):
-                filtered.append(p)
-        dense_map[vname] = filtered
-        log_kv(
-            log_prefix,
-            col=col,
-            vec=str(vname),
-            before=before,
-            after=len(filtered),
-            min_dense_score=float(min_dense_score),
-        )
+            if score_val is not None:
+                score_values.append(score_val)
+
+        if score_values:
+            score_values.sort()
+            min_score = score_values[0]
+            max_score = score_values[-1]
+            topn = min(3, len(score_values))
+            topn_avg = sum(score_values[-topn:]) / float(topn)
+
+            def _percentile(sorted_vals: List[float], pct: float) -> float:
+                if not sorted_vals:
+                    return float("nan")
+                if len(sorted_vals) == 1:
+                    return sorted_vals[0]
+                pos = (pct / 100.0) * (len(sorted_vals) - 1)
+                lo = int(pos)
+                hi = min(lo + 1, len(sorted_vals) - 1)
+                frac = pos - lo
+                return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
+
+            log_kv(
+                "RAG.DENSE.SCORE.STATS",
+                col=col,
+                vec=str(vname),
+                count=len(score_values),
+                min=float(min_score),
+                max=float(max_score),
+                p50=float(_percentile(score_values, 50.0)),
+                p90=float(_percentile(score_values, 90.0)),
+                p99=float(_percentile(score_values, 99.0)),
+                top3_avg=float(topn_avg),
+            )
 
 def _resolve_collection(p: Any, payload: Optional[dict] = None) -> str:
     pl = payload if payload is not None else getattr(p, "payload", None) or {}
