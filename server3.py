@@ -36,7 +36,16 @@ from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from retrieval import extract_keywords
-from settings import REDIS_URL, REDIS_TTL, MAX_TOP_K_SIZE
+from settings import (
+    REDIS_URL,
+    REDIS_TTL,
+    MAX_TOP_K_SIZE,
+    MAX_CONTEXT_CHARS,
+    MAX_DOC_SENTENCES,
+    MAX_DOC_TOKENS,
+    SUMMARY_DOC_SENTENCES,
+    SUMMARY_DOC_TOKENS,
+)
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
 
@@ -872,6 +881,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             docs_for_ctx = related_context or docs_for_ctx
 
     context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
+    if len(context_text) > MAX_CONTEXT_CHARS and docs_for_ctx:
+        context_text = summarize_documents_headlines(docs_for_ctx)
+        context_text = _truncate_context_text(context_text, MAX_CONTEXT_CHARS)
 
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
@@ -1250,13 +1262,97 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
                     + "\n".join(researcher_lines)
             )
 
+        combined_text = f"{refined_text}{researcher_block}".strip()
+        limited_text = _limit_text_by_sentences_and_tokens(
+            combined_text,
+            max_sentences=MAX_DOC_SENTENCES,
+            max_tokens=MAX_DOC_TOKENS,
+        )
+
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
-            f"{refined_text}"
-            f"{researcher_block}\n"
+            f"{limited_text}\n"
         )
 
     return "\n\n".join(context_chunks)
+
+
+def _format_metadata_limited(metadata: Dict[str, Any], max_lines: int) -> str:
+    lines = []
+    for key, value in metadata.items():
+        if value is None:
+            continue
+
+        if isinstance(value, list):
+            value = ", ".join(map(str, value))
+        elif isinstance(value, dict):
+            value = json.dumps(value, ensure_ascii=False)
+
+        lines.append(f"- {key}: {value}")
+        if len(lines) >= max_lines:
+            break
+
+    return "\n".join(lines) if lines else ""
+
+
+def _split_sentences(text: str) -> List[str]:
+    raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    sentences: List[str] = []
+    for line in raw_lines:
+        parts = re.split(r"(?<=[.!?])\s+", line)
+        cleaned = [part.strip() for part in parts if part.strip()]
+        if cleaned:
+            sentences.extend(cleaned)
+        else:
+            sentences.append(line)
+    return sentences
+
+
+def _limit_text_by_sentences_and_tokens(
+    text: str,
+    *,
+    max_sentences: int,
+    max_tokens: int,
+) -> str:
+    if not text:
+        return ""
+    sentences = _split_sentences(text)
+    limited: List[str] = []
+    token_count = 0
+    for sentence in sentences:
+        next_tokens = len(sentence.split())
+        if limited and (len(limited) >= max_sentences or token_count + next_tokens > max_tokens):
+            break
+        limited.append(sentence)
+        token_count += next_tokens
+        if len(limited) >= max_sentences:
+            break
+    return "\n".join(limited)
+
+
+def summarize_documents_headlines(docs: List[Document]) -> str:
+    context_chunks: List[str] = []
+    for doc in docs:
+        mapped_doc = RagMapper.map(doc)
+        source_idx = doc.get("source_index")
+        title = mapped_doc.get("title", "제목 없음")
+        summary_text = _format_metadata_limited(
+            mapped_doc.get("meta_basic", {}),
+            max_lines=SUMMARY_DOC_SENTENCES,
+        )
+        summary_text = _limit_text_by_sentences_and_tokens(
+            summary_text,
+            max_sentences=SUMMARY_DOC_SENTENCES,
+            max_tokens=SUMMARY_DOC_TOKENS,
+        )
+        context_chunks.append(f"## 출처 {source_idx}. {title}\n{summary_text}\n")
+    return "\n\n".join(context_chunks)
+
+
+def _truncate_context_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...\n(컨텍스트가 너무 길어 일부가 잘렸습니다.)"
 
 
 def format_metadata(metadata: Dict[str, Any]) -> str:
