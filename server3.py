@@ -638,6 +638,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
     prev_context_str = None
 
+
     if qa.question_type == QuestionType.FOLLOW_UP:
         if len(qa.related_docs) > 0:
             related_doc_indexes = set(qa.related_docs)

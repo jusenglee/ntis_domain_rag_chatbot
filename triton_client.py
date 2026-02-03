@@ -207,7 +207,16 @@ def _compute_max_new_tokens(
     """
     prompt_tokens = _get_prompt_tokens(model_name, prompt)
 
-    max_seq_len = _get_max_seq_len(model_name)
+    max_seq_len = MODEL_MAX_CONTEXT.get(model_name)
+    if not max_seq_len:
+        try:
+            tok = get_tokenizer_for_model(model_name)
+            max_seq_len = getattr(tok, "model_max_length", DEFAULT_MAX_MODEL_LEN)
+            # HF 쪽에서 종종 엄청 큰 값(1e30 같은) 넣어두는 경우 방어
+            if max_seq_len is None or max_seq_len > 100_000:
+                max_seq_len = DEFAULT_MAX_MODEL_LEN
+        except Exception:
+            max_seq_len = DEFAULT_MAX_MODEL_LEN
 
     MIN_NEW_TOKENS = 64      # 최소 생성 토큰
 
@@ -587,11 +596,6 @@ def triton_infer(
         - stream=True  → 제너레이터 (yield str)
         - stream=False → str (전체 응답)
     """
-    prompt = _trim_prompt_to_max_length(
-        model_name,
-        prompt,
-    )
-
     logger.info(f"[TRITON] infer start - model={model_name}, len={len(prompt)}")
     log_prompt_tokens(model_name, prompt, tag="infer")
 
