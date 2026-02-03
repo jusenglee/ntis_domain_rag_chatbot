@@ -2239,10 +2239,20 @@ def _run_rag_with_vectors(
         plan.target_collections = hinted_cols
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
+
+    lookup_filter_policy = str(os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")).strip().lower()
+    if lookup_filter_policy not in ("hard", "off"):
+        logger.warning(
+            "[RAG] invalid RAG_LOOKUP_FILTER_POLICY=%s, falling back to 'hard'",
+            lookup_filter_policy,
+        )
+        lookup_filter_policy = "hard"
+
     lookup_filter_enabled = bool(
         plan.mode == "lookup"
+        and lookup_filter_policy == "hard"
         and search_filter_signal
-        and str(os.getenv("RAG_LOOKUP_FILTER_ENABLE", "0")).strip().lower() in ("1", "true", "yes", "y")
+        and search_filter_conf_ok
     )
 
     if relation and plan.mode in ("search", "lookup"):
@@ -2311,6 +2321,9 @@ def _run_rag_with_vectors(
             "search_filter_enabled": search_filter_enabled,
             "lookup_filter_enabled": lookup_filter_enabled,
             "relation_lookup_enforce": relation_lookup_enforce,
+            "lookup_filter_policy": lookup_filter_policy,
+            "filter_signal": search_filter_signal,
+            "filter_conf_ok": search_filter_conf_ok,
         },
         "mix_weights": {
             "dense": {k: float(v) for k, v in (w_dense_map or {}).items()},
@@ -2326,6 +2339,10 @@ def _run_rag_with_vectors(
     log_kv(
         "RAG.FILTERS",
         strategy_summary=strategy_summary,
+        mode=plan.mode,
+        search_filter_signal=search_filter_signal,
+        search_filter_conf_ok=search_filter_conf_ok,
+        lookup_filter_policy=lookup_filter_policy,
     )
 
     log_kv(
@@ -2338,6 +2355,10 @@ def _run_rag_with_vectors(
         relation=relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=list(getattr(plan, "target_collections", []) or []),
+        lookup_filter_policy=lookup_filter_policy,
+        search_filter_enabled=int(search_filter_enabled),
+        lookup_filter_enabled=int(lookup_filter_enabled),
+        relation_lookup_enforce=int(relation_lookup_enforce),
     )
     log_kv(
         "RAG.PRESET/PLAN.POST",
