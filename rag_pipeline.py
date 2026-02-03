@@ -2166,6 +2166,56 @@ def _run_rag_with_vectors(
     if hinted_cols:
         plan.target_collections = hinted_cols
 
+    if relation and plan.mode in ("search", "lookup"):
+        logger.warning(
+            "[RAG] relation-mode conflict detected (mode=%s, relation=%s, hint_mode=%s)",
+            plan.mode,
+            relation,
+            hint_mode,
+        )
+        log_kv(
+            "RAG.PLAN.MODE_CONFLICT",
+            level="warning",
+            mode=plan.mode,
+            relation=relation,
+            hint_mode=hint_mode,
+            base_route=base_route,
+            action=action,
+        )
+
+    relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
+    if relation_lookup_policy not in ("filter", "join"):
+        logger.warning(
+            "[RAG] invalid RAG_RELATION_LOOKUP_POLICY=%s, falling back to 'filter'",
+            relation_lookup_policy,
+        )
+        relation_lookup_policy = "filter"
+
+    relation_lookup_enforce = False
+    if relation and plan.mode == "lookup":
+        if relation_lookup_policy == "join":
+            plan.mode = "join"
+            logger.warning(
+                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
+                relation_lookup_policy,
+                relation,
+            )
+        else:
+            relation_lookup_enforce = True
+            logger.warning(
+                "[RAG] enforcing relation filters in lookup (policy=%s, relation=%s)",
+                relation_lookup_policy,
+                relation,
+            )
+        log_kv(
+            "RAG.PLAN.RELATION_LOOKUP_POLICY",
+            level="warning",
+            policy=relation_lookup_policy,
+            mode=plan.mode,
+            relation=relation,
+            enforced=int(relation_lookup_enforce),
+        )
+
     # allow 적용 (force/allow)
     if effective_allow:
         filtered = _pick_collections((plan.target_collections or []), effective_allow)
@@ -2579,8 +2629,31 @@ def _run_rag_with_vectors(
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
+        def _relation_lookup_filter_for_col() -> Any:
+            if not relation_lookup_enforce or not relation:
+                return None
+            route = get_relation_route(relation)
+            if route is None:
+                return None
+            if col == route.hop1_col:
+                tag_filters_local = route.hop1_tag_filters
+            elif col == route.hop2_col:
+                tag_filters_local = route.hop2_tag_filters
+            else:
+                return None
+            base_filter = _build_tag_only_filter(tag_filters_local) if tag_filters_local else None
+            relation_parts = set(route.relation)
+            if col == COL_PROJECT:
+                if "people" in relation_parts and people_filter:
+                    base_filter = _and_filter(base_filter, people_filter)
+                if "org" in relation_parts and (participant_org_filter or org_filter):
+                    base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
+            return base_filter
+
+        relation_filter = _relation_lookup_filter_for_col()
+
         def _apply_extra_filters(base_filter: Any) -> Any:
-            combined = base_filter
+            combined = _and_filter(relation_filter, base_filter) if relation_filter else base_filter
             if col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     combined = _and_filter(combined, year_range_filter)
