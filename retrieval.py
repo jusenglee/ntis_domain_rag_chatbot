@@ -573,11 +573,10 @@ def _payload_get(pl: Dict[str, Any], key: str, default: Any = "") -> Any:
 
 
 # =========================
-# Query normalization / keywords
+# Query normalization
 # =========================
 
 _SPACE_RE = re.compile(r"\s+")
-_HANGUL_RE = re.compile(r"[\u3131-\u318E\uAC00-\uD7A3]")
 
 
 def normalize_query(q: str) -> str:
@@ -587,41 +586,6 @@ def normalize_query(q: str) -> str:
     q = str(q).strip()
     q = _SPACE_RE.sub(" ", q)
     return q
-
-
-def _strip_whitespace_korean(text: str) -> str:
-    if not text or not _HANGUL_RE.search(text):
-        return ""
-    return re.sub(r"\s+", "", text)
-
-
-_KW_RE = re.compile(r"[\w\u3131-\u318E\uAC00-\uD7A3]+", re.UNICODE)
-
-
-def extract_keywords(q: str, *, max_keywords: int = 12) -> List[str]:
-    """Deterministic keyword extractor (간단 룰)."""
-    text = normalize_query(q)
-    if not text:
-        return []
-
-    raw = _KW_RE.findall(text)
-    if not raw:
-        return []
-
-    out: List[str] = []
-    seen: set[str] = set()
-    for t in raw:
-        tt = t.strip()
-        if not tt:
-            continue
-        key = tt.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tt)
-        if len(out) >= max_keywords:
-            break
-    return out
 
 
 def _approx_token_len(text: str) -> int:

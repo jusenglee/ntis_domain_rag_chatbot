@@ -239,25 +239,6 @@ def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(perf_types)))
     return qmodels.Filter(should=should) if should else None
 
-def build_keyword_filter(keywords: List[str]) -> Optional[Any]:
-    if qmodels is None or not keywords:
-        return None
-    keys = [
-        "keyword_text",
-        "keyword1",
-        "keyword2",
-        "kor_kywd",
-        "eng_kywd",
-        "meta_basic.kor_kywd",
-        "meta_basic.eng_kywd",
-        "keyword",
-        "keywords",
-    ]
-    should: List["qmodels.Condition"] = []
-    for key in keys:
-        should.append(qmodels.FieldCondition(key=key, match=make_match_any(keywords)))
-    return qmodels.Filter(should=should) if should else None
-
 def _build_prtcp_mp_nested_filter(
         *,
         people_terms: List[str],
