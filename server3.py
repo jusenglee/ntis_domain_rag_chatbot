@@ -1595,6 +1595,20 @@ def _format_org_line(
     return "- 참여기관: 정보 없음"
 
 
+def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
+    try:
+        return RagMapper.map(doc)
+    except MappingError as exc:
+        source_idx = doc.get("source_index")
+        logger.warning(
+            "문서 매핑 실패(%s): source_index=%s, error=%s",
+            context,
+            source_idx,
+            exc,
+        )
+        return None
+
+
 def summarize_documents_headlines(
     docs: List[Document],
     *,
@@ -1607,7 +1621,9 @@ def summarize_documents_headlines(
     headlines: List[str] = []
 
     for doc in docs:
-        mapped_doc = RagMapper.map(doc)
+        mapped_doc = _safe_map_doc(doc, context="summarize_documents_headlines")
+        if not mapped_doc:
+            continue
         source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
@@ -1662,7 +1678,9 @@ def refine_documents_rule_based(
     doc_max_tokens = None if relax_limits else MAX_DOC_TOKENS
 
     for doc in docs:
-        mapped_doc = RagMapper.map(doc)
+        mapped_doc = _safe_map_doc(doc, context="refine_documents_rule_based")
+        if not mapped_doc:
+            continue
 
         source_idx = doc.get("source_index")
 
