@@ -628,6 +628,40 @@ def _ensure_collection_mark(points: List[Any], col: str) -> None:
         if isinstance(pl, dict):
             pl.setdefault("_collection", col)
 
+def _apply_dense_threshold(
+    sr: Dict[str, Any],
+    *,
+    use_dense_threshold: bool,
+    min_dense_score: float,
+    log_prefix: str,
+    col: Optional[str] = None,
+) -> None:
+    if not use_dense_threshold:
+        return
+    dense_map = sr.get("dense")
+    if not isinstance(dense_map, dict):
+        return
+    for vname, lst in dense_map.items():
+        before = len(lst or [])
+        filtered: List[Any] = []
+        for p in lst or []:
+            score = getattr(p, "score", None)
+            try:
+                score_val = float(score) if score is not None else None
+            except Exception:
+                score_val = None
+            if score_val is not None and score_val >= float(min_dense_score):
+                filtered.append(p)
+        dense_map[vname] = filtered
+        log_kv(
+            log_prefix,
+            col=col,
+            vec=str(vname),
+            before=before,
+            after=len(filtered),
+            min_dense_score=float(min_dense_score),
+        )
+
 def _resolve_collection(p: Any, payload: Optional[dict] = None) -> str:
     pl = payload if payload is not None else getattr(p, "payload", None) or {}
     if not isinstance(pl, dict):
@@ -1943,6 +1977,8 @@ def _run_rag_with_vectors(
         top_k_dense=int(preset.top_k_dense),
         top_k_lex_cand=int(preset.top_k_lex_cand),
         top_k_lex=int(preset.top_k_lex),
+        use_dense_threshold=int(preset.use_dense_threshold),
+        min_dense_score=float(preset.min_dense_score),
         sparse_vector_name=sparse_vector_name_eff,
         sparse_topk=int(sparse_topk_eff),
         sparse_weight=float(sparse_weight_eff),
@@ -2010,6 +2046,8 @@ def _run_rag_with_vectors(
         base_route=plan.base_route,
         action=plan.action,
         relation=plan.relation,
+        use_dense_threshold=int(preset.use_dense_threshold),
+        min_dense_score=float(preset.min_dense_score),
         output_type=getattr(plan, "output_type", None),
         target_cols=plan.target_collections,
     )
@@ -2116,6 +2154,13 @@ def _run_rag_with_vectors(
                     top_k_lex=min(hop1_k_base, 80),
                     query_filter=hop1_filter,  # ✅ 실제 적용
                     timings_out=local_timings_h1,
+                )
+                _apply_dense_threshold(
+                    sr1,
+                    use_dense_threshold=bool(preset.use_dense_threshold),
+                    min_dense_score=float(preset.min_dense_score),
+                    log_prefix="RAG.DENSE.THRESHOLD.HOP1",
+                    col=hop1_col,
                 )
                 _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
                 for _, lst in (sr1.get("dense") or {}).items():
@@ -2263,6 +2308,13 @@ def _run_rag_with_vectors(
                 top_k_lex=min(hop2_k_base, 120),
                 query_filter=hop2_filter,  # ✅ JOIN 필터 강제 적용
                 timings_out=local_timings_h2,
+            )
+            _apply_dense_threshold(
+                sr2,
+                use_dense_threshold=bool(preset.use_dense_threshold),
+                min_dense_score=float(preset.min_dense_score),
+                log_prefix="RAG.DENSE.THRESHOLD.HOP2",
+                col=hop2_col,
             )
             _ensure_collection_mark((sr2.get("lexical") or []), hop2_col)
             for _, lst in (sr2.get("dense") or {}).items():
@@ -2455,6 +2507,13 @@ def _run_rag_with_vectors(
             top_k_lex=topk_lex,
             query_filter=qfilter,  # ✅ plan 기반 적용
             timings_out=local_timings,
+        )
+        _apply_dense_threshold(
+            sr,
+            use_dense_threshold=bool(preset.use_dense_threshold),
+            min_dense_score=float(preset.min_dense_score),
+            log_prefix="RAG.DENSE.THRESHOLD.COL",
+            col=col,
         )
 
         hybrid_points = sr.get("hybrid") or []
