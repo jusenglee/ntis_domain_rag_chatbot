@@ -93,6 +93,8 @@ MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
+MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
+MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -1295,9 +1297,28 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
         log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
                     f"title: {title}")
 
-        refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
+        meta_basic = mapped_doc.get("meta_basic", {})
+        meta_basic_text = format_metadata(
+            meta_basic,
+            max_sentences=MAX_FIELD_SENTENCES,
+            max_tokens=MAX_FIELD_TOKENS,
+        )
+        log_section(
+            "refine_documents_rule_based - meta_basic 필드 출력 확인",
+            f"meta_basic keys: {list(meta_basic.keys())}\n"
+            f"formatted:\n{meta_basic_text}",
+        )
+
+        meta_detail_text = ""
         if is_detail:
-            refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
+            meta_detail_text = format_metadata(
+                mapped_doc.get("meta_detail", {}),
+                max_sentences=MAX_FIELD_SENTENCES,
+                max_tokens=MAX_FIELD_TOKENS,
+            )
+
+        refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
+        refined_text = "\n".join(refined_parts)
 
         researcher_lines = RagMapper.get_researcher_info(mapped_doc)
         researcher_block = ""
@@ -1400,7 +1421,12 @@ def _truncate_context_text(text: str, max_chars: int) -> str:
     return f"{text[:max_chars]}...\n(컨텍스트가 너무 길어 일부가 잘렸습니다.)"
 
 
-def format_metadata(metadata: Dict[str, Any]) -> str:
+def format_metadata(
+    metadata: Dict[str, Any],
+    *,
+    max_sentences: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
 
@@ -1412,6 +1438,13 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
             value = ", ".join(map(str, value))
         elif isinstance(value, dict):
             value = json.dumps(value, ensure_ascii=False)
+
+        if max_sentences is not None and max_tokens is not None:
+            value = _limit_text_by_sentences_and_tokens(
+                str(value),
+                max_sentences=max_sentences,
+                max_tokens=max_tokens,
+            )
 
         lines.append(f"- {key}: {value}")
 
