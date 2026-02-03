@@ -41,6 +41,7 @@ from retrieval import (
     extract_keywords,
     dense_retrieve_hybrid_multi,
     build_context_mixed,
+    _payload_get,
 )
 
 # -------------------------
@@ -724,6 +725,9 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
     )
     keyword_text = _to_text(pl.get("keyword_text") or pl.get("keyword1") or pl.get("keyword2") or "")
     category_text = _to_text(pl.get("category") or pl.get("cetegory") or "")
+    prtcp_mp_names = _to_text(_payload_get(pl, "prtcp_mp[].hm_nm"))
+    prtcp_mp_orgs = _to_text(_payload_get(pl, "prtcp_mp[].blng_org_nm"))
+    prtcp_org_names = _to_text(_payload_get(pl, "prtcp_org[].org_nm"))
 
     meta_kv = []
     for k in (
@@ -764,6 +768,12 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
         meta_kv.append(f"category:{category_text}")
     if keyword_text:
         meta_kv.append(f"keyword_text:{keyword_text}")
+    if prtcp_mp_names:
+        meta_kv.append(f"prtcp_mp_hm_nm:{prtcp_mp_names}")
+    if prtcp_mp_orgs:
+        meta_kv.append(f"prtcp_mp_blng_org_nm:{prtcp_mp_orgs}")
+    if prtcp_org_names:
+        meta_kv.append(f"prtcp_org_nm:{prtcp_org_names}")
     meta_kv_s = _to_text("; ".join(meta_kv))[:800]
 
     return {
