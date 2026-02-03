@@ -66,6 +66,11 @@ from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
     build_search_preset as _build_search_preset,
 )
+from rag_parts.search_strategy import (
+    SEARCH_STRATEGY_VERSION,
+    build_strategy_key,
+    get_mode_policy,
+)
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
@@ -1280,6 +1285,30 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
         return True
     return False
 
+def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
+    """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
+
+    우선순위(강제):
+    1) relation이 있으면 join
+    2) id query 또는 명확한 ids -> lookup
+    3) list/stats/download -> lookup
+    4) topic/search -> search (기본 유지)
+    5) 그 외 -> search
+    """
+    action = it.action
+    rel = it.relation
+    if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
+        return "lookup", "people_project_lookup"
+    if rel:
+        return "join", "relation"
+    if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
+        return "lookup", "id_or_exact"
+    if action in ("list", "stats", "download"):
+        return "lookup", "list_like"
+    if action in ("topic", "search"):
+        return "search", "topic_search"
+    return "search", "default"
+
 def _build_plan(it: NormalizedIntent) -> QueryPlan:
     # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
     # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
@@ -1328,16 +1357,7 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     rel = it.relation
     output_type = getattr(it, "output_type", None)
 
-    if bool(it.is_id_query):
-        return QueryPlan(
-            mode="lookup",
-            base_route=base_route,
-            action=action,
-            relation=None,
-            output_type=output_type,
-            target_collections=_default_target_collections(),
-            filters={},
-        )
+    mode, mode_reason = _select_mode_policy(it)
 
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         target_cols = _resolve_relation_target_cols(rel, reason="people_project_lookup")
@@ -1363,19 +1383,8 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
             filters={},
         )
 
-    if action in ("list", "stats", "download") or bool(it.is_id_query) or _has_any_ids(it):
-        return QueryPlan(
-            mode="lookup",
-            base_route=base_route,
-            action=action,
-            relation=None,
-            output_type=output_type,
-            target_collections=_default_target_collections(),
-            filters={},
-        )
-
     return QueryPlan(
-        mode="search",
+        mode=mode,
         base_route=base_route,
         action=action,
         relation=None,
@@ -2109,6 +2118,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.FILTERS",
+        strategy_version=SEARCH_STRATEGY_VERSION,
         org_terms=org_terms,
         org_role=org_role,
         people_terms=people_terms,
@@ -2158,6 +2168,8 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.PRESET/PLAN.PRE",
+        strategy_version=SEARCH_STRATEGY_VERSION,
+        preset_key=getattr(preset, "strategy_key", None),
         top_k_dense=int(preset.top_k_dense),
         top_k_lex_cand=int(preset.top_k_lex_cand),
         top_k_lex=int(preset.top_k_lex),
@@ -2204,12 +2216,34 @@ def _run_rag_with_vectors(
 
     # plan
     plan = _build_plan(it)
+    policy_mode, policy_reason = _select_mode_policy(it)
+    enforced_reasons = {"relation", "id_or_exact", "list_like", "topic_search", "people_project_lookup"}
+    enforced_mode = policy_mode if policy_reason in enforced_reasons else None
+
     if hint_mode in ("search", "lookup", "join"):
-        plan.mode = hint_mode
+        if enforced_mode and hint_mode != enforced_mode:
+            log_kv(
+                "RAG.PLAN.MODE_ENFORCE",
+                level="warning",
+                enforced_mode=enforced_mode,
+                requested_mode=hint_mode,
+                reason=policy_reason,
+                action=action,
+                base_route=base_route,
+                relation=relation,
+            )
+            plan.mode = enforced_mode
+        else:
+            plan.mode = hint_mode
     if hinted_cols:
         plan.target_collections = hinted_cols
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
+    lookup_filter_enabled = bool(
+        plan.mode == "lookup"
+        and search_filter_signal
+        and str(os.getenv("RAG_LOOKUP_FILTER_ENABLE", "0")).strip().lower() in ("1", "true", "yes", "y")
+    )
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
@@ -2266,8 +2300,37 @@ def _run_rag_with_vectors(
         filtered = _pick_collections((plan.target_collections or []), effective_allow)
         plan.target_collections = filtered if filtered else list(effective_allow)
 
+    strategy_key = build_strategy_key(action, plan.mode)
+    mode_policy = get_mode_policy(plan.mode)
+    strategy_summary = {
+        "mode": plan.mode,
+        "strategy_version": SEARCH_STRATEGY_VERSION,
+        "strategy_key": strategy_key,
+        "policy_reason": policy_reason,
+        "filter": {
+            "search_filter_enabled": search_filter_enabled,
+            "lookup_filter_enabled": lookup_filter_enabled,
+            "relation_lookup_enforce": relation_lookup_enforce,
+        },
+        "mix_weights": {
+            "dense": {k: float(v) for k, v in (w_dense_map or {}).items()},
+            "sparse": float(sparse_weight_eff),
+            "rerank": mode_policy.get("rerank_weights"),
+        },
+    }
+
+    log_kv(
+        "RAG.INTENT",
+        strategy_summary=strategy_summary,
+    )
+    log_kv(
+        "RAG.FILTERS",
+        strategy_summary=strategy_summary,
+    )
+
     log_kv(
         "RAG.ROUTE/PLAN",
+        strategy_summary=strategy_summary,
         mode=plan.mode,
         route=getattr(plan, "route", None),
         base_route=base_route,
@@ -2278,6 +2341,9 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.PRESET/PLAN.POST",
+        strategy_summary=strategy_summary,
+        strategy_version=SEARCH_STRATEGY_VERSION,
+        strategy_key=strategy_key,
         mode=plan.mode,
         base_route=plan.base_route,
         action=plan.action,
@@ -2697,6 +2763,27 @@ def _run_rag_with_vectors(
 
         relation_filter = _relation_lookup_filter_for_col()
 
+        def _build_soft_filter_for_col(col_name: str) -> Any:
+            base_filter = None
+            if col_name == COL_PROJECT:
+                if people_filter or participant_org_filter or org_filter:
+                    tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                    base_filter = _and_filter(base_filter, tag_filter_local)
+                if people_filter:
+                    base_filter = _and_filter(base_filter, people_filter)
+                if participant_org_filter or org_filter:
+                    base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
+                if project_tag_filter:
+                    base_filter = _and_filter(base_filter, project_tag_filter)
+                if generic_tag_filter:
+                    base_filter = _and_filter(base_filter, generic_tag_filter)
+            elif col_name == COL_PERF:
+                if perf_tag_filter:
+                    base_filter = _and_filter(base_filter, perf_tag_filter)
+                if generic_tag_filter:
+                    base_filter = _and_filter(base_filter, generic_tag_filter)
+            return base_filter
+
         def _apply_extra_filters(base_filter: Any) -> Any:
             combined = _and_filter(relation_filter, base_filter) if relation_filter else base_filter
             if col in (COL_PROJECT, COL_PERF):
@@ -2710,29 +2797,13 @@ def _run_rag_with_vectors(
 
         if plan.mode != "lookup":
             if plan.mode == "search" and search_filter_enabled:
-                base_filter = None
-                if col == COL_PROJECT:
-                    if people_filter or participant_org_filter or org_filter:
-                        tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                        base_filter = _and_filter(base_filter, tag_filter_local)
-                    if people_filter:
-                        base_filter = _and_filter(base_filter, people_filter)
-                    if participant_org_filter or org_filter:
-                        base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
-                    if project_tag_filter:
-                        base_filter = _and_filter(base_filter, project_tag_filter)
-                    if generic_tag_filter:
-                        base_filter = _and_filter(base_filter, generic_tag_filter)
-                elif col == COL_PERF:
-                    if perf_tag_filter:
-                        base_filter = _and_filter(base_filter, perf_tag_filter)
-                    if generic_tag_filter:
-                        base_filter = _and_filter(base_filter, generic_tag_filter)
-                return _apply_extra_filters(base_filter)
+                return _apply_extra_filters(_build_soft_filter_for_col(col))
             if plan.mode == "search" and col == COL_PROJECT and relation == ("people", "project") and people_filter:
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
             return _apply_extra_filters(None)
+
+        base_filter_lookup = _build_soft_filter_for_col(col) if lookup_filter_enabled else None
 
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
@@ -2742,22 +2813,27 @@ def _run_rag_with_vectors(
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
-            return _apply_extra_filters(pjt_filter)
+            combined = _and_filter(pjt_filter, base_filter_lookup) if base_filter_lookup else pjt_filter
+            return _apply_extra_filters(combined)
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
-            return _apply_extra_filters(perf_tag_filter)
+            combined = _and_filter(perf_tag_filter, base_filter_lookup) if base_filter_lookup else perf_tag_filter
+            return _apply_extra_filters(combined)
 
         # (선택) org_filter는 project 컬렉션에서만
         if col == COL_PROJECT and relation == ("people", "project") and people_filter:
             tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-            return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
+            combined = _and_filter(_and_filter(tag_filter_local, people_filter), base_filter_lookup) if base_filter_lookup else _and_filter(tag_filter_local, people_filter)
+            return _apply_extra_filters(combined)
 
         if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
             if org_role == "participant":
-                return _apply_extra_filters(participant_org_filter or org_filter)
+                combined = _and_filter(participant_org_filter or org_filter, base_filter_lookup) if base_filter_lookup else (participant_org_filter or org_filter)
+                return _apply_extra_filters(combined)
             if org_filter:
-                return _apply_extra_filters(org_filter)
+                combined = _and_filter(org_filter, base_filter_lookup) if base_filter_lookup else org_filter
+                return _apply_extra_filters(combined)
 
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
@@ -2781,11 +2857,13 @@ def _run_rag_with_vectors(
                     combined_filter = _and_filter(combined_filter, people_filter)
                 if participant_org_filter or org_filter:
                     combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
+                combined_filter = _and_filter(combined_filter, base_filter_lookup) if base_filter_lookup else combined_filter
                 return _apply_extra_filters(combined_filter)
 
         if col == COL_PERF and base_route == "perf" and perf_tag_filter:
-            return _apply_extra_filters(perf_tag_filter)
-        return _apply_extra_filters(None)
+            combined = _and_filter(perf_tag_filter, base_filter_lookup) if base_filter_lookup else perf_tag_filter
+            return _apply_extra_filters(combined)
+        return _apply_extra_filters(base_filter_lookup)
 
 
     # retrieve each collection

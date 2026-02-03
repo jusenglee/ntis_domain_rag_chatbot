@@ -608,19 +608,11 @@ def extract_keywords(q: str, *, max_keywords: int = 12) -> List[str]:
     if not raw:
         return []
 
-    stop = {
-        "은", "는", "이", "가", "을", "를", "에", "의", "와", "과", "도", "만",
-        "좀", "좀요", "주세요", "알려줘", "알려주세요",
-        "방법", "절차", "어떻게", "무엇", "어떤", "관련",
-    }
-
     out: List[str] = []
     seen: set[str] = set()
     for t in raw:
         tt = t.strip()
         if not tt:
-            continue
-        if tt in stop or tt.lower() in stop:
             continue
         key = tt.lower()
         if key in seen:
