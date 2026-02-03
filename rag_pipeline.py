@@ -653,14 +653,15 @@ def _apply_dense_threshold(
                 if score_val is not None and score_val >= float(min_dense_score):
                     filtered.append(p)
             dense_map[vname] = filtered
-            log_kv(
-                log_prefix,
-                col=col,
-                vec=str(vname),
-                before=before,
-                after=len(filtered),
-                min_dense_score=float(min_dense_score),
-            )
+        log_kv(
+            log_prefix,
+            col=col,
+            vec=str(vname),
+            applied=bool(use_dense_threshold),
+            before=before,
+            after=len(filtered),
+            min_dense_score=float(min_dense_score),
+        )
 
         score_values: List[float] = []
         for p in filtered:
