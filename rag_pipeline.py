@@ -2155,6 +2155,23 @@ def _run_rag_with_vectors(
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
     )
 
+    people_relation_disabled = False
+    forced_target_cols: Optional[List[str]] = None
+    if people_terms and base_route in ("project", "perf") and relation and "people" in set(relation):
+        people_relation_disabled = True
+        forced_target_cols = [COL_PROJECT if base_route == "project" else COL_PERF]
+        log_kv(
+            "RAG.PLAN.RELATION_DISABLED",
+            level="warning",
+            reason="people_terms_base_route",
+            base_route=base_route,
+            relation=relation,
+            forced_target_cols=forced_target_cols,
+            people_terms=people_terms[:4],
+        )
+        it.relation = None
+        relation = None
+
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
     # -------------------------
@@ -2267,6 +2284,17 @@ def _run_rag_with_vectors(
         plan.mode = "lookup"
     if hinted_cols:
         plan.target_collections = hinted_cols
+    if people_relation_disabled:
+        plan.relation = None
+        if plan.mode == "join":
+            plan.mode = (
+                "lookup"
+                if (action in ("list", "stats", "download") or _has_explicit_identifiers(it) or _has_any_ids(it))
+                else "search"
+            )
+        if forced_target_cols:
+            plan.target_collections = forced_target_cols
+        relation = None
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
@@ -2881,6 +2909,8 @@ def _run_rag_with_vectors(
                 if generic_tag_filter:
                     base_filter = _and_filter(base_filter, generic_tag_filter)
             elif col_name == COL_PERF:
+                if base_route == "perf" and people_filter:
+                    base_filter = _and_filter(base_filter, people_filter)
                 if perf_tag_filter:
                     base_filter = _and_filter(base_filter, perf_tag_filter)
                 if generic_tag_filter:
@@ -2970,9 +3000,14 @@ def _run_rag_with_vectors(
                 combined_filter = _and_filter(combined_filter, base_filter_lookup) if base_filter_lookup else combined_filter
                 return _apply_extra_filters(combined_filter)
 
-        if col == COL_PERF and base_route == "perf" and perf_tag_filter:
-            combined = _and_filter(perf_tag_filter, base_filter_lookup) if base_filter_lookup else perf_tag_filter
-            return _apply_extra_filters(combined)
+        if col == COL_PERF and base_route == "perf":
+            combined_filter = base_filter_lookup
+            if people_filter:
+                combined_filter = _and_filter(combined_filter, people_filter) if combined_filter else people_filter
+            if perf_tag_filter:
+                combined_filter = _and_filter(combined_filter, perf_tag_filter) if combined_filter else perf_tag_filter
+            if combined_filter is not None:
+                return _apply_extra_filters(combined_filter)
         return _apply_extra_filters(base_filter_lookup)
 
 
