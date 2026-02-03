@@ -2312,17 +2312,25 @@ def _run_rag_with_vectors(
 
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
-        if relation_lookup_policy == "join":
+        relation_parts = set(relation)
+        force_join_relation = relation_parts == {"project", "perf"}
+        should_promote_join = relation_lookup_policy == "join" or force_join_relation
+        if should_promote_join:
             plan.mode = "join"
             logger.warning(
-                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
+                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s, force_join=%s)",
                 relation_lookup_policy,
                 relation,
+                int(force_join_relation),
             )
+            if force_join_relation and relation_lookup_policy != "join":
+                logger.warning(
+                    "[RAG] relation_lookup_enforce=0 (override to join for project↔perf relation)",
+                )
         else:
             relation_lookup_enforce = True
             logger.warning(
-                "[RAG] enforcing relation filters in lookup (policy=%s, relation=%s)",
+                "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
                 relation_lookup_policy,
                 relation,
             )
