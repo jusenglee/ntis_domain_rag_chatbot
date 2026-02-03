@@ -906,6 +906,11 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
+    log_section(
+        f"FINAL PROMPT ({model_name})",
+        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
+    )
+
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
     response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)

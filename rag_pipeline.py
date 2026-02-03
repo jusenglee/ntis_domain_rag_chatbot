@@ -1770,14 +1770,19 @@ def _run_rag_with_vectors(
             return None
 
     intent_from_payload = False
+    planner_confidence: Optional[float] = None
     it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
     if it is None:
         it = _normalize_payload_intent(intent_payload)
     if it is not None:
         intent_from_payload = True
+        planner_confidence = _get_attr(intent_payload, "planner_confidence", None)
+        if planner_confidence is None:
+            planner_confidence = _get_attr(_get_attr(intent_payload, "query_intent", None), "planner_confidence", None)
     else:
         raw_intent = _get_attr(intent_payload, "query_intent", None) or _get_attr(intent_payload, "raw_intent", None)
         if raw_intent is not None:
+            planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
             qa_researchers = _get_attr(qa, "researchers", None) or []
             if isinstance(qa_researchers, str):
                 qa_researchers = [qa_researchers]
@@ -1822,6 +1827,7 @@ def _run_rag_with_vectors(
             # intent (hint는 query_intent에서 흡수)
             domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
             raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
+            planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
             qa_researchers = _get_attr(qa, "researchers", None) or []
             if isinstance(qa_researchers, str):
                 qa_researchers = [qa_researchers]
@@ -1949,6 +1955,11 @@ def _run_rag_with_vectors(
     action = it.action
     base_route = it.base_route
     relation = it.relation
+    if planner_confidence is not None:
+        try:
+            planner_confidence = float(planner_confidence)
+        except Exception:
+            planner_confidence = None
 
     # budget (for ctx builder)
     ctx_budget = int(
@@ -2065,6 +2076,37 @@ def _run_rag_with_vectors(
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
+    project_tag_filter = _build_tag_only_filter(list(it.project_tag_filters)) if it.project_tag_filters else None
+    generic_tag_filter = _build_tag_only_filter(list(it.tag_filters)) if it.tag_filters else None
+
+    hint_people_filters = _normalize_hint_terms(
+        hint_filters.get("researcher_name") or hint_filters.get("people_name")
+    ) if isinstance(hint_filters, dict) else []
+    hint_org_filters = _normalize_hint_terms(
+        hint_filters.get("org_name") or hint_filters.get("org")
+    ) if isinstance(hint_filters, dict) else []
+    hint_tag_filters = _normalize_hint_terms(
+        hint_filters.get("tag_filters")
+        or hint_filters.get("project_tag_filters")
+        or hint_filters.get("perf_tag_filters")
+    ) if isinstance(hint_filters, dict) else []
+
+    search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
+    search_filter_signal = bool(
+        hint_people_filters
+        or hint_org_filters
+        or hint_tag_filters
+        or people_terms
+        or org_terms
+        or it.tag_filters
+        or it.project_tag_filters
+        or it.perf_tag_filters
+    )
+    search_filter_conf_ok = bool(
+        (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
+        or (qa_conf >= search_filter_min_conf)
+    )
+    search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     log_kv(
         "RAG.FILTERS",
@@ -2084,6 +2126,8 @@ def _run_rag_with_vectors(
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
+        project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
+        generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         keyword_filter=str(keyword_filter) if keyword_filter is not None else None,
@@ -2664,6 +2708,26 @@ def _run_rag_with_vectors(
             return combined
 
         if plan.mode != "lookup":
+            if plan.mode == "search" and search_filter_enabled:
+                base_filter = None
+                if col == COL_PROJECT:
+                    if people_filter or participant_org_filter or org_filter:
+                        tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
+                        base_filter = _and_filter(base_filter, tag_filter_local)
+                    if people_filter:
+                        base_filter = _and_filter(base_filter, people_filter)
+                    if participant_org_filter or org_filter:
+                        base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
+                    if project_tag_filter:
+                        base_filter = _and_filter(base_filter, project_tag_filter)
+                    if generic_tag_filter:
+                        base_filter = _and_filter(base_filter, generic_tag_filter)
+                elif col == COL_PERF:
+                    if perf_tag_filter:
+                        base_filter = _and_filter(base_filter, perf_tag_filter)
+                    if generic_tag_filter:
+                        base_filter = _and_filter(base_filter, generic_tag_filter)
+                return _apply_extra_filters(base_filter)
             if plan.mode == "search" and col == COL_PROJECT and relation == ("people", "project") and people_filter:
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
@@ -2737,6 +2801,9 @@ def _run_rag_with_vectors(
             "RAG.COL.RETRIEVE",
             col=col,
             mode=plan.mode,
+            search_filter_enabled=search_filter_enabled,
+            search_filter_signal=search_filter_signal,
+            search_filter_conf_ok=search_filter_conf_ok,
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,
