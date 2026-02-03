@@ -2106,7 +2106,6 @@ def _run_rag_with_vectors(
         (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
         or (qa_conf >= search_filter_min_conf)
     )
-    search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     log_kv(
         "RAG.FILTERS",
@@ -2209,6 +2208,8 @@ def _run_rag_with_vectors(
         plan.mode = hint_mode
     if hinted_cols:
         plan.target_collections = hinted_cols
+
+    search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
