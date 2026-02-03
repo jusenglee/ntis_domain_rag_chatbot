@@ -877,6 +877,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
+    log_section(
+        f"-----------------검색 결과----------------)",
+        f"[검색 : ]\n{state.context}",
+    )
+
+
+
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
@@ -1280,7 +1287,13 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
         mapped_doc = RagMapper.map(doc)
 
         source_idx = doc.get("source_index")
+
         title = mapped_doc.get("title", "제목 없음")
+        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+                    f"mapped_doc: {mapped_doc}")
+
+        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+                    f"title: {title}")
 
         refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
         if is_detail:
