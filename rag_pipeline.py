@@ -635,6 +635,9 @@ def _apply_dense_threshold(
     min_dense_score: float,
     log_prefix: str,
     col: Optional[str] = None,
+    action: Optional[str] = None,
+    base_route: Optional[str] = None,
+    relation: Optional[Tuple[str, str]] = None,
 ) -> None:
     dense_map = sr.get("dense")
     if not isinstance(dense_map, dict):
@@ -653,13 +656,20 @@ def _apply_dense_threshold(
                 if score_val is not None and score_val >= float(min_dense_score):
                     filtered.append(p)
             dense_map[vname] = filtered
+        reduced = before - len(filtered)
+        reduced_ratio = (float(reduced) / float(before)) if before else 0.0
         log_kv(
             log_prefix,
             col=col,
             vec=str(vname),
+            action=action,
+            base_route=base_route,
+            relation=str(relation) if relation else None,
             applied=bool(use_dense_threshold),
             before=before,
             after=len(filtered),
+            reduced=reduced,
+            reduced_ratio=round(reduced_ratio, 4),
             min_dense_score=float(min_dense_score),
         )
 
@@ -2225,6 +2235,9 @@ def _run_rag_with_vectors(
                     min_dense_score=float(preset.min_dense_score),
                     log_prefix="RAG.DENSE.THRESHOLD.HOP1",
                     col=hop1_col,
+                    action=action,
+                    base_route=base_route,
+                    relation=relation,
                 )
                 _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
                 for _, lst in (sr1.get("dense") or {}).items():
@@ -2381,6 +2394,9 @@ def _run_rag_with_vectors(
                 min_dense_score=float(preset.min_dense_score),
                 log_prefix="RAG.DENSE.THRESHOLD.HOP2",
                 col=hop2_col,
+                action=action,
+                base_route=base_route,
+                relation=relation,
             )
             _ensure_collection_mark((sr2.get("lexical") or []), hop2_col)
             for _, lst in (sr2.get("dense") or {}).items():
@@ -2582,6 +2598,9 @@ def _run_rag_with_vectors(
             min_dense_score=float(preset.min_dense_score),
             log_prefix="RAG.DENSE.THRESHOLD.COL",
             col=col,
+            action=action,
+            base_route=base_route,
+            relation=relation,
         )
 
         hybrid_points = sr.get("hybrid") or []
