@@ -650,15 +650,25 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                 if doc.get("source_index") in related_doc_indexes
             ]
             if related_context:
-                prev_context_str = refine_documents_rule_based(related_context, True)
+                prev_context_str = refine_documents_rule_based(
+                    related_context,
+                    True,
+                    researchers=(qa.researchers if qa else None),
+                )
             else:
                 # fallback: 전체 prev_context 사용
                 related_context = state.prev_context
-                prev_context_str = refine_documents_rule_based(related_context)
+                prev_context_str = refine_documents_rule_based(
+                    related_context,
+                    researchers=(qa.researchers if qa else None),
+                )
         else:
             # fallback: 전체 prev_context 사용
             related_context = state.prev_context
-            prev_context_str = refine_documents_rule_based(related_context)
+            prev_context_str = refine_documents_rule_based(
+                related_context,
+                researchers=(qa.researchers if qa else None),
+            )
 
 
 
@@ -901,7 +911,15 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             ]
             docs_for_ctx = related_context or docs_for_ctx
 
-    context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
+    context_text = (
+        refine_documents_rule_based(
+            docs_for_ctx,
+            is_detail,
+            researchers=(qa.researchers if qa else None),
+        )
+        if docs_for_ctx
+        else "없음"
+    )
     log_section("context_text - 페이로드 평탄화 후 데이터",
                 f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
@@ -1280,7 +1298,149 @@ def build_advanced_workflow():
     return workflow
 
 
-def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
+def _normalize_researcher_token(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    normalized = re.sub(r"[^0-9a-zA-Z가-힣]", "", str(value)).lower()
+    return normalized
+
+
+def _extract_researcher_fields(researcher: Any) -> tuple[str, str, str]:
+    if isinstance(researcher, Researcher):
+        name = researcher.name
+        affiliation = researcher.affiliation
+        researcher_id = researcher.researcher_id
+    elif isinstance(researcher, dict):
+        name = researcher.get("name")
+        affiliation = researcher.get("affiliation")
+        researcher_id = researcher.get("researcher_id")
+    else:
+        name = getattr(researcher, "name", None)
+        affiliation = getattr(researcher, "affiliation", None)
+        researcher_id = getattr(researcher, "researcher_id", None)
+    return (
+        str(name).strip() if name else "",
+        str(affiliation).strip() if affiliation else "",
+        str(researcher_id).strip() if researcher_id else "",
+    )
+
+
+def _match_prtcp_members(
+    prtcp_members: List[Dict[str, Any]],
+    researchers: Optional[List[Any]],
+    *,
+    max_matches: int = 5,
+) -> List[Dict[str, Any]]:
+    if not prtcp_members or not researchers:
+        return []
+
+    matches: List[Dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for researcher in researchers:
+        name, affiliation, researcher_id = _extract_researcher_fields(researcher)
+        name_norm = _normalize_researcher_token(name)
+        affiliation_norm = _normalize_researcher_token(affiliation)
+        best_member = None
+        best_score = 0.0
+
+        for member in prtcp_members:
+            hm_id = str(member.get("hm_id") or "").strip()
+            hm_nm = str(member.get("hm_nm") or "").strip()
+            org_nm = str(member.get("blng_org_nm") or "").strip()
+
+            score = 0.0
+            if researcher_id and hm_id and researcher_id == hm_id:
+                score = 3.0
+            else:
+                hm_nm_norm = _normalize_researcher_token(hm_nm)
+                if name_norm and hm_nm_norm and name_norm == hm_nm_norm:
+                    score = 2.0
+                    if affiliation_norm:
+                        org_norm = _normalize_researcher_token(org_nm)
+                        if org_norm and org_norm == affiliation_norm:
+                            score = 2.5
+
+            if score > best_score:
+                best_score = score
+                best_member = member
+
+        if best_member and best_score > 0:
+            dedup_key = (
+                str(best_member.get("hm_id") or _normalize_researcher_token(best_member.get("hm_nm"))),
+                _normalize_researcher_token(best_member.get("blng_org_nm")),
+            )
+            if dedup_key not in seen_keys:
+                seen_keys.add(dedup_key)
+                matches.append(best_member)
+                if len(matches) >= max_matches:
+                    break
+
+    return matches
+
+
+def _format_researcher_line(
+    matched_members: List[Dict[str, Any]],
+    fallback_lines: List[str],
+    *,
+    max_matches: int = 5,
+) -> str:
+    if matched_members:
+        names = []
+        for member in matched_members[:max_matches]:
+            name = str(member.get("hm_nm") or "이름미상").strip()
+            org = str(member.get("blng_org_nm") or "소속미상").strip()
+            names.append(f"{name}({org})")
+        return f"- 연구자(매칭): {', '.join(names)}"
+
+    fallback_names = []
+    for line in fallback_lines[:max_matches]:
+        cleaned = line.lstrip("- ").strip()
+        if cleaned:
+            fallback_names.append(cleaned)
+    if fallback_names:
+        return f"- 연구자: {', '.join(fallback_names)}"
+
+    return "- 연구자: 정보 없음"
+
+
+def summarize_documents_headlines(
+    docs: List[Document],
+    *,
+    researchers: Optional[List[Any]] = None,
+    max_matches: int = 5,
+) -> str:
+    headlines: List[str] = []
+
+    for doc in docs:
+        mapped_doc = RagMapper.map(doc)
+        source_idx = doc.get("source_index")
+        title = mapped_doc.get("title", "제목 없음")
+
+        prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
+        matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
+        fallback_lines = RagMapper.get_researcher_info(mapped_doc)
+        researcher_line = _format_researcher_line(
+            matched_members,
+            fallback_lines,
+            max_matches=max_matches,
+        )
+
+        headlines.append(
+            f"## 출처 {source_idx}. {title}\n"
+            f"{researcher_line}\n"
+        )
+
+    return "\n\n".join(headlines)
+
+
+def refine_documents_rule_based(
+    docs: List[Document],
+    is_detail: bool = False,
+    *,
+    researchers: Optional[List[Any]] = None,
+    max_matches: int = 5,
+) -> str:
     context_chunks: List[str] = []
 
     for doc in docs:
@@ -1318,15 +1478,18 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
         refined_text = "\n".join(refined_parts)
 
-        researcher_lines = RagMapper.get_researcher_info(mapped_doc)
+        prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
+        matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
+        fallback_lines = RagMapper.get_researcher_info(mapped_doc)
+        researcher_line = _format_researcher_line(
+            matched_members,
+            fallback_lines,
+            max_matches=max_matches,
+        )
         log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"researcher_lines: {researcher_lines}")
-        researcher_block = ""
-        if researcher_lines:
-            researcher_block = (
-                    "\n- 연구원 목록:\n"
-                    + "\n".join(researcher_lines)
-            )
+                    f"matched_members: {matched_members}\n"
+                    f"fallback_lines: {fallback_lines}")
+        researcher_block = f"\n{researcher_line}"
 
         combined_text = f"{refined_text}{researcher_block}".strip()
         limited_text = _limit_text_by_sentences_and_tokens(
