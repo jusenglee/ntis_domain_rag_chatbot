@@ -1489,14 +1489,30 @@ def refine_documents_rule_based(
         log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
                     f"matched_members: {matched_members}\n"
                     f"fallback_lines: {fallback_lines}")
-        researcher_block = f"\n{researcher_line}"
-
-        combined_text = f"{refined_text}{researcher_block}".strip()
-        limited_text = _limit_text_by_sentences_and_tokens(
-            combined_text,
+        researcher_text = researcher_line.strip()
+        limited_body = _limit_text_by_sentences_and_tokens(
+            refined_text,
             max_sentences=MAX_DOC_SENTENCES,
             max_tokens=MAX_DOC_TOKENS,
         )
+        body_sentences = _split_sentences(limited_body) if limited_body else []
+        body_tokens = sum(len(sentence.split()) for sentence in body_sentences)
+        researcher_sentences = _split_sentences(researcher_text) if researcher_text else []
+        researcher_tokens = sum(len(sentence.split()) for sentence in researcher_sentences)
+        if (
+            len(body_sentences) + len(researcher_sentences) > MAX_DOC_SENTENCES
+            or body_tokens + researcher_tokens > MAX_DOC_TOKENS
+        ):
+            available_sentences = max(MAX_DOC_SENTENCES - len(researcher_sentences), 0)
+            available_tokens = max(MAX_DOC_TOKENS - researcher_tokens, 0)
+            limited_body = _limit_text_by_sentences_and_tokens(
+                refined_text,
+                max_sentences=available_sentences,
+                max_tokens=available_tokens,
+            )
+
+        combined_text = f"{limited_body}\n{researcher_text}".strip()
+        limited_text = combined_text
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
