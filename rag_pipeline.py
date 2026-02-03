@@ -26,7 +26,14 @@ from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
-from settings import DEFAULT_MODEL_NAME, logger, MAX_TOKENS, get_ctx_token_budget, RAG_COLLECTION_ALLOWLIST
+from settings import (
+    DEFAULT_MODEL_NAME,
+    logger,
+    MAX_TOKENS,
+    get_ctx_token_budget,
+    get_model_max_output_tokens,
+    RAG_COLLECTION_ALLOWLIST,
+)
 from rag_types import RagResult
 from rag_store import build_rag_objects
 from retrieval import (
@@ -1789,7 +1796,12 @@ def _run_rag_with_vectors(
     relation = it.relation
 
     # budget (for ctx builder)
-    ctx_budget = int(get_ctx_token_budget(model_name, max_output_tokens=MAX_TOKENS))
+    ctx_budget = int(
+        get_ctx_token_budget(
+            model_name,
+            max_output_tokens=get_model_max_output_tokens(model_name),
+        )
+    )
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # preset (topK etc)

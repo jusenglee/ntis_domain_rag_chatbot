@@ -45,7 +45,7 @@ TOKENIZER_MAP = {
 # 하이퍼파라미터
 TOP_K_BASE       = 300
 TOP_K_RETURN     = 20
-MAX_TOKENS = 16000
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "16000"))
 TEMPERATURE      = 0.2
 TOP_P            = 0.8
 SCORE_THRESHOLD  = 0.20
@@ -89,12 +89,21 @@ MODEL_MAX_OUTPUT_TOKENS = {
     "gemma_vllm_0": int(os.getenv("GEMMA_MAX_TOKENS", str(MAX_TOKENS))),
 }
 
+
+def get_model_max_output_tokens(model_name: str) -> int:
+    return int(MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS))
+
 # 벤치 로그
 LOG_DIR = Path(os.getenv("RAG_BENCH_LOG_DIR", "./rag_bench_logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 os.environ.setdefault(
     "CTX_TOKEN_BUDGET",
-    str(get_ctx_token_budget(DEFAULT_MODEL_NAME, max_output_tokens=MAX_TOKENS)),
+    str(
+        get_ctx_token_budget(
+            DEFAULT_MODEL_NAME,
+            max_output_tokens=get_model_max_output_tokens(DEFAULT_MODEL_NAME),
+        )
+    ),
 )
 os.environ.setdefault("SNIPPET_MAX_CHARS", str(SNIPPET_MAX_CHARS))
