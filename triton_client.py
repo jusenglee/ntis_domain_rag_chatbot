@@ -33,6 +33,7 @@ from settings import (
     CTX_SAFETY_MARGIN,
     DEFAULT_MAX_MODEL_LEN,
     MODEL_MAX_CONTEXT,
+    TRITON_TIMEOUTS,
 )
 from settings import logger  # 공용 logger
 
@@ -322,13 +323,33 @@ def _create_stream_client() -> InferenceServerClient:
     return InferenceServerClient(url=TRITON_URL, verbose=False)
 
 
+def _resolve_stream_timeouts(
+        model_name: str,
+        request_type: str,
+        first_token_timeout: int | None,
+        idle_timeout: int | None,
+) -> tuple[int, int]:
+    fallback_first = 10 if first_token_timeout is None else int(first_token_timeout)
+    fallback_idle = 20 if idle_timeout is None else int(idle_timeout)
+    request_timeouts = TRITON_TIMEOUTS.get(model_name, {})
+    model_timeouts = request_timeouts.get(request_type, None)
+    if model_timeouts:
+        model_first, model_idle = model_timeouts
+        return (
+            model_first if first_token_timeout is None else int(first_token_timeout),
+            model_idle if idle_timeout is None else int(idle_timeout),
+        )
+    return fallback_first, fallback_idle
+
+
 def _triton_stream_generator(
         model_name: str,
         prompt: str,
         text: InferInput,
         sparams: InferInput,
-        first_token_timeout: int = 10,
-        idle_timeout: int = 20,
+        first_token_timeout: int | None = 10,
+        idle_timeout: int | None = 20,
+        request_type: str = "stream",
 ):
     """
     Triton gRPC streaming 호출을 래핑한 제너레이터.
@@ -338,6 +359,12 @@ def _triton_stream_generator(
     - first_token_timeout: 첫 토큰이 올 때까지의 최대 대기시간
     - idle_timeout: 응답이 시작된 이후 추가 토큰이 오지 않을 경우 타임아웃
     """
+    first_token_timeout, idle_timeout = _resolve_stream_timeouts(
+        model_name,
+        request_type,
+        first_token_timeout,
+        idle_timeout,
+    )
     cli = _create_stream_client()  # ⚠️ 스트리밍용으로 별도 클라이언트 생성
 
     stream_flag = InferInput("stream", [1], "BOOL")
@@ -454,6 +481,7 @@ def _triton_infer_sync(
             sparams,
             first_token_timeout=10,
             idle_timeout=20,
+            request_type="sync",
     ):
         accumulated_text += chunk
 
@@ -488,8 +516,8 @@ def triton_infer(
         max_tokens: int = MAX_TOKENS,
         temperature: float = TEMPERATURE,
         top_p: float = TOP_P,
-        timeout_first: int = 20,
-        timeout_idle: int = 120,
+        timeout_first: int | None = None,
+        timeout_idle: int | None = None,
 ):
     """
     Triton vLLM backend 공용 infer 함수.
@@ -523,6 +551,12 @@ def triton_infer(
 
     if stream:
         # 스트리밍 모드
+        timeout_first, timeout_idle = _resolve_stream_timeouts(
+            model_name,
+            "stream",
+            timeout_first,
+            timeout_idle,
+        )
         text, sparams = _make_inputs(
             prompt,
             max_tokens=dynamic_max_tokens,
@@ -537,6 +571,7 @@ def triton_infer(
             sparams,
             first_token_timeout=timeout_first,
             idle_timeout=timeout_idle,
+            request_type="stream",
         )
 
         # gpt-oss 계열이면 assistantfinal 이후만 스트리밍

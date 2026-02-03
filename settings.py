@@ -93,6 +93,44 @@ MODEL_MAX_OUTPUT_TOKENS = {
 def get_model_max_output_tokens(model_name: str) -> int:
     return int(MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS))
 
+
+def _get_timeout_env(name: str, default: int) -> int:
+    return int(os.getenv(name, str(default)))
+
+
+GPT_OSS_STREAM_TIMEOUT_FIRST = _get_timeout_env("GPT_OSS_STREAM_TIMEOUT_FIRST", 8)
+GPT_OSS_STREAM_TIMEOUT_IDLE = _get_timeout_env("GPT_OSS_STREAM_TIMEOUT_IDLE", 60)
+GEMMA_STREAM_TIMEOUT_FIRST = _get_timeout_env("GEMMA_STREAM_TIMEOUT_FIRST", 4)
+GEMMA_STREAM_TIMEOUT_IDLE = _get_timeout_env("GEMMA_STREAM_TIMEOUT_IDLE", 20)
+
+GPT_OSS_SYNC_TIMEOUT_FIRST = _get_timeout_env(
+    "GPT_OSS_SYNC_TIMEOUT_FIRST",
+    GPT_OSS_STREAM_TIMEOUT_FIRST,
+)
+GPT_OSS_SYNC_TIMEOUT_IDLE = _get_timeout_env(
+    "GPT_OSS_SYNC_TIMEOUT_IDLE",
+    GPT_OSS_STREAM_TIMEOUT_IDLE,
+)
+GEMMA_SYNC_TIMEOUT_FIRST = _get_timeout_env(
+    "GEMMA_SYNC_TIMEOUT_FIRST",
+    GEMMA_STREAM_TIMEOUT_FIRST,
+)
+GEMMA_SYNC_TIMEOUT_IDLE = _get_timeout_env(
+    "GEMMA_SYNC_TIMEOUT_IDLE",
+    GEMMA_STREAM_TIMEOUT_IDLE,
+)
+
+TRITON_TIMEOUTS = {
+    "gpt_oss_0": {
+        "stream": (GPT_OSS_STREAM_TIMEOUT_FIRST, GPT_OSS_STREAM_TIMEOUT_IDLE),
+        "sync": (GPT_OSS_SYNC_TIMEOUT_FIRST, GPT_OSS_SYNC_TIMEOUT_IDLE),
+    },
+    "gemma_vllm_0": {
+        "stream": (GEMMA_STREAM_TIMEOUT_FIRST, GEMMA_STREAM_TIMEOUT_IDLE),
+        "sync": (GEMMA_SYNC_TIMEOUT_FIRST, GEMMA_SYNC_TIMEOUT_IDLE),
+    },
+}
+
 # 벤치 로그
 LOG_DIR = Path(os.getenv("RAG_BENCH_LOG_DIR", "./rag_bench_logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
