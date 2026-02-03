@@ -358,6 +358,9 @@ async def _run_question_analysis(
     prev_context_str = refine_documents_rule_based(
         prev_context,
         researchers=researchers,
+        organizations=None,
+        org_filters=None,
+        ids_map=None,
     )
 
     system_prompt = (
@@ -658,6 +661,9 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                     related_context,
                     True,
                     researchers=(qa.researchers if qa else None),
+                    organizations=(qa.organizations if qa else None),
+                    org_filters=(qa.filters if qa else None),
+                    ids_map=(qa.ids_map if qa else None),
                 )
             else:
                 # fallback: 전체 prev_context 사용
@@ -665,6 +671,9 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                 prev_context_str = refine_documents_rule_based(
                     related_context,
                     researchers=(qa.researchers if qa else None),
+                    organizations=(qa.organizations if qa else None),
+                    org_filters=(qa.filters if qa else None),
+                    ids_map=(qa.ids_map if qa else None),
                 )
         else:
             # fallback: 전체 prev_context 사용
@@ -672,6 +681,9 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             prev_context_str = refine_documents_rule_based(
                 related_context,
                 researchers=(qa.researchers if qa else None),
+                organizations=(qa.organizations if qa else None),
+                org_filters=(qa.filters if qa else None),
+                ids_map=(qa.ids_map if qa else None),
             )
 
 
@@ -920,6 +932,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             docs_for_ctx,
             is_detail,
             researchers=(qa.researchers if qa else None),
+            organizations=(qa.organizations if qa else None),
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
         )
         if docs_for_ctx
         else "없음"
@@ -1329,6 +1344,146 @@ def _extract_researcher_fields(researcher: Any) -> tuple[str, str, str]:
     )
 
 
+def _extract_org_fields(org: Any) -> tuple[str, str, str]:
+    if isinstance(org, dict):
+        name = org.get("org_nm") or org.get("org_name") or org.get("name")
+        org_id = (
+            org.get("org_id")
+            or org.get("org_cd")
+            or org.get("org_code")
+            or org.get("org_no")
+        )
+        role = org.get("org_slct_nm") or org.get("role") or org.get("org_role")
+    else:
+        name = getattr(org, "org_nm", None) or getattr(org, "name", None)
+        org_id = (
+            getattr(org, "org_id", None)
+            or getattr(org, "org_cd", None)
+            or getattr(org, "org_code", None)
+            or getattr(org, "org_no", None)
+        )
+        role = getattr(org, "org_slct_nm", None) or getattr(org, "role", None)
+    return (
+        str(name).strip() if name else "",
+        str(org_id).strip() if org_id else "",
+        str(role).strip() if role else "",
+    )
+
+
+def _collect_org_hints(
+    organizations: Optional[List[Any]],
+    filters: Optional[Dict[str, Any]],
+    ids_map: Optional[Dict[str, Any]],
+) -> tuple[list[str], list[str], Optional[str]]:
+    org_terms: list[str] = []
+    org_ids: list[str] = []
+    role_hint: Optional[str] = None
+
+    for org in organizations or []:
+        if isinstance(org, dict):
+            name = org.get("name") or org.get("org_nm") or org.get("org_name")
+            org_id = org.get("org_id") or org.get("org_cd") or org.get("org_code")
+            if name:
+                org_terms.append(str(name).strip())
+            if org_id:
+                org_ids.append(str(org_id).strip())
+        else:
+            org_terms.append(str(org).strip())
+
+    if isinstance(filters, dict):
+        org_terms += _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+        org_ids += _normalize_hint_terms(filters.get("org_id"))
+        role_hint = filters.get("org_role") or role_hint
+
+    if isinstance(ids_map, dict):
+        org_ids += _normalize_hint_terms(ids_map.get("org_id"))
+
+    org_terms = _normalize_hint_terms(org_terms)
+    org_ids = _normalize_hint_terms(org_ids)
+    return org_terms, org_ids, str(role_hint).strip() if role_hint else None
+
+
+def _match_prtcp_orgs(
+    prtcp_orgs: List[Dict[str, Any]],
+    org_terms: list[str],
+    org_ids: list[str],
+    role_hint: Optional[str],
+    *,
+    max_matches: int = 5,
+) -> List[Dict[str, Any]]:
+    if not prtcp_orgs or (not org_terms and not org_ids):
+        return []
+
+    org_terms_exact = {term.strip() for term in org_terms if term.strip()}
+    org_terms_norm = {_normalize_researcher_token(term) for term in org_terms_exact}
+    org_ids_set = {str(org_id).strip() for org_id in org_ids if str(org_id).strip()}
+    role_hint_norm = _normalize_researcher_token(role_hint) if role_hint else ""
+
+    candidates: list[dict[str, Any]] = []
+    for org in prtcp_orgs:
+        org_nm, org_id, role = _extract_org_fields(org)
+        org_nm_norm = _normalize_researcher_token(org_nm)
+        role_norm = _normalize_researcher_token(role)
+
+        score = 0.0
+        match_type = None
+        if org_id and org_id in org_ids_set:
+            score = 3.0
+            match_type = "id_exact"
+        if org_nm and org_nm in org_terms_exact and score < 2.5:
+            score = 2.5
+            match_type = "name_exact"
+        if org_nm_norm and org_nm_norm in org_terms_norm and score < 2.0:
+            score = 2.0
+            match_type = "name_norm"
+
+        if score <= 0:
+            continue
+
+        role_confirmed = match_type in {"id_exact", "name_exact"}
+        if role_hint_norm and role_norm and role_norm == role_hint_norm:
+            role_confirmed = True
+            score += 0.1
+
+        candidates.append(
+            {
+                "org_nm": org_nm or "기관미상",
+                "org_id": org_id,
+                "org_slct_nm": role,
+                "match_type": match_type,
+                "role_confirmed": role_confirmed,
+                "score": score,
+            }
+        )
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: item.get("score", 0), reverse=True)
+    seen_keys: set[tuple[str, str]] = set()
+    matches: list[dict[str, Any]] = []
+    for item in candidates:
+        key = (
+            str(item.get("org_id") or ""),
+            _normalize_researcher_token(item.get("org_nm")),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        matches.append(item)
+        if len(matches) >= max_matches:
+            break
+    return matches
+
+
+def _format_org_entry(org_nm: str, role: str, role_confirmed: bool) -> str:
+    if role:
+        if role_confirmed:
+            return f"{org_nm}({role})"
+        return f"{org_nm}(참여 당시 기관: {role})"
+    return org_nm
+
+
 def _match_prtcp_members(
     prtcp_members: List[Dict[str, Any]],
     researchers: Optional[List[Any]],
@@ -1408,10 +1563,39 @@ def _format_researcher_line(
     return "- 연구자: 정보 없음"
 
 
+def _format_org_line(
+    matched_orgs: List[Dict[str, Any]],
+    prtcp_orgs: List[Dict[str, Any]],
+    *,
+    max_matches: int = 5,
+) -> str:
+    if matched_orgs:
+        entries = []
+        for org in matched_orgs[:max_matches]:
+            org_nm = str(org.get("org_nm") or "기관미상").strip()
+            role = str(org.get("org_slct_nm") or "").strip()
+            role_confirmed = bool(org.get("role_confirmed"))
+            entries.append(_format_org_entry(org_nm, role, role_confirmed))
+        return f"- 참여기관(매칭): {', '.join(entries)}"
+
+    if prtcp_orgs:
+        entries = []
+        for org in prtcp_orgs[:max_matches]:
+            org_nm, _, role = _extract_org_fields(org)
+            org_nm = org_nm or "기관미상"
+            entries.append(_format_org_entry(org_nm, role, False))
+        return f"- 참여기관: {', '.join(entries)}"
+
+    return "- 참여기관: 정보 없음"
+
+
 def summarize_documents_headlines(
     docs: List[Document],
     *,
     researchers: Optional[List[Any]] = None,
+    organizations: Optional[List[Any]] = None,
+    org_filters: Optional[Dict[str, Any]] = None,
+    ids_map: Optional[Dict[str, Any]] = None,
     max_matches: int = 5,
 ) -> str:
     headlines: List[str] = []
@@ -1430,9 +1614,25 @@ def summarize_documents_headlines(
             max_matches=max_matches,
         )
 
+        prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
+        org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
+        matched_orgs = _match_prtcp_orgs(
+            prtcp_orgs,
+            org_terms,
+            org_ids,
+            role_hint,
+            max_matches=max_matches,
+        )
+        org_line = _format_org_line(
+            matched_orgs,
+            prtcp_orgs,
+            max_matches=max_matches,
+        )
+
         headlines.append(
             f"## 출처 {source_idx}. {title}\n"
             f"{researcher_line}\n"
+            f"{org_line}\n"
         )
 
     return "\n\n".join(headlines)
@@ -1443,6 +1643,9 @@ def refine_documents_rule_based(
     is_detail: bool = False,
     *,
     researchers: Optional[List[Any]] = None,
+    organizations: Optional[List[Any]] = None,
+    org_filters: Optional[Dict[str, Any]] = None,
+    ids_map: Optional[Dict[str, Any]] = None,
     max_matches: int = 5,
 ) -> str:
     context_chunks: List[str] = []
@@ -1490,10 +1693,24 @@ def refine_documents_rule_based(
             fallback_lines,
             max_matches=max_matches,
         )
+        prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
+        org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
+        matched_orgs = _match_prtcp_orgs(
+            prtcp_orgs,
+            org_terms,
+            org_ids,
+            role_hint,
+            max_matches=max_matches,
+        )
+        org_line = _format_org_line(
+            matched_orgs,
+            prtcp_orgs,
+            max_matches=max_matches,
+        )
         log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
                     f"matched_members: {matched_members}\n"
-                    f"fallback_lines: {fallback_lines}")
-        researcher_block = f"\n{researcher_line}"
+                    f"fallback_lines: {fallback_lines}\n"
+                    f"matched_orgs: {matched_orgs}")
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
@@ -1503,19 +1720,21 @@ def refine_documents_rule_based(
         body_sentences = _split_sentences(limited_body)
         body_token_counts = [len(sentence.split()) for sentence in body_sentences]
         body_token_count = sum(body_token_counts)
-        researcher_sentences = _split_sentences(researcher_line)
-        researcher_token_count = len(researcher_line.split())
+        extra_lines = [line for line in [researcher_line, org_line] if line]
+        extra_text = "\n".join(extra_lines)
+        extra_sentences = _split_sentences(extra_text)
+        extra_token_count = len(extra_text.split())
 
         while body_sentences and (
-            len(body_sentences) + len(researcher_sentences) > MAX_DOC_SENTENCES
-            or body_token_count + researcher_token_count > MAX_DOC_TOKENS
+            len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
+            or body_token_count + extra_token_count > MAX_DOC_TOKENS
         ):
             body_token_count -= body_token_counts.pop()
             body_sentences.pop()
 
         limited_body = "\n".join(body_sentences).strip()
         limited_text = "\n".join(
-            [part for part in [limited_body, researcher_line] if part]
+            [part for part in [limited_body] + extra_lines if part]
         ).strip()
 
         context_chunks.append(
