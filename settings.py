@@ -45,7 +45,7 @@ TOKENIZER_MAP = {
 # 하이퍼파라미터
 TOP_K_BASE       = 300
 TOP_K_RETURN     = 20
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "16000"))
+DEFAULT_MAX_TOKENS = int(os.getenv("MAX_TOKENS", "16000"))
 TEMPERATURE      = 0.2
 TOP_P            = 0.8
 SCORE_THRESHOLD  = 0.20
@@ -77,7 +77,7 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
     model_ctx = MODEL_MAX_CONTEXT.get(model_name, DEFAULT_MAX_MODEL_LEN)
 
     if max_output_tokens is None:
-        max_output_tokens = MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS)
+        max_output_tokens = MAX_TOKENS.get(model_name, DEFAULT_MAX_TOKENS)
 
     avail = model_ctx - PROMPT_OVERHEAD_TOKENS - int(max_output_tokens) - CTX_SAFETY_MARGIN
 
@@ -89,14 +89,14 @@ MODEL_MAX_CONTEXT = {
     "gpt_oss_0": int(os.getenv("GPT_OSS_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
     "gemma_vllm_0": int(os.getenv("GEMMA_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
 }
-MODEL_MAX_OUTPUT_TOKENS = {
-    "gpt_oss_0": int(os.getenv("GPT_OSS_MAX_TOKENS", str(MAX_TOKENS))),
-    "gemma_vllm_0": int(os.getenv("GEMMA_MAX_TOKENS", str(MAX_TOKENS))),
+MAX_TOKENS = {
+    "gpt_oss_0": int(os.getenv("GPT_OSS_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+    "gemma_vllm_0": int(os.getenv("GEMMA_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
 }
 
 
 def get_model_max_output_tokens(model_name: str) -> int:
-    return int(MODEL_MAX_OUTPUT_TOKENS.get(model_name, MAX_TOKENS))
+    return int(MAX_TOKENS.get(model_name, DEFAULT_MAX_TOKENS))
 
 
 def _get_timeout_env(name: str, default: int) -> int:

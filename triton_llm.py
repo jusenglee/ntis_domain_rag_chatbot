@@ -18,8 +18,14 @@ class TritonChatModel(BaseChatModel):
         # 비동기 호출 (스트리밍 없이 결과만 반환)
         prompt = self._format_messages(messages)
         full_text = ""
+        max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
         # stream=False로 호출
-        gen = triton_infer(self.model_name, prompt, stream=False)
+        gen = triton_infer(
+            self.model_name,
+            prompt,
+            stream=False,
+            max_tokens=max_tokens_hint,
+        )
         for chunk in gen:
             if chunk:
                 full_text += chunk
@@ -29,13 +35,19 @@ class TritonChatModel(BaseChatModel):
     async def _astream(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
         """스트리밍 지원"""
         prompt = self._format_messages(messages)
+        max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
 
         # Triton generator를 비동기 루프에서 실행 (block 방지)
         import asyncio
         loop = asyncio.get_running_loop()
 
         # stream=True
-        gen = triton_infer(self.model_name, prompt, stream=True)
+        gen = triton_infer(
+            self.model_name,
+            prompt,
+            stream=True,
+            max_tokens=max_tokens_hint,
+        )
 
         try:
             while True:

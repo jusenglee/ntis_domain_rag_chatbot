@@ -29,7 +29,6 @@ from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, no
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
-    MAX_TOKENS,
     get_ctx_token_budget,
     get_model_max_output_tokens,
     RAG_COLLECTION_ALLOWLIST,

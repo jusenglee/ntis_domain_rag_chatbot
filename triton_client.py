@@ -29,13 +29,13 @@ from tritonclient.grpc import InferenceServerClient, InferInput, InferRequestedO
 from settings import (
     TRITON_URL,
     TOKENIZER_MAP,
-    MAX_TOKENS,
     TEMPERATURE,
     TOP_P,
     CTX_SAFETY_MARGIN,
     DEFAULT_MAX_MODEL_LEN,
     MODEL_MAX_CONTEXT,
     TRITON_TIMEOUTS,
+    get_model_max_output_tokens,
 )
 from settings import logger  # 공용 logger
 
@@ -211,8 +211,12 @@ def _compute_max_new_tokens(
 
     MIN_NEW_TOKENS = 64      # 최소 생성 토큰
 
-    # settings.MAX_TOKENS 를 기본 상한으로, 인자로 들어오면 그것으로 override
-    cap = int(max_tokens_hint) if max_tokens_hint is not None else int(MAX_TOKENS)
+    # 모델별 기본 상한을 사용하고, 인자로 들어오면 그것으로 override
+    cap = (
+        int(max_tokens_hint)
+        if max_tokens_hint is not None
+        else int(get_model_max_output_tokens(model_name))
+    )
 
     available = max_seq_len - prompt_tokens - CTX_SAFETY_MARGIN
     if available <= 0:
@@ -561,7 +565,7 @@ def triton_infer(
         prompt: str,
         *,
         stream: bool = True,
-        max_tokens: int = MAX_TOKENS,
+        max_tokens: int | None = None,
         temperature: float = TEMPERATURE,
         top_p: float = TOP_P,
         timeout_first: int | None = None,
@@ -590,6 +594,9 @@ def triton_infer(
 
     logger.info(f"[TRITON] infer start - model={model_name}, len={len(prompt)}")
     log_prompt_tokens(model_name, prompt, tag="infer")
+
+    if max_tokens is None:
+        max_tokens = int(get_model_max_output_tokens(model_name))
 
     dynamic_max_tokens = _compute_max_new_tokens(
         model_name=model_name,

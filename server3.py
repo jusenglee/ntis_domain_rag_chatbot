@@ -91,6 +91,17 @@ templates = Jinja2Templates(directory="templates")
 redis_client: Optional[redis.Redis] = None
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
+SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
+FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
+
+def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
+    if not qa:
+        return None
+    if qa.question_type == QuestionType.FOLLOW_UP:
+        return FOLLOW_UP_MAX_TOKENS_HINT
+    if qa.question_type == QuestionType.DEFAULT and qa.mode in (None, "SEARCH"):
+        return SHORT_ANSWER_MAX_TOKENS_HINT
+    return None
 
 def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> str:
     if not value:
@@ -895,7 +906,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     )
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
-    response = await llm.ainvoke(messages)
+    max_tokens_hint = _select_max_tokens_hint(qa)
+    response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
     final_answer = response.content.replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
