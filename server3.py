@@ -752,6 +752,21 @@ class CustomRAGRetriever(BaseModel):
 
         return documents
 
+def _resolve_rag_queries(
+    state: AgentState,
+    qa: Optional[QuestionAnalysis],
+    ks: Optional[KnowledgeSufficiency],
+) -> tuple[str, str, str, float]:
+    raw_query = state.question
+    hint_query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or raw_query
+    qa_confidence = float(qa.confidence) if qa else None
+    ks_confidence = float(ks.confidence) if ks else None
+    confidence = qa_confidence if qa_confidence is not None else (ks_confidence if ks_confidence is not None else 0.0)
+    min_confidence = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
+    search_query = hint_query if confidence >= min_confidence else raw_query
+    return raw_query, hint_query, search_query, confidence
+
+
 @measure_latency("rag_search")
 async def node_rag_search(state: AgentState) -> Dict[str, Any]:
     """RAG 검색 수행 (병렬 실행)"""
@@ -760,8 +775,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
     qa = state.question_analysis
 
     try:
-
-        query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or state.question
+        raw_query, hint_query, search_query, confidence = _resolve_rag_queries(state, qa, ks)
         search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
         search_num = min(int(search_num), MAX_TOP_K_SIZE)
 
@@ -779,8 +793,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             filters=dict(qa.filters or {}) if qa else {},
             limit=search_num,
             history_summary=(qa.history_summary if qa else ""),
-            retrieval_query=query,
-            confidence=float(qa.confidence if qa else 0.0),
+            retrieval_query=hint_query,
+            confidence=confidence,
         )
 
         retriever = CustomRAGRetriever(
@@ -798,7 +812,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             func=retriever.retrieve
         )
 
-        docs = await asyncio.to_thread(rag_tool.func, query)
+        docs = await asyncio.to_thread(rag_tool.func, search_query)
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -808,7 +822,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         log_section("RAG SEARCH",
                     f"coq: {state.conversation_id}{state.question}\n"
-                    f"Query: {query}\n"
+                    f"Query: {search_query}\n"
                     f"Found: {len(docs)} docs\n")
         return {"context": docs}
 
