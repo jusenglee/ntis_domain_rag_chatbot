@@ -96,6 +96,14 @@ FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+RESEARCHER_SHOW_AFFILIATION = _env_bool("RESEARCHER_SHOW_AFFILIATION", False)
+
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
         return None
@@ -1343,6 +1351,7 @@ def _match_prtcp_members(
         affiliation_norm = _normalize_researcher_token(affiliation)
         best_member = None
         best_score = 0.0
+        best_match_type: str | None = None
 
         for member in prtcp_members:
             hm_id = str(member.get("hm_id") or "").strip()
@@ -1352,18 +1361,23 @@ def _match_prtcp_members(
             score = 0.0
             if researcher_id and hm_id and researcher_id == hm_id:
                 score = 3.0
+                match_type = "id_exact"
             else:
+                match_type = None
                 hm_nm_norm = _normalize_researcher_token(hm_nm)
                 if name_norm and hm_nm_norm and name_norm == hm_nm_norm:
                     score = 2.0
+                    match_type = "name_exact"
                     if affiliation_norm:
                         org_norm = _normalize_researcher_token(org_nm)
                         if org_norm and org_norm == affiliation_norm:
                             score = 2.5
+                            match_type = "name_affiliation"
 
             if score > best_score:
                 best_score = score
                 best_member = member
+                best_match_type = match_type
 
         if best_member and best_score > 0:
             dedup_key = (
@@ -1372,7 +1386,9 @@ def _match_prtcp_members(
             )
             if dedup_key not in seen_keys:
                 seen_keys.add(dedup_key)
-                matches.append(best_member)
+                matched_member = dict(best_member)
+                matched_member["match_type"] = best_match_type
+                matches.append(matched_member)
                 if len(matches) >= max_matches:
                     break
 
@@ -1385,19 +1401,34 @@ def _format_researcher_line(
     *,
     max_matches: int = 5,
 ) -> str:
+    def _strip_affiliation(text: str) -> str:
+        return re.sub(r"\s*\(.*\)\s*$", "", text).strip()
+
     if matched_members:
         names = []
         for member in matched_members[:max_matches]:
             name = str(member.get("hm_nm") or "이름미상").strip()
             org = str(member.get("blng_org_nm") or "소속미상").strip()
-            names.append(f"{name}({org})")
+            match_type = str(member.get("match_type") or "").strip()
+            show_affiliation = (
+                match_type == "id_exact" or RESEARCHER_SHOW_AFFILIATION
+            )
+            if show_affiliation and org:
+                names.append(f"{name}(참여 당시 소속: {org})")
+            else:
+                names.append(name)
         return f"- 연구자(매칭): {', '.join(names)}"
 
     fallback_names = []
     for line in fallback_lines[:max_matches]:
         cleaned = line.lstrip("- ").strip()
         if cleaned:
-            fallback_names.append(cleaned)
+            if RESEARCHER_SHOW_AFFILIATION:
+                fallback_names.append(cleaned)
+            else:
+                stripped = _strip_affiliation(cleaned)
+                if stripped:
+                    fallback_names.append(stripped)
     if fallback_names:
         return f"- 연구자: {', '.join(fallback_names)}"
 
