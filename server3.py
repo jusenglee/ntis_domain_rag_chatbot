@@ -934,6 +934,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             organizations=(qa.organizations if qa else None),
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
+            relax_limits=True,
         )
         if docs_for_ctx
         else "없음"
@@ -1652,8 +1653,13 @@ def refine_documents_rule_based(
     org_filters: Optional[Dict[str, Any]] = None,
     ids_map: Optional[Dict[str, Any]] = None,
     max_matches: int = 5,
+    relax_limits: bool = False,
 ) -> str:
     context_chunks: List[str] = []
+    field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
+    field_max_tokens = None if relax_limits else MAX_FIELD_TOKENS
+    doc_max_sentences = None if relax_limits else MAX_DOC_SENTENCES
+    doc_max_tokens = None if relax_limits else MAX_DOC_TOKENS
 
     for doc in docs:
         mapped_doc = RagMapper.map(doc)
@@ -1670,8 +1676,8 @@ def refine_documents_rule_based(
         meta_basic = mapped_doc.get("meta_basic", {})
         meta_basic_text = format_metadata(
             meta_basic,
-            max_sentences=MAX_FIELD_SENTENCES,
-            max_tokens=MAX_FIELD_TOKENS,
+            max_sentences=field_max_sentences,
+            max_tokens=field_max_tokens,
         )
         log_section(
             "refine_documents_rule_based - meta_basic 필드 출력 확인",
@@ -1683,8 +1689,8 @@ def refine_documents_rule_based(
         if is_detail:
             meta_detail_text = format_metadata(
                 mapped_doc.get("meta_detail", {}),
-                max_sentences=MAX_FIELD_SENTENCES,
-                max_tokens=MAX_FIELD_TOKENS,
+                max_sentences=field_max_sentences,
+                max_tokens=field_max_tokens,
             )
 
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
@@ -1719,8 +1725,8 @@ def refine_documents_rule_based(
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
-            max_sentences=MAX_DOC_SENTENCES,
-            max_tokens=MAX_DOC_TOKENS,
+            max_sentences=doc_max_sentences,
+            max_tokens=doc_max_tokens,
         )
         body_sentences = _split_sentences(limited_body)
         body_token_counts = [len(sentence.split()) for sentence in body_sentences]
@@ -1730,12 +1736,13 @@ def refine_documents_rule_based(
         extra_sentences = _split_sentences(extra_text)
         extra_token_count = len(extra_text.split())
 
-        while body_sentences and (
-            len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
-            or body_token_count + extra_token_count > MAX_DOC_TOKENS
-        ):
-            body_token_count -= body_token_counts.pop()
-            body_sentences.pop()
+        if not relax_limits:
+            while body_sentences and (
+                len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
+                or body_token_count + extra_token_count > MAX_DOC_TOKENS
+            ):
+                body_token_count -= body_token_counts.pop()
+                body_sentences.pop()
 
         limited_body = "\n".join(body_sentences).strip()
         limited_text = "\n".join(
@@ -1766,11 +1773,13 @@ def _split_sentences(text: str) -> List[str]:
 def _limit_text_by_sentences_and_tokens(
     text: str,
     *,
-    max_sentences: int,
-    max_tokens: int,
+    max_sentences: Optional[int],
+    max_tokens: Optional[int],
 ) -> str:
     if not text:
         return ""
+    if max_sentences is None or max_tokens is None:
+        return text.strip()
     sentences = _split_sentences(text)
     limited: List[str] = []
     token_count = 0
