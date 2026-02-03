@@ -1155,6 +1155,14 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         )
         if year_terms_hint:
             normalized_intent.years = year_terms_hint
+            normalized_intent.year_from = year_terms_hint[0]
+            normalized_intent.year_to = year_terms_hint[-1]
+        year_from = filters.get("year_from")
+        year_to = filters.get("year_to")
+        if year_from is not None:
+            normalized_intent.year_from = str(year_from).strip() or None
+        if year_to is not None:
+            normalized_intent.year_to = str(year_to).strip() or None
         tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
         if tag_filters_hint:
             normalized_intent.tag_filters = tag_filters_hint
@@ -1162,6 +1170,12 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
                 normalized_intent.perf_tag_filters = tag_filters_hint
             if question_analysis.head == "project":
                 normalized_intent.project_tag_filters = tag_filters_hint
+        perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
+        if perf_types_hint:
+            normalized_intent.perf_types = perf_types_hint
+        keywords_hint = _normalize_hint_terms(filters.get("keywords"))
+        if keywords_hint:
+            normalized_intent.keywords = keywords_hint
         org_role = filters.get("org_role")
         if org_role:
             normalized_intent.org_role = str(org_role).strip().lower() or None

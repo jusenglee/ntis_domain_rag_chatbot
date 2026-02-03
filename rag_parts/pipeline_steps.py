@@ -82,10 +82,14 @@ class NormalizedIntent:
     is_id_query: bool
     output_type: Optional[str] = None
     years: List[str] = field(default_factory=list)
+    year_from: Optional[str] = None
+    year_to: Optional[str] = None
     people_terms: List[str] = field(default_factory=list)
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     org_role: Optional[str] = None
+    perf_types: List[str] = field(default_factory=list)
+    keywords: List[str] = field(default_factory=list)
     perf_tag_filters: List[str] = field(default_factory=list)
     project_tag_filters: List[str] = field(default_factory=list)
     tag_filters: List[str] = field(default_factory=list)
@@ -193,10 +197,14 @@ def normalize_intent(
         is_id_query=bool(getattr(intent, "is_id_query", False)),
         output_type=output_type,
         years=_normalize_terms(getattr(intent, "years", None) or []),
+        year_from=(str(getattr(intent, "year_from", "") or "").strip() or None),
+        year_to=(str(getattr(intent, "year_to", "") or "").strip() or None),
         people_terms=people_terms,
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        perf_types=_normalize_terms(getattr(intent, "perf_types", None) or []),
+        keywords=_normalize_terms(getattr(intent, "keywords", None) or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),
         tag_filters=_normalize_terms(getattr(intent, "tag_filters", None) or []),
