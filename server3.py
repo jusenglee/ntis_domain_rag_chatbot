@@ -900,10 +900,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             docs_for_ctx = related_context or docs_for_ctx
 
     context_text = refine_documents_rule_based(docs_for_ctx, is_detail) if docs_for_ctx else "없음"
-    if len(context_text) > MAX_CONTEXT_CHARS and docs_for_ctx:
-        context_text = summarize_documents_headlines(docs_for_ctx)
-        context_text = _truncate_context_text(context_text, MAX_CONTEXT_CHARS)
-
+    log_section("context_text - 페이로드 평탄화 후 데이터",
+                f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
@@ -1292,14 +1290,13 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
         log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
                     f"mapped_doc: {mapped_doc}")
 
-        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"title: {title}")
-
         refined_text = format_metadata(mapped_doc.get("meta_basic", {}))
         if is_detail:
             refined_text += format_metadata(mapped_doc.get("meta_detail", {}))
 
         researcher_lines = RagMapper.get_researcher_info(mapped_doc)
+        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+                    f"researcher_lines: {researcher_lines}")
         researcher_block = ""
         if researcher_lines:
             researcher_block = (
@@ -1320,24 +1317,6 @@ def refine_documents_rule_based(docs: List[Document], is_detail=False) -> str:
         )
 
     return "\n\n".join(context_chunks)
-
-
-def _format_metadata_limited(metadata: Dict[str, Any], max_lines: int) -> str:
-    lines = []
-    for key, value in metadata.items():
-        if value is None:
-            continue
-
-        if isinstance(value, list):
-            value = ", ".join(map(str, value))
-        elif isinstance(value, dict):
-            value = json.dumps(value, ensure_ascii=False)
-
-        lines.append(f"- {key}: {value}")
-        if len(lines) >= max_lines:
-            break
-
-    return "\n".join(lines) if lines else ""
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -1374,30 +1353,6 @@ def _limit_text_by_sentences_and_tokens(
             break
     return "\n".join(limited)
 
-
-def summarize_documents_headlines(docs: List[Document]) -> str:
-    context_chunks: List[str] = []
-    for doc in docs:
-        mapped_doc = RagMapper.map(doc)
-        source_idx = doc.get("source_index")
-        title = mapped_doc.get("title", "제목 없음")
-        summary_text = _format_metadata_limited(
-            mapped_doc.get("meta_basic", {}),
-            max_lines=SUMMARY_DOC_SENTENCES,
-        )
-        summary_text = _limit_text_by_sentences_and_tokens(
-            summary_text,
-            max_sentences=SUMMARY_DOC_SENTENCES,
-            max_tokens=SUMMARY_DOC_TOKENS,
-        )
-        context_chunks.append(f"## 출처 {source_idx}. {title}\n{summary_text}\n")
-    return "\n\n".join(context_chunks)
-
-
-def _truncate_context_text(text: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}...\n(컨텍스트가 너무 길어 일부가 잘렸습니다.)"
 
 
 def format_metadata(metadata: Dict[str, Any]) -> str:
