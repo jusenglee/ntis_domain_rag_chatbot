@@ -751,6 +751,28 @@ def _rrf_merge(sources: List[_RankSource], *, rrf_k: int = 60, keep: int = 2000)
         out.append(p)
     return out
 
+def _use_dense_score_weight() -> bool:
+    return str(os.getenv("RAG_USE_DENSE_SCORE_WEIGHT", "0")).strip().lower() in ("1", "true", "yes", "y")
+
+def _dense_score_weight(points: List[Any]) -> float:
+    score_values: List[float] = []
+    for p in points or []:
+        score = getattr(p, "score", None)
+        try:
+            score_val = float(score) if score is not None else None
+        except Exception:
+            score_val = None
+        if score_val is not None:
+            score_values.append(score_val)
+    if not score_values:
+        return 1.0
+    min_score = min(score_values)
+    max_score = max(score_values)
+    if max_score == min_score:
+        return 1.0
+    norm_scores = [(s - min_score) / float(max_score - min_score) for s in score_values]
+    return sum(norm_scores) / float(len(norm_scores))
+
 # -------------------------
 # Keyword / Filter soft rerank
 # -------------------------
@@ -2210,7 +2232,9 @@ def _run_rag_with_vectors(
                 # Hop1 RRF merge
                 sources_h1: List[_RankSource] = []
                 for vname, lst in (sr1.get("dense") or {}).items():
-                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
+                    base_weight = float(w_dense_map.get(vname, 1.0))
+                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
                 sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
                 h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
 
@@ -2364,7 +2388,9 @@ def _run_rag_with_vectors(
             # Hop2 RRF + JOIN 최종 rerank (mode="join")
             sources_h2: List[_RankSource] = []
             for vname, lst in (sr2.get("dense") or {}).items():
-                sources_h2.append(_RankSource(name=f"{hop2_col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
+                base_weight = float(w_dense_map.get(vname, 1.0))
+                score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                sources_h2.append(_RankSource(name=f"{hop2_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
             sources_h2.append(_RankSource(name=f"{hop2_col}:lex", weight=float(sparse_weight_eff), points=sr2.get("lexical") or []))
             h2_rrf = _rrf_merge(sources_h2, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=800)
             h2_rrf = _dedup_by_doc_id(h2_rrf)
@@ -2690,7 +2716,9 @@ def _run_rag_with_vectors(
             sources.append(_RankSource(name=f"{col}:hybrid", weight=1.0, points=hybrid_points))
             continue
         for vname, lst in (sr.get("dense") or {}).items():
-            sources.append(_RankSource(name=f"{col}:{vname}", weight=float(w_dense_map.get(vname, 1.0)), points=lst or []))
+            base_weight = float(w_dense_map.get(vname, 1.0))
+            score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+            sources.append(_RankSource(name=f"{col}:{vname}", weight=base_weight * score_weight, points=lst or []))
         sources.append(_RankSource(name=f"{col}:lex", weight=float(sparse_weight_eff), points=sr.get("lexical") or []))
 
     log_section("RAG.PER_COL_STATS", per_col_stats)
