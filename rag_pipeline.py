@@ -1283,6 +1283,21 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
         return True
     return False
 
+def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
+    if bool(getattr(it, "is_id_query", False)):
+        return True
+    if getattr(it, "action", None) in ("id_exact", "id_fuzzy"):
+        return True
+    ids_map = getattr(it, "ids_map", None) or {}
+    if isinstance(ids_map, dict):
+        for values in ids_map.values():
+            if values:
+                return True
+    ids_flat = getattr(it, "ids_flat", None) or []
+    if isinstance(ids_flat, list) and ids_flat:
+        return True
+    return False
+
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
@@ -1877,6 +1892,7 @@ def _run_rag_with_vectors(
             )
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
+    planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
     hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
     hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
@@ -2211,27 +2227,44 @@ def _run_rag_with_vectors(
 
     pre_vecs = _get_pre_vecs(q)
 
+    def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
+        if not action_value:
+            return None
+        action_value = str(action_value).strip().lower()
+        if action_value in ("list", "stats", "download", "id_exact", "id_fuzzy"):
+            return "lookup"
+        if action_value in ("topic", "search"):
+            return "search"
+        if action_value == "join":
+            return "join"
+        return None
+
     # plan
     plan = _build_plan(it)
-    policy_mode, policy_reason = _select_mode_policy(it)
-    enforced_reasons = {"relation", "id_or_exact", "list_like", "topic_search", "people_project_lookup"}
-    enforced_mode = policy_mode if policy_reason in enforced_reasons else None
+    _, policy_reason = _select_mode_policy(it)
+    planner_mode = hint_mode or _planner_action_to_mode(planner_action)
+    planner_first_applied = False
+    forced_lookup_exception = False
+    forced_lookup_reason = None
 
-    if hint_mode in ("search", "lookup", "join"):
-        if enforced_mode and hint_mode != enforced_mode:
-            log_kv(
-                "RAG.PLAN.MODE_ENFORCE",
-                level="warning",
-                enforced_mode=enforced_mode,
-                requested_mode=hint_mode,
-                reason=policy_reason,
-                action=action,
-                base_route=base_route,
-                relation=relation,
-            )
-            plan.mode = enforced_mode
-        else:
-            plan.mode = hint_mode
+    if planner_mode in ("search", "lookup", "join"):
+        plan.mode = planner_mode
+        planner_first_applied = True
+
+    if _has_explicit_identifiers(it) and plan.mode != "lookup":
+        forced_lookup_exception = True
+        forced_lookup_reason = "explicit_identifiers"
+        log_kv(
+            "RAG.PLAN.MODE_ENFORCE",
+            level="warning",
+            enforced_mode="lookup",
+            requested_mode=plan.mode,
+            reason=forced_lookup_reason,
+            action=action,
+            base_route=base_route,
+            relation=relation,
+        )
+        plan.mode = "lookup"
     if hinted_cols:
         plan.target_collections = hinted_cols
 
@@ -2314,6 +2347,13 @@ def _run_rag_with_vectors(
         "strategy_version": SEARCH_STRATEGY_VERSION,
         "strategy_key": strategy_key,
         "policy_reason": policy_reason,
+        "planner": {
+            "planner_first_applied": planner_first_applied,
+            "planner_mode": planner_mode,
+            "planner_action": planner_action,
+            "forced_lookup_exception": forced_lookup_exception,
+            "forced_lookup_reason": forced_lookup_reason,
+        },
         "filter": {
             "search_filter_enabled": search_filter_enabled,
             "lookup_filter_enabled": lookup_filter_enabled,
@@ -2352,6 +2392,11 @@ def _run_rag_with_vectors(
         relation=relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=list(getattr(plan, "target_collections", []) or []),
+        planner_first_applied=int(planner_first_applied),
+        planner_mode=planner_mode,
+        planner_action=planner_action,
+        forced_lookup_exception=int(forced_lookup_exception),
+        forced_lookup_reason=forced_lookup_reason,
         lookup_filter_policy=lookup_filter_policy,
         search_filter_enabled=int(search_filter_enabled),
         lookup_filter_enabled=int(lookup_filter_enabled),
