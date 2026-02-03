@@ -1368,6 +1368,10 @@ def format_metadata(metadata: Dict[str, Any]) -> str:
         elif isinstance(value, dict):
             value = json.dumps(value, ensure_ascii=False)
 
+        if isinstance(value, str):
+            value = re.sub(r"[\n\r\t]+", " ", value)
+            value = re.sub(r"\s{2,}", " ", value).strip()
+
         lines.append(f"- {key}: {value}")
 
     return "\n".join(lines) if lines else ""
