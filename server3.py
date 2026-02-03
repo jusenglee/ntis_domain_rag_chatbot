@@ -347,6 +347,7 @@ async def _run_question_analysis(
         conversation_id: str,
         chat_history: List[BaseMessage],
         prev_context: List[Dict[str, Any]],
+        researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
     llm = TritonChatModel(model_name="gpt_oss_0")  # GPT
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
@@ -354,7 +355,10 @@ async def _run_question_analysis(
     history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    prev_context_str = refine_documents_rule_based(prev_context)
+    prev_context_str = refine_documents_rule_based(
+        prev_context,
+        researchers=researchers,
+    )
 
     system_prompt = (
         "당신은 NTIS R&D 데이터 질의 분석 전문가입니다.\n"
