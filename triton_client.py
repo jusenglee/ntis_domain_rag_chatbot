@@ -15,9 +15,11 @@ Triton Inference Server gRPC 클라이언트 래퍼 모듈.
     싱글톤 클라이언트는 non-stream(관리용) API에만 사용한다.
 """
 
+import hashlib
 import json
 import threading
 import time
+from collections import OrderedDict
 from typing import Dict, List
 
 import numpy as np
@@ -42,6 +44,13 @@ _triton_client: InferenceServerClient | None = None
 
 # 모델별 토크나이저 캐시
 _tokenizers: Dict[str, AutoTokenizer] = {}
+
+# 프롬프트 토큰 길이 캐시 (해시 기반, LRU)
+_PROMPT_TOKEN_CACHE: "OrderedDict[str, int]" = OrderedDict()
+_PROMPT_TOKEN_CACHE_LOCK = threading.Lock()
+_PROMPT_TOKEN_CACHE_MAX = 1024
+_SHORT_PROMPT_CHAR_THRESHOLD = 2000
+_SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
 
 # gpt-oss 계열이 최종 답변 앞에 붙이는 마커
 ASSISTANT_FINAL_MARKER = "assistantfinal"
@@ -75,6 +84,31 @@ def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
     return _tokenizers[model_name]
 
 
+def _prompt_cache_key(model_name: str, prompt: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(model_name.encode("utf-8"))
+    digest.update(b"|")
+    digest.update(prompt.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _get_cached_prompt_tokens(cache_key: str) -> int | None:
+    with _PROMPT_TOKEN_CACHE_LOCK:
+        cached = _PROMPT_TOKEN_CACHE.get(cache_key)
+        if cached is None:
+            return None
+        _PROMPT_TOKEN_CACHE.move_to_end(cache_key)
+        return cached
+
+
+def _set_cached_prompt_tokens(cache_key: str, token_count: int) -> None:
+    with _PROMPT_TOKEN_CACHE_LOCK:
+        _PROMPT_TOKEN_CACHE[cache_key] = token_count
+        _PROMPT_TOKEN_CACHE.move_to_end(cache_key)
+        if len(_PROMPT_TOKEN_CACHE) > _PROMPT_TOKEN_CACHE_MAX:
+            _PROMPT_TOKEN_CACHE.popitem(last=False)
+
+
 def _get_prompt_tokens(model_name: str, prompt: str) -> int:
     """
     주어진 모델 기준으로 프롬프트 토큰 길이 계산.
@@ -82,15 +116,29 @@ def _get_prompt_tokens(model_name: str, prompt: str) -> int:
     - 토크나이저가 없거나 문제가 생기면 len(prompt) 기반으로
       아주 러프하게 fallback 한다.
     """
+    cache_key = _prompt_cache_key(model_name, prompt)
+    cached = _get_cached_prompt_tokens(cache_key)
+    if cached is not None:
+        return cached
+
+    if len(prompt) < _SHORT_PROMPT_CHAR_THRESHOLD:
+        estimate = max(1, len(prompt) // _SHORT_PROMPT_CHAR_TOKEN_RATIO)
+        _set_cached_prompt_tokens(cache_key, estimate)
+        return estimate
+
     try:
         tok = get_tokenizer_for_model(model_name)
         # special token은 시스템 프롬프트 등에 이미 포함되어 있을 수 있으니 False
         ids = tok.encode(prompt, add_special_tokens=False)
-        return len(ids)
+        token_count = len(ids)
+        _set_cached_prompt_tokens(cache_key, token_count)
+        return token_count
     except Exception as e:
         logger.warning(f"[TRITON] prompt token 계산 실패, fallback 사용: {e}")
         # 완전 비었으면 0 보다는 1 이상으로 반환
-        return max(1, len(prompt) // 2)
+        fallback = max(1, len(prompt) // 2)
+        _set_cached_prompt_tokens(cache_key, fallback)
+        return fallback
 
 
 # ---------------------------------------------------------------------------
