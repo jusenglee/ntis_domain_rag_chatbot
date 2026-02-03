@@ -2342,6 +2342,26 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
         )
+    if relation and plan.mode == "lookup":
+        ids_map_for_lookup = getattr(it, "ids_map", None) or {}
+        pjt_ids_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_id") or []) if str(x).strip()]
+        pjt_nos_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_no") or []) if str(x).strip()]
+        if not (pjt_ids_for_lookup or pjt_nos_for_lookup):
+            plan.mode = "join"
+            relation_lookup_enforce = False
+            logger.warning(
+                "[RAG] lookup+relation ids_map empty -> join fallback (relation=%s)",
+                relation,
+            )
+            log_kv(
+                "RAG.PLAN.LOOKUP_JOIN_FALLBACK",
+                level="warning",
+                build_project_id_filter="fallback_join",
+                ids_map=ids_map_for_lookup,
+                pjt_id=pjt_ids_for_lookup,
+                pjt_no=pjt_nos_for_lookup,
+                relation=relation,
+            )
 
     # allow 적용 (force/allow)
     if effective_allow:
@@ -2873,6 +2893,15 @@ def _run_rag_with_vectors(
         ids_map = getattr(it, "ids_map", {}) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        if relation and not (pjt_ids or pjt_nos):
+            log_kv(
+                "RAG.LOOKUP.IDS_MAP.EMPTY",
+                build_project_id_filter="skip",
+                ids_map=ids_map,
+                pjt_id=pjt_ids,
+                pjt_no=pjt_nos,
+                relation=relation,
+            )
         if payload_project_terms:
             pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
