@@ -3093,6 +3093,7 @@ def _run_rag_with_vectors(
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
     # fallback policy
+    min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
     fallback_chat = False
     fallback_reason = None
 
@@ -3133,7 +3134,7 @@ def _run_rag_with_vectors(
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
     if not fallback_chat:
 
-        max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
+        max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
         requested_limit = max(
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
             _coerce_int(_get_attr(hint, "limit", 0), 0),
@@ -3162,8 +3163,11 @@ def _run_rag_with_vectors(
     if fallback_chat:
         allow_fallback_summary = str(os.getenv("RAG_FALLBACK_SUMMARY_CONTEXT", "0")).strip().lower() in ("1", "true", "yes", "y")
         fallback_summary_max_items = max(1, int(os.getenv("RAG_FALLBACK_SUMMARY_MAX_ITEMS", "3")))
-        if allow_fallback_summary and reranked:
-            max_items = min(fallback_summary_max_items, ctx_hard_limit)
+        if reranked:
+            if allow_fallback_summary:
+                max_items = min(ctx_hard_limit, max(min_ctx_items, fallback_summary_max_items))
+            else:
+                max_items = min(ctx_hard_limit, min_ctx_items)
             reranked_for_ctx = reranked[: max(1, max_items)]
             context, refs, ctx_fieldset = _build_context_with_output_type(
                 reranked_for_ctx,
@@ -3173,12 +3177,15 @@ def _run_rag_with_vectors(
                 max_items=max_items,
                 query_text=q,
             )
-            _timing_put(timings, "flag.fallback_summary_context", 1.0)
+            if allow_fallback_summary:
+                _timing_put(timings, "flag.fallback_summary_context", 1.0)
+            else:
+                _timing_put(timings, "flag.fallback_min_context", 1.0)
         else:
             context, refs = "", []
             ctx_fieldset = _resolve_output_fieldset(plan.output_type)
     else:
-        max_items = min(int(preset.max_ctx_items), ctx_hard_limit)
+        max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
         reranked_for_ctx = reranked[: max(1, max_items)]
         context, refs, ctx_fieldset = _build_context_with_output_type(
             reranked_for_ctx,
@@ -3192,11 +3199,25 @@ def _run_rag_with_vectors(
     _timing_put(timings, "phase.build_context", time.time() - t0)
     _timing_put(timings, "phase.total", time.time() - t_all0)
 
+    ctx_max_items = max_items if "max_items" in locals() else min(int(preset.max_ctx_items), ctx_hard_limit)
+    kept_ctx = min(len(reranked or []), ctx_max_items)
+    discarded_ctx = max(0, len(reranked or []) - kept_ctx)
+
+    log_kv(
+        "RAG.CONTEXT",
+        reranked_total=len(reranked or []),
+        min_ctx_items=min_ctx_items,
+        kept_ctx=kept_ctx,
+        discarded_ctx=discarded_ctx,
+        fallback_chat=fallback_chat,
+        fallback_reason=timings.get("info.fallback_reason"),
+    )
+
     log_kv(
         "RAG.CTX",
         ctx_len=len(context or ""),
         refs=len(refs or []),
-        max_items=int(min(int(preset.max_ctx_items), ctx_hard_limit)),
+        max_items=int(ctx_max_items),
         fallback_chat=fallback_chat,
         fallback_reason=timings.get("info.fallback_reason"),
         output_type=plan.output_type,
