@@ -25,7 +25,7 @@ from pprint import pformat
 from dataclasses import dataclass, fields
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
+from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent, resolve_join_hops
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -2424,6 +2424,22 @@ def _run_rag_with_vectors(
         output_type=getattr(plan, "output_type", None),
         target_cols=plan.target_collections,
     )
+
+    if relation and base_route in ("project", "perf") and plan.mode != "join":
+        route = get_relation_route(relation)
+        hop_plan = resolve_join_hops(relation)
+        if route and hop_plan:
+            requested_mode = plan.mode
+            plan.mode = "join"
+            log_kv(
+                "RAG.PLAN.MODE_GUARD",
+                level="warning",
+                enforced_mode="join",
+                requested_mode=requested_mode,
+                reason="relation_base_route_guard",
+                base_route=base_route,
+                relation=relation,
+            )
 
     # -------------------------
     # JOIN mode (2-hop)
