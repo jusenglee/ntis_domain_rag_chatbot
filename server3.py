@@ -1491,12 +1491,28 @@ def refine_documents_rule_based(
                     f"fallback_lines: {fallback_lines}")
         researcher_block = f"\n{researcher_line}"
 
-        combined_text = f"{refined_text}{researcher_block}".strip()
-        limited_text = _limit_text_by_sentences_and_tokens(
-            combined_text,
+        limited_body = _limit_text_by_sentences_and_tokens(
+            refined_text,
             max_sentences=MAX_DOC_SENTENCES,
             max_tokens=MAX_DOC_TOKENS,
         )
+        body_sentences = _split_sentences(limited_body)
+        body_token_counts = [len(sentence.split()) for sentence in body_sentences]
+        body_token_count = sum(body_token_counts)
+        researcher_sentences = _split_sentences(researcher_line)
+        researcher_token_count = len(researcher_line.split())
+
+        while body_sentences and (
+            len(body_sentences) + len(researcher_sentences) > MAX_DOC_SENTENCES
+            or body_token_count + researcher_token_count > MAX_DOC_TOKENS
+        ):
+            body_token_count -= body_token_counts.pop()
+            body_sentences.pop()
+
+        limited_body = "\n".join(body_sentences).strip()
+        limited_text = "\n".join(
+            [part for part in [limited_body, researcher_line] if part]
+        ).strip()
 
         context_chunks.append(
             f"## 출처 {source_idx}. {title}\n"
