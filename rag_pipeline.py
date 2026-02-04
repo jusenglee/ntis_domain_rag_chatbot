@@ -2113,12 +2113,12 @@ def _run_rag_with_vectors(
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
                 it.keywords = keywords_hint
-            project_title_hint = _normalize_hint_terms(
-                hint_filters.get("project_title") or hint_filters.get("project_name")
+            title_hint = _normalize_hint_terms(
+                hint_filters.get("title") or hint_filters.get("name")
             )
-            if project_title_hint:
-                it.project_title = project_title_hint
-                it.keywords = list(dict.fromkeys([*list(it.keywords or []), *project_title_hint]))
+            if title_hint:
+                it.title = title_hint
+                it.keywords = list(dict.fromkeys([*list(it.keywords or []), *title_hint]))
 
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
     payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
@@ -2129,8 +2129,8 @@ def _run_rag_with_vectors(
     payload_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "tag_filters", None))
     payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
     payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
-    payload_project_title = _normalize_hint_terms(
-        _get_attr(intent_payload, "project_title", None) or _get_attr(intent_payload, "project_name", None)
+    payload_title = _normalize_hint_terms(
+        _get_attr(intent_payload, "itle", None) or _get_attr(intent_payload, "title", None)
     )
     payload_year_from = _get_attr(intent_payload, "year_from", None)
     payload_year_to = _get_attr(intent_payload, "year_to", None)
@@ -2156,9 +2156,9 @@ def _run_rag_with_vectors(
         it.perf_tag_filters = payload_perf_tag_filters
     if payload_project_tag_filters:
         it.project_tag_filters = payload_project_tag_filters
-    if payload_project_title:
-        it.project_title = payload_project_title
-        it.keywords = list(dict.fromkeys([*list(it.keywords or []), *payload_project_title]))
+    if payload_title:
+        it.title = payload_title
+        it.keywords = list(dict.fromkeys([*list(it.keywords or []), *payload_title]))
     if payload_year_from is not None:
         it.year_from = str(payload_year_from).strip() or None
     if payload_year_to is not None:
@@ -2343,11 +2343,11 @@ def _run_rag_with_vectors(
 
     title_terms = [
         t.strip()
-        for t in (list(getattr(it, "project_title", None) or []) or [])
+        for t in (list(getattr(it, "title", None) or []) or [])
         if str(t).strip()
     ]
-    it.project_title = project_title_terms
-    title_filter = build_title_filter(project_title_terms) if project_title_terms else None
+    it.title = title_terms
+    title_filter = build_title_filter(title_terms) if title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
@@ -2427,7 +2427,7 @@ def _run_rag_with_vectors(
         perf_types=perf_types,
         keywords=keyword_terms,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
-        project_title_terms=title_terms,
+        title_terms=title_terms,
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,

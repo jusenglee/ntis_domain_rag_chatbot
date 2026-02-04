@@ -95,7 +95,7 @@ class NormalizedIntent:
     org_role: Optional[str] = None
     perf_types: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
-    project_title: List[str] = field(default_factory=list)
+    title: List[str] = field(default_factory=list)
     perf_tag_filters: List[str] = field(default_factory=list)
     project_tag_filters: List[str] = field(default_factory=list)
     tag_filters: List[str] = field(default_factory=list)

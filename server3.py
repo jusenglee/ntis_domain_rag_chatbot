@@ -1097,9 +1097,9 @@ async def build_intent_payload(
             kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             kws = [raw_keywords.strip()]
-        project_title_hint = question_analysis.filters.get("project_title") or question_analysis.filters.get("project_name")
-        if project_title_hint:
-            title_terms = _normalize_hint_terms(project_title_hint)
+        title_hint = question_analysis.filters.get("title") or question_analysis.filters.get("name")
+        if title_hint:
+            title_terms = _normalize_hint_terms(title_hint)
             kws = list(dict.fromkeys([*kws, *title_terms]))
     hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name] if question_analysis else []
     hint_org_terms = list(question_analysis.organizations or []) if question_analysis else []
@@ -1280,13 +1280,13 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         if keywords_hint:
             current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
             normalized_intent.keywords = list(dict.fromkeys([*keywords_hint, *current_keywords]))
-        project_title_hint = _normalize_hint_terms(
-            filters.get("project_title") or filters.get("project_name")
+        title_hint = _normalize_hint_terms(
+            filters.get("title") or filters.get("ame")
         )
-        if project_title_hint:
-            normalized_intent.project_title = project_title_hint
+        if title_hint:
+            normalized_intent.title = title_hint
             current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
-            normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *project_title_hint]))
+            normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *title_hint]))
         org_role = filters.get("org_role")
         if org_role:
             normalized_intent.org_role = str(org_role).strip().lower() or None

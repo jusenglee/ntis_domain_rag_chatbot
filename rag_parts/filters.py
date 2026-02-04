@@ -562,11 +562,6 @@ def build_title_filter(terms: List[str]) -> Optional[Any]:
     ]
     return _build_title_filter_with_keys(terms, keys)
 
-
-def build_project_title_filter(terms: List[str]) -> Optional[Any]:
-    """과제명(국문/영문) 기반 서버단 필터를 구성합니다."""
-    return build_title_filter(terms)
-
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 
