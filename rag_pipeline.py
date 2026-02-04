@@ -1718,6 +1718,9 @@ def _run_rag_with_vectors(
     # --- hint 적용 (single-pass) ---
     qa = hint
     qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
+    hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
+    hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
+    hint_policy = "merge" if hint_conf_ok else "ignore"
 
     hinted_base = None
     hinted_limit = 0
@@ -1730,7 +1733,7 @@ def _run_rag_with_vectors(
     if payload_target_cols:
         hinted_cols = payload_target_cols
 
-    if qa and qa_conf >= float(os.getenv("RAG_HINT_MIN_CONF", "0.55")):
+    if hint_conf_ok:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
         hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
@@ -1753,6 +1756,8 @@ def _run_rag_with_vectors(
         raw_query=query,
         normalized=q,
         hint_conf=qa_conf,
+        qa_conf=qa_conf,
+        hint_applied=int(hint_conf_ok),
         hinted_base=hinted_base,
         hinted_limit=hinted_limit,
         hinted_cols=hinted_cols,
@@ -1977,7 +1982,7 @@ def _run_rag_with_vectors(
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
-    if not intent_from_payload:
+    if not intent_from_payload and hint_conf_ok:
         if hint_head in ("project", "perf", "people", "org", "support"):
             it.base_route = hint_head
         if hint_relation:
@@ -2140,27 +2145,29 @@ def _run_rag_with_vectors(
         if researcher_id not in (None, ""):
             hint_people_ids.append(researcher_id)
     if hint_people_terms:
-        merged_people = hint_people_terms + people_terms
-        deduped_people: List[str] = []
-        seen_people: set[str] = set()
-        for term in merged_people:
-            if term in seen_people:
-                continue
-            seen_people.add(term)
-            deduped_people.append(term)
-        people_terms = deduped_people
+        if hint_policy == "merge":
+            merged_people = hint_people_terms + people_terms
+            deduped_people: List[str] = []
+            seen_people: set[str] = set()
+            for term in merged_people:
+                if term in seen_people:
+                    continue
+                seen_people.add(term)
+                deduped_people.append(term)
+            people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
     if hint_people_ids:
-        merged_ids = hint_people_ids + people_ids
-        deduped_ids: List[Any] = []
-        seen_ids: set[Any] = set()
-        for pid in merged_ids:
-            if pid in seen_ids:
-                continue
-            seen_ids.add(pid)
-            deduped_ids.append(pid)
-        people_ids = deduped_ids
+        if hint_policy == "merge":
+            merged_ids = hint_people_ids + people_ids
+            deduped_ids: List[Any] = []
+            seen_ids: set[Any] = set()
+            for pid in merged_ids:
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                deduped_ids.append(pid)
+            people_ids = deduped_ids
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
@@ -2219,15 +2226,15 @@ def _run_rag_with_vectors(
 
     hint_people_filters = _normalize_hint_terms(
         hint_filters.get("researcher_name") or hint_filters.get("people_name")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_org_filters = _normalize_hint_terms(
         hint_filters.get("org_name") or hint_filters.get("org")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_tag_filters = _normalize_hint_terms(
         hint_filters.get("tag_filters")
         or hint_filters.get("project_tag_filters")
         or hint_filters.get("perf_tag_filters")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
 
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
     search_filter_signal = bool(
@@ -2566,6 +2573,8 @@ def _run_rag_with_vectors(
         relation=relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=list(getattr(plan, "target_collections", []) or []),
+        qa_conf=qa_conf,
+        hint_applied=int(hint_conf_ok),
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
