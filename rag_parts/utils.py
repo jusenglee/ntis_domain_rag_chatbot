@@ -42,10 +42,8 @@ def point_brief(p: Any) -> Dict[str, Any]:
     score = getattr(p, "score", None)
     title = (
         pl.get("title_text")
-        or pl.get("title")
         or pl.get("title1")
         or pl.get("title2")
-        or meta.get("kor_pjt_nm")
         or ""
     )
     doc_id = pl.get("doc_id") or ""
@@ -60,4 +58,3 @@ def point_brief(p: Any) -> Dict[str, Any]:
         "source_table": str(st),
         "title": str(title)[:80],
     }
-
