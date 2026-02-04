@@ -43,6 +43,31 @@ _SPARSE_LOCK = threading.Lock()
 # logger = logging.getLogger("RAG_Retrieval")
 
 
+def _filter_brief(f: Any) -> str:
+    if f is None:
+        return "None"
+    return (
+        f"Filter(must={len(getattr(f, 'must', None) or [])}, "
+        f"should={len(getattr(f, 'should', None) or [])}, "
+        f"must_not={len(getattr(f, 'must_not', None) or [])})"
+    )
+
+
+def _peek(points: Any, n: int = 3) -> List[Any]:
+    out: List[Any] = []
+    for p in (points or [])[:n]:
+        pl = getattr(p, "payload", {}) or {}
+        out.append(
+            (
+                str(getattr(p, "id", "")),
+                pl.get("doc_id"),
+                (pl.get("title_text") or "")[:40],
+                float(getattr(p, "score", 0.0) or 0.0),
+            )
+        )
+    return out
+
+
 def _get_sparse_encoder(model_name: str):
     """Per-model cached SparseTextEmbedding encoder (thread-safe)."""
     # fastembed import는 여기서 한 번만 시도
@@ -133,7 +158,7 @@ def _qdrant_query_points_sparse(
             query_filter=query_filter,        # query_points 쪽 파라미터명
             timeout=int(timeout),
         )
-        return list(res or [])
+        return list(getattr(res, "points", []) or [])
     except TypeError:
         # 2) old-style
         try:
@@ -177,6 +202,13 @@ def _qdrant_sparse_search(
             sparse_vector_name,
         )
         return []
+    logger.info(
+        "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
+        model_name,
+        len(query_text or ""),
+        len(getattr(sv, "indices", []) or []),
+        (query_text or "")[:80],
+    )
 
     return _qdrant_query_points_sparse(
         client,
@@ -779,7 +811,9 @@ def dense_retrieve_hybrid_multi(
         timings["hybrid_once_total"] = time.perf_counter() - t_hybrid0
         if hybrid_points is not None:
             timings["hybrid_once_hits"] = float(len(hybrid_points))
-            return {"dense": {}, "lexical": [], "hybrid": hybrid_points}
+            ret = {"dense": {}, "lexical": [], "hybrid": hybrid_points}
+            logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
+            return ret
 
     # -----------------------
     # Dense retrieval
@@ -803,11 +837,8 @@ def dense_retrieve_hybrid_multi(
         q_text_for_dense,
         q_text_for_sparse,
     )
-    logger.debug(
-        "[RETRIEVE] q_text_for_dense=%s q_text_for_sparse=%s",
-        q_text_for_dense,
-        q_text_for_sparse,
-    )
+    logger.info("[RETRIEVE] filter=%s", _filter_brief(query_filter))
+
     for vec_name, emb in (emb_map or {}).items():
         t0 = time.perf_counter()
         v = embed_query(emb, q)
@@ -850,6 +881,7 @@ def dense_retrieve_hybrid_multi(
             for p in pts:
                 _set_payload_hint(p, collection_name, vec_name)
             dense[vec_name] = pts
+            logger.info("[DENSE] vec=%s hits=%d peek=%s", vec_name, len(pts), _peek(pts))
 
             dense_queries += 1
             dense_points += len(pts)
@@ -898,6 +930,11 @@ def dense_retrieve_hybrid_multi(
         _PAYLOAD_MIN_FIELDS,
         lexical_fields_eff,
     )
+    logger.info(
+        "[PAYLOAD] dense=%s lex=%s",
+        type(with_payload_dense_sparse).__name__,
+        type(with_payload_lex).__name__,
+    )
 
     t_sparse0 = time.perf_counter()
     lex_cand = 0
@@ -918,12 +955,15 @@ def dense_retrieve_hybrid_multi(
         if sp_hits:
             lex_points = list(sp_hits)[: int(top_k_lexical)]
             lex_cand = len(sp_hits)
+        logger.info("[SPARSE] hits=%d cand=%d peek=%s", len(lex_points), lex_cand, _peek(lex_points))
     timings["lexical_sparse"] = time.perf_counter() - t_sparse0
     timings["lexical_candidates"] = float(lex_cand)
     timings["lexical_scored"] = float(len(lex_points))
     timings["lexical_total"] = time.perf_counter() - t_lex0
 
-    return {"dense": dense, "lexical": lex_points}
+    ret = {"dense": dense, "lexical": lex_points}
+    logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
+    return ret
 
 
 # =========================
