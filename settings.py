@@ -52,10 +52,10 @@ SCORE_THRESHOLD  = 0.20
 FUZZ_MIN         = 55
 SNIPPET_MAX_CHARS = 8000
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
-MAX_DOC_SENTENCES = int(os.getenv("MAX_DOC_SENTENCES", "8"))
-MAX_DOC_TOKENS = int(os.getenv("MAX_DOC_TOKENS", "400"))
-SUMMARY_DOC_SENTENCES = int(os.getenv("SUMMARY_DOC_SENTENCES", "3"))
-SUMMARY_DOC_TOKENS = int(os.getenv("SUMMARY_DOC_TOKENS", "120"))
+MAX_DOC_SENTENCES = int(os.getenv("MAX_DOC_SENTENCES", "12"))
+MAX_DOC_TOKENS = int(os.getenv("MAX_DOC_TOKENS", "800"))
+SUMMARY_DOC_SENTENCES = int(os.getenv("SUMMARY_DOC_SENTENCES", "6"))
+SUMMARY_DOC_TOKENS = int(os.getenv("SUMMARY_DOC_TOKENS", "240"))
 
 # Redis / 검색 제한 설정
 # REDIS_URL: Redis 연결 문자열 (예: redis://localhost:6379)

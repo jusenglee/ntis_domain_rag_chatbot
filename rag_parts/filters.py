@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .constants import (
-    KEY_ORG_NORM,
     PERF_TAGS,
     TAG_RI_PAPER, TAG_RI_IPR, TAG_RI_RSCH_RPT, TAG_RI_FCLT_EQUIP, TAG_RI_TECH_INFO,
     TAG_RI_SW, TAG_RI_NVR, TAG_RI_COMPOUND, TAG_RI_ORGSM_INFO, TAG_RI_ORGSM_RES,
@@ -80,7 +79,6 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
         ]
     elif role is None:
         keys = [
-            KEY_ORG_NORM,
             "org_nm",
             "prtcp_org[].org_nm",
             "prtcp_mp[].blng_org_nm",
