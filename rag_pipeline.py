@@ -2380,6 +2380,8 @@ def _run_rag_with_vectors(
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
     keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
+    if plan.mode == "lookup" and title_terms:
+        keyword_terms = _merge_keywords_with_priority(title_terms, keyword_terms)
     it.keywords = keyword_terms
     kws = keyword_terms
 
@@ -2630,6 +2632,20 @@ def _run_rag_with_vectors(
         )
         lookup_filter_policy = "hard"
 
+    lookup_title_filter_policy = str(os.getenv("RAG_LOOKUP_TITLE_FILTER_POLICY", "soft")).strip().lower()
+    if lookup_title_filter_policy != "soft":
+        logger.warning(
+            "[RAG] invalid RAG_LOOKUP_TITLE_FILTER_POLICY=%s, forcing 'soft'",
+            lookup_title_filter_policy,
+        )
+        lookup_title_filter_policy = "soft"
+    log_kv(
+        "RAG.LOOKUP.TITLE_FILTER_POLICY",
+        policy=lookup_title_filter_policy,
+        mode=plan.mode,
+        title_terms=title_terms[:4],
+    )
+
     lookup_filter_enabled = bool(
         plan.mode == "lookup"
         and lookup_filter_policy == "hard"
@@ -2726,7 +2742,7 @@ def _run_rag_with_vectors(
         plan.target_collections = filtered if filtered else list(effective_allow)
 
     title_filter_applied_to = None
-    if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
+    if title_filter and (plan.mode == "search" and search_filter_conf_ok):
         title_filter_applied_to = "project/perf"
     tag_filter_applied_to = None
     if (project_tag_filter or perf_tag_filter) and (
@@ -2789,6 +2805,7 @@ def _run_rag_with_vectors(
             "lookup_filter_enabled": lookup_filter_enabled,
             "relation_lookup_enforce": relation_lookup_enforce,
             "lookup_filter_policy": lookup_filter_policy,
+            "lookup_title_filter_policy": lookup_title_filter_policy,
             "filter_signal": search_filter_signal,
             "filter_conf_ok": search_filter_conf_ok,
         },
@@ -3469,9 +3486,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and (
-                    plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
-                ):
+                if title_filter and (plan.mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
                 if people_filter or participant_org_filter or org_filter:
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -3483,9 +3498,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and (
-                    plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
-                ):
+                if title_filter and (plan.mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter:
                     base_filter = _and_filter(base_filter, people_filter)
