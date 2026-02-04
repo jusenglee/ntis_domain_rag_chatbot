@@ -377,7 +377,7 @@ def _qdrant_hybrid_query_once(
     fusion_query = _get_fusion_rrf()
     if fusion_query is None:
         return None
-
+    logger.info(f"---------------------------{prefetch}-----------------------------")
     query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
     try:
         res = client.query_points(
@@ -798,7 +798,11 @@ def dense_retrieve_hybrid_multi(
         q_text_for_dense,
         q_text_for_sparse,
     )
-
+    logger.debug(
+        "[RETRIEVE] q_text_for_dense=%s q_text_for_sparse=%s",
+        q_text_for_dense,
+        q_text_for_sparse,
+    )
     for vec_name, emb in (emb_map or {}).items():
         t0 = time.perf_counter()
         v = embed_query(emb, q)
