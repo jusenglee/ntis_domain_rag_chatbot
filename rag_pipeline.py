@@ -1392,6 +1392,7 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
     우선순위(강제):
+    0) relation action -> join (ids 유무와 무관)
     1) relation + join ids -> join
     2) id query 또는 명확한 ids -> lookup
     3) list/stats/download -> lookup
@@ -1400,6 +1401,8 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """
     action = it.action
     rel = it.relation
+    if action == "relation" and rel:
+        return "join", "relation_action"
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         return "lookup", "people_project_lookup"
     if rel and _has_relation_join_ids(it):
@@ -2571,9 +2574,17 @@ def _run_rag_with_vectors(
         )
         relation_lookup_policy = "filter"
 
+    relation_action = bool(relation and action == "relation")
+    has_relation_join_ids = _has_relation_join_ids(it)
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
-        if relation_lookup_policy == "join" and _has_relation_join_ids(it):
+        if relation_action:
+            plan.mode = "join"
+            logger.warning(
+                "[RAG] promoting lookup+relation(action) to join (relation=%s)",
+                relation,
+            )
+        elif relation_lookup_policy == "join" and has_relation_join_ids:
             plan.mode = "join"
             logger.warning(
                 "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
@@ -2581,12 +2592,13 @@ def _run_rag_with_vectors(
                 relation,
             )
         else:
-            relation_lookup_enforce = True
-            logger.warning(
-                "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
-                relation_lookup_policy,
-                relation,
-            )
+            relation_lookup_enforce = bool(has_relation_join_ids)
+            if relation_lookup_enforce:
+                logger.warning(
+                    "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
+                    relation_lookup_policy,
+                    relation,
+                )
         log_kv(
             "RAG.PLAN.RELATION_LOOKUP_POLICY",
             level="warning",
@@ -2595,19 +2607,30 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
         )
-    if relation and plan.mode == "join" and not _has_relation_join_ids(it):
-        plan.mode = "lookup"
-        relation_lookup_enforce = True
-        logger.warning(
-            "[RAG] join skipped due to missing relation ids (relation=%s)",
-            relation,
-        )
-        log_kv(
-            "RAG.PLAN.JOIN_SKIPPED",
-            level="warning",
-            reason="missing_relation_ids",
-            relation=relation,
-        )
+    if relation and plan.mode == "join" and not has_relation_join_ids:
+        if relation_action:
+            logger.warning(
+                "[RAG] relation action without join ids: using Hop1→Hop2 flow (relation=%s)",
+                relation,
+            )
+            log_kv(
+                "RAG.PLAN.JOIN_HOP1_REQUIRED",
+                level="warning",
+                reason="relation_action_missing_ids",
+                relation=relation,
+            )
+        else:
+            plan.mode = "lookup"
+            logger.warning(
+                "[RAG] join skipped due to missing relation ids (relation=%s)",
+                relation,
+            )
+            log_kv(
+                "RAG.PLAN.JOIN_SKIPPED",
+                level="warning",
+                reason="missing_relation_ids",
+                relation=relation,
+            )
 
     # allow 적용 (force/allow)
     if effective_allow:
@@ -2707,7 +2730,10 @@ def _run_rag_with_vectors(
     # -------------------------
     if plan.mode == "join" and relation:
         t_hop0 = time.time()
-        pjt_ids = (getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}).get("pjt_id") or []
+        ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
+        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
+        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        seed_join_ids = list(dict.fromkeys(pjt_ids + pjt_nos))
 
 
 
@@ -2762,9 +2788,9 @@ def _run_rag_with_vectors(
             hop1_filter = None
 
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
-            if pjt_ids:
-                join_ids = pjt_ids[:]
-                log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_pjt_ids", join_ids=join_ids[:10])
+            if seed_join_ids:
+                join_ids = seed_join_ids[:]
+                log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_join_ids", join_ids=join_ids[:10])
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
                 if hop1_kind == "people" and people_filter:
