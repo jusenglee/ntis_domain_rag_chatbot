@@ -145,6 +145,15 @@ def _deserialize_history(payload: Any) -> List[BaseMessage]:
             history.append(AIMessage(content=content))
     return history
 
+def _normalize_none_string(value: Any) -> Any:
+    if isinstance(value, str) and value.strip() == "None":
+        return None
+    if isinstance(value, list):
+        return [_normalize_none_string(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_none_string(item) for key, item in value.items()}
+    return value
+
 class ContentCategory(str, Enum):
 
     PROJECT = "project"          # 과제/연구개발
@@ -374,7 +383,8 @@ async def _run_question_analysis(
         "2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.\n"
         "3) 모호하면 문장으로 회피하지 말고(confidence 낮춤), 관련 필드는 null/[] 처리.\n"
         "4) related_docs는 FOLLOW_UP일 때만 채우고, 아니면 [] 입니다.\n"
-        "5) researchers/organizations는 '특정' 대상이 식별될 때만 포함합니다. (없으면 [])\n\n"
+        "5) researchers/organizations는 '특정' 대상이 식별될 때만 포함합니다. (없으면 [])\n"
+        "6) 값이 없으면 문자열 'None'을 쓰지 말고 반드시 null/[]로 표기합니다.\n\n"
     
         "====================\n"
         "[Category 분류 규칙]\n"
@@ -532,6 +542,8 @@ async def _run_question_analysis(
             "prev_context": prev_context_str or "없음",
             "question": question
         })
+        normalized_payload = _normalize_none_string(result.model_dump())
+        result = QuestionAnalysis.model_validate(normalized_payload)
         result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
         log_section(
@@ -1086,6 +1098,10 @@ async def build_intent_payload(
             kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             kws = [raw_keywords.strip()]
+        project_title_hint = question_analysis.filters.get("project_title") or question_analysis.filters.get("project_name")
+        if project_title_hint:
+            title_terms = _normalize_hint_terms(project_title_hint)
+            kws = list(dict.fromkeys([*kws, *title_terms]))
     hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name] if question_analysis else []
     hint_org_terms = list(question_analysis.organizations or []) if question_analysis else []
     hint_org_role = None
@@ -1240,12 +1256,27 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
                 normalized_intent.perf_tag_filters = tag_filters_hint
             if question_analysis.head == "project":
                 normalized_intent.project_tag_filters = tag_filters_hint
+        relation_text = str(question_analysis.relation or "").strip().lower()
+        existing_tag_filters = _normalize_hint_terms(getattr(normalized_intent, "tag_filters", None))
+        if not tag_filters_hint and not existing_tag_filters and relation_text == "project_perf":
+            default_tag_filters = ["IRD_NAI_PJT_INFO"]
+            normalized_intent.tag_filters = default_tag_filters
+            if question_analysis.head == "perf":
+                normalized_intent.perf_tag_filters = default_tag_filters
+            if question_analysis.head == "project":
+                normalized_intent.project_tag_filters = default_tag_filters
         perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
         if perf_types_hint:
             normalized_intent.perf_types = perf_types_hint
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
             normalized_intent.keywords = keywords_hint
+        project_title_hint = _normalize_hint_terms(
+            filters.get("project_title") or filters.get("project_name")
+        )
+        if project_title_hint:
+            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
+            normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *project_title_hint]))
         org_role = filters.get("org_role")
         if org_role:
             normalized_intent.org_role = str(org_role).strip().lower() or None
