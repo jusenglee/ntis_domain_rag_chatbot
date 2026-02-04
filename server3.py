@@ -455,9 +455,10 @@ async def _run_question_analysis(
         "[filters 규칙]\n"
         "====================\n"
         "filters는 dict입니다. 필요한 것만 포함합니다.\n"
-        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords,\n"
+        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords, project_title, project_name,\n"
         "participant_researcher_name, participant_researcher_id,\n"
         "participant_org_name, lead_org_name, performing_org_name, org_role\n"
+        "대괄호 [] 내부는 과제명으로 간주해 project_title에 넣습니다.\n"
         "관계형 질의에서 참여인력/참가기관이 잡히면 participant_* 키를 우선 사용합니다.\n\n"
     
         "====================\n"
@@ -1085,6 +1086,10 @@ async def build_intent_payload(
             kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             kws = [raw_keywords.strip()]
+        project_title_hint = question_analysis.filters.get("project_title") or question_analysis.filters.get("project_name")
+        if project_title_hint:
+            title_terms = _normalize_hint_terms(project_title_hint)
+            kws = list(dict.fromkeys([*kws, *title_terms]))
     hint_people_terms = [r.name for r in (question_analysis.researchers or []) if r.name] if question_analysis else []
     hint_org_terms = list(question_analysis.organizations or []) if question_analysis else []
     hint_org_role = None
@@ -1245,6 +1250,12 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
             normalized_intent.keywords = keywords_hint
+        project_title_hint = _normalize_hint_terms(
+            filters.get("project_title") or filters.get("project_name")
+        )
+        if project_title_hint:
+            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
+            normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *project_title_hint]))
         org_role = filters.get("org_role")
         if org_role:
             normalized_intent.org_role = str(org_role).strip().lower() or None
