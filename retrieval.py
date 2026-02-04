@@ -791,6 +791,14 @@ def dense_retrieve_hybrid_multi(
     if int(top_k_dense) <= 0:
         emb_map = {}
 
+    q_text_for_dense = q or ""
+    q_text_for_sparse = q or ""
+    logger.info(
+        "[RETRIEVE] q_text_for_dense=%s q_text_for_sparse=%s",
+        q_text_for_dense,
+        q_text_for_sparse,
+    )
+
     for vec_name, emb in (emb_map or {}).items():
         t0 = time.perf_counter()
         v = embed_query(emb, q)
