@@ -163,15 +163,25 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
     # base lexical fields
-    base_fields = ["title_text", "content_text", "keyword_text", "flat_text", "category", "title", *PJT_NO_FIELDS]
+    base_fields = [
+        "title_text",
+        "title1",
+        "title2",
+        "content_text",
+        "keyword_text",
+        "flat_text",
+        "category",
+        *PJT_NO_FIELDS,
+    ]
 
     weights = {
         "title_text": default_title_w,
+        "title1": default_title_w,
+        "title2": default_title_w,
         "content_text": default_content_w,
         "keyword_text": default_keyword_w,
         "flat_text": default_flat_w,
         "category": default_category_w,
-        "title": default_title_w,
         "pjt_no": default_pjt_no_w,
         "meta_basic.pjt_no": default_pjt_no_w,
         "prtcp_mp[].hm_nm": default_prtcp_person_w,
