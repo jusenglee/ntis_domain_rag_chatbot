@@ -9,8 +9,8 @@ JOIN(2-hop)에서 Hop1 결과(예: 과제/참여인력/기관 등)로부터 join
 - sanitize_query_by_terms(q, remove_terms): 제거 대상 용어를 질의에서 제거(공백 정리)
 
 주의:
-- PJT_ID는 저장 스키마에 따라 payload/meta_basic에 여러 키 변형으로 존재할 수 있어
-  여러 키 변형을 모두 확인합니다.
+- PJT_ID는 저장 스키마에 따라 payload/meta_basic/meta_detail에 여러 키 변형으로 존재할 수 있어
+  payload 최상위 → meta 순서로 여러 키 변형을 모두 확인합니다.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def _normalize_pjt_id(v: Any) -> Optional[str]:
 
 
 def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    """Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다. (PJT_ID는 payload 최상위에만 존재)"""
+    """Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다. (payload 최상위 → meta 순서)"""
     out: List[str] = []
     seen = set()
 
@@ -91,14 +91,16 @@ def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
         if not payload:
             continue
 
-        for k in _PJT_ID_KEYS:
-            if k in payload:
-                pid = _normalize_pjt_id(payload.get(k))  # ✅ 여기만 있으면 됨
-                if pid and pid not in seen:
-                    out.append(pid)
-                    seen.add(pid)
-                    if len(out) >= max_ids:
-                        return out
+        meta = _get_meta(payload)
+        for source in (payload, meta):
+            for k in _PJT_ID_KEYS:
+                if k in source:
+                    pid = _normalize_pjt_id(source.get(k))
+                    if pid and pid not in seen:
+                        out.append(pid)
+                        seen.add(pid)
+                        if len(out) >= max_ids:
+                            return out
 
     return out
 
