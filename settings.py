@@ -31,7 +31,7 @@ def _split_csv(value: str | None, default: list[str]) -> list[str]:
 
 RAG_COLLECTION_ALLOWLIST = _split_csv(
     os.getenv("RAG_COLLECTION_ALLOWLIST"),
-    ["ntis_project_v3", "ntis_perf_v3"],
+    ["ntis_project_v3", "ntis_perf_v2"],
 )
 
 # Triton
