@@ -1759,6 +1759,11 @@ def _run_rag_with_vectors(
             out.append(s)
         return out
 
+    def _merge_keywords_with_priority(primary: Any, secondary: Any) -> List[str]:
+        primary_terms = _normalize_hint_terms(primary)
+        secondary_terms = _normalize_hint_terms(secondary)
+        return list(dict.fromkeys([*primary_terms, *secondary_terms]))
+
     def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
         if not isinstance(raw, dict):
             return {}
@@ -1951,6 +1956,8 @@ def _run_rag_with_vectors(
             if intent_perf_types:
                 perf_types_source = "intent"
                 log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
+
+    planner_keywords = _normalize_hint_terms(getattr(it, "keywords", None))
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
@@ -2239,6 +2246,8 @@ def _run_rag_with_vectors(
     title_filter = build_project_title_filter(title_terms) if title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
+    # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
+    keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
     it.keywords = keyword_terms
     kws = keyword_terms
 
@@ -2328,7 +2337,14 @@ def _run_rag_with_vectors(
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
     # -------------------------
-    log_section("RAG.KEYWORDS", kws)
+    log_section(
+        "RAG.KEYWORDS",
+        {
+            "planner_keywords": planner_keywords,
+            "final_keywords": kws,
+            "priority_rule": "planner>hint/payload",
+        },
+    )
     log_kv(
         "RAG.INTENT",
         action=action,

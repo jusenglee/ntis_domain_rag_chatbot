@@ -1278,7 +1278,8 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
             )
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
-            normalized_intent.keywords = keywords_hint
+            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
+            normalized_intent.keywords = list(dict.fromkeys([*keywords_hint, *current_keywords]))
         project_title_hint = _normalize_hint_terms(
             filters.get("project_title") or filters.get("project_name")
         )
