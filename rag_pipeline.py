@@ -320,6 +320,74 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
+def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
+    stats = {
+        "total": 0,
+        "missing_pjt_id": 0,
+        "missing_pjt_no": 0,
+        "missing_tag": 0,
+        "missing_pjt_any": 0,
+    }
+    for p in points or []:
+        payload = getattr(p, "payload", None) or {}
+        if not isinstance(payload, dict):
+            continue
+        stats["total"] += 1
+        pjt_id = str(payload.get("pjt_id") or "").strip()
+        pjt_no = str(payload.get("pjt_no") or "").strip()
+        tag = str(payload.get("tag") or "").strip()
+        if not pjt_id:
+            stats["missing_pjt_id"] += 1
+        if not pjt_no:
+            stats["missing_pjt_no"] += 1
+        if not tag:
+            stats["missing_tag"] += 1
+        if not pjt_id and not pjt_no:
+            stats["missing_pjt_any"] += 1
+    return stats
+
+def _ensure_join_keys_in_payload(
+    points: Iterable[Any],
+    *,
+    force_from_meta: bool = True,
+    force_tag_from_tags: bool = True,
+) -> Dict[str, int]:
+    stats = {
+        "total": 0,
+        "forced_pjt_id": 0,
+        "forced_pjt_no": 0,
+        "forced_tag": 0,
+    }
+    for p in points or []:
+        payload = getattr(p, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        stats["total"] += 1
+        meta = _get_meta(payload)
+        if force_from_meta:
+            if not payload.get("pjt_id"):
+                candidate = _pick_first(meta.get("pjt_id"), meta.get("pjt_no"))
+                if candidate:
+                    payload["pjt_id"] = candidate
+                    stats["forced_pjt_id"] += 1
+            if not payload.get("pjt_no"):
+                candidate = _pick_first(meta.get("pjt_no"), meta.get("pjt_id"))
+                if candidate:
+                    payload["pjt_no"] = candidate
+                    stats["forced_pjt_no"] += 1
+        if not payload.get("tag"):
+            candidate = ""
+            if force_tag_from_tags:
+                tags_value = payload.get("tags")
+                if isinstance(tags_value, list) and tags_value:
+                    candidate = str(tags_value[0]).strip()
+            if not candidate and force_from_meta:
+                candidate = _pick_first(meta.get("tag"))
+            if candidate:
+                payload["tag"] = candidate
+                stats["forced_tag"] += 1
+    return stats
+
 def _approx_token_len(text: str) -> int:
     """토크나이저 없이 예산 기반 컷오프용 근사치."""
     if not text:
@@ -2679,6 +2747,18 @@ def _run_rag_with_vectors(
                         ctx_hard_limit,
                     )
                     _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
+                    missing = _count_missing_join_keys(hop1_top)
+                    if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                        if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                            _hydrate_points_payload(qdr, hop1_top)
+                            missing = _count_missing_join_keys(hop1_top)
+                        if str(os.getenv("RAG_HOP1_FORCE_JOIN_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                            forced = _ensure_join_keys_in_payload(hop1_top)
+                            if any(forced[k] for k in ("forced_pjt_id", "forced_pjt_no", "forced_tag")):
+                                log_kv("RAG.JOIN.HOP1.FORCE_KEYS", **forced)
+                            missing = _count_missing_join_keys(hop1_top)
+                    if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                        log_kv("RAG.JOIN.HOP1.MISSING_KEYS", **missing)
 
                 join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
 
@@ -2703,6 +2783,10 @@ def _run_rag_with_vectors(
 
             # join_ids 없으면 종료
             if not join_ids:
+                if hop1_top:
+                    missing = _count_missing_join_keys(hop1_top)
+                    if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                        log_kv("RAG.JOIN.HOP1.DROP_KEYS", **missing)
                 context = (
                     f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
                     f"### [Hop2] {hop2_label}\n- 필터 PJT_ID 후보: (없음)\n\n"
