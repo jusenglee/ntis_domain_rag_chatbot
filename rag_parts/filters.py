@@ -500,6 +500,31 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
 
     return qmodels.Filter(should=should)
 
+def build_project_title_filter(terms: List[str]) -> Optional[Any]:
+    """과제명(국문/영문) 기반 서버단 필터를 구성합니다."""
+    if qmodels is None:
+        return None
+    norm_terms = [str(t).strip() for t in (terms or []) if str(t).strip()]
+    if not norm_terms:
+        return None
+
+    keys = [
+        "kor_pjt_nm",
+        "eng_pjt_nm",
+        "meta_basic.kor_pjt_nm",
+        "meta_basic.eng_pjt_nm",
+        "meta_basic.pjt_nm",
+        "pjt_nm",
+    ]
+    should: List["qmodels.Condition"] = []
+    for key in keys:
+        if not key:
+            continue
+        should.append(qmodels.FieldCondition(key=key, match=make_match_any(norm_terms)))
+    if not should:
+        return None
+    return qmodels.Filter(should=should)
+
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
 

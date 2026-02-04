@@ -89,6 +89,7 @@ from rag_parts.filters import (
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     build_project_id_filter,
+    build_project_title_filter,
     JoinFilterInput,
     PerfFilterInput, PeopleFilterInput, OrgFilterInput,
 )
@@ -2011,6 +2012,7 @@ def _run_rag_with_vectors(
                 hint_filters.get("project_title") or hint_filters.get("project_name")
             )
             if project_title_hint:
+                it.project_title = project_title_hint
                 it.keywords = list(dict.fromkeys([*list(it.keywords or []), *project_title_hint]))
 
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
@@ -2048,6 +2050,7 @@ def _run_rag_with_vectors(
     if payload_project_tag_filters:
         it.project_tag_filters = payload_project_tag_filters
     if payload_project_title:
+        it.project_title = payload_project_title
         it.keywords = list(dict.fromkeys([*list(it.keywords or []), *payload_project_title]))
     if payload_year_from is not None:
         it.year_from = str(payload_year_from).strip() or None
@@ -2171,6 +2174,14 @@ def _run_rag_with_vectors(
     it.perf_types = perf_types
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
 
+    project_title_terms = [
+        t.strip()
+        for t in (list(getattr(it, "project_title", None) or []) or [])
+        if str(t).strip()
+    ]
+    it.project_title = project_title_terms
+    project_title_filter = build_project_title_filter(project_title_terms) if project_title_terms else None
+
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     it.keywords = keyword_terms
     kws = keyword_terms
@@ -2197,6 +2208,7 @@ def _run_rag_with_vectors(
         hint_people_filters
         or hint_org_filters
         or hint_tag_filters
+        or project_title_terms
         or people_terms
         or org_terms
         or it.tag_filters
@@ -2222,11 +2234,13 @@ def _run_rag_with_vectors(
         perf_types=perf_types,
         keywords=keyword_terms,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        project_title_terms=project_title_terms,
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
+        project_title_filter=str(project_title_filter) if project_title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
         generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
@@ -2991,6 +3005,8 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
+                if project_title_filter:
+                    base_filter = _and_filter(base_filter, project_title_filter)
                 if people_filter or participant_org_filter or org_filter:
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                     base_filter = _and_filter(base_filter, tag_filter_local)
