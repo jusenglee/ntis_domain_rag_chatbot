@@ -556,6 +556,7 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
 def build_title_filter(terms: List[str]) -> Optional[Any]:
     """문서 제목(과제/성과 공통) 기반 서버단 필터를 구성합니다."""
     keys = [
+        "title",
         "title1",
         "title2",
         "title_text",
