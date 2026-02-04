@@ -156,7 +156,7 @@ def _normalize_none_string(value: Any) -> Any:
     return value
 
 def _resolve_title_from_payload(payload: Dict[str, Any]) -> str:
-    for key in ("title_text", "title1", "title2", "title"):
+    for key in ("title_text", "title1", "title2"):
         value = payload.get(key)
         if value is None:
             continue

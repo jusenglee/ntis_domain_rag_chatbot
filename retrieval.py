@@ -171,6 +171,11 @@ def _qdrant_sparse_search(
     model_name = (os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25") or "").strip() or "Qdrant/bm25"
     sv = _encode_sparse_query(query_text, model_name=model_name)
     if sv is None:
+        logger.warning(
+            "[retrieval] sparse_query skipped: encoder unavailable or empty query col=%s using=%s",
+            collection_name,
+            sparse_vector_name,
+        )
         return []
 
     return _qdrant_query_points_sparse(
