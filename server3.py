@@ -471,6 +471,8 @@ async def _run_question_analysis(
         "participant_org_name, lead_org_name, performing_org_name, org_role\n"
         "대괄호 [] 내부는 과제명으로 간주해 project_title에 넣습니다.\n"
         "관계형 질의에서 참여인력/참가기관이 잡히면 participant_* 키를 우선 사용합니다.\n\n"
+        "participant_researcher_name -> prtcp_mp[].hm_nm, participant_researcher_id -> prtcp_mp[].hm_id\n"
+        "participant_org_name -> prtcp_org[].org_nm, lead_org_name/performing_org_name -> org_nm / prfrm_org_nm\n\n"
     
         "====================\n"
         "[tag_filters 매핑 규칙]\n"
