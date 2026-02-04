@@ -3005,7 +3005,9 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if project_title_filter:
+                if project_title_filter and (
+                    plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
+                ):
                     base_filter = _and_filter(base_filter, project_title_filter)
                 if people_filter or participant_org_filter or org_filter:
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
