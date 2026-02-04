@@ -295,26 +295,6 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="참여기관 목록",
         )
-    if relation == ("people", "perf"):
-        return JoinHopPlan(
-            hop1_col=COL_PROJECT,
-            hop2_col=COL_PERF,
-            hop1_kind="people",
-            hop2_kind="perf",
-            hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[],
-            hop2_label="연관 성과(논문/특허/보고서 등) 목록",
-        )
-    if relation == ("org", "perf"):
-        return JoinHopPlan(
-            hop1_col=COL_PROJECT,
-            hop2_col=COL_PERF,
-            hop1_kind="org",
-            hop2_kind="perf",
-            hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[],
-            hop2_label="연관 성과(논문/특허/보고서 등) 목록",
-        )
     if relation == ("perf", "project"):
         return JoinHopPlan(
             hop1_col=COL_PERF,
@@ -324,45 +304,5 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop1_tag_filters=None,
             hop2_tag_filters=[TAG_PJT_INFO],
             hop2_label="연관 과제(프로젝트) 정보",
-        )
-    if relation == ("perf", "people"):
-        return JoinHopPlan(
-            hop1_col=COL_PERF,
-            hop2_col=COL_PROJECT,
-            hop1_kind="perf",
-            hop2_kind="people",
-            hop1_tag_filters=None,
-            hop2_tag_filters=[TAG_PJT_INFO],
-            hop2_label="연관 과제의 참여인력 목록",
-        )
-    if relation == ("perf", "org"):
-        return JoinHopPlan(
-            hop1_col=COL_PERF,
-            hop2_col=COL_PROJECT,
-            hop1_kind="perf",
-            hop2_kind="org",
-            hop1_tag_filters=None,
-            hop2_tag_filters=[TAG_PJT_INFO],
-            hop2_label="연관 과제의 참여기관 목록",
-        )
-    if relation == ("people", "project"):
-        return JoinHopPlan(
-            hop1_col=COL_PROJECT,
-            hop2_col=COL_PROJECT,
-            hop1_kind="people",
-            hop2_kind="project",
-            hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[TAG_PJT_INFO],
-            hop2_label="참여 과제(프로젝트) 목록",
-        )
-    if relation == ("org", "project"):
-        return JoinHopPlan(
-            hop1_col=COL_PROJECT,
-            hop2_col=COL_PROJECT,
-            hop1_kind="org",
-            hop2_kind="project",
-            hop1_tag_filters=[TAG_PJT_INFO],
-            hop2_tag_filters=[TAG_PJT_INFO],
-            hop2_label="참여 과제(프로젝트) 목록",
         )
     return None
