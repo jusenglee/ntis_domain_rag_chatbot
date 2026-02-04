@@ -675,6 +675,7 @@ def _call_dense_retrieve_hybrid_multi(
         qtext: str,
         kws: List[str],
         collection: str,
+        lexical_fields: Optional[List[str]],
         sparse_vector_name: Optional[str],
         sparse_topk: Optional[int],
         top_k_dense: int,
@@ -693,6 +694,8 @@ def _call_dense_retrieve_hybrid_multi(
         "sparse_topk": sparse_topk,
         "timings": timings_out,
     }
+    if "lexical_fields" in params:
+        common_kwargs["lexical_fields"] = lexical_fields
 
     if "client" in params and "collection_name" in params:
         return dense_retrieve_hybrid_multi(
@@ -1014,7 +1017,7 @@ def _payload_text_bundle(p: Any) -> Dict[str, str]:
     meta_kv_s = _to_text("; ".join(meta_kv))[:800]
 
     return {
-        "title": title,
+        "title_text": title,
         "flat_text": flat_text[:2000],
         "content_text": content_text[:2000],
         "keyword_text": keyword_text[:1200],
@@ -1030,12 +1033,12 @@ def _count_term_hits(text: str, term: str) -> int:
 def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
     w = w or {}
     tb = _payload_text_bundle(p)
-    w_title = float(w.get("title1", 2.0))
+    w_title = float(w.get("title_text", 2.0))
     w_flat = float(w.get("flat_text", 0.6))
     w_content = float(w.get("content_text", 1.0))
     w_keyword = float(w.get("keyword_text", 0.8))
-    w_category = float(w.get("category", 0.6))
-    w_meta = float(w.get("meta_kv", 0.4))
+    w_category = float(w.get("category", 0.0))
+    w_meta = float(w.get("meta_kv", 0.0))
 
     sc = 0.0
     for kw in (kws or [])[:30]:
@@ -2905,6 +2908,7 @@ def _run_rag_with_vectors(
             qtext=q,
             kws=kws,
             collection=COL_PROJECT,
+            lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=min(hop1_k_base, 80),
             top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
@@ -3104,6 +3108,7 @@ def _run_rag_with_vectors(
                     qtext=hop1_q,
                     kws=kws,
                     collection=hop1_col,
+                    lexical_fields=preset.lexical_fields,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
                     top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
@@ -3288,6 +3293,7 @@ def _run_rag_with_vectors(
                 qtext=hop2_q,
                 kws=kws,
                 collection=hop2_col,
+                lexical_fields=preset.lexical_fields,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
                 top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
@@ -3598,6 +3604,7 @@ def _run_rag_with_vectors(
             qtext=q,
             kws=kws,
             collection=col,
+            lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=sparse_topk_eff,
             top_k_dense=use_dense_k,

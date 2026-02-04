@@ -49,10 +49,11 @@ def _prioritize_people_org_fields(
 ) -> SearchPreset:
     if not _is_people_org_intent(intent):
         return preset
-    prioritized = PEOPLE_ORG_FIELDS
-    preset.lexical_fields = prioritized + [f for f in preset.lexical_fields if f not in prioritized]
-    for field in prioritized:
-        preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
+    prioritized = [field for field in PEOPLE_ORG_FIELDS if field in preset.lexical_fields]
+    if prioritized:
+        preset.lexical_fields = prioritized + [f for f in preset.lexical_fields if f not in prioritized]
+        for field in prioritized:
+            preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
     return preset
 
 
@@ -62,9 +63,8 @@ def _ensure_pjt_no_fields(
     default_weights: Dict[str, float],
 ) -> SearchPreset:
     for field in PJT_NO_FIELDS:
-        if field not in preset.lexical_fields:
-            preset.lexical_fields.append(field)
-        preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
+        if field in preset.lexical_fields:
+            preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
     return preset
 
 
@@ -162,34 +162,19 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_prtcp_org_w = max(_f("RAG_W_PRTCP_ORG", default_title_w), default_title_w)
     default_sparse_vector = os.getenv("RAG_SPARSE_VECTOR_NAME", "bm25").strip()
 
-    # base lexical fields
+    # base lexical fields (schema-defined)
     base_fields = [
         "title_text",
-        "title1",
-        "title2",
         "content_text",
         "keyword_text",
         "flat_text",
-        "category",
-        *PJT_NO_FIELDS,
     ]
 
     weights = {
         "title_text": default_title_w,
-        "title1": default_title_w,
-        "title2": default_title_w,
         "content_text": default_content_w,
         "keyword_text": default_keyword_w,
         "flat_text": default_flat_w,
-        "category": default_category_w,
-        "pjt_no": default_pjt_no_w,
-        "meta_basic.pjt_no": default_pjt_no_w,
-        "prtcp_mp[].hm_nm": default_prtcp_person_w,
-        "prtcp_mp.hm_nm": default_prtcp_person_w,
-        "prtcp_mp[].blng_org_nm": default_prtcp_org_w,
-        "prtcp_mp.blng_org_nm": default_prtcp_org_w,
-        "prtcp_org[].org_nm": default_prtcp_org_w,
-        "prtcp_org.org_nm": default_prtcp_org_w,
     }
 
     # ---- action presets ----
@@ -333,19 +318,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         if intent.base_route == "project" and intent.org_terms:
             preset.use_org_filter = True
             preset.org_lex_boost = True
-            # org_name_norm을 lexical에 포함(가중치 부여)
-            org_fields = [
-                "org_nm",
-                "prtcp_org[].org_nm",
-                "prtcp_mp[].blng_org_nm",
-            ]
-            preset.lexical_fields = [
-                *base_fields,
-                *[field for field in org_fields if field not in base_fields],
-            ]
-            org_weight = _f("RAG_W_ORG_NORM", 3.0)
-            for field in org_fields:
-                preset.lexical_field_weights.setdefault(field, org_weight)
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
