@@ -61,6 +61,7 @@ from rag_parts.query_intent import (
     classify_query as _classify_query,
     get_relation_route,
     relation_target_collections,
+    normalize_categories,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -1751,24 +1752,6 @@ def _run_rag_with_vectors(
     # -------------------------
     # ids_map / ids_flat 안전 접근 유틸
     # -------------------------
-    log_kv(
-        "RAG.INPUT",
-        raw_query=query,
-        normalized=q,
-        hint_conf=qa_conf,
-        qa_conf=qa_conf,
-        hint_applied=int(hint_conf_ok),
-        hinted_base=hinted_base,
-        hinted_limit=hinted_limit,
-        hinted_cols=hinted_cols,
-        payload_target_cols=payload_target_cols,
-        allow_cols=allow_cols,
-        model_name=model_name,
-        stack=stack,
-        vector_names=vector_names,
-        intent_payload=bool(intent_payload),
-    )
-
     def _normalize_hint_terms(values: Any) -> List[str]:
         if values is None:
             return []
@@ -1834,6 +1817,10 @@ def _run_rag_with_vectors(
         ):
             if key in data:
                 data[key] = _normalize_hint_terms(data.get(key))
+        if "categories" in data:
+            data["categories"] = normalize_categories(data.get("categories"))
+        if "retrieval_query" in data:
+            data["retrieval_query"] = str(data.get("retrieval_query") or "").strip() or None
 
         if "year_from" in data:
             year_from_terms = _normalize_hint_terms([data.get("year_from")])
@@ -2075,6 +2062,20 @@ def _run_rag_with_vectors(
         it.year_from = str(payload_year_from).strip() or None
     if payload_year_to is not None:
         it.year_to = str(payload_year_to).strip() or None
+
+    planner_categories = normalize_categories(getattr(it, "categories", None))
+    planner_limit = getattr(it, "planner_limit", None)
+    planner_retrieval_query = str(getattr(it, "retrieval_query", "") or "").strip() or None
+    planner_meta_source = "qa" if hint_conf_ok else "intent"
+
+    if not hint_conf_ok:
+        if planner_retrieval_query:
+            q = normalize_query(planner_retrieval_query) or q
+        if planner_limit is not None:
+            hinted_limit = _coerce_int(planner_limit, hinted_limit)
+            if hinted_limit < 0:
+                hinted_limit = 0
+
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -2083,6 +2084,38 @@ def _run_rag_with_vectors(
             planner_confidence = float(planner_confidence)
         except Exception:
             planner_confidence = None
+
+    qa_categories = normalize_categories(
+        _get_attr(qa, "category", None) or _get_attr(qa, "categories", None)
+    )
+    qa_limit = _get_attr(qa, "limit", None)
+    qa_retrieval_query = str(_get_attr(qa, "retrieval_query", "") or "").strip() or None
+
+    log_kv(
+        "RAG.INPUT",
+        raw_query=query,
+        normalized=q,
+        hint_conf=qa_conf,
+        qa_conf=qa_conf,
+        hint_applied=int(hint_conf_ok),
+        hinted_base=hinted_base,
+        hinted_limit=hinted_limit,
+        hinted_cols=hinted_cols,
+        payload_target_cols=payload_target_cols,
+        allow_cols=allow_cols,
+        qa_categories=qa_categories,
+        qa_limit=qa_limit,
+        qa_retrieval_query=qa_retrieval_query,
+        planner_categories=planner_categories,
+        planner_limit=planner_limit,
+        planner_retrieval_query=planner_retrieval_query,
+        planner_confidence=planner_confidence,
+        planner_meta_source=planner_meta_source,
+        model_name=model_name,
+        stack=stack,
+        vector_names=vector_names,
+        intent_payload=bool(intent_payload),
+    )
 
     # budget (for ctx builder)
     ctx_budget = int(
@@ -2598,6 +2631,11 @@ def _run_rag_with_vectors(
         min_dense_score=float(preset.min_dense_score),
         output_type=getattr(plan, "output_type", None),
         target_cols=plan.target_collections,
+        planner_categories=planner_categories,
+        planner_limit=planner_limit,
+        planner_retrieval_query=planner_retrieval_query,
+        planner_confidence=planner_confidence,
+        planner_meta_source=planner_meta_source,
     )
 
     if relation and base_route in ("project", "perf") and plan.mode != "join":

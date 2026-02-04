@@ -19,7 +19,7 @@ from .filters import (
     build_prtcp_org_nested_filter,
     build_tag_only_filter,
 )
-from .query_intent import QueryIntent, classify_query as _classify_query
+from .query_intent import QueryIntent, classify_query as _classify_query, normalize_categories
 
 
 def classify_query_compat(
@@ -82,6 +82,10 @@ class NormalizedIntent:
     relation: Optional[Tuple[str, str]]
     is_id_query: bool
     output_type: Optional[str] = None
+    categories: List[str] = field(default_factory=list)
+    planner_limit: Optional[int] = None
+    retrieval_query: Optional[str] = None
+    planner_confidence: Optional[float] = None
     years: List[str] = field(default_factory=list)
     year_from: Optional[str] = None
     year_to: Optional[str] = None
@@ -202,6 +206,10 @@ def normalize_intent(
         relation=relation,
         is_id_query=bool(getattr(intent, "is_id_query", False)),
         output_type=output_type,
+        categories=normalize_categories(getattr(intent, "categories", None)),
+        planner_limit=getattr(intent, "planner_limit", None),
+        retrieval_query=(str(getattr(intent, "retrieval_query", "") or "").strip() or None),
+        planner_confidence=getattr(intent, "planner_confidence", None),
         years=_normalize_terms(getattr(intent, "years", None) or []),
         year_from=(str(getattr(intent, "year_from", "") or "").strip() or None),
         year_to=(str(getattr(intent, "year_to", "") or "").strip() or None),
