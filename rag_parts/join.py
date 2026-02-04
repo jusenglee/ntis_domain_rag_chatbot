@@ -18,20 +18,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-
-_PJT_ID_KEYS = (
-    "PJT_ID",
-    "PJT_NO",
-    "pjt_id",
-    "pjtId",
-    "pjtNo",
-    "pjt_no",
-    "pjtid",
-    "pjtno",
-    "project_id",
-    "project_no",
-)
-
 # 흔한 중첩 경로 후보 (payload 안의 meta_basic/meta_detail dict)
 _META_KEYS = ("meta_basic", "meta_detail")
 
@@ -79,30 +65,38 @@ def _normalize_pjt_id(v: Any) -> Optional[str]:
 
 
 def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    """Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다. (payload 최상위 → meta 순서)"""
+    """
+    Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다.
+    ✅ 무조건 payload 최상위(pjt_id 계열)만 사용합니다. (meta/중첩 경로 미사용)
+    """
     out: List[str] = []
     seen = set()
 
     if not points:
         return out
 
+    TOP_PJT_ID_KEYS = ("pjt_id")
+
     for p in points:
         payload = _get_payload(p)
-        if not payload:
+        if not isinstance(payload, dict) or not payload:
             continue
 
-        meta = _get_meta(payload)
-        for source in (payload, meta):
-            for k in _PJT_ID_KEYS:
-                if k in source:
-                    pid = _normalize_pjt_id(source.get(k))
-                    if pid and pid not in seen:
-                        out.append(pid)
-                        seen.add(pid)
-                        if len(out) >= max_ids:
-                            return out
+        for k in TOP_PJT_ID_KEYS:
+            if k not in payload:
+                continue
+            pid = _normalize_pjt_id(payload.get(k))
+            if not pid or pid in seen:
+                continue
+
+            out.append(pid)
+            seen.add(pid)
+
+            if len(out) >= max_ids:
+                return out
 
     return out
+
 
 
 def sanitize_query_by_terms(q: str, remove_terms: Optional[List[str]] = None) -> str:
