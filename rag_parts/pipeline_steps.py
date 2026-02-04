@@ -9,6 +9,7 @@ from .constants import (
     COL_PROJECT,
     COL_PERF,
     TAG_PJT_INFO,
+    normalize_perf_types,
 )
 from .filters import (
     OrgFilterInput,
@@ -191,6 +192,10 @@ def normalize_intent(
         if relation is None:
             relation = fallback.relation
 
+    perf_types_raw = _normalize_terms(getattr(intent, "perf_types", None) or [])
+    perf_type_norm = normalize_perf_types(perf_types_raw)
+    perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
+
     return NormalizedIntent(
         action=action,
         base_route=base_route,
@@ -204,7 +209,7 @@ def normalize_intent(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
-        perf_types=_normalize_terms(getattr(intent, "perf_types", None) or []),
+        perf_types=perf_types,
         keywords=_normalize_terms(getattr(intent, "keywords", None) or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),

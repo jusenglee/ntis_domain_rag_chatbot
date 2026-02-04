@@ -54,6 +54,7 @@ from rag_parts.constants import (
     TAG_PJT_INFO,
     TAG_PJT_MP,
     TAG_PJT_ORG,
+    normalize_perf_types,
 )
 from rag_parts.query_intent import (
     QueryIntent,
@@ -2170,7 +2171,13 @@ def _run_rag_with_vectors(
     it.year_to = year_to
     year_range_filter = build_year_range_filter(year_from, year_to) if (year_from or year_to) else None
 
-    perf_types = [t.strip() for t in (list(getattr(it, "perf_types", None) or []) or []) if str(t).strip()]
+    perf_types_raw = [
+        t.strip()
+        for t in (list(getattr(it, "perf_types", None) or []) or [])
+        if str(t).strip()
+    ]
+    perf_type_norm = normalize_perf_types(perf_types_raw)
+    perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
     it.perf_types = perf_types
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
 

@@ -231,18 +231,11 @@ def build_year_range_filter(
 def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     if qmodels is None or not perf_types:
         return None
-    keys = [
-        "tag",
-        "perf_type",
-        "perf_type_nm",
-        "perf_type_cd",
-        "meta_basic.perf_type",
-        "meta_basic.perf_type_nm",
-    ]
-    should: List["qmodels.Condition"] = []
-    for key in keys:
-        should.append(qmodels.FieldCondition(key=key, match=make_match_any(perf_types)))
-    return qmodels.Filter(should=should) if should else None
+    # Qdrant perf 컬렉션의 성과 유형은 payload.tag 기준으로 필터링한다.
+    key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
+    return qmodels.Filter(
+        must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(perf_types))]
+    )
 
 def _build_prtcp_mp_nested_filter(
         *,
