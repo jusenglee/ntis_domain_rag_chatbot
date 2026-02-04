@@ -82,7 +82,6 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
             "org_nm",
             "prtcp_org[].org_nm",
             "prtcp_mp[].blng_org_nm",
-            "meta_basic.pjt_prfrm_org_nm",
         ]
     should: List["qmodels.Condition"] = []
     for key in keys:
