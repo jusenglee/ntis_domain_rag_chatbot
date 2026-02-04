@@ -158,24 +158,10 @@ def _qdrant_query_points_sparse(
             query_filter=query_filter,        # query_points 쪽 파라미터명
             timeout=int(timeout),
         )
+        logger.warning(f"[retrieval] sparse client.search res: {res}")
         return list(getattr(res, "points", []) or [])
-    except TypeError:
-        # 2) old-style
-        try:
-            res = client.search(
-                collection_name=collection_name,
-                query_vector=(str(sparse_vector_name), sparse_vector),
-                limit=int(limit),
-                with_payload=with_payload,
-                with_vectors=False,
-                filter=query_filter,          # search 쪽 파라미터명
-            )
-            return list(res or [])
-        except Exception as e:  # pragma: no cover
-            logger.warning(f"[retrieval] sparse client.search failed: {e}")
-            return []
     except Exception as e:  # pragma: no cover
-        logger.warning(f"[retrieval] sparse query_points failed: {e}")
+        logger.warning(f"[retrieval] sparse client.search failed: {e}")
         return []
 
 
@@ -309,7 +295,7 @@ def _qdrant_hybrid_query_once(
     fusion = _get_fusion_rrf()
     if fusion is None:
         return None
-
+    logger.warning(f"[retrieval] hybrid query_points query_text: {query_text}")
     supports_using = _prefetch_supports_using()
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")
@@ -410,7 +396,6 @@ def _qdrant_hybrid_query_once(
     fusion_query = _get_fusion_rrf()
     if fusion_query is None:
         return None
-    logger.info(f"---------------------------{prefetch}-----------------------------")
     query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
     try:
         res = client.query_points(
@@ -423,6 +408,7 @@ def _qdrant_hybrid_query_once(
             query_filter=query_filter,
             timeout=int(_DEFAULT_QDRANT_TIMEOUT),
         )
+        logger.warning(f"[retrieval] hybrid query_points res: {res}")
     except Exception as e:  # pragma: no cover
         logger.warning(f"[retrieval] hybrid query_points failed: {e}")
         return None
