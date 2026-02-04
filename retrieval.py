@@ -698,6 +698,31 @@ def ensure_keyword_index(
 # Payload helpers
 # =========================
 
+def _attach_collection(point: Any, collection: str) -> Any:
+    if point is None or not collection:
+        return point
+    if isinstance(point, dict):
+        payload = point.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("_collection", collection)
+        point["payload"] = payload
+        point.setdefault("_collection", collection)
+        return point
+    setattr(point, "_collection", collection)
+    payload = getattr(point, "payload", None)
+    if not isinstance(payload, dict):
+        payload = {}
+        setattr(point, "payload", payload)
+    payload.setdefault("_collection", collection)
+    return point
+
+
+def _ensure_collection_mark(points: List[Any], collection: str) -> None:
+    for point in points or []:
+        _attach_collection(point, collection)
+
+
 def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
     # """Annotate payload with collection/vector hints for debug/dedup."""
     # try:
@@ -874,6 +899,7 @@ def dense_retrieve_hybrid_multi(
             timings[f"dense_qdrant_{vec_name}"] = t_q
 
             pts = list(getattr(res, "points", []) or [])
+            _ensure_collection_mark(pts, collection_name)
             for p in pts:
                 _set_payload_hint(p, collection_name, vec_name)
             dense[vec_name] = pts
@@ -946,6 +972,7 @@ def dense_retrieve_hybrid_multi(
         )
         if sp_hits:
             lex_points = list(sp_hits)[: int(top_k_lexical)]
+            _ensure_collection_mark(lex_points, collection_name)
             lex_cand = len(sp_hits)
         logger.info("[SPARSE] hits=%d cand=%d peek=%s", len(lex_points), lex_cand, _peek(lex_points))
     timings["lexical_sparse"] = time.perf_counter() - t_sparse0
