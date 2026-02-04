@@ -2230,13 +2230,13 @@ def _run_rag_with_vectors(
             values=perf_types,
         )
 
-    project_title_terms = [
+    title_terms = [
         t.strip()
         for t in (list(getattr(it, "project_title", None) or []) or [])
         if str(t).strip()
     ]
-    it.project_title = project_title_terms
-    project_title_filter = build_project_title_filter(project_title_terms) if project_title_terms else None
+    it.project_title = title_terms
+    title_filter = build_project_title_filter(title_terms) if title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     it.keywords = keyword_terms
@@ -2264,7 +2264,7 @@ def _run_rag_with_vectors(
         hint_people_filters
         or hint_org_filters
         or hint_tag_filters
-        or project_title_terms
+        or title_terms
         or people_terms
         or org_terms
         or it.tag_filters
@@ -2275,6 +2275,10 @@ def _run_rag_with_vectors(
         (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
         or (qa_conf >= search_filter_min_conf)
     )
+
+    title_filter_applied_to = None
+    if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
+        title_filter_applied_to = "project/perf"
 
     log_kv(
         "RAG.FILTERS",
@@ -2290,17 +2294,18 @@ def _run_rag_with_vectors(
         perf_types=perf_types,
         keywords=keyword_terms,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
-        project_title_terms=project_title_terms,
+        project_title_terms=title_terms,
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
-        project_title_filter=str(project_title_filter) if project_title_filter is not None else None,
+        project_title_filter=str(title_filter) if title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
         generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
+        title_filter_applied_to=title_filter_applied_to,
     )
 
     people_relation_disabled = False
@@ -3117,10 +3122,10 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if project_title_filter and (
+                if title_filter and (
                     plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
                 ):
-                    base_filter = _and_filter(base_filter, project_title_filter)
+                    base_filter = _and_filter(base_filter, title_filter)
                 if people_filter or participant_org_filter or org_filter:
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                     base_filter = _and_filter(base_filter, tag_filter_local)
@@ -3133,6 +3138,10 @@ def _run_rag_with_vectors(
                 if generic_tag_filter:
                     base_filter = _and_filter(base_filter, generic_tag_filter)
             elif col_name == COL_PERF:
+                if title_filter and (
+                    plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
+                ):
+                    base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter:
                     base_filter = _and_filter(base_filter, people_filter)
                 if perf_tag_filter:
