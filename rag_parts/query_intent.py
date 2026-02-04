@@ -615,19 +615,11 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
     wants_org = has_org or any(c in t for c in REL_ORG_CUES)
 
     if base_route == "people":
-        # 사람 → 과제/성과
-        if has_project or ("과제" in t) or ("pjt" in t) or ("참여" in t):
-            return ("people", "project")
-        if has_perf:
-            return ("people", "perf")
+        # 사람 → 과제/성과 (JOIN 비활성화: prtcp_mp 필터로 처리)
         return None
 
     if base_route == "org":
-        # 기관 → 과제/성과
-        if has_project or ("과제" in t) or ("pjt" in t) or ("참여" in t):
-            return ("org", "project")
-        if has_perf:
-            return ("org", "perf")
+        # 기관 → 과제/성과 (JOIN 비활성화: prtcp_org 필터로 처리)
         return None
 
     if base_route == "project":
@@ -642,10 +634,6 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
     if base_route == "perf":
         if wants_perf_to_project:
             return ("perf", "project")
-        if wants_people:
-            return ("perf", "people")
-        if wants_org:
-            return ("perf", "org")
         return None
 
     return None
@@ -979,26 +967,6 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="참여기관 목록",
     ),
-    ("people", "perf"): RelationRoute(
-        relation=("people", "perf"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PERF,
-        hop1_kind="people",
-        hop2_kind="perf",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[],
-        hop2_label="연관 성과(논문/특허/보고서 등) 목록",
-    ),
-    ("org", "perf"): RelationRoute(
-        relation=("org", "perf"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PERF,
-        hop1_kind="org",
-        hop2_kind="perf",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[],
-        hop2_label="연관 성과(논문/특허/보고서 등) 목록",
-    ),
     ("perf", "project"): RelationRoute(
         relation=("perf", "project"),
         hop1_col=COL_PERF,
@@ -1008,46 +976,6 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_tag_filters=None,
         hop2_tag_filters=[TAG_PJT_INFO],
         hop2_label="연관 과제(프로젝트) 정보",
-    ),
-    ("perf", "people"): RelationRoute(
-        relation=("perf", "people"),
-        hop1_col=COL_PERF,
-        hop2_col=COL_PROJECT,
-        hop1_kind="perf",
-        hop2_kind="people",
-        hop1_tag_filters=None,
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="연관 과제의 참여인력 목록",
-    ),
-    ("perf", "org"): RelationRoute(
-        relation=("perf", "org"),
-        hop1_col=COL_PERF,
-        hop2_col=COL_PROJECT,
-        hop1_kind="perf",
-        hop2_kind="org",
-        hop1_tag_filters=None,
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="연관 과제의 참여기관 목록",
-    ),
-    ("people", "project"): RelationRoute(
-        relation=("people", "project"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="people",
-        hop2_kind="project",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여 과제(프로젝트) 목록",
-    ),
-    ("org", "project"): RelationRoute(
-        relation=("org", "project"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="org",
-        hop2_kind="project",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여 과제(프로젝트) 목록",
     ),
 }
 
