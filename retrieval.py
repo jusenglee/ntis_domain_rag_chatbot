@@ -414,7 +414,7 @@ def _qdrant_hybrid_query_once(
     fusion_query = _get_fusion_rrf()
     if fusion_query is None:
         return None
-
+    logger.info(f"---------------------------{prefetch}-----------------------------")
     query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
     try:
         res = client.query_points(
