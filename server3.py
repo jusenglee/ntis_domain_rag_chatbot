@@ -467,7 +467,7 @@ async def _run_question_analysis(
         "[filters 규칙]\n"
         "====================\n"
         "filters는 dict입니다. 필요한 것만 포함합니다.\n"
-        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords,\n"
+        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords, title\n"
         "participant_researcher_name, participant_researcher_id,\n"
         "participant_org_name, lead_org_name, performing_org_name, org_role\n"
         "관계형 질의에서 참여인력/참가기관이 잡히면 participant_* 키를 우선 사용합니다.\n\n"
