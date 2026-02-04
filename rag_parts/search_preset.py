@@ -19,7 +19,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .constants import KEY_ORG_NORM
 from .query_intent import QueryIntent
 from .search_strategy import resolve_preset_key
 
@@ -294,7 +293,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 5) List/filter
     if action in ("list", "download", "stats"):
-        # list/filter/stats/download는 구조 키워드 비중이 높아 lex가 유리한 경우가 많음(추측입니다)
+        # list/filter/stats/download는 구조 키워드 비중이 높아 lex가 유리한 경우가 많음
         prefer_lex_only = os.getenv("RAG_LIST_LEX_ONLY", "0") == "1"
         top_k_lex = _i("RAG_TOPK_LEX_FILTER", 180)
         w_lex = _f("RAG_W_LEX_FILTER", 0.65)
@@ -325,20 +324,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             preset.use_org_filter = True
             preset.org_lex_boost = True
             # org_name_norm을 lexical에 포함(가중치 부여)
-            if KEY_ORG_NORM not in preset.lexical_fields:
-                preset.lexical_fields = [
-                    "title_text",
-                    "content_text",
-                    "keyword_text",
-                    "flat_text",
-                    "category",
-                    "title",
-                    KEY_ORG_NORM,
-                    "org_nm",
-                    *PJT_NO_FIELDS,
-                ]
-            preset.lexical_field_weights[KEY_ORG_NORM] = _f("RAG_W_ORG_NORM", 3.0)
-            preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights[KEY_ORG_NORM])
+            org_fields = [
+                "org_nm",
+                "prtcp_org[].org_nm",
+                "prtcp_mp[].blng_org_nm",
+            ]
+            preset.lexical_fields = [
+                *base_fields,
+                *[field for field in org_fields if field not in base_fields],
+            ]
+            org_weight = _f("RAG_W_ORG_NORM", 3.0)
+            for field in org_fields:
+                preset.lexical_field_weights.setdefault(field, org_weight)
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 

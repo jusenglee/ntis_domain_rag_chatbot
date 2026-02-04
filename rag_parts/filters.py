@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .constants import (
-    KEY_ORG_NORM,
     PERF_TAGS,
     TAG_RI_PAPER, TAG_RI_IPR, TAG_RI_RSCH_RPT, TAG_RI_FCLT_EQUIP, TAG_RI_TECH_INFO,
     TAG_RI_SW, TAG_RI_NVR, TAG_RI_COMPOUND, TAG_RI_ORGSM_INFO, TAG_RI_ORGSM_RES,
@@ -80,11 +79,9 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
         ]
     elif role is None:
         keys = [
-            KEY_ORG_NORM,
             "org_nm",
             "prtcp_org[].org_nm",
             "prtcp_mp[].blng_org_nm",
-            "meta_basic.pjt_prfrm_org_nm",
         ]
     should: List["qmodels.Condition"] = []
     for key in keys:
@@ -228,21 +225,61 @@ def build_year_range_filter(
 
     return qmodels.Filter(should=should) if should else None
 
+_PERF_TYPE_ALIASES: List[Dict[str, Any]] = [
+    {"tag": TAG_RI_PAPER, "category": "논문", "aliases": ["논문", "paper"]},
+    {"tag": TAG_RI_IPR, "category": "특허", "aliases": ["특허", "patent", "지식재산"]},
+    {"tag": TAG_RI_RSCH_RPT, "category": "연구보고서", "aliases": ["연구보고서", "보고서", "report", "rpt"]},
+    {"tag": TAG_RI_FCLT_EQUIP, "category": "시설/장비", "aliases": ["시설", "장비", "equip", "equipment"]},
+    {"tag": TAG_RI_TECH_INFO, "category": "기술요약", "aliases": ["기술요약", "기술정보", "tech", "technology"]},
+    {"tag": TAG_RI_SW, "category": "소프트웨어", "aliases": ["소프트웨어", "software", "sw"]},
+    {"tag": TAG_RI_NVR, "category": "신품종", "aliases": ["신품종", "nvr"]},
+    {"tag": TAG_RI_COMPOUND, "category": "화합물", "aliases": ["화합물", "compound"]},
+    {"tag": TAG_RI_ORGSM_INFO, "category": "생명정보", "aliases": ["생명정보"]},
+    {"tag": TAG_RI_ORGSM_RES, "category": "생물자원", "aliases": ["생물자원", "resource"]},
+]
+
+
+def _normalize_perf_type_terms(perf_types: List[str]) -> tuple[List[str], List[str]]:
+    tags: List[str] = []
+    categories: List[str] = []
+    perf_tag_set = {t.upper() for t in PERF_TAGS}
+
+    def _push_unique(target: List[str], value: str) -> None:
+        if value and value not in target:
+            target.append(value)
+
+    for raw in perf_types:
+        sval = str(raw).strip()
+        if not sval:
+            continue
+        upper = sval.upper()
+        if upper in perf_tag_set:
+            _push_unique(tags, upper)
+            continue
+        normalized = re.sub(r"\s+", " ", sval).strip()
+        normalized = re.sub(r"\s*성과\s*$", "", normalized).strip()
+        normalized_lower = normalized.lower()
+        matched = False
+        for entry in _PERF_TYPE_ALIASES:
+            if normalized_lower in {a.lower() for a in entry["aliases"]}:
+                _push_unique(tags, entry["tag"])
+                _push_unique(categories, entry["category"])
+                matched = True
+                break
+        if not matched and normalized:
+            _push_unique(categories, normalized)
+
+    return tags, categories
+
+
 def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     if qmodels is None or not perf_types:
         return None
-    keys = [
-        "tag",
-        "perf_type",
-        "perf_type_nm",
-        "perf_type_cd",
-        "meta_basic.perf_type",
-        "meta_basic.perf_type_nm",
-    ]
-    should: List["qmodels.Condition"] = []
-    for key in keys:
-        should.append(qmodels.FieldCondition(key=key, match=make_match_any(perf_types)))
-    return qmodels.Filter(should=should) if should else None
+    # Qdrant perf 컬렉션의 성과 유형은 payload.tag 기준으로 필터링한다.
+    key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
+    return qmodels.Filter(
+        must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(perf_types))]
+    )
 
 def _build_prtcp_mp_nested_filter(
         *,
@@ -519,20 +556,9 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
 def build_title_filter(terms: List[str]) -> Optional[Any]:
     """문서 제목(과제/성과 공통) 기반 서버단 필터를 구성합니다."""
     keys = [
-        "kor_pjt_nm",
-        "eng_pjt_nm",
-        "title",
         "title1",
         "title2",
         "title_text",
-        "meta_basic.kor_pjt_nm",
-        "meta_basic.eng_pjt_nm",
-        "meta_basic.title",
-        "meta_basic.title1",
-        "meta_basic.title2",
-        "meta_basic.title_text",
-        "meta_basic.pjt_nm",
-        "pjt_nm",
     ]
     return _build_title_filter_with_keys(terms, keys)
 

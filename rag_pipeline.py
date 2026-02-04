@@ -54,12 +54,14 @@ from rag_parts.constants import (
     TAG_PJT_INFO,
     TAG_PJT_MP,
     TAG_PJT_ORG,
+    normalize_perf_types,
 )
 from rag_parts.query_intent import (
     QueryIntent,
     classify_query as _classify_query,
     get_relation_route,
     relation_target_collections,
+    normalize_categories,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -1367,11 +1369,30 @@ def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
         return True
     return False
 
+def _has_relation_join_ids(it: NormalizedIntent) -> bool:
+    ids_map = getattr(it, "ids_map", None) or {}
+    if not isinstance(ids_map, dict):
+        return False
+    if any(ids_map.get(key) for key in ("pjt_id", "pjt_no")):
+        return True
+    perf_id_keys = (
+        "doi",
+        "issn",
+        "eissn",
+        "pissn",
+        "patent_reg_no",
+        "patent_app_no",
+        "paper_id",
+        "perf_id",
+        "rst_id",
+    )
+    return any(ids_map.get(key) for key in perf_id_keys)
+
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
     우선순위(강제):
-    1) relation이 있으면 join
+    1) relation + join ids -> join
     2) id query 또는 명확한 ids -> lookup
     3) list/stats/download -> lookup
     4) topic/search -> search (기본 유지)
@@ -1381,8 +1402,8 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     rel = it.relation
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         return "lookup", "people_project_lookup"
-    if rel:
-        return "join", "relation"
+    if rel and _has_relation_join_ids(it):
+        return "join", "relation_ids"
     if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
         return "lookup", "id_or_exact"
     if action in ("list", "stats", "download"):
@@ -1391,7 +1412,12 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
         return "search", "topic_search"
     return "search", "default"
 
-def _build_plan(it: NormalizedIntent) -> QueryPlan:
+def _build_plan(
+    it: NormalizedIntent,
+    *,
+    preferred_mode: Optional[str] = None,
+    preferred_mode_source: Optional[str] = None,
+) -> Tuple[QueryPlan, str]:
     # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
     # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
     # 2) 교집합이 비면 allowlist를 우선(fallback) 적용한다.
@@ -1439,41 +1465,26 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     rel = it.relation
     output_type = getattr(it, "output_type", None)
 
-    mode, mode_reason = _select_mode_policy(it)
-
-    if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
-        target_cols = _resolve_relation_target_cols(rel, reason="people_project_lookup")
-        return QueryPlan(
-            mode="lookup",
-            base_route=base_route,
-            action=action,
-            relation=rel,
-            output_type=output_type,
-            target_collections=target_cols if target_cols else _default_target_collections(),
-            filters={},
-        )
+    if preferred_mode:
+        mode = preferred_mode
+        mode_reason = f"planner:{preferred_mode_source or 'mode'}"
+    else:
+        mode, mode_reason = _select_mode_policy(it)
 
     if rel:
-        target_cols = _resolve_relation_target_cols(rel, reason="join_relation")
-        return QueryPlan(
-            mode="join",
-            base_route=base_route,
-            action=action,
-            relation=rel,
-            output_type=output_type,
-            target_collections=target_cols if target_cols else _default_target_collections(),
-            filters={},
-        )
+        target_cols = _resolve_relation_target_cols(rel, reason="relation_target")
+    else:
+        target_cols = _default_target_collections()
 
     return QueryPlan(
         mode=mode,
         base_route=base_route,
         action=action,
-        relation=None,
+        relation=rel,
         output_type=output_type,
-        target_collections=_default_target_collections(),
+        target_collections=target_cols,
         filters={},
-    )
+    ), mode_reason
 
 # -------------------------
 # 2-hop JOIN helpers
@@ -1717,6 +1728,9 @@ def _run_rag_with_vectors(
     # --- hint 적용 (single-pass) ---
     qa = hint
     qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
+    hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
+    hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
+    hint_policy = "merge" if hint_conf_ok else "ignore"
 
     hinted_base = None
     hinted_limit = 0
@@ -1729,7 +1743,7 @@ def _run_rag_with_vectors(
     if payload_target_cols:
         hinted_cols = payload_target_cols
 
-    if qa and qa_conf >= float(os.getenv("RAG_HINT_MIN_CONF", "0.55")):
+    if hint_conf_ok:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
         hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
@@ -1747,22 +1761,6 @@ def _run_rag_with_vectors(
     # -------------------------
     # ids_map / ids_flat 안전 접근 유틸
     # -------------------------
-    log_kv(
-        "RAG.INPUT",
-        raw_query=query,
-        normalized=q,
-        hint_conf=qa_conf,
-        hinted_base=hinted_base,
-        hinted_limit=hinted_limit,
-        hinted_cols=hinted_cols,
-        payload_target_cols=payload_target_cols,
-        allow_cols=allow_cols,
-        model_name=model_name,
-        stack=stack,
-        vector_names=vector_names,
-        intent_payload=bool(intent_payload),
-    )
-
     def _normalize_hint_terms(values: Any) -> List[str]:
         if values is None:
             return []
@@ -1779,6 +1777,11 @@ def _run_rag_with_vectors(
             seen.add(s)
             out.append(s)
         return out
+
+    def _merge_keywords_with_priority(primary: Any, secondary: Any) -> List[str]:
+        primary_terms = _normalize_hint_terms(primary)
+        secondary_terms = _normalize_hint_terms(secondary)
+        return list(dict.fromkeys([*primary_terms, *secondary_terms]))
 
     def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
         if not isinstance(raw, dict):
@@ -1828,6 +1831,10 @@ def _run_rag_with_vectors(
         ):
             if key in data:
                 data[key] = _normalize_hint_terms(data.get(key))
+        if "categories" in data:
+            data["categories"] = normalize_categories(data.get("categories"))
+        if "retrieval_query" in data:
+            data["retrieval_query"] = str(data.get("retrieval_query") or "").strip() or None
 
         if "year_from" in data:
             year_from_terms = _normalize_hint_terms([data.get("year_from")])
@@ -1861,6 +1868,7 @@ def _run_rag_with_vectors(
     _timing_put(timings, "phase.kw_det", time.time() - t0)
 
     intent_from_payload = False
+    perf_types_source: Optional[str] = None
     planner_confidence: Optional[float] = None
     it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
     if it is None:
@@ -1914,6 +1922,10 @@ def _run_rag_with_vectors(
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
             )
+            intent_perf_types = list(getattr(it, "perf_types", []) or [])
+            if intent_perf_types:
+                perf_types_source = "intent"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
         else:
             # intent (hint는 query_intent에서 흡수)
             domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
@@ -1959,6 +1971,12 @@ def _run_rag_with_vectors(
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
             )
+            intent_perf_types = list(getattr(it, "perf_types", []) or [])
+            if intent_perf_types:
+                perf_types_source = "intent"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
+
+    planner_keywords = _normalize_hint_terms(getattr(it, "keywords", None))
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
@@ -1967,7 +1985,7 @@ def _run_rag_with_vectors(
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
-    if not intent_from_payload:
+    if not intent_from_payload and hint_conf_ok:
         if hint_head in ("project", "perf", "people", "org", "support"):
             it.base_route = hint_head
         if hint_relation:
@@ -2005,6 +2023,8 @@ def _run_rag_with_vectors(
             perf_types_hint = _normalize_hint_terms(hint_filters.get("perf_types"))
             if perf_types_hint:
                 it.perf_types = perf_types_hint
+                perf_types_source = "hint"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=perf_types_hint)
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
                 it.keywords = keywords_hint
@@ -2041,6 +2061,8 @@ def _run_rag_with_vectors(
         it.people_terms = payload_people_terms
     if payload_perf_types:
         it.perf_types = payload_perf_types
+        perf_types_source = "payload"
+        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=payload_perf_types)
     if payload_keywords:
         it.keywords = payload_keywords
     if payload_tag_filters:
@@ -2056,6 +2078,20 @@ def _run_rag_with_vectors(
         it.year_from = str(payload_year_from).strip() or None
     if payload_year_to is not None:
         it.year_to = str(payload_year_to).strip() or None
+
+    planner_categories = normalize_categories(getattr(it, "categories", None))
+    planner_limit = getattr(it, "planner_limit", None)
+    planner_retrieval_query = str(getattr(it, "retrieval_query", "") or "").strip() or None
+    planner_meta_source = "qa" if hint_conf_ok else "intent"
+
+    if not hint_conf_ok:
+        if planner_retrieval_query:
+            q = normalize_query(planner_retrieval_query) or q
+        if planner_limit is not None:
+            hinted_limit = _coerce_int(planner_limit, hinted_limit)
+            if hinted_limit < 0:
+                hinted_limit = 0
+
     action = it.action
     base_route = it.base_route
     relation = it.relation
@@ -2064,6 +2100,38 @@ def _run_rag_with_vectors(
             planner_confidence = float(planner_confidence)
         except Exception:
             planner_confidence = None
+
+    qa_categories = normalize_categories(
+        _get_attr(qa, "category", None) or _get_attr(qa, "categories", None)
+    )
+    qa_limit = _get_attr(qa, "limit", None)
+    qa_retrieval_query = str(_get_attr(qa, "retrieval_query", "") or "").strip() or None
+
+    log_kv(
+        "RAG.INPUT",
+        raw_query=query,
+        normalized=q,
+        hint_conf=qa_conf,
+        qa_conf=qa_conf,
+        hint_applied=int(hint_conf_ok),
+        hinted_base=hinted_base,
+        hinted_limit=hinted_limit,
+        hinted_cols=hinted_cols,
+        payload_target_cols=payload_target_cols,
+        allow_cols=allow_cols,
+        qa_categories=qa_categories,
+        qa_limit=qa_limit,
+        qa_retrieval_query=qa_retrieval_query,
+        planner_categories=planner_categories,
+        planner_limit=planner_limit,
+        planner_retrieval_query=planner_retrieval_query,
+        planner_confidence=planner_confidence,
+        planner_meta_source=planner_meta_source,
+        model_name=model_name,
+        stack=stack,
+        vector_names=vector_names,
+        intent_payload=bool(intent_payload),
+    )
 
     # budget (for ctx builder)
     ctx_budget = int(
@@ -2126,27 +2194,29 @@ def _run_rag_with_vectors(
         if researcher_id not in (None, ""):
             hint_people_ids.append(researcher_id)
     if hint_people_terms:
-        merged_people = hint_people_terms + people_terms
-        deduped_people: List[str] = []
-        seen_people: set[str] = set()
-        for term in merged_people:
-            if term in seen_people:
-                continue
-            seen_people.add(term)
-            deduped_people.append(term)
-        people_terms = deduped_people
+        if hint_policy == "merge":
+            merged_people = hint_people_terms + people_terms
+            deduped_people: List[str] = []
+            seen_people: set[str] = set()
+            for term in merged_people:
+                if term in seen_people:
+                    continue
+                seen_people.add(term)
+                deduped_people.append(term)
+            people_terms = deduped_people
     it.people_terms = people_terms
     people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
     if hint_people_ids:
-        merged_ids = hint_people_ids + people_ids
-        deduped_ids: List[Any] = []
-        seen_ids: set[Any] = set()
-        for pid in merged_ids:
-            if pid in seen_ids:
-                continue
-            seen_ids.add(pid)
-            deduped_ids.append(pid)
-        people_ids = deduped_ids
+        if hint_policy == "merge":
+            merged_ids = hint_people_ids + people_ids
+            deduped_ids: List[Any] = []
+            seen_ids: set[Any] = set()
+            for pid in merged_ids:
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                deduped_ids.append(pid)
+            people_ids = deduped_ids
     people_org_terms = org_terms if org_role == "affiliation" else []
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
@@ -2170,11 +2240,23 @@ def _run_rag_with_vectors(
     it.year_to = year_to
     year_range_filter = build_year_range_filter(year_from, year_to) if (year_from or year_to) else None
 
-    perf_types = [t.strip() for t in (list(getattr(it, "perf_types", None) or []) or []) if str(t).strip()]
+    perf_types_raw = [
+        t.strip()
+        for t in (list(getattr(it, "perf_types", None) or []) or [])
+        if str(t).strip()
+    ]
+    perf_type_norm = normalize_perf_types(perf_types_raw)
+    perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
     it.perf_types = perf_types
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
+    if perf_types or perf_types_source:
+        log_kv(
+            "RAG.PERF_TYPES.FINAL",
+            source=perf_types_source or "derived",
+            values=perf_types,
+        )
 
-    project_title_terms = [
+    title_terms = [
         t.strip()
         for t in (list(getattr(it, "project_title", None) or []) or [])
         if str(t).strip()
@@ -2183,6 +2265,8 @@ def _run_rag_with_vectors(
     title_filter = build_title_filter(project_title_terms) if project_title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
+    # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
+    keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
     it.keywords = keyword_terms
     kws = keyword_terms
 
@@ -2193,22 +2277,22 @@ def _run_rag_with_vectors(
 
     hint_people_filters = _normalize_hint_terms(
         hint_filters.get("researcher_name") or hint_filters.get("people_name")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_org_filters = _normalize_hint_terms(
         hint_filters.get("org_name") or hint_filters.get("org")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_tag_filters = _normalize_hint_terms(
         hint_filters.get("tag_filters")
         or hint_filters.get("project_tag_filters")
         or hint_filters.get("perf_tag_filters")
-    ) if isinstance(hint_filters, dict) else []
+    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
 
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
     search_filter_signal = bool(
         hint_people_filters
         or hint_org_filters
         or hint_tag_filters
-        or project_title_terms
+        or title_terms
         or people_terms
         or org_terms
         or it.tag_filters
@@ -2219,6 +2303,10 @@ def _run_rag_with_vectors(
         (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
         or (qa_conf >= search_filter_min_conf)
     )
+
+    title_filter_applied_to = None
+    if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
+        title_filter_applied_to = "project/perf"
 
     log_kv(
         "RAG.FILTERS",
@@ -2234,7 +2322,7 @@ def _run_rag_with_vectors(
         perf_types=perf_types,
         keywords=keyword_terms,
         perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
-        project_title_terms=project_title_terms,
+        project_title_terms=title_terms,
         tag_filters=list(getattr(it, "tag_filters", []) or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
@@ -2245,6 +2333,7 @@ def _run_rag_with_vectors(
         generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
+        title_filter_applied_to=title_filter_applied_to,
     )
 
     people_relation_disabled = False
@@ -2267,7 +2356,14 @@ def _run_rag_with_vectors(
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
     # -------------------------
-    log_section("RAG.KEYWORDS", kws)
+    log_section(
+        "RAG.KEYWORDS",
+        {
+            "planner_keywords": planner_keywords,
+            "final_keywords": kws,
+            "priority_rule": "planner>hint/payload",
+        },
+    )
     log_kv(
         "RAG.INTENT",
         action=action,
@@ -2349,31 +2445,76 @@ def _run_rag_with_vectors(
         return None
 
     # plan
-    plan = _build_plan(it)
-    _, policy_reason = _select_mode_policy(it)
-    planner_mode = hint_mode or _planner_action_to_mode(planner_action)
-    planner_first_applied = False
-    forced_lookup_exception = False
-    forced_lookup_reason = None
+    planner_mode = hint_mode
+    planner_mode_source = "qa.mode" if planner_mode else None
+    if not planner_mode:
+        planner_mode = _planner_action_to_mode(planner_action)
+        planner_mode_source = "qa.action" if planner_mode else None
+    if planner_mode not in ("search", "lookup", "join"):
+        if planner_mode:
+            log_kv(
+                "RAG.PLAN.PLANNER_MODE_INVALID",
+                level="warning",
+                planner_mode=planner_mode,
+                planner_mode_source=planner_mode_source,
+                planner_action=planner_action,
+            )
+        planner_mode = None
+        planner_mode_source = None
 
-    if planner_mode in ("search", "lookup", "join"):
-        plan.mode = planner_mode
-        planner_first_applied = True
+    plan, policy_reason = _build_plan(
+        it,
+        preferred_mode=planner_mode,
+        preferred_mode_source=planner_mode_source,
+    )
+    planner_first_applied = bool(planner_mode)
+    mode_override_applied = False
+    mode_override_reason = None
+    mode_override_from = None
+    mode_override_to = None
 
-    if _has_explicit_identifiers(it) and plan.mode != "lookup":
-        forced_lookup_exception = True
-        forced_lookup_reason = "explicit_identifiers"
+    def _apply_mode_override(
+        enforced_mode: str,
+        *,
+        reason: str,
+        **extra: Any,
+    ) -> bool:
+        nonlocal mode_override_applied, mode_override_reason, mode_override_from, mode_override_to
+        if plan.mode == enforced_mode:
+            return False
+        mode_override_applied = True
+        mode_override_reason = reason
+        mode_override_from = plan.mode
+        mode_override_to = enforced_mode
         log_kv(
-            "RAG.PLAN.MODE_ENFORCE",
+            "RAG.PLAN.MODE_OVERRIDE",
             level="warning",
-            enforced_mode="lookup",
+            enforced_mode=enforced_mode,
             requested_mode=plan.mode,
-            reason=forced_lookup_reason,
+            reason=reason,
+            **extra,
+        )
+        plan.mode = enforced_mode
+        return True
+
+    if planner_mode and relation == ("people", "project") and list(getattr(it, "people_terms", []) or []):
+        _apply_mode_override(
+            "lookup",
+            reason="people_project_lookup",
+            action=action,
+            base_route=base_route,
+            relation=relation,
+            people_terms=people_terms[:4],
+        )
+
+    if planner_mode and _has_explicit_identifiers(it):
+        _apply_mode_override(
+            "lookup",
+            reason="explicit_identifiers",
             action=action,
             base_route=base_route,
             relation=relation,
         )
-        plan.mode = "lookup"
     if hinted_cols:
         plan.target_collections = hinted_cols
     if people_relation_disabled:
@@ -2432,21 +2573,13 @@ def _run_rag_with_vectors(
 
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
-        relation_parts = set(relation)
-        force_join_relation = relation_parts == {"project", "perf"}
-        should_promote_join = relation_lookup_policy == "join" or force_join_relation
-        if should_promote_join:
+        if relation_lookup_policy == "join" and _has_relation_join_ids(it):
             plan.mode = "join"
             logger.warning(
-                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s, force_join=%s)",
+                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
                 relation_lookup_policy,
                 relation,
-                int(force_join_relation),
             )
-            if force_join_relation and relation_lookup_policy != "join":
-                logger.warning(
-                    "[RAG] relation_lookup_enforce=0 (override to join for project↔perf relation)",
-                )
         else:
             relation_lookup_enforce = True
             logger.warning(
@@ -2462,26 +2595,19 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
         )
-    if relation and plan.mode == "lookup":
-        ids_map_for_lookup = getattr(it, "ids_map", None) or {}
-        pjt_ids_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_id") or []) if str(x).strip()]
-        pjt_nos_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_no") or []) if str(x).strip()]
-        if not (pjt_ids_for_lookup or pjt_nos_for_lookup):
-            plan.mode = "join"
-            relation_lookup_enforce = False
-            logger.warning(
-                "[RAG] lookup+relation ids_map empty -> join fallback (relation=%s)",
-                relation,
-            )
-            log_kv(
-                "RAG.PLAN.LOOKUP_JOIN_FALLBACK",
-                level="warning",
-                build_project_id_filter="fallback_join",
-                ids_map=ids_map_for_lookup,
-                pjt_id=pjt_ids_for_lookup,
-                pjt_no=pjt_nos_for_lookup,
-                relation=relation,
-            )
+    if relation and plan.mode == "join" and not _has_relation_join_ids(it):
+        plan.mode = "lookup"
+        relation_lookup_enforce = True
+        logger.warning(
+            "[RAG] join skipped due to missing relation ids (relation=%s)",
+            relation,
+        )
+        log_kv(
+            "RAG.PLAN.JOIN_SKIPPED",
+            level="warning",
+            reason="missing_relation_ids",
+            relation=relation,
+        )
 
     # allow 적용 (force/allow)
     if effective_allow:
@@ -2499,8 +2625,10 @@ def _run_rag_with_vectors(
             "planner_first_applied": planner_first_applied,
             "planner_mode": planner_mode,
             "planner_action": planner_action,
-            "forced_lookup_exception": forced_lookup_exception,
-            "forced_lookup_reason": forced_lookup_reason,
+            "mode_override_applied": mode_override_applied,
+            "mode_override_reason": mode_override_reason,
+            "mode_override_from": mode_override_from,
+            "mode_override_to": mode_override_to,
         },
         "filter": {
             "search_filter_enabled": search_filter_enabled,
@@ -2540,11 +2668,15 @@ def _run_rag_with_vectors(
         relation=relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=list(getattr(plan, "target_collections", []) or []),
+        qa_conf=qa_conf,
+        hint_applied=int(hint_conf_ok),
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
-        forced_lookup_exception=int(forced_lookup_exception),
-        forced_lookup_reason=forced_lookup_reason,
+        mode_override_applied=int(mode_override_applied),
+        mode_override_reason=mode_override_reason,
+        mode_override_from=mode_override_from,
+        mode_override_to=mode_override_to,
         lookup_filter_policy=lookup_filter_policy,
         search_filter_enabled=int(search_filter_enabled),
         lookup_filter_enabled=int(lookup_filter_enabled),
@@ -2563,23 +2695,12 @@ def _run_rag_with_vectors(
         min_dense_score=float(preset.min_dense_score),
         output_type=getattr(plan, "output_type", None),
         target_cols=plan.target_collections,
+        planner_categories=planner_categories,
+        planner_limit=planner_limit,
+        planner_retrieval_query=planner_retrieval_query,
+        planner_confidence=planner_confidence,
+        planner_meta_source=planner_meta_source,
     )
-
-    if relation and base_route in ("project", "perf") and plan.mode != "join":
-        route = get_relation_route(relation)
-        hop_plan = resolve_join_hops(relation)
-        if route and hop_plan:
-            requested_mode = plan.mode
-            plan.mode = "join"
-            log_kv(
-                "RAG.PLAN.MODE_GUARD",
-                level="warning",
-                enforced_mode="join",
-                requested_mode=requested_mode,
-                reason="relation_base_route_guard",
-                base_route=base_route,
-                relation=relation,
-            )
 
     # -------------------------
     # JOIN mode (2-hop)

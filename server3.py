@@ -34,6 +34,7 @@ from rag_store import build_rag_objects
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
+from rag_parts.constants import normalize_perf_types
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from settings import (
     REDIS_URL,
@@ -445,7 +446,7 @@ async def _run_question_analysis(
         "- mode=LOOKUP\n\n"
     
         "E) 위 조건에 해당하지 않는 주제/개념 중심 탐색이면\n"
-        "- mode=SEARCH\n"
+        "- mode=SEARCH\n"   
         "- head는 가장 중심 데이터(애매하면 project)\n\n"
     
         "====================\n"
@@ -880,6 +881,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                     f"coq: {state.conversation_id}{state.question}\n"
                     f"Query: {search_query}\n"
                     f"Found: {len(docs)} docs\n")
+        log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
+
         return {"context": docs}
 
     except Exception as e:
@@ -912,10 +915,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    log_section(
-        f"-----------------검색 결과----------------)",
-        f"[검색 : ]\n{state.context}",
-    )
 
 
 
@@ -947,8 +946,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         if docs_for_ctx
         else "없음"
     )
-    log_section("context_text - 페이로드 평탄화 후 데이터",
-                f"title: {context_text}")
+    # log_section("context_text - 페이로드 평탄화 후 데이터",
+    #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
@@ -958,10 +957,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
-    log_section(
-        f"FINAL PROMPT ({model_name})",
-        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
-    )
+    # log_section(
+    #     f"FINAL PROMPT ({model_name})",
+    #     f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
+    # )
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
@@ -1273,10 +1272,14 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
                 normalized_intent.project_tag_filters = default_tag_filters
         perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
         if perf_types_hint:
-            normalized_intent.perf_types = perf_types_hint
+            perf_type_norm = normalize_perf_types(perf_types_hint)
+            normalized_intent.perf_types = (
+                perf_type_norm["tags"] or perf_type_norm["unknown"]
+            )
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
-            normalized_intent.keywords = keywords_hint
+            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
+            normalized_intent.keywords = list(dict.fromkeys([*keywords_hint, *current_keywords]))
         project_title_hint = _normalize_hint_terms(
             filters.get("project_title") or filters.get("project_name")
         )
@@ -1737,11 +1740,11 @@ def refine_documents_rule_based(
         source_idx = doc.get("source_index")
 
         title = mapped_doc.get("title", "제목 없음")
-        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"mapped_doc: {mapped_doc}")
-
-        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"title: {title}")
+        # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+        #             f"mapped_doc: {mapped_doc}")
+        #
+        # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+        #             f"title: {title}")
 
         meta_basic = mapped_doc.get("meta_basic", {})
         meta_basic_text = format_metadata(
@@ -1749,11 +1752,11 @@ def refine_documents_rule_based(
             max_sentences=field_max_sentences,
             max_tokens=field_max_tokens,
         )
-        log_section(
-            "refine_documents_rule_based - meta_basic 필드 출력 확인",
-            f"meta_basic keys: {list(meta_basic.keys())}\n"
-            f"formatted:\n{meta_basic_text}",
-        )
+        # log_section(
+        #     "refine_documents_rule_based - meta_basic 필드 출력 확인",
+        #     f"meta_basic keys: {list(meta_basic.keys())}\n"
+        #     f"formatted:\n{meta_basic_text}",
+        # )
 
         meta_detail_text = ""
         if is_detail:
@@ -1788,10 +1791,10 @@ def refine_documents_rule_based(
             prtcp_orgs,
             max_matches=max_matches,
         )
-        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"matched_members: {matched_members}\n"
-                    f"fallback_lines: {fallback_lines}\n"
-                    f"matched_orgs: {matched_orgs}")
+        # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+        #             f"matched_members: {matched_members}\n"
+        #             f"fallback_lines: {fallback_lines}\n"
+        #             f"matched_orgs: {matched_orgs}")
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
@@ -2097,7 +2100,7 @@ async def query_stream(payload: QueryRequest):
             for d in documents_used:
                 ref_docs.append(RagMapper.get_references(d))
 
-            log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
+            # log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
