@@ -790,7 +790,16 @@ def dense_retrieve_hybrid_multi(
     top_k_lexical = _clamp_top_k(top_k_lexical, minimum=0, fallback=_DEFAULT_TOPK_LEX)
 
     hybrid_once_eff = _HYBRID_QUERY_ONCE if hybrid_once is None else bool(hybrid_once)
-    if hybrid_once_eff and sparse_vector_name and emb_map:
+    if hybrid_once_eff:
+        if not sparse_vector_name or not emb_map:
+            logger.warning(
+                "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s",
+                bool(sparse_vector_name),
+                bool(emb_map),
+            )
+            ret = {"dense": {}, "lexical": [], "hybrid": []}
+            logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
+            return ret
         t_hybrid0 = time.perf_counter()
         hybrid_points = _qdrant_hybrid_query_once(
             client,
@@ -805,11 +814,15 @@ def dense_retrieve_hybrid_multi(
             query_filter=query_filter,
         )
         timings["hybrid_once_total"] = time.perf_counter() - t_hybrid0
-        if hybrid_points is not None:
-            timings["hybrid_once_hits"] = float(len(hybrid_points))
-            ret = {"dense": {}, "lexical": [], "hybrid": hybrid_points}
+        if hybrid_points is None:
+            logger.warning("[RETRIEVE.HYBRID] failed: empty result")
+            ret = {"dense": {}, "lexical": [], "hybrid": []}
             logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
             return ret
+        timings["hybrid_once_hits"] = float(len(hybrid_points))
+        ret = {"dense": {}, "lexical": [], "hybrid": hybrid_points}
+        logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
+        return ret
 
     # -----------------------
     # Dense retrieval
