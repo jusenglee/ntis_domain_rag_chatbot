@@ -228,6 +228,53 @@ def build_year_range_filter(
 
     return qmodels.Filter(should=should) if should else None
 
+_PERF_TYPE_ALIASES: List[Dict[str, Any]] = [
+    {"tag": TAG_RI_PAPER, "category": "논문", "aliases": ["논문", "paper"]},
+    {"tag": TAG_RI_IPR, "category": "특허", "aliases": ["특허", "patent", "지식재산"]},
+    {"tag": TAG_RI_RSCH_RPT, "category": "연구보고서", "aliases": ["연구보고서", "보고서", "report", "rpt"]},
+    {"tag": TAG_RI_FCLT_EQUIP, "category": "시설/장비", "aliases": ["시설", "장비", "equip", "equipment"]},
+    {"tag": TAG_RI_TECH_INFO, "category": "기술요약", "aliases": ["기술요약", "기술정보", "tech", "technology"]},
+    {"tag": TAG_RI_SW, "category": "소프트웨어", "aliases": ["소프트웨어", "software", "sw"]},
+    {"tag": TAG_RI_NVR, "category": "신품종", "aliases": ["신품종", "nvr"]},
+    {"tag": TAG_RI_COMPOUND, "category": "화합물", "aliases": ["화합물", "compound"]},
+    {"tag": TAG_RI_ORGSM_INFO, "category": "생명정보", "aliases": ["생명정보"]},
+    {"tag": TAG_RI_ORGSM_RES, "category": "생물자원", "aliases": ["생물자원", "resource"]},
+]
+
+
+def _normalize_perf_type_terms(perf_types: List[str]) -> tuple[List[str], List[str]]:
+    tags: List[str] = []
+    categories: List[str] = []
+    perf_tag_set = {t.upper() for t in PERF_TAGS}
+
+    def _push_unique(target: List[str], value: str) -> None:
+        if value and value not in target:
+            target.append(value)
+
+    for raw in perf_types:
+        sval = str(raw).strip()
+        if not sval:
+            continue
+        upper = sval.upper()
+        if upper in perf_tag_set:
+            _push_unique(tags, upper)
+            continue
+        normalized = re.sub(r"\s+", " ", sval).strip()
+        normalized = re.sub(r"\s*성과\s*$", "", normalized).strip()
+        normalized_lower = normalized.lower()
+        matched = False
+        for entry in _PERF_TYPE_ALIASES:
+            if normalized_lower in {a.lower() for a in entry["aliases"]}:
+                _push_unique(tags, entry["tag"])
+                _push_unique(categories, entry["category"])
+                matched = True
+                break
+        if not matched and normalized:
+            _push_unique(categories, normalized)
+
+    return tags, categories
+
+
 def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     if qmodels is None or not perf_types:
         return None
