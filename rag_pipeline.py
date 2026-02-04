@@ -1369,11 +1369,30 @@ def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
         return True
     return False
 
+def _has_relation_join_ids(it: NormalizedIntent) -> bool:
+    ids_map = getattr(it, "ids_map", None) or {}
+    if not isinstance(ids_map, dict):
+        return False
+    if any(ids_map.get(key) for key in ("pjt_id", "pjt_no")):
+        return True
+    perf_id_keys = (
+        "doi",
+        "issn",
+        "eissn",
+        "pissn",
+        "patent_reg_no",
+        "patent_app_no",
+        "paper_id",
+        "perf_id",
+        "rst_id",
+    )
+    return any(ids_map.get(key) for key in perf_id_keys)
+
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
     우선순위(강제):
-    1) relation이 있으면 join
+    1) relation + join ids -> join
     2) id query 또는 명확한 ids -> lookup
     3) list/stats/download -> lookup
     4) topic/search -> search (기본 유지)
@@ -1383,8 +1402,8 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     rel = it.relation
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
         return "lookup", "people_project_lookup"
-    if rel:
-        return "join", "relation"
+    if rel and _has_relation_join_ids(it):
+        return "join", "relation_ids"
     if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
         return "lookup", "id_or_exact"
     if action in ("list", "stats", "download"):
@@ -2554,21 +2573,13 @@ def _run_rag_with_vectors(
 
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
-        relation_parts = set(relation)
-        force_join_relation = relation_parts == {"project", "perf"}
-        should_promote_join = relation_lookup_policy == "join" or force_join_relation
-        if should_promote_join:
+        if relation_lookup_policy == "join" and _has_relation_join_ids(it):
             plan.mode = "join"
             logger.warning(
-                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s, force_join=%s)",
+                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
                 relation_lookup_policy,
                 relation,
-                int(force_join_relation),
             )
-            if force_join_relation and relation_lookup_policy != "join":
-                logger.warning(
-                    "[RAG] relation_lookup_enforce=0 (override to join for project↔perf relation)",
-                )
         else:
             relation_lookup_enforce = True
             logger.warning(
@@ -2584,26 +2595,19 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
         )
-    if relation and plan.mode == "lookup":
-        ids_map_for_lookup = getattr(it, "ids_map", None) or {}
-        pjt_ids_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_id") or []) if str(x).strip()]
-        pjt_nos_for_lookup = [str(x).strip() for x in (ids_map_for_lookup.get("pjt_no") or []) if str(x).strip()]
-        if not (pjt_ids_for_lookup or pjt_nos_for_lookup):
-            plan.mode = "join"
-            relation_lookup_enforce = False
-            logger.warning(
-                "[RAG] lookup+relation ids_map empty -> join fallback (relation=%s)",
-                relation,
-            )
-            log_kv(
-                "RAG.PLAN.LOOKUP_JOIN_FALLBACK",
-                level="warning",
-                build_project_id_filter="fallback_join",
-                ids_map=ids_map_for_lookup,
-                pjt_id=pjt_ids_for_lookup,
-                pjt_no=pjt_nos_for_lookup,
-                relation=relation,
-            )
+    if relation and plan.mode == "join" and not _has_relation_join_ids(it):
+        plan.mode = "lookup"
+        relation_lookup_enforce = True
+        logger.warning(
+            "[RAG] join skipped due to missing relation ids (relation=%s)",
+            relation,
+        )
+        log_kv(
+            "RAG.PLAN.JOIN_SKIPPED",
+            level="warning",
+            reason="missing_relation_ids",
+            relation=relation,
+        )
 
     # allow 적용 (force/allow)
     if effective_allow:
@@ -2697,22 +2701,6 @@ def _run_rag_with_vectors(
         planner_confidence=planner_confidence,
         planner_meta_source=planner_meta_source,
     )
-
-    if relation and base_route in ("project", "perf") and plan.mode != "join":
-        route = get_relation_route(relation)
-        hop_plan = resolve_join_hops(relation)
-        if route and hop_plan:
-            requested_mode = plan.mode
-            plan.mode = "join"
-            log_kv(
-                "RAG.PLAN.MODE_GUARD",
-                level="warning",
-                enforced_mode="join",
-                requested_mode=requested_mode,
-                reason="relation_base_route_guard",
-                base_route=base_route,
-                relation=relation,
-            )
 
     # -------------------------
     # JOIN mode (2-hop)
