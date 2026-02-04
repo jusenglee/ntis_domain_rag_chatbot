@@ -1275,6 +1275,7 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
             filters.get("project_title") or filters.get("project_name")
         )
         if project_title_hint:
+            normalized_intent.project_title = project_title_hint
             current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
             normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *project_title_hint]))
         org_role = filters.get("org_role")
