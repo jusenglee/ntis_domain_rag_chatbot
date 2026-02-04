@@ -399,10 +399,6 @@ def _qdrant_hybrid_query_once(
             "content_text",
             "keyword_text",
             "flat_text",
-            "category",
-            "prtcp_mp[].hm_nm",
-            "prtcp_mp[].blng_org_nm",
-            "prtcp_org[].org_nm",
         ]
     )
     with_payload = _with_payload_selector(
@@ -919,10 +915,6 @@ def dense_retrieve_hybrid_multi(
             "content_text",
             "keyword_text",
             "flat_text",
-            "category",
-            "prtcp_mp[].hm_nm",
-            "prtcp_mp[].blng_org_nm",
-            "prtcp_org[].org_nm",
         ]
     )
     with_payload_lex = _with_payload_selector(
