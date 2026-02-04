@@ -2702,6 +2702,154 @@ def _run_rag_with_vectors(
         planner_meta_source=planner_meta_source,
     )
 
+    def _maybe_followup_perf_hop_from_project() -> List[str]:
+        if relation != ("project", "perf"):
+            return []
+        ids_map = getattr(it, "ids_map", None) or {}
+        if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
+            return []
+        if plan.mode == "join":
+            return []
+        target_cols = list(plan.target_collections or _default_target_collections())
+        if COL_PROJECT not in target_cols or COL_PERF not in target_cols:
+            log_kv(
+                "RAG.PERF.FOLLOWUP.SKIP",
+                reason="target_collections",
+                target_cols=target_cols,
+            )
+            return []
+
+        route = get_relation_route(relation)
+        hop1_tag_filters = route.hop1_tag_filters if route else None
+        hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+        if year_range_filter:
+            hop1_filter = _and_filter(hop1_filter, year_range_filter)
+
+        hop1_keep = int(os.getenv("RAG_HOP1_KEEP", "5"))
+        hop1_k_base = int(os.getenv("RAG_HOP1_TOPK_BASE", "250"))
+
+        log_kv(
+            "RAG.PERF.FOLLOWUP.HOP1",
+            hop1_col=COL_PROJECT,
+            hop1_q=q,
+            hop1_tag_filters=hop1_tag_filters,
+            hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+            hop1_k_base=hop1_k_base,
+            hop1_keep=hop1_keep,
+        )
+
+        vec_avail = _named_vectors_in_collection(qdr, COL_PROJECT)
+        use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+        pre_vecs_h1 = _get_pre_vecs(q)
+        emb_map_h1: Dict[str, Any] = {}
+        for vname in use_vecs_h1:
+            pe = pre_vecs_h1.get(vname)
+            emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
+        emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
+
+        local_timings_h1: Dict[str, float] = {}
+        sr1 = _call_dense_retrieve_hybrid_multi(
+            qdr=qdr,
+            emb_map=emb_map_h1,
+            qtext=q,
+            kws=kws,
+            collection=COL_PROJECT,
+            sparse_vector_name=sparse_vector_name_eff,
+            sparse_topk=min(hop1_k_base, 80),
+            top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
+            top_k_lex_cand=hop1_k_base,
+            top_k_lex=min(hop1_k_base, 80),
+            query_filter=hop1_filter,
+            timings_out=local_timings_h1,
+        )
+        _apply_dense_threshold(
+            sr1,
+            use_dense_threshold=bool(preset.use_dense_threshold),
+            min_dense_score=float(preset.min_dense_score),
+            log_prefix="RAG.DENSE.THRESHOLD.FOLLOWUP",
+            col=COL_PROJECT,
+            action=action,
+            base_route=base_route,
+            relation=relation,
+        )
+        _ensure_collection_mark((sr1.get("lexical") or []), COL_PROJECT)
+        for _, lst in (sr1.get("dense") or {}).items():
+            _ensure_collection_mark(lst or [], COL_PROJECT)
+
+        sources_h1: List[_RankSource] = []
+        for vname, lst in (sr1.get("dense") or {}).items():
+            base_weight = float(w_dense_map.get(vname, 1.0))
+            score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+            sources_h1.append(
+                _RankSource(
+                    name=f"{COL_PROJECT}:{vname}",
+                    weight=base_weight * score_weight,
+                    points=lst or [],
+                )
+            )
+        sources_h1.append(
+            _RankSource(
+                name=f"{COL_PROJECT}:lex",
+                weight=float(sparse_weight_eff),
+                points=sr1.get("lexical") or [],
+            )
+        )
+        h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
+        h1_rrf = _dedup_by_doc_id(h1_rrf)
+        hop1_reranked = _final_rerank(
+            h1_rrf,
+            it=it,
+            kws=kws,
+            lex_w=lex_w_eff,
+            base_route="project",
+            mode="search",
+            keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
+            tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+            tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+        )
+        hop1_reranked = _dedup_by_doc_id(hop1_reranked)
+        if len(hop1_reranked) > ctx_hard_limit:
+            hop1_reranked = hop1_reranked[:ctx_hard_limit]
+
+        hop1_top = hop1_reranked[: max(1, hop1_keep)]
+        if hop1_top:
+            hydrate_keep = min(
+                max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
+                ctx_hard_limit,
+            )
+            _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
+            missing = _count_missing_join_keys(hop1_top)
+            if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                ):
+                    _hydrate_points_payload(qdr, hop1_top)
+                    missing = _count_missing_join_keys(hop1_top)
+                if str(os.getenv("RAG_HOP1_FORCE_JOIN_KEYS", "1")).strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                ):
+                    forced = _ensure_join_keys_in_payload(hop1_top)
+                    if any(forced[k] for k in ("forced_pjt_id", "forced_pjt_no", "forced_tag")):
+                        log_kv("RAG.PERF.FOLLOWUP.FORCE_KEYS", **forced)
+                    missing = _count_missing_join_keys(hop1_top)
+            if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                log_kv("RAG.PERF.FOLLOWUP.MISSING_KEYS", **missing)
+
+        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        log_kv(
+            "RAG.PERF.FOLLOWUP.JOIN_IDS",
+            join_ids_preview=join_ids[:10],
+            join_ids_count=len(join_ids),
+            timings={k: float(v) for k, v in (local_timings_h1 or {}).items()},
+        )
+        return join_ids
+
     # -------------------------
     # JOIN mode (2-hop)
     # -------------------------
@@ -3083,6 +3231,12 @@ def _run_rag_with_vectors(
 
     # collection list
     target_cols = list(plan.target_collections or _default_target_collections())
+    perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
+    perf_followup_filter = (
+        build_perf_filter(PerfFilterInput(query=q, join_ids=perf_followup_join_ids))
+        if perf_followup_join_ids
+        else None
+    )
 
     # topK caps
     topk_dense = int(preset.top_k_dense)
@@ -3161,6 +3315,8 @@ def _run_rag_with_vectors(
                     combined = _and_filter(combined, year_range_filter)
             if col == COL_PERF and perf_type_filter:
                 combined = _and_filter(combined, perf_type_filter)
+            if col == COL_PERF and perf_followup_filter:
+                combined = _and_filter(combined, perf_followup_filter) if combined else perf_followup_filter
             return combined
 
         if plan.mode != "lookup":
