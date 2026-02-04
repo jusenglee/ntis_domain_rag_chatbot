@@ -585,7 +585,8 @@ def build_context_list_light(
             header = ""
         else:
             total_tok += header_tok
-    ctx = header + ("\n".join(items) if items else "(후보 없음)")
+    empty_notice = "성과 없음" if kind == "perf" else "(후보 없음)"
+    ctx = header + ("\n".join(items) if items else empty_notice)
     return ctx, points
 
 
@@ -1024,6 +1025,22 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         sc += w_meta * min(_count_term_hits(tb["meta_kv"], kw), 2)
     return float(sc)
 
+def _keyword_exact_match_hits(p: Any, kws: List[str]) -> int:
+    tb = _payload_text_bundle(p)
+    title = (tb.get("title") or "").lower()
+    keyword_text = (tb.get("keyword_text") or "").lower()
+    hits = 0
+    for kw in (kws or [])[:30]:
+        kw = kw.strip()
+        if not kw:
+            continue
+        kw_lower = kw.lower()
+        if kw_lower in title:
+            hits += 1
+        if kw_lower in keyword_text:
+            hits += 1
+    return hits
+
 def _flatten_ids_from_intent(it: Any) -> List[str]:
     # ids_flat 우선, 없으면 ids_map/ids(dict) 평탄화
     flat = getattr(it, "ids_flat", None)
@@ -1254,11 +1271,13 @@ def _final_rerank(
     raw_f = []
     raw_fam = []
     raw_tag = []
+    raw_exact_hits = []
     raw_items = []
     for idx, p in enumerate(cands):
         pl = getattr(p, "payload", None)
         rrf_sc = float(pl.get("_rrf", 0.0)) if isinstance(pl, dict) else 0.0
         kw_sc = _keyword_score(p, kws, lex_w)
+        exact_hits = _keyword_exact_match_hits(p, kws)
         f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids)
         fam = _family_bonus(p, base_route)
         tag_sc = _tag_match_bonus(
@@ -1272,7 +1291,37 @@ def _final_rerank(
         raw_f.append(f_sc)
         raw_fam.append(fam)
         raw_tag.append(tag_sc)
-        raw_items.append((idx, p, rrf_sc, kw_sc, f_sc, fam, tag_sc))
+        raw_exact_hits.append(float(exact_hits))
+        raw_items.append({
+            "idx": idx,
+            "p": p,
+            "rrf": rrf_sc,
+            "kw": kw_sc,
+            "f": f_sc,
+            "fam": fam,
+            "tag": tag_sc,
+            "exact_hits": exact_hits,
+        })
+
+    if raw_kw and max(raw_kw) <= 0 and any(raw_exact_hits):
+        exact_bonus = float(os.getenv("RAG_KW_EXACT_MATCH_BONUS", "2.0"))
+        for i, item in enumerate(raw_items):
+            bonus = exact_bonus * float(item["exact_hits"])
+            if bonus > 0:
+                raw_kw[i] += bonus
+                item["kw"] = raw_kw[i]
+        log_kv(
+            "RAG.RERANK.KEYWORD_EXACT_MATCH_BONUS",
+            applied=True,
+            bonus=exact_bonus,
+            hits_total=sum(raw_exact_hits),
+        )
+    else:
+        log_kv(
+            "RAG.RERANK.KEYWORD_EXACT_MATCH_BONUS",
+            applied=False,
+            hits_total=sum(raw_exact_hits),
+        )
 
     sample_slice = slice(0, max(0, min(score_sample, len(raw_items))))
     log_section(
@@ -1280,6 +1329,7 @@ def _final_rerank(
         {
             "_rrf": _score_stats(raw_rrf[sample_slice]),
             "_keyword_score": _score_stats(raw_kw[sample_slice]),
+            "keyword_exact_match_hits": _score_stats(raw_exact_hits[sample_slice]),
             "_filter_score": _score_stats(raw_f[sample_slice]),
             "_family_bonus": _score_stats(raw_fam[sample_slice]),
             "_tag_match_bonus": _score_stats(raw_tag[sample_slice]),
@@ -1307,7 +1357,14 @@ def _final_rerank(
     legacy_w_rrf, legacy_w_kw, legacy_w_f = legacy_weights.get(mode, legacy_weights["search"])
     scored = []
     legacy_scored = []
-    for i, (idx, p, rrf_sc, kw_sc, f_sc, fam, tag_sc) in enumerate(raw_items):
+    for i, item in enumerate(raw_items):
+        idx = item["idx"]
+        p = item["p"]
+        rrf_sc = item["rrf"]
+        kw_sc = item["kw"]
+        f_sc = item["f"]
+        fam = item["fam"]
+        tag_sc = item["tag"]
         tot = (
             (w_rrf * norm_rrf[i])
             + (w_kw * norm_kw[i])
@@ -3788,7 +3845,11 @@ def _run_rag_with_vectors(
             else:
                 _timing_put(timings, "flag.fallback_min_context", 1.0)
         else:
-            context, refs = "", []
+            if base_route == "perf":
+                context = "성과 없음. 다른 키워드로 재시도해 주세요."
+            else:
+                context = ""
+            refs = []
             ctx_fieldset = _resolve_output_fieldset(plan.output_type)
     else:
         max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
