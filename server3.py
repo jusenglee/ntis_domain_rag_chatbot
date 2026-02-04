@@ -1161,8 +1161,10 @@ def _normalize_hint_terms(values: Any) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for v in values:
+        if v is None:
+            continue
         s = str(v).strip()
-        if not s or s in seen:
+        if not s or s.lower() in ("none", "null") or s in seen:
             continue
         seen.add(s)
         out.append(s)
@@ -1246,9 +1248,13 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         year_from = filters.get("year_from")
         year_to = filters.get("year_to")
         if year_from is not None:
-            normalized_intent.year_from = str(year_from).strip() or None
+            year_from_value = str(year_from).strip()
+            if year_from_value and year_from_value.lower() not in ("none", "null"):
+                normalized_intent.year_from = year_from_value
         if year_to is not None:
-            normalized_intent.year_to = str(year_to).strip() or None
+            year_to_value = str(year_to).strip()
+            if year_to_value and year_to_value.lower() not in ("none", "null"):
+                normalized_intent.year_to = year_to_value
         tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
         if tag_filters_hint:
             normalized_intent.tag_filters = tag_filters_hint
