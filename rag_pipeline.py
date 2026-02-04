@@ -3406,9 +3406,29 @@ def _run_rag_with_vectors(
     topk_lex_cand = min(int(preset.top_k_lex_cand), int(os.getenv("RAG_FED_LEX_CAND_CAP", "260")))
     topk_lex = int(sparse_topk_eff)
 
+    def _expand_vector_names(names: List[str]) -> List[str]:
+        expanded: List[str] = []
+        for name in names:
+            if name not in expanded:
+                expanded.append(name)
+            if name.endswith("_qa"):
+                base = name[:-3]
+                if base and base not in expanded:
+                    expanded.append(base)
+        return expanded
+
     def _build_emb_map_for_collection(col: str) -> Dict[str, Any]:
         vec_avail = _named_vectors_in_collection(qdr, col)
-        use_vecs = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+        expanded_names = _expand_vector_names(vector_names)
+        use_vecs = [v for v in expanded_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+        if isinstance(vec_avail, set) and not use_vecs and vector_names:
+            logger.warning(
+                "[RAG] no matching vectors for col=%s available=%s requested=%s expanded=%s",
+                col,
+                sorted(vec_avail),
+                vector_names,
+                expanded_names,
+            )
         out: Dict[str, Any] = {}
         for vname in use_vecs:
             pe = pre_vecs.get(vname)
@@ -3963,14 +3983,22 @@ def run_rag_once(
     intent_payload: Any = None,
 ) -> RagResult:
     domain_hint: Optional[str] = None
+    vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
+    vector_names = [v.strip() for v in vector_names_env.split(",") if v.strip()]
+    w_dense_map = {
+        "e5i_qa": 1.0,
+        "e5_qa": 0.8,
+        "e5i": 1.0,
+        "e5": 0.8,
+    }
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
         hint=hint,
         intent_payload=intent_payload,
         stack="M",
-        vector_names=["e5i_qa", "e5_qa"],
-        w_dense_map={"e5i_qa": 1.0, "e5_qa": 0.8},
+        vector_names=vector_names or ["e5i_qa", "e5_qa"],
+        w_dense_map=w_dense_map,
         lexical_field_weights=None,
         domain_hint=domain_hint,
     )
