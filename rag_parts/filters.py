@@ -538,11 +538,22 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
 
     return qmodels.Filter(should=should)
 
-def build_project_title_filter(terms: List[str]) -> Optional[Any]:
-    """과제명(국문/영문) 기반 서버단 필터를 구성합니다."""
+def build_project_title_filter(
+    terms: List[str],
+    keyword_terms: Optional[List[str]] = None,
+) -> Optional[Any]:
+    """과제명/키워드 기반 서버단 필터를 구성합니다."""
     if qmodels is None:
         return None
     norm_terms = [str(t).strip() for t in (terms or []) if str(t).strip()]
+    keyword_terms = [str(t).strip() for t in (keyword_terms or []) if str(t).strip()]
+    if keyword_terms:
+        seen = set(norm_terms)
+        for term in keyword_terms:
+            if term in seen:
+                continue
+            seen.add(term)
+            norm_terms.append(term)
     if not norm_terms:
         return None
 

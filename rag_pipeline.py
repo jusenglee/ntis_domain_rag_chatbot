@@ -2262,13 +2262,13 @@ def _run_rag_with_vectors(
         if str(t).strip()
     ]
     it.project_title = title_terms
-    title_filter = build_project_title_filter(title_terms) if title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
     keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
     it.keywords = keyword_terms
     kws = keyword_terms
+    title_filter = build_project_title_filter(title_terms, keyword_terms)
 
     # perf tag filter (필요 시)
     perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
@@ -2573,7 +2573,7 @@ def _run_rag_with_vectors(
 
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
-        if relation_lookup_policy == "join" and _has_relation_join_ids(it):
+        if relation_lookup_policy == "join" and _has_relation_join_ids(it) and not (title_terms or keyword_terms):
             plan.mode = "join"
             logger.warning(
                 "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
@@ -2774,6 +2774,11 @@ def _run_rag_with_vectors(
                 if hop1_col in (COL_PROJECT, COL_PERF):
                     if year_range_filter:
                         hop1_filter = _and_filter(hop1_filter, year_range_filter)
+                    if title_filter:
+                        title_query_terms = title_terms or keyword_terms
+                        if title_query_terms:
+                            hop1_q = " ".join(title_query_terms)
+                        hop1_filter = _and_filter(hop1_filter, title_filter)
                 if hop1_col == COL_PERF and perf_type_filter:
                     hop1_filter = _and_filter(hop1_filter, perf_type_filter)
 
