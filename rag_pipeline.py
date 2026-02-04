@@ -3097,20 +3097,24 @@ def _run_rag_with_vectors(
                     base_route=base_route,
                     relation=relation,
                 )
-                _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
-                for _, lst in (sr1.get("dense") or {}).items():
-                    _ensure_collection_mark(lst or [], hop1_col)
+                hybrid_points = sr1.get("hybrid") or []
+                if hybrid_points:
+                    _ensure_collection_mark(hybrid_points, hop1_col)
+                    h1_rrf = _dedup_by_doc_id(hybrid_points)
+                else:
+                    _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
+                    for _, lst in (sr1.get("dense") or {}).items():
+                        _ensure_collection_mark(lst or [], hop1_col)
 
-                # Hop1 RRF merge
-                sources_h1: List[_RankSource] = []
-                for vname, lst in (sr1.get("dense") or {}).items():
-                    base_weight = float(w_dense_map.get(vname, 1.0))
-                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
-                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
-                h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
-
-                h1_rrf = _dedup_by_doc_id(h1_rrf)
+                    # Hop1 RRF merge
+                    sources_h1: List[_RankSource] = []
+                    for vname, lst in (sr1.get("dense") or {}).items():
+                        base_weight = float(w_dense_map.get(vname, 1.0))
+                        score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                        sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+                    sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
+                    h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
+                    h1_rrf = _dedup_by_doc_id(h1_rrf)
                 hop1_reranked = _final_rerank(
                     h1_rrf,
                     it=it,
@@ -3277,19 +3281,24 @@ def _run_rag_with_vectors(
                 base_route=base_route,
                 relation=relation,
             )
-            _ensure_collection_mark((sr2.get("lexical") or []), hop2_col)
-            for _, lst in (sr2.get("dense") or {}).items():
-                _ensure_collection_mark(lst or [], hop2_col)
+            hybrid_points = sr2.get("hybrid") or []
+            if hybrid_points:
+                _ensure_collection_mark(hybrid_points, hop2_col)
+                h2_rrf = _dedup_by_doc_id(hybrid_points)
+            else:
+                _ensure_collection_mark((sr2.get("lexical") or []), hop2_col)
+                for _, lst in (sr2.get("dense") or {}).items():
+                    _ensure_collection_mark(lst or [], hop2_col)
 
-            # Hop2 RRF + JOIN 최종 rerank (mode="join")
-            sources_h2: List[_RankSource] = []
-            for vname, lst in (sr2.get("dense") or {}).items():
-                base_weight = float(w_dense_map.get(vname, 1.0))
-                score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
-                sources_h2.append(_RankSource(name=f"{hop2_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-            sources_h2.append(_RankSource(name=f"{hop2_col}:lex", weight=float(sparse_weight_eff), points=sr2.get("lexical") or []))
-            h2_rrf = _rrf_merge(sources_h2, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=800)
-            h2_rrf = _dedup_by_doc_id(h2_rrf)
+                # Hop2 RRF + JOIN 최종 rerank (mode="join")
+                sources_h2: List[_RankSource] = []
+                for vname, lst in (sr2.get("dense") or {}).items():
+                    base_weight = float(w_dense_map.get(vname, 1.0))
+                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                    sources_h2.append(_RankSource(name=f"{hop2_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+                sources_h2.append(_RankSource(name=f"{hop2_col}:lex", weight=float(sparse_weight_eff), points=sr2.get("lexical") or []))
+                h2_rrf = _rrf_merge(sources_h2, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=800)
+                h2_rrf = _dedup_by_doc_id(h2_rrf)
 
             hop2_reranked = _final_rerank(
                 h2_rrf,
