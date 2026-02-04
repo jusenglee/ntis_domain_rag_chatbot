@@ -79,21 +79,14 @@ def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
 
     for p in points:
         payload = _get_payload(p)
-        if not isinstance(payload, dict) or not payload:
+        pid = _normalize_pjt_id(payload.get(TOP_PJT_ID_KEYS))
+        if not pid or pid in seen:
             continue
+        out.append(pid)
+        seen.add(pid)
 
-        for k in TOP_PJT_ID_KEYS:
-            if k not in payload:
-                continue
-            pid = _normalize_pjt_id(payload.get(k))
-            if not pid or pid in seen:
-                continue
-
-            out.append(pid)
-            seen.add(pid)
-
-            if len(out) >= max_ids:
-                return out
+        if len(out) >= max_ids:
+            return out
 
     return out
 

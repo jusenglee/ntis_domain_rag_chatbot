@@ -408,7 +408,7 @@ def _qdrant_hybrid_query_once(
             query_filter=query_filter,
             timeout=int(_DEFAULT_QDRANT_TIMEOUT),
         )
-        logger.warning(f"[retrieval] hybrid query_points res: {res}")
+        #logger.warning(f"[retrieval] hybrid query_points res: {res}")
     except Exception as e:  # pragma: no cover
         logger.warning(f"[retrieval] hybrid query_points failed: {e}")
         return None
