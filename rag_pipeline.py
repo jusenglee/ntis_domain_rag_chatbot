@@ -2399,49 +2399,6 @@ def _run_rag_with_vectors(
         or (qa_conf >= search_filter_min_conf)
     )
 
-    title_filter_applied_to = None
-    if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
-        title_filter_applied_to = "project/perf"
-    tag_filter_applied_to = None
-    if (project_tag_filter or perf_tag_filter) and (
-        plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
-    ):
-        tag_targets: list[str] = []
-        if project_tag_filter:
-            tag_targets.append("project")
-        if perf_tag_filter:
-            tag_targets.append("perf")
-        tag_filter_applied_to = "/".join(tag_targets) if tag_targets else None
-
-    log_kv(
-        "RAG.FILTERS",
-        strategy_version=SEARCH_STRATEGY_VERSION,
-        org_terms=org_terms,
-        org_role=org_role,
-        people_terms=people_terms,
-        people_ids=people_ids,
-        gender_terms=gender_terms,
-        people_org_terms=people_org_terms,
-        year_from=year_from,
-        year_to=year_to,
-        perf_types=perf_types,
-        keywords=keyword_terms,
-        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
-        title_terms=title_terms,
-        tag_filters=list(getattr(it, "tag_filters", []) or []),
-        org_filter=str(org_filter) if org_filter is not None else None,
-        participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
-        people_filter=str(people_filter) if people_filter is not None else None,
-        perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
-        title_filter=str(title_filter) if title_filter is not None else None,
-        project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
-        generic_tag_filter=str(generic_tag_filter_raw) if generic_tag_filter_raw is not None else None,
-        year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
-        perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
-        title_filter_applied_to=title_filter_applied_to,
-        tag_filter_applied_to=tag_filter_applied_to,
-    )
-
     people_relation_disabled = False
     forced_target_cols: Optional[List[str]] = None
     if people_terms and base_route in ("project", "perf") and relation and "people" in set(relation):
@@ -2739,6 +2696,49 @@ def _run_rag_with_vectors(
     if effective_allow:
         filtered = _pick_collections((plan.target_collections or []), effective_allow)
         plan.target_collections = filtered if filtered else list(effective_allow)
+
+    title_filter_applied_to = None
+    if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
+        title_filter_applied_to = "project/perf"
+    tag_filter_applied_to = None
+    if (project_tag_filter or perf_tag_filter) and (
+        plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
+    ):
+        tag_targets: list[str] = []
+        if project_tag_filter:
+            tag_targets.append("project")
+        if perf_tag_filter:
+            tag_targets.append("perf")
+        tag_filter_applied_to = "/".join(tag_targets) if tag_targets else None
+
+    log_kv(
+        "RAG.FILTERS",
+        strategy_version=SEARCH_STRATEGY_VERSION,
+        org_terms=org_terms,
+        org_role=org_role,
+        people_terms=people_terms,
+        people_ids=people_ids,
+        gender_terms=gender_terms,
+        people_org_terms=people_org_terms,
+        year_from=year_from,
+        year_to=year_to,
+        perf_types=perf_types,
+        keywords=keyword_terms,
+        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        title_terms=title_terms,
+        tag_filters=list(getattr(it, "tag_filters", []) or []),
+        org_filter=str(org_filter) if org_filter is not None else None,
+        participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
+        people_filter=str(people_filter) if people_filter is not None else None,
+        perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
+        title_filter=str(title_filter) if title_filter is not None else None,
+        project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
+        generic_tag_filter=str(generic_tag_filter_raw) if generic_tag_filter_raw is not None else None,
+        year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
+        perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
+        title_filter_applied_to=title_filter_applied_to,
+        tag_filter_applied_to=tag_filter_applied_to,
+    )
 
     strategy_key = build_strategy_key(action, plan.mode)
     mode_policy = get_mode_policy(plan.mode)
