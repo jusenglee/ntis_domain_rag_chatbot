@@ -726,12 +726,28 @@ def _call_dense_retrieve_hybrid_multi(
         **common_kwargs,
     )
 
+def _attach_collection(p: Any, col: str) -> Any:
+    if p is None or not col:
+        return p
+    if isinstance(p, dict):
+        payload = p.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("_collection", col)
+        p["payload"] = payload
+        p.setdefault("_collection", col)
+        return p
+    setattr(p, "_collection", col)
+    payload = getattr(p, "payload", None)
+    if not isinstance(payload, dict):
+        payload = {}
+        setattr(p, "payload", payload)
+    payload.setdefault("_collection", col)
+    return p
+
 def _ensure_collection_mark(points: List[Any], col: str) -> None:
     for p in points or []:
-        setattr(p, "_collection", col)
-        pl = getattr(p, "payload", None)
-        if isinstance(pl, dict):
-            pl.setdefault("_collection", col)
+        _attach_collection(p, col)
 
 def _apply_dense_threshold(
     sr: Dict[str, Any],
@@ -820,10 +836,21 @@ def _apply_dense_threshold(
             )
 
 def _resolve_collection(p: Any, payload: Optional[dict] = None) -> str:
-    pl = payload if payload is not None else getattr(p, "payload", None) or {}
+    if payload is not None:
+        pl = payload
+    elif isinstance(p, dict):
+        pl = p.get("payload", None)
+    else:
+        pl = getattr(p, "payload", None)
+    pl = pl or {}
     if not isinstance(pl, dict):
         pl = {}
-    col = pl.get("_collection") or getattr(p, "_collection", None)
+    col = pl.get("_collection")
+    if not col:
+        if isinstance(p, dict):
+            col = p.get("_collection")
+        else:
+            col = getattr(p, "_collection", None)
     return str(col) if col else ""
 
 # -------------------------
