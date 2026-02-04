@@ -421,19 +421,14 @@ async def _run_question_analysis(
         "- 다음 중 하나라도 있으면 관계형 질의입니다:\n"
         "  * 사람/기관(고유명) + (참여/소속/연관/목록/과제/성과/논문/특허/SW/보고서 등)\n"
         "  * 'OOO의 과제', 'OOO 연구자의 논문', 'OO기관 성과' 같은 소유/관계 표현\n"
-        "- 관계형 질의는 SEARCH 금지. mode는 LOOKUP 또는 JOIN만 사용.\n"
-        "- head는 '질문의 출발점 엔티티'로 고정:\n"
-        "  * 연구자 이름/연구자ID가 출발점이면 head=people\n"
-        "  * 기관명/기관ID가 출발점이면 head=org\n"
-        "  * 과제가 출발점이면 head=project\n"
-        "  * 성과가 출발점이면 head=perf\n"
-        "- relation은 반드시 설정:\n"
-        "  * people -> project/perf: people_project 또는 people_perf\n"
-        "  * org -> project/perf: org_project 또는 org_perf\n"
-        "  * project <-> perf: project_perf 또는 perf_project\n"
-        "- JOIN은 다음 조건에서만 사용:\n"
-        "  * 사람/기관의 ID(연구자번호/기관코드 등)가 있고, 추가 조건(연도/유형 등)까지 있어 2단계가 유리할 때\n"
-        "  * 그 외에는 LOOKUP\n\n"
+        "- 관계형 질의라도 기본 mode는 LOOKUP (컬렉션 내 필터로 해결). SEARCH 금지.\n"
+        "- prtcp_mp/prtcp_org가 모든 데이터에 포함되는 경우 JOIN 사용 금지.\n"
+        "- head는 '출발점 엔티티'가 아니라 '목표 데이터'로 결정:\n"
+        "  * 과제/프로젝트 목록/통계/상세면 head=project\n"
+        "  * 성과(논문/특허/SW/보고서 등) 목록/통계/상세면 head=perf\n"
+        "  * 연구자/기관 자체 상세/식별 요청이면 head=people/org\n"
+        "- relation은 기본 null. 예외적으로 project<->perf 관계가 명확할 때만 설정:\n"
+        "  * project_perf, perf_project\n\n"
     
         "D) 목록/통계/다운로드/필터 중심 조회이면\n"
         "- mode=LOOKUP\n\n"
@@ -446,25 +441,24 @@ async def _run_question_analysis(
         "[Relation enum]\n"
         "====================\n"
         "relation은 아래 중 하나 또는 null:\n"
-        "- project_perf, perf_project\n"
-        "- people_project, project_people\n"
-        "- org_project, project_org\n"
-        "- people_perf, perf_people\n"
-        "- org_perf, perf_org\n\n"
+        "- project_perf, perf_project\n\n"
     
         "====================\n"
         "[ids_map 규칙]\n"
         "====================\n"
         "ids_map은 dict이며, 키는 아래 허용 키만 사용합니다. 값은 문자열 배열입니다.\n"
-        "허용 키 예시: pjt_id, researcher_id, org_id, doi, issn, eissn, pissn, patent_reg_no, patent_app_no, paper_id, perf_id, rst_id\n"
+        "허용 키 예시: pjt_id, pjt_no, person_no(참여인력 hm_id), org_id, org_code, biz_no,\n"
+        "doi, issn, eissn, pissn, patent_reg_no, patent_app_no, paper_id, perf_id, rst_id\n"
         "추출하지 못하면 빈 dict로 둡니다.\n\n"
     
         "====================\n"
         "[filters 규칙]\n"
         "====================\n"
         "filters는 dict입니다. 필요한 것만 포함합니다.\n"
-        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords\n"
-        "관계형 질의에서 researcher_name/org_name이 잡히면 반드시 filters에 포함합니다.\n\n"
+        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords,\n"
+        "participant_researcher_name, participant_researcher_id,\n"
+        "participant_org_name, lead_org_name, performing_org_name, org_role\n"
+        "관계형 질의에서 참여인력/참가기관이 잡히면 participant_* 키를 우선 사용합니다.\n\n"
     
         "====================\n"
         "[tag_filters 매핑 규칙]\n"
@@ -476,14 +470,15 @@ async def _run_question_analysis(
         "5) 연구보고서 => IRD_NAI_RI_RSCH_RPT\n"
         "6) 시설장비 => IRD_NAI_RI_FCLT_EQUIP\n"
         "7) 기술요약 => IRD_NAI_RI_TECH_INFO\n"
-        "8) 모르면 tag_filters 생략 가능(단, PROJECT/PERFORMANCE가 명확하면 채우는 쪽 우선)\n\n"
+        "8) 성과 키워드(논문/특허/SW/보고서 등)가 있으면 성과 태그를 우선 적용\n"
+        "9) 모르면 tag_filters 생략 가능(단, PROJECT/PERFORMANCE가 명확하면 채우는 쪽 우선)\n\n"
     
         "====================\n"
         "[retrieval_query 생성 규칙]\n"
         "====================\n"
         "retrieval_query는 검색 최적화용 짧은 쿼리입니다.\n"
         "- 핵심 개념 5개 이내, 최대 120자\n"
-        "- 불필요한 기능어 제거: '연구자', '참여한', '목록', '조회', '알려줘', '무엇', '어떤' 등은 되도록 제외\n"
+        "- 불필요한 기능어 제거: '연구자', '참여한', '참여', '소속', '연관', '목록', '조회', '알려줘', '무엇', '어떤' 등은 되도록 제외\n"
         "- 사람/기관명이 있으면 반드시 포함\n"
         "- 연도 범위가 있으면 포함(예: '2018~2020')\n\n"
     
@@ -1201,11 +1196,29 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
         org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
         if org_terms_hint:
             normalized_intent.org_terms = org_terms_hint
+        participant_people_terms = _normalize_hint_terms(filters.get("participant_researcher_name"))
         people_terms_hint = _normalize_hint_terms(
             filters.get("researcher_name") or filters.get("people_name")
         )
+        people_terms_hint = _normalize_hint_terms([*participant_people_terms, *people_terms_hint])
         if people_terms_hint:
             normalized_intent.people_terms = people_terms_hint
+        participant_people_ids = _normalize_hint_terms(filters.get("participant_researcher_id"))
+        if participant_people_ids:
+            normalized_intent.ids_map = _merge_ids_map(
+                getattr(normalized_intent, "ids_map", {}),
+                {"person_no": participant_people_ids},
+            )
+        participant_org_terms = _normalize_hint_terms(filters.get("participant_org_name"))
+        lead_org_terms = _normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+        if participant_org_terms:
+            normalized_intent.org_terms = participant_org_terms
+            if not getattr(normalized_intent, "org_role", None):
+                normalized_intent.org_role = "participant"
+        if lead_org_terms:
+            normalized_intent.org_terms = lead_org_terms
+            if not getattr(normalized_intent, "org_role", None):
+                normalized_intent.org_role = "performer"
         year_terms_hint = _normalize_hint_terms(
             [filters.get("year_from"), filters.get("year_to")]
         )

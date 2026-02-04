@@ -269,7 +269,7 @@ TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", 
 
 COUNT_CUES = ["건수", "몇건", "통계", "count", "총 몇", "총몇", "몇 개", "몇개"]
 DETAIL_CUES = ["상세", "세부", "자세히", "정보", "내용", "설명", "프로필"]
-LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘"]
+LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘", "이력", "내역"]
 
 
 def pick_perf_tag_filters(q: str) -> List[str]:
@@ -625,10 +625,7 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
     if base_route == "project":
         if has_perf:
             return ("project", "perf")
-        if wants_people:
-            return ("project", "people")
-        if wants_org:
-            return ("project", "org")
+        # 사람/기관은 prtcp_mp/prtcp_org로 단일 컬렉션 처리 (JOIN 비활성화)
         return None
 
     if base_route == "perf":
@@ -713,7 +710,15 @@ def _apply_affiliation_intent(
     if not people_terms:
         people_terms = _extract_people_terms_for_affiliation(q)
 
-    return people_terms, org_terms, ("people", "org")
+    return people_terms, org_terms, None
+
+
+def _strip_non_join_relation(relation: Optional[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
+    if not relation:
+        return None
+    if any(part in ("people", "org") for part in relation):
+        return None
+    return relation
 
 
 @dataclass
@@ -1183,6 +1188,7 @@ def classify_query(
     relation = _parse_relation(plan.get("relation"))
     if relation not in RELATION_ROUTE_TABLES:
         relation = None
+    relation = _strip_non_join_relation(relation)
 
     intent = str(plan.get("intent") or "").strip().lower()
     if intent not in ("support", "id", "filter", "topic", "content"):
@@ -1197,6 +1203,8 @@ def classify_query(
 
     action = str(plan.get("action") or "").strip().lower()
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
+        action = ""
+    if not action or (action == "relation" and relation is None):
         if base_route == "support":
             action = "support"
         elif relation is not None:
@@ -1278,6 +1286,7 @@ def classify_query(
         ids_map=ids_map,
         relation=relation,
     )
+    relation = _strip_non_join_relation(relation)
 
     return QueryIntent(
         base_route=base_route,
