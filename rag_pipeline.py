@@ -1393,7 +1393,12 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
         return "search", "topic_search"
     return "search", "default"
 
-def _build_plan(it: NormalizedIntent) -> QueryPlan:
+def _build_plan(
+    it: NormalizedIntent,
+    *,
+    preferred_mode: Optional[str] = None,
+    preferred_mode_source: Optional[str] = None,
+) -> Tuple[QueryPlan, str]:
     # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
     # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
     # 2) 교집합이 비면 allowlist를 우선(fallback) 적용한다.
@@ -1441,41 +1446,26 @@ def _build_plan(it: NormalizedIntent) -> QueryPlan:
     rel = it.relation
     output_type = getattr(it, "output_type", None)
 
-    mode, mode_reason = _select_mode_policy(it)
-
-    if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
-        target_cols = _resolve_relation_target_cols(rel, reason="people_project_lookup")
-        return QueryPlan(
-            mode="lookup",
-            base_route=base_route,
-            action=action,
-            relation=rel,
-            output_type=output_type,
-            target_collections=target_cols if target_cols else _default_target_collections(),
-            filters={},
-        )
+    if preferred_mode:
+        mode = preferred_mode
+        mode_reason = f"planner:{preferred_mode_source or 'mode'}"
+    else:
+        mode, mode_reason = _select_mode_policy(it)
 
     if rel:
-        target_cols = _resolve_relation_target_cols(rel, reason="join_relation")
-        return QueryPlan(
-            mode="join",
-            base_route=base_route,
-            action=action,
-            relation=rel,
-            output_type=output_type,
-            target_collections=target_cols if target_cols else _default_target_collections(),
-            filters={},
-        )
+        target_cols = _resolve_relation_target_cols(rel, reason="relation_target")
+    else:
+        target_cols = _default_target_collections()
 
     return QueryPlan(
         mode=mode,
         base_route=base_route,
         action=action,
-        relation=None,
+        relation=rel,
         output_type=output_type,
-        target_collections=_default_target_collections(),
+        target_collections=target_cols,
         filters={},
-    )
+    ), mode_reason
 
 # -------------------------
 # 2-hop JOIN helpers
@@ -2415,31 +2405,76 @@ def _run_rag_with_vectors(
         return None
 
     # plan
-    plan = _build_plan(it)
-    _, policy_reason = _select_mode_policy(it)
-    planner_mode = hint_mode or _planner_action_to_mode(planner_action)
-    planner_first_applied = False
-    forced_lookup_exception = False
-    forced_lookup_reason = None
+    planner_mode = hint_mode
+    planner_mode_source = "qa.mode" if planner_mode else None
+    if not planner_mode:
+        planner_mode = _planner_action_to_mode(planner_action)
+        planner_mode_source = "qa.action" if planner_mode else None
+    if planner_mode not in ("search", "lookup", "join"):
+        if planner_mode:
+            log_kv(
+                "RAG.PLAN.PLANNER_MODE_INVALID",
+                level="warning",
+                planner_mode=planner_mode,
+                planner_mode_source=planner_mode_source,
+                planner_action=planner_action,
+            )
+        planner_mode = None
+        planner_mode_source = None
 
-    if planner_mode in ("search", "lookup", "join"):
-        plan.mode = planner_mode
-        planner_first_applied = True
+    plan, policy_reason = _build_plan(
+        it,
+        preferred_mode=planner_mode,
+        preferred_mode_source=planner_mode_source,
+    )
+    planner_first_applied = bool(planner_mode)
+    mode_override_applied = False
+    mode_override_reason = None
+    mode_override_from = None
+    mode_override_to = None
 
-    if _has_explicit_identifiers(it) and plan.mode != "lookup":
-        forced_lookup_exception = True
-        forced_lookup_reason = "explicit_identifiers"
+    def _apply_mode_override(
+        enforced_mode: str,
+        *,
+        reason: str,
+        **extra: Any,
+    ) -> bool:
+        nonlocal mode_override_applied, mode_override_reason, mode_override_from, mode_override_to
+        if plan.mode == enforced_mode:
+            return False
+        mode_override_applied = True
+        mode_override_reason = reason
+        mode_override_from = plan.mode
+        mode_override_to = enforced_mode
         log_kv(
-            "RAG.PLAN.MODE_ENFORCE",
+            "RAG.PLAN.MODE_OVERRIDE",
             level="warning",
-            enforced_mode="lookup",
+            enforced_mode=enforced_mode,
             requested_mode=plan.mode,
-            reason=forced_lookup_reason,
+            reason=reason,
+            **extra,
+        )
+        plan.mode = enforced_mode
+        return True
+
+    if planner_mode and relation == ("people", "project") and list(getattr(it, "people_terms", []) or []):
+        _apply_mode_override(
+            "lookup",
+            reason="people_project_lookup",
+            action=action,
+            base_route=base_route,
+            relation=relation,
+            people_terms=people_terms[:4],
+        )
+
+    if planner_mode and _has_explicit_identifiers(it):
+        _apply_mode_override(
+            "lookup",
+            reason="explicit_identifiers",
             action=action,
             base_route=base_route,
             relation=relation,
         )
-        plan.mode = "lookup"
     if hinted_cols:
         plan.target_collections = hinted_cols
     if people_relation_disabled:
@@ -2565,8 +2600,10 @@ def _run_rag_with_vectors(
             "planner_first_applied": planner_first_applied,
             "planner_mode": planner_mode,
             "planner_action": planner_action,
-            "forced_lookup_exception": forced_lookup_exception,
-            "forced_lookup_reason": forced_lookup_reason,
+            "mode_override_applied": mode_override_applied,
+            "mode_override_reason": mode_override_reason,
+            "mode_override_from": mode_override_from,
+            "mode_override_to": mode_override_to,
         },
         "filter": {
             "search_filter_enabled": search_filter_enabled,
@@ -2611,8 +2648,10 @@ def _run_rag_with_vectors(
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
-        forced_lookup_exception=int(forced_lookup_exception),
-        forced_lookup_reason=forced_lookup_reason,
+        mode_override_applied=int(mode_override_applied),
+        mode_override_reason=mode_override_reason,
+        mode_override_from=mode_override_from,
+        mode_override_to=mode_override_to,
         lookup_filter_policy=lookup_filter_policy,
         search_filter_enabled=int(search_filter_enabled),
         lookup_filter_enabled=int(lookup_filter_enabled),
