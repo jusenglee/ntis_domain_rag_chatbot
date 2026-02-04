@@ -483,7 +483,8 @@ async def _run_question_analysis(
         "6) 시설장비 => IRD_NAI_RI_FCLT_EQUIP\n"
         "7) 기술요약 => IRD_NAI_RI_TECH_INFO\n"
         "8) 성과 키워드(논문/특허/SW/보고서 등)가 있으면 성과 태그를 우선 적용\n"
-        "9) 모르면 tag_filters 생략 가능(단, PROJECT/PERFORMANCE가 명확하면 채우는 쪽 우선)\n\n"
+        "9) relation이 project_perf/perf_project면 tag_filters는 IRD_NAI_PJT_INFO\n"
+        "10) 모르면 tag_filters 생략 가능(단, PROJECT/PERFORMANCE가 명확하면 채우는 쪽 우선)\n\n"
     
         "====================\n"
         "[retrieval_query 생성 규칙]\n"
@@ -1257,6 +1258,15 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
                 normalized_intent.perf_tag_filters = tag_filters_hint
             if question_analysis.head == "project":
                 normalized_intent.project_tag_filters = tag_filters_hint
+        relation_text = str(question_analysis.relation or "").strip().lower()
+        existing_tag_filters = _normalize_hint_terms(getattr(normalized_intent, "tag_filters", None))
+        if not tag_filters_hint and not existing_tag_filters and relation_text == "project_perf":
+            default_tag_filters = ["IRD_NAI_PJT_INFO"]
+            normalized_intent.tag_filters = default_tag_filters
+            if question_analysis.head == "perf":
+                normalized_intent.perf_tag_filters = default_tag_filters
+            if question_analysis.head == "project":
+                normalized_intent.project_tag_filters = default_tag_filters
         perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
         if perf_types_hint:
             normalized_intent.perf_types = perf_types_hint
