@@ -1862,6 +1862,7 @@ def _run_rag_with_vectors(
     _timing_put(timings, "phase.kw_det", time.time() - t0)
 
     intent_from_payload = False
+    perf_types_source: Optional[str] = None
     planner_confidence: Optional[float] = None
     it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
     if it is None:
@@ -1915,6 +1916,10 @@ def _run_rag_with_vectors(
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
             )
+            intent_perf_types = list(getattr(it, "perf_types", []) or [])
+            if intent_perf_types:
+                perf_types_source = "intent"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
         else:
             # intent (hint는 query_intent에서 흡수)
             domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
@@ -1960,6 +1965,10 @@ def _run_rag_with_vectors(
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
             )
+            intent_perf_types = list(getattr(it, "perf_types", []) or [])
+            if intent_perf_types:
+                perf_types_source = "intent"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
@@ -2006,6 +2015,8 @@ def _run_rag_with_vectors(
             perf_types_hint = _normalize_hint_terms(hint_filters.get("perf_types"))
             if perf_types_hint:
                 it.perf_types = perf_types_hint
+                perf_types_source = "hint"
+                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=perf_types_hint)
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
                 it.keywords = keywords_hint
@@ -2042,6 +2053,8 @@ def _run_rag_with_vectors(
         it.people_terms = payload_people_terms
     if payload_perf_types:
         it.perf_types = payload_perf_types
+        perf_types_source = "payload"
+        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=payload_perf_types)
     if payload_keywords:
         it.keywords = payload_keywords
     if payload_tag_filters:
@@ -2180,6 +2193,12 @@ def _run_rag_with_vectors(
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
     it.perf_types = perf_types
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
+    if perf_types or perf_types_source:
+        log_kv(
+            "RAG.PERF_TYPES.FINAL",
+            source=perf_types_source or "derived",
+            values=perf_types,
+        )
 
     project_title_terms = [
         t.strip()
