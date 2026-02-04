@@ -56,3 +56,97 @@ PERF_TAGS = {
     TAG_RI_FCLT_EQUIP,
     TAG_RI_TECH_INFO,
 }
+
+# -----------------------------
+# Perf type mapping (tag <-> category)
+# -----------------------------
+PERF_TYPE_TAG_TO_CATEGORY = {
+    TAG_RI_PAPER: "논문",
+    TAG_RI_IPR: "특허",
+    TAG_RI_SW: "소프트웨어",
+    TAG_RI_NVR: "생명정보",
+    TAG_RI_ORGSM_INFO: "생물정보",
+    TAG_RI_ORGSM_RES: "생물자원",
+    TAG_RI_COMPOUND: "화합물",
+    TAG_RI_RSCH_RPT: "연구보고서",
+    TAG_RI_FCLT_EQUIP: "시설장비",
+    TAG_RI_TECH_INFO: "기술요약",
+}
+
+PERF_TYPE_CATEGORY_ALIASES = {
+    # 논문
+    "논문": TAG_RI_PAPER,
+    "학술지": TAG_RI_PAPER,
+    "paper": TAG_RI_PAPER,
+    # 특허
+    "특허": TAG_RI_IPR,
+    "patent": TAG_RI_IPR,
+    # 소프트웨어
+    "소프트웨어": TAG_RI_SW,
+    "software": TAG_RI_SW,
+    "sw": TAG_RI_SW,
+    # 연구보고서
+    "연구보고서": TAG_RI_RSCH_RPT,
+    "보고서": TAG_RI_RSCH_RPT,
+    "report": TAG_RI_RSCH_RPT,
+    "rpt": TAG_RI_RSCH_RPT,
+    # 시설장비
+    "시설장비": TAG_RI_FCLT_EQUIP,
+    "시설": TAG_RI_FCLT_EQUIP,
+    "장비": TAG_RI_FCLT_EQUIP,
+    "equipment": TAG_RI_FCLT_EQUIP,
+    "equip": TAG_RI_FCLT_EQUIP,
+    # 기술요약
+    "기술요약": TAG_RI_TECH_INFO,
+    "기술정보": TAG_RI_TECH_INFO,
+    "tech": TAG_RI_TECH_INFO,
+    # 생명정보
+    "생명정보": TAG_RI_NVR,
+    "nvr": TAG_RI_NVR,
+    # 생물정보
+    "생물정보": TAG_RI_ORGSM_INFO,
+    "orgsm": TAG_RI_ORGSM_INFO,
+    # 생물자원
+    "생물자원": TAG_RI_ORGSM_RES,
+    "resource": TAG_RI_ORGSM_RES,
+    # 화합물
+    "화합물": TAG_RI_COMPOUND,
+    "compound": TAG_RI_COMPOUND,
+}
+
+_PERF_TYPE_TAG_ALIASES = {}
+for _tag in PERF_TAGS:
+    _tag_upper = str(_tag).strip().upper()
+    if not _tag_upper:
+        continue
+    _PERF_TYPE_TAG_ALIASES[_tag_upper] = _tag
+    _PERF_TYPE_TAG_ALIASES[_tag_upper.replace("IRD_NAI_", "")] = _tag
+    _PERF_TYPE_TAG_ALIASES[_tag_upper.replace("IRD_", "")] = _tag
+    _PERF_TYPE_TAG_ALIASES[_tag_upper.replace("NAI_", "")] = _tag
+
+
+def _normalize_perf_type_key(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", value.strip().lower())
+
+
+def normalize_perf_types(values: list[object]) -> dict[str, list[str]]:
+    tags: list[str] = []
+    categories: list[str] = []
+    unknown: list[str] = []
+    for raw in values or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        tag = _PERF_TYPE_TAG_ALIASES.get(text.strip().upper())
+        if tag is None:
+            key = _normalize_perf_type_key(text)
+            tag = PERF_TYPE_CATEGORY_ALIASES.get(key)
+        if tag is not None:
+            if tag not in tags:
+                tags.append(tag)
+            category = PERF_TYPE_TAG_TO_CATEGORY.get(tag)
+            if category and category not in categories:
+                categories.append(category)
+            continue
+        unknown.append(text)
+    return {"tags": tags, "categories": categories, "unknown": unknown}

@@ -278,14 +278,11 @@ def _normalize_perf_type_terms(perf_types: List[str]) -> tuple[List[str], List[s
 def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     if qmodels is None or not perf_types:
         return None
-    tags, categories = _normalize_perf_type_terms(perf_types)
-    should: List["qmodels.Condition"] = []
+    # Qdrant perf 컬렉션의 성과 유형은 payload.tag 기준으로 필터링한다.
     key_tag = (os.getenv("RAG_KEY_TAG", "tag").strip() or "tag")
-    if tags:
-        should.append(qmodels.FieldCondition(key=key_tag, match=make_match_any(tags)))
-    if categories:
-        should.append(qmodels.FieldCondition(key="category", match=make_match_any(categories)))
-    return qmodels.Filter(should=should) if should else None
+    return qmodels.Filter(
+        must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(perf_types))]
+    )
 
 def _build_prtcp_mp_nested_filter(
         *,

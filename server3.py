@@ -34,6 +34,7 @@ from rag_store import build_rag_objects
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
+from rag_parts.constants import normalize_perf_types
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from settings import (
     REDIS_URL,
@@ -1273,7 +1274,10 @@ def _apply_question_analysis_to_intent(normalized_intent, question_analysis: Que
                 normalized_intent.project_tag_filters = default_tag_filters
         perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
         if perf_types_hint:
-            normalized_intent.perf_types = perf_types_hint
+            perf_type_norm = normalize_perf_types(perf_types_hint)
+            normalized_intent.perf_types = (
+                perf_type_norm["tags"] or perf_type_norm["unknown"]
+            )
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
             normalized_intent.keywords = keywords_hint
