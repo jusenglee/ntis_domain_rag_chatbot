@@ -155,6 +155,22 @@ def _normalize_none_string(value: Any) -> Any:
         return {key: _normalize_none_string(item) for key, item in value.items()}
     return value
 
+def _resolve_title_from_payload(payload: Dict[str, Any]) -> str:
+    for key in ("title_text", "title1", "title2", "title"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text == "None":
+            continue
+        return text
+    return ""
+
+def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
+    preferred_title = _resolve_title_from_payload(mapped_doc)
+    if preferred_title:
+        mapped_doc["title"] = preferred_title
+
 class ContentCategory(str, Enum):
 
     PROJECT = "project"          # 과제/연구개발
@@ -796,7 +812,7 @@ class CustomRAGRetriever(BaseModel):
                 score = 0.0
 
             rag_data = {
-                "title": hit_data.get("title1") or hit_data.get("title_text"),
+                "title": _resolve_title_from_payload(hit_data),
                 "source_index" : idx,
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
@@ -1679,6 +1695,7 @@ def summarize_documents_headlines(
         mapped_doc = _safe_map_doc(doc, context="summarize_documents_headlines")
         if not mapped_doc:
             continue
+        _apply_title_preference(mapped_doc)
         source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
@@ -1736,6 +1753,7 @@ def refine_documents_rule_based(
         mapped_doc = _safe_map_doc(doc, context="refine_documents_rule_based")
         if not mapped_doc:
             continue
+        _apply_title_preference(mapped_doc)
 
         source_idx = doc.get("source_index")
 
