@@ -222,7 +222,6 @@ def _point_summary(p: Any) -> Dict[str, Any]:
 
     title = pick(
         pl.get("title_text"),
-        pl.get("title"),
         pl.get("title1"),
         pl.get("title2"),
         meta.get("kor_pjt_nm"),
@@ -454,7 +453,6 @@ def _pick_nested_first(pl: Dict[str, Any], list_key: str, field_key: str) -> str
 def _payload_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     return _pick_first(
         pl.get("title_text"),
-        pl.get("title"),
         pl.get("title1"),
         pl.get("title2"),
         meta.get("kor_pjt_nm"),
@@ -594,11 +592,11 @@ def build_context_list_light(
 # Output type -> fieldset
 # -------------------------
 _OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
-    "list": ("title", "org", "year", "id"),
-    "detail": ("title", "meta_detail", "summary"),
+    "list": ("title_text", "org", "year", "id"),
+    "detail": ("title_text", "meta_detail", "summary"),
     "stats": ("aggregation_keys",),
-    "summary": ("title", "meta_basic", "summary", "content"),
-    "relation": ("title", "relation", "id"),
+    "summary": ("title_text", "meta_basic", "summary", "content"),
+    "relation": ("title_text", "relation", "id"),
 }
 
 
@@ -926,7 +924,7 @@ def _to_text(v: object) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
-    title = _to_text(pl.get("title_text") or pl.get("title") or pl.get("title1") or "")
+    title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
     meta_title = _to_text(
         meta.get("kor_pjt_nm")
         or meta.get("eng_pjt_nm")
@@ -1232,7 +1230,7 @@ def _rerank_compare_summary(points: List[Any], total_key: str, *, topn: int) -> 
             "tag": pl.get("tag"),
             total_key: pl.get(total_key),
             "_final_total": pl.get("_final_total"),
-            "title": _clip_text(pl.get("title_text") or pl.get("title") or "", 120),
+            "title": _clip_text(_payload_title(pl, _get_meta(pl)), 120),
         })
     return out
 
