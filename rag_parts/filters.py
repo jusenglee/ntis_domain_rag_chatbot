@@ -546,18 +546,9 @@ def build_project_title_filter(terms: List[str]) -> Optional[Any]:
         return None
 
     keys = [
-        "kor_pjt_nm",
-        "eng_pjt_nm",
         "title1",
         "title2",
         "title_text",
-        "meta_basic.kor_pjt_nm",
-        "meta_basic.eng_pjt_nm",
-        "meta_basic.title1",
-        "meta_basic.title2",
-        "meta_basic.title_text",
-        "meta_basic.pjt_nm",
-        "pjt_nm",
     ]
     should: List["qmodels.Condition"] = []
     for key in keys:
