@@ -145,6 +145,15 @@ def _deserialize_history(payload: Any) -> List[BaseMessage]:
             history.append(AIMessage(content=content))
     return history
 
+def _normalize_none_string(value: Any) -> Any:
+    if isinstance(value, str) and value.strip() == "None":
+        return None
+    if isinstance(value, list):
+        return [_normalize_none_string(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_none_string(item) for key, item in value.items()}
+    return value
+
 class ContentCategory(str, Enum):
 
     PROJECT = "project"          # 과제/연구개발
@@ -374,7 +383,8 @@ async def _run_question_analysis(
         "2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.\n"
         "3) 모호하면 문장으로 회피하지 말고(confidence 낮춤), 관련 필드는 null/[] 처리.\n"
         "4) related_docs는 FOLLOW_UP일 때만 채우고, 아니면 [] 입니다.\n"
-        "5) researchers/organizations는 '특정' 대상이 식별될 때만 포함합니다. (없으면 [])\n\n"
+        "5) researchers/organizations는 '특정' 대상이 식별될 때만 포함합니다. (없으면 [])\n"
+        "6) 값이 없으면 문자열 'None'을 쓰지 말고 반드시 null/[]로 표기합니다.\n\n"
     
         "====================\n"
         "[Category 분류 규칙]\n"
@@ -533,6 +543,8 @@ async def _run_question_analysis(
             "prev_context": prev_context_str or "없음",
             "question": question
         })
+        normalized_payload = _normalize_none_string(result.model_dump())
+        result = QuestionAnalysis.model_validate(normalized_payload)
         result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
         log_section(
