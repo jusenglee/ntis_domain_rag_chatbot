@@ -109,6 +109,33 @@ def _normalize_tag_value(tag: object) -> str:
 
 PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
 PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
+
+def _classify_tag_family(tag: object) -> str:
+    norm = _normalize_tag_value(tag)
+    if not norm:
+        return "other"
+    if norm.startswith("NAI_PJT_") or norm in PROJECT_TAGS_NORM:
+        return "project"
+    if norm.startswith("NAI_RI_") or norm in PERF_TAGS_NORM:
+        return "perf"
+    return "other"
+
+def _split_tag_filters_by_family(tag_filters: Iterable[object]) -> tuple[list[str], list[str], list[str]]:
+    project_tags: list[str] = []
+    perf_tags: list[str] = []
+    other_tags: list[str] = []
+    for tag in (tag_filters or []):
+        tag_str = str(tag).strip()
+        if not tag_str:
+            continue
+        family = _classify_tag_family(tag_str)
+        if family == "project":
+            project_tags.append(tag_str)
+        elif family == "perf":
+            perf_tags.append(tag_str)
+        else:
+            other_tags.append(tag_str)
+    return project_tags, perf_tags, other_tags
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -1060,23 +1087,21 @@ def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: 
         elif strict_ids:
             sc -= 15.0
 
-    # perf tag filters (exact) - base_route와 무관하게 적용
-    if it.perf_tag_filters:
-        pl = getattr(p, "payload", None) or {}
-        if not isinstance(pl, dict):
-            pl = {}
-        tag = str(pl.get("tag") or "")
+    pl = getattr(p, "payload", None) or {}
+    if not isinstance(pl, dict):
+        pl = {}
+    tag = str(pl.get("tag") or "")
+    col = _resolve_collection(p, pl)
+
+    # perf tag filters (exact) - perf 컬렉션에만 적용
+    if it.perf_tag_filters and col == COL_PERF:
         for t in list(it.perf_tag_filters)[:8]:
             if str(t) == tag:
                 sc += 90.0
                 break
 
-    # project tag filters (exact) - base_route와 무관하게 적용
-    if it.project_tag_filters:
-        pl = getattr(p, "payload", None) or {}
-        if not isinstance(pl, dict):
-            pl = {}
-        tag = str(pl.get("tag") or "")
+    # project tag filters (exact) - project 컬렉션에만 적용
+    if it.project_tag_filters and col == COL_PROJECT:
         for t in list(it.project_tag_filters)[:8]:
             if str(t) == tag:
                 sc += 80.0
@@ -2270,10 +2295,20 @@ def _run_rag_with_vectors(
     it.keywords = keyword_terms
     kws = keyword_terms
 
-    # perf tag filter (필요 시)
-    perf_tag_filter = _build_tag_only_filter(list(it.perf_tag_filters)) if it.perf_tag_filters else None
-    project_tag_filter = _build_tag_only_filter(list(it.project_tag_filters)) if it.project_tag_filters else None
-    generic_tag_filter = _build_tag_only_filter(list(it.tag_filters)) if it.tag_filters else None
+    # perf/project tag filter (필요 시) + generic tag 분리 적용
+    generic_tag_filter_raw = _build_tag_only_filter(list(it.tag_filters)) if it.tag_filters else None
+
+    generic_project_tags, generic_perf_tags, generic_other_tags = _split_tag_filters_by_family(
+        list(it.tag_filters or [])
+    )
+    project_tag_filters_for_col = list(it.project_tag_filters or []) + generic_project_tags + generic_other_tags
+    perf_tag_filters_for_col = list(it.perf_tag_filters or []) + generic_perf_tags + generic_other_tags
+    project_tag_filter = (
+        _build_tag_only_filter(project_tag_filters_for_col) if project_tag_filters_for_col else None
+    )
+    perf_tag_filter = (
+        _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
+    )
 
     hint_people_filters = _normalize_hint_terms(
         hint_filters.get("researcher_name") or hint_filters.get("people_name")
@@ -2307,6 +2342,16 @@ def _run_rag_with_vectors(
     title_filter_applied_to = None
     if title_filter and (plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)):
         title_filter_applied_to = "project/perf"
+    tag_filter_applied_to = None
+    if (project_tag_filter or perf_tag_filter) and (
+        plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
+    ):
+        tag_targets: list[str] = []
+        if project_tag_filter:
+            tag_targets.append("project")
+        if perf_tag_filter:
+            tag_targets.append("perf")
+        tag_filter_applied_to = "/".join(tag_targets) if tag_targets else None
 
     log_kv(
         "RAG.FILTERS",
@@ -2330,10 +2375,11 @@ def _run_rag_with_vectors(
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
         project_title_filter=str(title_filter) if title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
-        generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
+        generic_tag_filter=str(generic_tag_filter_raw) if generic_tag_filter_raw is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
+        tag_filter_applied_to=tag_filter_applied_to,
     )
 
     people_relation_disabled = False
@@ -3139,8 +3185,6 @@ def _run_rag_with_vectors(
                     base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
-                if generic_tag_filter:
-                    base_filter = _and_filter(base_filter, generic_tag_filter)
             elif col_name == COL_PERF:
                 if title_filter and (
                     plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
@@ -3150,8 +3194,6 @@ def _run_rag_with_vectors(
                     base_filter = _and_filter(base_filter, people_filter)
                 if perf_tag_filter:
                     base_filter = _and_filter(base_filter, perf_tag_filter)
-                if generic_tag_filter:
-                    base_filter = _and_filter(base_filter, generic_tag_filter)
             return base_filter
 
         def _apply_extra_filters(base_filter: Any) -> Any:
