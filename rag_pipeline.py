@@ -91,7 +91,7 @@ from rag_parts.filters import (
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     build_project_id_filter,
-    build_project_title_filter,
+    build_title_filter,
     JoinFilterInput,
     PerfFilterInput, PeopleFilterInput, OrgFilterInput,
 )
@@ -2261,8 +2261,8 @@ def _run_rag_with_vectors(
         for t in (list(getattr(it, "project_title", None) or []) or [])
         if str(t).strip()
     ]
-    it.project_title = title_terms
-    title_filter = build_project_title_filter(title_terms) if title_terms else None
+    it.project_title = project_title_terms
+    title_filter = build_title_filter(project_title_terms) if project_title_terms else None
 
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
@@ -2328,7 +2328,7 @@ def _run_rag_with_vectors(
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
-        project_title_filter=str(title_filter) if title_filter is not None else None,
+        title_filter=str(title_filter) if title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
         generic_tag_filter=str(generic_tag_filter) if generic_tag_filter is not None else None,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
