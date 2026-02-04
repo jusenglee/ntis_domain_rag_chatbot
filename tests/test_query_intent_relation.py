@@ -14,6 +14,12 @@ from rag_parts.query_intent import (
     relation_target_collections,
     QueryIntent,
 )
+from server3 import (
+    _apply_question_analysis_to_intent,
+    ContentCategory,
+    QuestionAnalysis,
+    QuestionType,
+)
 
 
 class QueryIntentRelationTests(unittest.TestCase):
@@ -94,6 +100,58 @@ class QueryIntentRelationTests(unittest.TestCase):
         )
 
         self.assertEqual(normalized.org_terms, ["농업생명과학연구원"])
+
+    def test_apply_question_analysis_skips_none_years(self) -> None:
+        intent = QueryIntent(
+            base_route="project",
+            relation=None,
+            intent="content",
+            action="content",
+            is_id_query=False,
+            long_query=False,
+            rare_ratio=0.0,
+        )
+        analysis = QuestionAnalysis(
+            category=[ContentCategory.PROJECT],
+            question_type=QuestionType.DEFAULT,
+            related_docs=[],
+            history_summary="",
+            retrieval_query="",
+            confidence=1.0,
+            filters={"year_from": None, "year_to": "None"},
+        )
+
+        _apply_question_analysis_to_intent(intent, analysis)
+
+        self.assertEqual(intent.years, [])
+        self.assertIsNone(getattr(intent, "year_from", None))
+        self.assertIsNone(getattr(intent, "year_to", None))
+
+    def test_apply_question_analysis_skips_null_year_from(self) -> None:
+        intent = QueryIntent(
+            base_route="project",
+            relation=None,
+            intent="content",
+            action="content",
+            is_id_query=False,
+            long_query=False,
+            rare_ratio=0.0,
+        )
+        analysis = QuestionAnalysis(
+            category=[ContentCategory.PROJECT],
+            question_type=QuestionType.DEFAULT,
+            related_docs=[],
+            history_summary="",
+            retrieval_query="",
+            confidence=1.0,
+            filters={"year_from": "null", "year_to": "2020"},
+        )
+
+        _apply_question_analysis_to_intent(intent, analysis)
+
+        self.assertEqual(intent.years, ["2020"])
+        self.assertEqual(getattr(intent, "year_from", None), "2020")
+        self.assertEqual(getattr(intent, "year_to", None), "2020")
 
 
 if __name__ == "__main__":
