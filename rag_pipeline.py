@@ -1030,7 +1030,7 @@ def _count_term_hits(text: str, term: str) -> int:
 def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
     w = w or {}
     tb = _payload_text_bundle(p)
-    w_title = float(w.get("title", 2.0))
+    w_title = float(w.get("title1", 2.0))
     w_flat = float(w.get("flat_text", 0.6))
     w_content = float(w.get("content_text", 1.0))
     w_keyword = float(w.get("keyword_text", 0.8))
@@ -1042,7 +1042,7 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
         kw = kw.strip()
         if not kw:
             continue
-        sc += w_title * min(_count_term_hits(tb["title"], kw), 2)
+        sc += w_title * min(_count_term_hits(tb["title_text"], kw), 2)
         sc += w_flat * min(_count_term_hits(tb["flat_text"], kw), 4)
         sc += w_content * min(_count_term_hits(tb["content_text"], kw), 3)
         sc += w_keyword * min(_count_term_hits(tb["keyword_text"], kw), 3)
@@ -1052,7 +1052,7 @@ def _keyword_score(p: Any, kws: List[str], w: Dict[str, float]) -> float:
 
 def _keyword_exact_match_hits(p: Any, kws: List[str]) -> int:
     tb = _payload_text_bundle(p)
-    title = (tb.get("title") or "").lower()
+    title = (tb.get("title_text") or "").lower()
     keyword_text = (tb.get("keyword_text") or "").lower()
     hits = 0
     for kw in (kws or [])[:30]:
@@ -1095,7 +1095,7 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
 
 def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: bool) -> float:
     tb = _payload_text_bundle(p)
-    hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
+    hay = " | ".join([tb["title_text"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
 
     sc = 0.0
 
@@ -1607,7 +1607,7 @@ def _extract_quoted_terms(q: str) -> List[str]:
 
 def _must_contain_terms(p: Any, terms: List[str]) -> bool:
     tb = _payload_text_bundle(p)
-    hay = " | ".join([tb["title"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
+    hay = " | ".join([tb["title_text"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
     for t in (terms or []):
         if t.strip().lower() not in hay:
             return False

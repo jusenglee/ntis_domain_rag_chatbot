@@ -1091,7 +1091,6 @@ def build_context_docstyle(
             meta = _merge_meta(pl)
         title = _safe_str(
             pl.get("title_text")
-            or pl.get("title")
             or pl.get("title1")
             or pl.get("title2")
             or meta.get("kor_pjt_nm")
