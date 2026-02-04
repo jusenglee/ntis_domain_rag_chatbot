@@ -1939,6 +1939,11 @@ def _run_rag_with_vectors(
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
                 it.keywords = keywords_hint
+            project_title_hint = _normalize_hint_terms(
+                hint_filters.get("project_title") or hint_filters.get("project_name")
+            )
+            if project_title_hint:
+                it.keywords = list(dict.fromkeys([*list(it.keywords or []), *project_title_hint]))
 
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
     payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
@@ -1949,6 +1954,9 @@ def _run_rag_with_vectors(
     payload_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "tag_filters", None))
     payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
     payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
+    payload_project_title = _normalize_hint_terms(
+        _get_attr(intent_payload, "project_title", None) or _get_attr(intent_payload, "project_name", None)
+    )
     payload_year_from = _get_attr(intent_payload, "year_from", None)
     payload_year_to = _get_attr(intent_payload, "year_to", None)
     payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
@@ -1971,6 +1979,8 @@ def _run_rag_with_vectors(
         it.perf_tag_filters = payload_perf_tag_filters
     if payload_project_tag_filters:
         it.project_tag_filters = payload_project_tag_filters
+    if payload_project_title:
+        it.keywords = list(dict.fromkeys([*list(it.keywords or []), *payload_project_title]))
     if payload_year_from is not None:
         it.year_from = str(payload_year_from).strip() or None
     if payload_year_to is not None:
