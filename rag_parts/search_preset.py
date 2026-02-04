@@ -324,18 +324,18 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             preset.use_org_filter = True
             preset.org_lex_boost = True
             # org_name_norm을 lexical에 포함(가중치 부여)
-            preset.lexical_fields = [
-                "title_text",
-                "content_text",
-                "keyword_text",
-                "flat_text",
-                "category",
-                "title",
+            org_fields = [
                 "org_nm",
-                *PJT_NO_FIELDS,
+                "prtcp_org[].org_nm",
+                "prtcp_mp[].blng_org_nm",
             ]
-            preset.lexical_field_weights["org_nm"] = _f("RAG_W_ORG_NORM", 3.0)
-            preset.lexical_field_weights.setdefault("org_nm", preset.lexical_field_weights["org_nm"])
+            preset.lexical_fields = [
+                *base_fields,
+                *[field for field in org_fields if field not in base_fields],
+            ]
+            org_weight = _f("RAG_W_ORG_NORM", 3.0)
+            for field in org_fields:
+                preset.lexical_field_weights.setdefault(field, org_weight)
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
