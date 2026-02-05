@@ -15,7 +15,7 @@ from rag_parts.query_intent import (
     QueryIntent,
 )
 from server3 import (
-    _apply_question_analysis_to_intent,
+    _build_planner_override_request,
     ContentCategory,
     QuestionAnalysis,
     QuestionType,
@@ -101,12 +101,12 @@ class QueryIntentRelationTests(unittest.TestCase):
 
         self.assertEqual(normalized.org_terms, ["농업생명과학연구원"])
 
-    def test_apply_question_analysis_skips_none_years(self) -> None:
+    def test_build_planner_override_request_when_mode_and_action_conflict(self) -> None:
         intent = QueryIntent(
             base_route="project",
             relation=None,
             intent="content",
-            action="content",
+            action="topic",
             is_id_query=False,
             long_query=False,
             rare_ratio=0.0,
@@ -118,21 +118,21 @@ class QueryIntentRelationTests(unittest.TestCase):
             history_summary="",
             retrieval_query="",
             confidence=1.0,
-            filters={"year_from": None, "year_to": "None"},
+            mode="LOOKUP",
         )
 
-        _apply_question_analysis_to_intent(intent, analysis)
+        override_request = _build_planner_override_request(analysis, intent)
 
-        self.assertEqual(intent.years, [])
-        self.assertIsNone(getattr(intent, "year_from", None))
-        self.assertIsNone(getattr(intent, "year_to", None))
+        self.assertIsNotNone(override_request)
+        self.assertEqual(override_request["requested_mode"], "lookup")
+        self.assertEqual(override_request["current_action"], "topic")
 
-    def test_apply_question_analysis_skips_null_year_from(self) -> None:
+    def test_build_planner_override_request_when_mode_matches_action(self) -> None:
         intent = QueryIntent(
             base_route="project",
             relation=None,
             intent="content",
-            action="content",
+            action="list",
             is_id_query=False,
             long_query=False,
             rare_ratio=0.0,
@@ -144,14 +144,12 @@ class QueryIntentRelationTests(unittest.TestCase):
             history_summary="",
             retrieval_query="",
             confidence=1.0,
-            filters={"year_from": "null", "year_to": "2020"},
+            mode="LOOKUP",
         )
 
-        _apply_question_analysis_to_intent(intent, analysis)
+        override_request = _build_planner_override_request(analysis, intent)
 
-        self.assertEqual(intent.years, ["2020"])
-        self.assertEqual(getattr(intent, "year_from", None), "2020")
-        self.assertEqual(getattr(intent, "year_to", None), "2020")
+        self.assertIsNone(override_request)
 
 
 if __name__ == "__main__":

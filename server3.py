@@ -34,7 +34,6 @@ from rag_store import build_rag_objects
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
-from rag_parts.constants import normalize_perf_types
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from settings import (
     REDIS_URL,
@@ -1131,17 +1130,23 @@ async def build_intent_payload(
     raw_intent = classify_query_intent(
         question,
         kws,
-        domain_hint=question_analysis.head if question_analysis else None,
-        hint=question_analysis.model_dump() if question_analysis else None,
+        hint=planner_hint,
     )
+
+    if planner_hint and question_analysis:
+        override_request = _build_planner_override_request(question_analysis, raw_intent)
+        if override_request:
+            planner_hint["override_request"] = override_request
+            raw_intent = classify_query_intent(
+                question,
+                kws,
+                hint=planner_hint,
+            )
 
     normalized_intent = normalize_intent(
         raw_intent,
         query=question,
         keywords=kws,
-        hint_people_terms=hint_people_terms,
-        hint_org_terms=hint_org_terms,
-        hint_org_role=hint_org_role,
     )
 
     # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
