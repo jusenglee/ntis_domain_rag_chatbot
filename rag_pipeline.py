@@ -91,6 +91,7 @@ from rag_parts.filters import (
     build_year_range_filter,
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
+    make_match_any,
     build_project_id_filter,
     build_title_filter,
     JoinFilterInput,
@@ -1251,6 +1252,27 @@ def _default_target_collections() -> list[str]:
         return allow_list
     return [COL_PROJECT]
 
+
+def _default_target_collections_for_route(base_route: str) -> list[str]:
+    route_defaults = {
+        "project": [COL_PROJECT],
+        "perf": [COL_PERF],
+        "support": [COL_SUPPORT],
+        # people/org 질의는 프로젝트 컬렉션을 기본 엔티티 저장소로 사용
+        "people": [COL_PROJECT],
+        "org": [COL_PROJECT],
+    }
+    desired = list(route_defaults.get(str(base_route or "").strip().lower(), [COL_PROJECT]))
+    allow_list = list(RAG_COLLECTION_ALLOWLIST)
+    if not allow_list:
+        return desired
+
+    allow_set = set(allow_list)
+    selected = [c for c in desired if c in allow_set]
+    if selected:
+        return selected
+    return allow_list
+
 def _final_rerank(
         cands: List[Any],
         *,
@@ -1578,7 +1600,7 @@ def _build_plan(
     if rel:
         target_cols = _resolve_relation_target_cols(rel, reason="relation_target")
     else:
-        target_cols = _default_target_collections()
+        target_cols = _default_target_collections_for_route(base_route)
 
     return QueryPlan(
         mode=mode,
@@ -1850,10 +1872,10 @@ def _run_rag_with_vectors(
     hinted_base = None
     hinted_limit = 0
     hinted_cols: List[str] = _normalize_target_collections(
-        _get_attr(qa, "target_collections", None) or _get_attr(qa, "collections", None)
+        _get_attr(qa, "target_collections", None) or _get_attr(qa, "target_cols", None) or _get_attr(qa, "collections", None)
     )
     payload_target_cols = _normalize_target_collections(
-        _get_attr(intent_payload, "target_collections", None) or _get_attr(intent_payload, "collections", None)
+        _get_attr(intent_payload, "target_collections", None) or _get_attr(intent_payload, "target_cols", None) or _get_attr(intent_payload, "collections", None)
     )
     if payload_target_cols:
         hinted_cols = payload_target_cols
@@ -2783,6 +2805,29 @@ def _run_rag_with_vectors(
         and search_filter_signal
         and search_filter_conf_ok
     )
+
+    # qdrant-client 버전에 따라 should+min_should가 무시될 수 있어,
+    # lookup hard 정책에서는 planner/filters에서 명시된 연구자명만 must로 한 번 더 강제한다.
+    force_people_terms = _normalize_hint_terms(
+        (people_filter_spec or {}).get("participant_researcher_name")
+    ) if isinstance(people_filter_spec, dict) else []
+    if isinstance(hint_filters, dict):
+        force_people_terms = _normalize_hint_terms([
+            *force_people_terms,
+            *(hint_filters.get("participant_researcher_name") or []),
+        ])
+    if lookup_filter_enabled and force_people_terms and qmodels is not None:
+        forced_set = set(force_people_terms)
+        must_people_terms = [t for t in people_terms if t in forced_set] or force_people_terms
+        hard_people_filter = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="prtcp_mp[].hm_nm",
+                    match=make_match_any(list(must_people_terms)),
+                )
+            ]
+        )
+        people_filter = _and_filter(people_filter, hard_people_filter) if people_filter is not None else hard_people_filter
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
