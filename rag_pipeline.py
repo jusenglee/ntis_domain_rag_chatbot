@@ -2210,6 +2210,7 @@ def _run_rag_with_vectors(
             if hinted_limit < 0:
                 hinted_limit = 0
 
+    pending_strategy_filter_spec: Optional[Dict[str, Any]] = None
     if strategy_enabled:
         if strategy_head in ("project", "perf", "people", "org", "support"):
             ctx.base_route = strategy_head
@@ -2218,7 +2219,7 @@ def _run_rag_with_vectors(
         if strategy_action:
             ctx.action = strategy_action
         if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
-            plan = replace(plan, filters=dict(strategy_filter_spec))
+            pending_strategy_filter_spec = dict(strategy_filter_spec)
 
     action = ctx.action
     base_route = ctx.base_route
@@ -2276,7 +2277,7 @@ def _run_rag_with_vectors(
     org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
     ctx.org_role = org_role
-    planner_filter_spec = dict(plan.filters or {})
+    people_filter_spec = dict(pending_strategy_filter_spec or {})
     org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
         build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
@@ -2339,7 +2340,7 @@ def _run_rag_with_vectors(
         person_ids=people_ids,
         gender_terms=gender_terms,
         org_terms=people_org_terms,
-        filter_spec=planner_filter_spec.get("people_filter"),
+        filter_spec=people_filter_spec.get("people_filter"),
     )
     people_filter = (
         build_people_filter(people_spec)
@@ -2575,6 +2576,8 @@ def _run_rag_with_vectors(
         preferred_mode=planner_mode,
         preferred_mode_source=planner_mode_source,
     )
+    if pending_strategy_filter_spec:
+        plan = replace(plan, filters=pending_strategy_filter_spec)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     planner_first_applied = bool(planner_mode)
@@ -2662,6 +2665,8 @@ def _run_rag_with_vectors(
             )
         ctx.plan = plan
         ctx.target_collections = list(plan.target_collections)
+
+    planner_filter_spec = dict(plan.filters or {})
 
     preset_intent_view = ctx.intent_view()
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
