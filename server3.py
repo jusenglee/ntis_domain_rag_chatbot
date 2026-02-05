@@ -821,13 +821,10 @@ class CustomRAGRetriever(BaseModel):
         for idx, hit in enumerate(hits[:self.top_k], start=1):
             if hasattr(hit, "payload"):
                 hit_data = hit.payload
-                score = getattr(hit, "score", 0.0)
             elif isinstance(hit, dict):
                 hit_data = hit
-                score = hit.get("score", 0.0)
             else:
                 hit_data = getattr(hit, "__dict__", {})
-                score = 0.0
 
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
@@ -1973,18 +1970,14 @@ async def query_stream(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
-    inputs = {
-        "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)]
-    }
-
     graph = app.state.graph
 
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
 
         loaded_history, prev_context = await load_conversation_memory(conversation_id)
-        chat_history = loaded_history + [HumanMessage(content=question)]
+        user_message = HumanMessage(content=question)
+        chat_history = loaded_history + [user_message]
         intent_payload = await build_intent_payload(
             question,
             conversation_id,
@@ -1993,7 +1986,7 @@ async def query_stream(payload: QueryRequest):
         )
         inputs = {
             "conversation_id": conversation_id,
-            "messages": [HumanMessage(content=question)],
+            "messages": [user_message],
             "intent_payload": intent_payload,
             "question_analysis": intent_payload.get("question_analysis"),
         }
