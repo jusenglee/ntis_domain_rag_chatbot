@@ -101,7 +101,7 @@ class TagSchema:
         
         try:
             return self.title_formatter(values)
-        except Exception as e:
+        except Exception:
             # 포맷팅 중 에러 발생 시 None 반환
             return None
 

@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Any, List
+from typing import Dict, Any, List
 from copy import deepcopy
 from rag_mapper.mapping_config import get_schema_registry, DataTag, TagSchema
 

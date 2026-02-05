@@ -24,7 +24,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
-from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -39,11 +39,8 @@ from settings import (
     REDIS_URL,
     REDIS_TTL,
     MAX_TOP_K_SIZE,
-    MAX_CONTEXT_CHARS,
     MAX_DOC_SENTENCES,
     MAX_DOC_TOKENS,
-    SUMMARY_DOC_SENTENCES,
-    SUMMARY_DOC_TOKENS,
 )
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
