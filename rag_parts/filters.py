@@ -30,6 +30,8 @@ class PeopleFilterInput:
 @dataclass(frozen=True)
 class JoinFilterInput:
     join_ids: List[str] = field(default_factory=list)
+    pjt_nos: List[str] = field(default_factory=list)
+    join_key_mode: str = "instance"
     tag_filters: Optional[List[str]] = None
     people_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
@@ -125,6 +127,10 @@ def compile_filter(filter_spec: Optional[Dict[str, Any]]) -> Optional[Any]:
             "should": should or None,
             "must_not": must_not or None,
         }
+        min_should_raw = spec.get("min_should")
+        min_should = _normalize_min_should(min_should_raw)
+        if min_should is not None and should:
+            kwargs["min_should"] = min_should
         return qmodels.Filter(**kwargs)
 
     return _to_filter(filter_spec)
@@ -166,7 +172,7 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
             should.append(nested_mp_org)
     if not should:
         return None
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
     if qmodels is None or not spec.terms:
@@ -186,7 +192,7 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(spec.terms)))
     if not should:
         return None
-    nested_filter = qmodels.Filter(should=should)
+    nested_filter = _build_filter(must=None, should=should, must_not=None, min_should=1)
     nested_conditions: List[Any] = []
     nested_org = _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_org", nested_filter)
     if nested_org is not None:
@@ -200,7 +206,7 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
         return None
     if len(nested_conditions) == 1:
         return nested_conditions[0]
-    return qmodels.Filter(should=nested_conditions)
+    return _build_filter(must=None, should=nested_conditions, must_not=None, min_should=1)
 
 def build_tag_only_filter(tags: List[str]) -> Optional[Any]:
     if qmodels is None:
@@ -351,6 +357,7 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if spec.filter_spec is not None:
         return compile_filter(spec.filter_spec)
 
+    must: List["qmodels.Condition"] = []
     should: List["qmodels.Condition"] = []
     if spec.people_terms:
         should.append(
@@ -360,7 +367,7 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
             )
         )
     if spec.person_ids:
-        should.append(
+        must.append(
             qmodels.FieldCondition(
                 key="prtcp_mp[].hm_id",
                 match=make_match_any(list(spec.person_ids)),
@@ -381,7 +388,58 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
             )
         )
 
-    return qmodels.Filter(should=should) if should else None
+    if not must and not should:
+        return None
+    min_should = 1 if should else None
+    return _build_filter(must=must, should=should, must_not=None, min_should=min_should)
+
+
+def _normalize_min_should(min_should: Any) -> Optional[Any]:
+    if min_should in (None, ""):
+        return None
+    if isinstance(min_should, dict):
+        for key in ("min_count", "count", "value"):
+            if key in min_should:
+                return _normalize_min_should(min_should.get(key))
+        return None
+    try:
+        value = int(min_should)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+
+    min_should_cls = getattr(qmodels, "MinShould", None)
+    if min_should_cls is None:
+        return value
+    for kwargs in ({"min_count": value}, {"count": value}):
+        try:
+            return min_should_cls(**kwargs)
+        except Exception:
+            continue
+    return value
+
+
+def _build_filter(
+    *,
+    must: Optional[List[Any]],
+    should: Optional[List[Any]],
+    must_not: Optional[List[Any]],
+    min_should: Optional[Any] = None,
+) -> Any:
+    kwargs: Dict[str, Any] = {
+        "must": must or None,
+        "should": should or None,
+        "must_not": must_not or None,
+    }
+    normalized_min_should = _normalize_min_should(min_should)
+    if normalized_min_should is not None and kwargs["should"]:
+        kwargs["min_should"] = normalized_min_should
+    try:
+        return qmodels.Filter(**kwargs)
+    except TypeError:
+        kwargs.pop("min_should", None)
+        return qmodels.Filter(**kwargs)
 
 
 def and_filter(a: Any, b: Any) -> Any:
@@ -525,18 +583,52 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
         compiled = compile_filter(spec.filter_spec)
         return compiled or qmodels.Filter(must=[])
 
-    join_ids = list(spec.join_ids)
-    if not join_ids:
+    join_ids = list(dict.fromkeys(str(x).strip() for x in (spec.join_ids or []) if str(x).strip()))
+    pjt_nos = list(dict.fromkeys(str(x).strip() for x in (spec.pjt_nos or []) if str(x).strip()))
+
+    if not join_ids and not pjt_nos:
         return qmodels.Filter(must=[])
 
-    return qmodels.Filter(
-        should=[
-            qmodels.FieldCondition(
-                key="pjt_id",
-                match=make_match_any(join_ids),
+    mode = str(spec.join_key_mode or "instance").strip().lower()
+    if mode not in ("instance", "group"):
+        mode = "instance"
+
+    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+
+    must: List["qmodels.Condition"] = []
+    if mode == "group":
+        if pjt_nos:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_no,
+                    match=make_match_any(pjt_nos),
+                )
             )
-        ]
-    )
+        elif join_ids:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_id,
+                    match=make_match_any(join_ids),
+                )
+            )
+    else:
+        if join_ids:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_id,
+                    match=make_match_any(join_ids),
+                )
+            )
+        elif pjt_nos:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_no,
+                    match=make_match_any(pjt_nos),
+                )
+            )
+
+    return qmodels.Filter(must=must)
 
 
 def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":

@@ -16,6 +16,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # 흔한 중첩 경로 후보 (payload 안의 meta_basic/meta_detail dict)
 _META_KEYS = ("meta_basic", "meta_detail")
+TOP_PJT_ID_KEYS = ("pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id")
+FALLBACK_PJT_NO_KEYS = ("pjt_no", "meta_basic.pjt_no", "meta_detail.pjt_no")
 
 
 def _as_dict(x: Any) -> Optional[Dict[str, Any]]:
@@ -37,6 +39,23 @@ def _get_payload(point: Any) -> Optional[Dict[str, Any]]:
         return d
     return None
 
+
+def _get_path_value(payload: Dict[str, Any], key_path: str) -> Any:
+    """dot 표기(`a.b.c`)를 따라 중첩 dict 값을 읽습니다."""
+    if not isinstance(payload, dict) or not key_path:
+        return None
+    if "." not in key_path:
+        return payload.get(key_path)
+
+    cur: Any = payload
+    for part in key_path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
 def _normalize_pjt_id(v: Any) -> Optional[str]:
     if v is None:
         return None
@@ -50,31 +69,56 @@ def _normalize_pjt_id(v: Any) -> Optional[str]:
     return s
 
 
-def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
+def extract_pjt_ids(
+    points: Iterable[Any],
+    *,
+    max_ids: int = 80,
+    include_pjt_no_fallback: bool = False,
+) -> List[str] | Tuple[List[str], List[str]]:
     """
     Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다.
-    ✅ 무조건 payload 최상위(pjt_id 계열)만 사용합니다. (meta/중첩 경로 미사용)
+    payload 최상위 및 meta 점경로(pjt_id 계열)에서 우선 추출합니다.
+    include_pjt_no_fallback=True면 pjt_id 미추출 항목에서 pjt_no 후보를 별도로 수집해 함께 반환합니다.
     """
-    out: List[str] = []
-    seen = set()
+    pjt_ids: List[str] = []
+    pjt_nos: List[str] = []
+    seen_pjt_id = set()
+    seen_pjt_no = set()
 
     if not points:
-        return out
-
-    TOP_PJT_ID_KEYS = ("pjt_id")
+        return (pjt_ids, pjt_nos) if include_pjt_no_fallback else pjt_ids
 
     for p in points:
         payload = _get_payload(p)
-        pid = _normalize_pjt_id(payload.get(TOP_PJT_ID_KEYS))
-        if not pid or pid in seen:
+        if not payload:
             continue
-        out.append(pid)
-        seen.add(pid)
 
-        if len(out) >= max_ids:
-            return out
+        pid = None
+        for key_path in TOP_PJT_ID_KEYS:
+            pid = _normalize_pjt_id(_get_path_value(payload, key_path))
+            if pid:
+                break
 
-    return out
+        if pid:
+            if pid in seen_pjt_id:
+                continue
+            pjt_ids.append(pid)
+            seen_pjt_id.add(pid)
+            if len(pjt_ids) >= max_ids:
+                return (pjt_ids, pjt_nos) if include_pjt_no_fallback else pjt_ids
+            continue
+
+        if include_pjt_no_fallback:
+            pjt_no = None
+            for key_path in FALLBACK_PJT_NO_KEYS:
+                pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                if pjt_no:
+                    break
+            if pjt_no and pjt_no not in seen_pjt_no:
+                pjt_nos.append(pjt_no)
+                seen_pjt_no.add(pjt_no)
+
+    return (pjt_ids, pjt_nos) if include_pjt_no_fallback else pjt_ids
 
 
 
