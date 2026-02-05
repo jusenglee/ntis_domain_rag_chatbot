@@ -41,16 +41,6 @@ def _get_payload(point: Any) -> Optional[Dict[str, Any]]:
         return d
     return None
 
-
-def _get_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
-    for mk in _META_KEYS:
-        v = payload.get(mk)
-        if isinstance(v, dict):
-            merged.update(v)
-    return merged
-
-
 def _normalize_pjt_id(v: Any) -> Optional[str]:
     if v is None:
         return None

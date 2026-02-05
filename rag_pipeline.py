@@ -2210,6 +2210,7 @@ def _run_rag_with_vectors(
             if hinted_limit < 0:
                 hinted_limit = 0
 
+    pending_strategy_filter_spec: Optional[Dict[str, Any]] = None
     if strategy_enabled:
         if strategy_head in ("project", "perf", "people", "org", "support"):
             ctx.base_route = strategy_head
@@ -2218,7 +2219,7 @@ def _run_rag_with_vectors(
         if strategy_action:
             ctx.action = strategy_action
         if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
-            plan = replace(plan, filters=dict(strategy_filter_spec))
+            pending_strategy_filter_spec = dict(strategy_filter_spec)
 
     action = ctx.action
     base_route = ctx.base_route

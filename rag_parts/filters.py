@@ -311,39 +311,6 @@ _PERF_TYPE_ALIASES: List[Dict[str, Any]] = [
 ]
 
 
-def _normalize_perf_type_terms(perf_types: List[str]) -> tuple[List[str], List[str]]:
-    tags: List[str] = []
-    categories: List[str] = []
-    perf_tag_set = {t.upper() for t in PERF_TAGS}
-
-    def _push_unique(target: List[str], value: str) -> None:
-        if value and value not in target:
-            target.append(value)
-
-    for raw in perf_types:
-        sval = str(raw).strip()
-        if not sval:
-            continue
-        upper = sval.upper()
-        if upper in perf_tag_set:
-            _push_unique(tags, upper)
-            continue
-        normalized = re.sub(r"\s+", " ", sval).strip()
-        normalized = re.sub(r"\s*성과\s*$", "", normalized).strip()
-        normalized_lower = normalized.lower()
-        matched = False
-        for entry in _PERF_TYPE_ALIASES:
-            if normalized_lower in {a.lower() for a in entry["aliases"]}:
-                _push_unique(tags, entry["tag"])
-                _push_unique(categories, entry["category"])
-                matched = True
-                break
-        if not matched and normalized:
-            _push_unique(categories, normalized)
-
-    return tags, categories
-
-
 def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     if qmodels is None or not perf_types:
         return None
@@ -352,42 +319,6 @@ def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
     return qmodels.Filter(
         must=[qmodels.FieldCondition(key=key_tag, match=make_match_any(perf_types))]
     )
-
-def _build_prtcp_mp_nested_filter(
-        *,
-        people_terms: List[str],
-        person_ids: List[str],
-        gender_terms: List[str],
-        org_terms: Optional[List[str]] = None,
-) -> Optional[Any]:
-    if qmodels is None:
-        return None
-    nested_cls = getattr(qmodels, "NestedCondition", None)
-    nested_filter_cls = getattr(qmodels, "NestedFilter", None)
-    if nested_cls is None:
-        return None
-
-    id_cond = (
-        qmodels.FieldCondition(key="hm_id", match=make_match_any(person_ids))
-        if person_ids
-        else None
-    )
-    base_must = [c for c in (id_cond,) if c is not None]
-    if not base_must and not gender_terms:
-        return None
-
-    if gender_terms:
-        nested_should: List["qmodels.Condition"] = []
-        for key in ("gender_slct", "gender_slct_nm"):
-            must = list(base_must)
-            must.append(qmodels.FieldCondition(key=key, match=make_match_any(gender_terms)))
-            nested_cond = _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", qmodels.Filter(must=must))
-            if nested_cond is not None:
-                nested_should.append(nested_cond)
-        return qmodels.Filter(should=nested_should) if nested_should else None
-
-    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", qmodels.Filter(must=base_must))
-
 
 def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
     if qmodels is None or not terms:

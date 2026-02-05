@@ -112,34 +112,6 @@ def _normalize_org_term(term: str) -> str:
     return re.sub(r"\s+", " ", (term or "")).strip()
 
 
-def _is_stopword_org_term(term: str) -> bool:
-    t = _normalize_org_term(term).replace(" ", "")
-    return t in _ORG_TERM_STOPWORDS
-
-
-def _is_valid_org_term(term: str, *, require_suffix: bool = False) -> bool:
-    t = _normalize_org_term(term)
-    if not t or _is_stopword_org_term(t):
-        return False
-    if require_suffix:
-        for suf in _ORG_SUFFIXES:
-            if t == suf:
-                return False
-            if t.endswith(suf):
-                return len(t) > (len(suf) + 1)
-        return False
-    return True
-
-
-def _is_org_like(term: str) -> bool:
-    t = (term or "").strip()
-    if not t:
-        return False
-    if _ORG_ACRONYM_RE.fullmatch(t):
-        return True
-    tl = t.lower()
-    return any(suf.lower() in tl for suf in _ORG_SUFFIXES)
-
 def _is_rare_token(tok: str) -> bool:
     t = (tok or "").strip()
     if not t:
@@ -222,10 +194,6 @@ _PEOPLE_TERM_STOPWORDS = {
     _normalize_people_term("인물"),
 }
 
-
-def _is_stopword_people_term(term: str) -> bool:
-    t = _normalize_people_term(term)
-    return not t or t in _PEOPLE_TERM_STOPWORDS
 
 ORG_CUES = [
     "기관", "소속기관", "소속 기관", "주관기관", "주관 기관", "수행기관", "수행 기관",
@@ -365,12 +333,6 @@ def extract_years(q: str) -> List[str]:
         if len(years) >= 4:
             break
     return years
-
-
-def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 2) -> List[str]:
-    """질의 기반 사람 후보 추출(Deprecated). 서버 분석(Researchers) 결과를 신뢰한다."""
-    return []
-
 
 def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
     text = " ".join([q or ""] + list(kws or []))

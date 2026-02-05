@@ -227,54 +227,6 @@ def normalize_intent(
         remove_terms_for_head=_normalize_terms(getattr(intent, "remove_terms_for_head", None) or []),
     )
 
-
-def build_filter_bundle(intent: NormalizedIntent) -> FilterBundle:
-    org_terms = list(intent.org_terms)
-    org_role = intent.org_role
-    people_terms = list(intent.people_terms)
-    gender_terms = list(intent.gender_terms)
-    people_ids = list(intent.ids_map.get("person_no") or [])
-
-    people_org_terms: List[str] = []
-    if org_role == "affiliation" and org_terms:
-        people_org_terms = list(org_terms)
-
-    org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
-    participant_org_filter = (
-        build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
-        if org_terms and org_role == "participant"
-        else None
-    )
-
-    people_filter = (
-        build_people_filter(
-            PeopleFilterInput(
-                people_terms=people_terms,
-                person_ids=people_ids,
-                gender_terms=gender_terms,
-                org_terms=people_org_terms,
-            )
-        )
-        if (people_terms or people_ids or gender_terms or people_org_terms)
-        else None
-    )
-
-    perf_tag_filter = build_tag_only_filter(intent.perf_tag_filters) if intent.perf_tag_filters else None
-
-    return FilterBundle(
-        org_terms=org_terms,
-        org_role=org_role,
-        people_terms=people_terms,
-        people_ids=people_ids,
-        gender_terms=gender_terms,
-        people_org_terms=people_org_terms,
-        org_filter=org_filter,
-        participant_org_filter=participant_org_filter,
-        people_filter=people_filter,
-        perf_tag_filter=perf_tag_filter,
-    )
-
-
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:
     if not relation:
         return None
