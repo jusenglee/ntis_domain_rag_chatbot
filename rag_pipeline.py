@@ -3640,7 +3640,8 @@ def _run_rag_with_vectors(
         if payload_project_terms:
             pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         lookup_has_ids = bool(pjt_ids or pjt_nos or has_perf_ids)
-        apply_name_filters = mode != "lookup" or lookup_has_ids
+        lookup_has_name_filters = bool(people_terms or people_ids or org_terms)
+        apply_name_filters = mode != "lookup" or lookup_has_ids or lookup_has_name_filters
 
         relation_filter = _relation_lookup_filter_for_col(apply_name_filters)
 
