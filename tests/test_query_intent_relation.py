@@ -17,9 +17,7 @@ from rag_parts.query_intent import (
 )
 from server3 import (
     _build_planner_override_request,
-    ContentCategory,
     QuestionAnalysis,
-    QuestionType,
 )
 
 
@@ -125,13 +123,12 @@ class QueryIntentRelationTests(unittest.TestCase):
             rare_ratio=0.0,
         )
         analysis = QuestionAnalysis(
-            category=[ContentCategory.PROJECT],
-            question_type=QuestionType.DEFAULT,
-            related_docs=[],
-            history_summary="",
+            strategy_version="v2",
             retrieval_query="",
             confidence=1.0,
             mode="LOOKUP",
+            head="project",
+            action="topic",
         )
 
         override_request = _build_planner_override_request(analysis, intent)
@@ -151,13 +148,12 @@ class QueryIntentRelationTests(unittest.TestCase):
             rare_ratio=0.0,
         )
         analysis = QuestionAnalysis(
-            category=[ContentCategory.PROJECT],
-            question_type=QuestionType.DEFAULT,
-            related_docs=[],
-            history_summary="",
+            strategy_version="v2",
             retrieval_query="",
             confidence=1.0,
             mode="LOOKUP",
+            head="project",
+            action="topic",
         )
 
         override_request = _build_planner_override_request(analysis, intent)

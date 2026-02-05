@@ -85,6 +85,9 @@ class NormalizedIntent:
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     org_role: Optional[str] = None
+    lead_org_terms: List[str] = field(default_factory=list)
+    participant_org_terms: List[str] = field(default_factory=list)
+    people_affiliation_org_terms: List[str] = field(default_factory=list)
     perf_types: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     title: List[str] = field(default_factory=list)
@@ -129,6 +132,9 @@ def normalize_intent(
     hint_people_terms: Optional[List[str]] = None,
     hint_org_terms: Optional[List[str]] = None,
     hint_org_role: Optional[str] = None,
+    hint_lead_org_terms: Optional[List[str]] = None,
+    hint_participant_org_terms: Optional[List[str]] = None,
+    hint_people_affiliation_org_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
     ids_map = _normalize_ids_map(getattr(intent, "ids_map", None) or getattr(intent, "ids", None) or {})
     ids_flat = _normalize_terms(getattr(intent, "ids_flat", None) or [])
@@ -148,6 +154,14 @@ def normalize_intent(
     gender_terms = _normalize_terms(getattr(intent, "gender_terms", None) or [])
 
     org_role = (hint_org_role or getattr(intent, "org_role", None) or "").strip().lower() or None
+
+    lead_org_terms = _normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or [])
+    participant_org_terms = _normalize_terms(
+        hint_participant_org_terms or getattr(intent, "participant_org_terms", None) or []
+    )
+    people_affiliation_org_terms = _normalize_terms(
+        hint_people_affiliation_org_terms or getattr(intent, "people_affiliation_org_terms", None) or []
+    )
 
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
@@ -209,6 +223,9 @@ def normalize_intent(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        lead_org_terms=lead_org_terms,
+        participant_org_terms=participant_org_terms,
+        people_affiliation_org_terms=people_affiliation_org_terms,
         perf_types=perf_types,
         keywords=_normalize_terms(getattr(intent, "keywords", None) or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),

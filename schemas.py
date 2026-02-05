@@ -51,6 +51,9 @@ class ExecutionContext:
     gender_terms: list[str]
     org_terms: list[str]
     org_role: Optional[str]
+    lead_org_terms: list[str]
+    participant_org_terms: list[str]
+    people_affiliation_org_terms: list[str]
     perf_types: list[str]
     keywords: list[str]
     title: list[str]
@@ -84,6 +87,9 @@ class ExecutionContext:
             gender_terms=list(intent.gender_terms),
             org_terms=list(intent.org_terms),
             org_role=intent.org_role,
+            lead_org_terms=list(getattr(intent, "lead_org_terms", []) or []),
+            participant_org_terms=list(getattr(intent, "participant_org_terms", []) or []),
+            people_affiliation_org_terms=list(getattr(intent, "people_affiliation_org_terms", []) or []),
             perf_types=list(intent.perf_types),
             keywords=list(intent.keywords),
             title=list(intent.title),
@@ -116,6 +122,9 @@ class ExecutionContext:
             gender_terms=list(self.gender_terms),
             org_terms=list(self.org_terms),
             org_role=self.org_role,
+            lead_org_terms=list(self.lead_org_terms),
+            participant_org_terms=list(self.participant_org_terms),
+            people_affiliation_org_terms=list(self.people_affiliation_org_terms),
             perf_types=list(self.perf_types),
             keywords=list(self.keywords),
             title=list(self.title),

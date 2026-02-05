@@ -7,10 +7,6 @@ JOIN(2-hop)에서 Hop1 결과(예: 과제/참여인력/기관 등)로부터 join
 
 - extract_pjt_ids(points): Qdrant ScoredPoint(or dict) 목록에서 PJT_ID 후보를 최대 max_ids개 추출
 - sanitize_query_by_terms(q, remove_terms): 제거 대상 용어를 질의에서 제거(공백 정리)
-
-주의:
-- PJT_ID는 저장 스키마에 따라 payload/meta_basic/meta_detail에 여러 키 변형으로 존재할 수 있어
-  payload 최상위 → meta 순서로 여러 키 변형을 모두 확인합니다.
 """
 
 from __future__ import annotations
@@ -105,9 +101,27 @@ def extract_pjt_ids(
 
         if pid:
             if pid in seen_pjt_id:
+                if include_pjt_no_fallback:
+                    pjt_no = None
+                    for key_path in FALLBACK_PJT_NO_KEYS:
+                        pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                        if pjt_no:
+                            break
+                    if pjt_no and pjt_no not in seen_pjt_no:
+                        pjt_nos.append(pjt_no)
+                        seen_pjt_no.add(pjt_no)
                 continue
             pjt_ids.append(pid)
             seen_pjt_id.add(pid)
+            if include_pjt_no_fallback:
+                pjt_no = None
+                for key_path in FALLBACK_PJT_NO_KEYS:
+                    pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                    if pjt_no:
+                        break
+                if pjt_no and pjt_no not in seen_pjt_no:
+                    pjt_nos.append(pjt_no)
+                    seen_pjt_no.add(pjt_no)
             if len(pjt_ids) >= max_ids:
                 return (pjt_ids, pjt_nos) if include_pjt_no_fallback else pjt_ids
             continue

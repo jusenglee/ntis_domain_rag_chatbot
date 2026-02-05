@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from enum import Enum
+from dataclasses import replace
 
 # Redis
 import redis.asyncio as redis
@@ -95,9 +95,9 @@ MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
         return None
-    if qa.question_type == QuestionType.FOLLOW_UP:
+    if qa.mode == "JOIN":
         return FOLLOW_UP_MAX_TOKENS_HINT
-    if qa.question_type == QuestionType.DEFAULT and qa.mode in (None, "SEARCH"):
+    if qa.mode in (None, "SEARCH", "LOOKUP"):
         return SHORT_ANSWER_MAX_TOKENS_HINT
     return None
 
@@ -167,35 +167,18 @@ def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
     if preferred_title:
         mapped_doc["title"] = preferred_title
 
-class ContentCategory(str, Enum):
-
-    PROJECT = "project"          # 과제/연구개발
-    RESEARCHER = "researcher"    # 연구자
-    PERFORMANCE = "performance"  # 성과
-    QNA = "qna"                  # 질의응답/매뉴얼
-    ETC = "etc"                  # 기타
-
-class QuestionType(str, Enum):
-    DEFAULT = "default"
-    FOLLOW_UP = "follow_up"
-
-class Researcher(BaseModel):
-    name: str | None = None
-    affiliation: str | None = None
-    researcher_id: str | None = None
+Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
+Head = Literal["project", "perf", "people", "org", "support"]
+Action = Literal["topic", "list", "detail", "stats", "download"]
 
 # --- Pydantic Schemas for Structured Output ---
-class QuestionAnalysis(BaseModel):
-    """질문 분석 결과"""
-    category: list[ContentCategory] = Field(description="질문 카테고리")
-    question_type: QuestionType = Field(description="질문유형")
-    related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
-    researchers: list[Researcher] = Field(default_factory=list)
-    organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
-    mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
-    head: str | None = Field(default=None, description="project | perf | people | org | support")
-    relation: str | None = Field(default=None, description="project_perf | perf_project | null")
-    action: str | None = Field(default=None, description="topic | list | detail | stats | download")
+class QuestionAnalysisV2(BaseModel):
+    """질문 분석 결과(v2 Planner Schema)"""
+    strategy_version: Literal["v2"] = "v2"
+    mode: Mode
+    head: Head
+    action: Action
+    relation: Optional[str] = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     target_cols: list[str] = Field(default_factory=list, description="실행 대상 컬렉션")
@@ -204,16 +187,15 @@ class QuestionAnalysis(BaseModel):
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
         le=MAX_TOP_K_SIZE,
     )
-    history_summary: str = Field(description="대화 이력 기반 질문 요약")
-    retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
+    retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
+
+
+QuestionAnalysis = QuestionAnalysisV2
 
 class SearchHint(BaseModel):
     """RAG 검색 힌트"""
     coq: str = ""
-    category: list[str] = Field(default_factory=list)
-    researchers: list[dict[str, str | None]] = Field(default_factory=list)
-    organizations: list[str] = Field(default_factory=list)
     mode: str | None = None
     head: str | None = None
     relation: str | None = None
@@ -226,7 +208,6 @@ class SearchHint(BaseModel):
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
         le=MAX_TOP_K_SIZE,
     )
-    history_summary: str = ""
     retrieval_query: str = ""
     confidence: float = 0.0
 
@@ -405,166 +386,194 @@ async def _run_question_analysis(
         ids_map=None,
     )
 
-    system_prompt = (
-        "당신은 NTIS R&D 데이터 질의 분석 전문가입니다.\n"
-        "이 시스템에서 사용되는 용어는 모두 'R&D 행정/과제/성과/연구자/기관/시스템 이용(QnA)' 맥락으로 해석합니다.\n"
-        "절대 임의로 추측하지 말고, 근거가 약하면 confidence를 낮추고 필드 값을 null/[]로 둡니다.\n\n"
+    system_prompt = f"""
+        당신은 NTIS R&D 데이터 검색전략 플래너(LLM Planner)입니다.
+        당신의 임무는 사용자 질의마다 단 하나의 최종 전략(Strategy JSON)을 확정하는 것입니다.
+        실행 레이어(retrieval/filters/rerank/controller)는 당신의 전략을 변경/재해석하지 않고 그대로 실행합니다.
+        
+        ====================
+        [도메인/데이터 전제(필수)]
+        ====================
+        - 데이터는 과제(project)와 성과(perf)로 구성됩니다.
+        - 모든 문서에는 참여인력(prtcp_mp)과 참여기관(prtcp_org) 객체가 포함됩니다.
+        - 키 정의:
+          * PJT_ID: 과제 고유번호(단일 시행 인스턴스)
+          * PJT_NO: 동일과제 그룹 ID(연도 다른 시행들을 묶음)
+        - 기관 조건은 의미가 3종으로 나뉘며 filters에서 반드시 구분합니다:
+          1) 수행기관(메인) = org_nm
+          2) 참여기관(공동) = prtcp_org[].org_nm
+          3) 참여인력 소속기관(affiliation) = prtcp_mp[].blng_org_nm
+        
+        ====================
+        [불변 계약(매우 중요)]
+        ====================
+        1) 당신은 mode/head/relation/target_cols/ids_map/filters/limit/retrieval_query를 '단 하나'로 확정합니다.
+        2) 실행 레이어는 재결정 금지(허용: filters를 Qdrant filter로 '컴파일'만).
+        3) SEARCH는 누락 방지, LOOKUP/JOIN은 정확도/재현성 최우선입니다.
+        
+        ====================
+        [출력 강제 규칙]
+        ====================
+        1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
+        2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
+        3) strategy_version은 항상 "v2"로 고정합니다.
+        4) 아래 키를 반드시 모두 포함합니다:
+           strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
+        5) 값이 없으면 null/[]/{{}}/0.0 등 기본값을 사용합니다.
+        6) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}}를 사용합니다.
+        7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
+        
+        ====================
+        [Mode 정의]
+        ====================
+        - SEARCH: 탐색형(누락 방지 최우선). server-side must 필터로 후보를 먼저 자르지 않습니다.
+        - LOOKUP: 정확형(필터/ID 기반). server-side 하드필터로 정답집합 근처를 강제합니다.
+        - JOIN: 2-hop 관계형(project↔perf). Hop1에서 키를 확보하고 Hop2에서 하드필터로 강제합니다.
+        
+        ====================
+        [Mode 결정 규칙(우선순위)]
+        ====================
+        A) ids_map에 값이 하나라도 있으면 => mode="LOOKUP"
+        B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이면 => mode="LOOKUP"
+        C) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf 관계가 명확하면 => mode="JOIN"
+        D) 위에 해당하지 않는 토픽/키워드 탐색이면 => mode="SEARCH"
+        
+        추가 원칙(중요):
+        - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
+        - people/org 식별 Hop1(2-hop)은 기본 비활성입니다. (동명이인/식별자 요구 등 예외에서만 사용)
+        
+        ====================
+        [head 결정 규칙]
+        ====================
+        - head는 "사용자가 최종적으로 얻고 싶은 결과 엔티티"입니다.
+          * 과제 목록/상세/통계/다운로드 => head="project"
+          * 성과 목록/상세/통계/다운로드 => head="perf"
+          * 시스템 QnA => head="support"
+        - 사람/기관이 질의에 포함되어도, 목적이 과제/성과면 head를 people/org로 두지 않습니다.
+        - 예외: 연구자/기관 자체 식별/프로필/코드가 목적이면 head="people" 또는 head="org" 가능.
+        
+        ====================
+        [action enum]
+        ====================
+        action은 아래 중 하나:
+        - "topic" | "list" | "detail" | "stats" | "download"
+        
+        ====================
+        [relation enum]
+        ====================
+        relation은 아래 중 하나 또는 null:
+        - "project_perf" | "perf_project" | null
+        
+        ====================
+        [target_cols 규칙]
+        ====================
+        target_cols는 실행할 컬렉션 리스트입니다.
+        - "ntis_project_v2" / "ntis_perf_v2" 중 선택
+        - LOOKUP/JOIN은 필요한 컬렉션만 최소로 선택합니다.
+          * "신동구 참여과제" => ["ntis_project_v2"]
+          * "OO기관 성과" => ["ntis_perf_v2"]
+          * project↔perf JOIN => ["ntis_project_v2","ntis_perf_v2"]
+        - SEARCH는 기본적으로 두 컬렉션 모두 가능하나, head가 명확하면 1개만 선택 가능합니다.
+        
+        ====================
+        [ids_map 규칙]
+        ====================
+        ids_map은 dict이며 값은 문자열 배열입니다. 허용 키만 사용:
+        - pjt_id, pjt_no
+        - doi, issn, eissn, pissn
+        - patent_reg_no, patent_app_no
+        - paper_id, perf_id, rst_id
+        - person_no(참여인력 hm_id), org_id, org_code, biz_no
+        추출하지 못하면 빈 dict.
+        
+        ====================
+        [filters 규칙(계약)]
+        ====================
+        filters는 dict입니다. 필요한 키만 포함합니다.
+        허용 키:
+        - year_from, year_to
+        - title_terms (배열)
+        - keywords (배열)
+        - tag_filters (배열: IRD_NAI_PJT_INFO, IRD_NAI_RI_PAPER, IRD_NAI_RI_IPR, IRD_NAI_RI_SW, IRD_NAI_RI_RSCH_RPT, IRD_NAI_RI_FCLT_EQUIP, IRD_NAI_RI_TECH_INFO 등)
+        - perf_types (배열)
+        
+        사람/기관 관계 필터(의미 구분 필수):
+        - participant_researcher_name (배열) : prtcp_mp[].hm_nm
+        - participant_researcher_id (배열)   : prtcp_mp[].hm_id 또는 person_no
+        - lead_org_name (배열)               : org_nm (수행기관)
+        - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
+        - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
+        - org_role (문자열, 선택): "lead" | "participant" | null
+        
+        사람/기관 필터 강도 규칙(중요):
+        - ID가 있으면 must 수준(LOOKUP 하드필터)로 가정
+        - 이름만 있으면 must가 아니라 should+min_should=1 수준의 하드 게이트로 가정(정규화/변형 포함)
+        - 동명이인/동명기관 가능성이 높으면 confidence를 낮춥니다.
+        
+        ====================
+        [SEARCH의 서버필터 원칙]
+        ====================
+        - SEARCH에서는 server-side must 필터 금지(또는 최소화)
+        - 허용: must_not로 명백히 다른 도메인 제외 정도
+        - 사람/기관/tag은 rerank 보너스/게이트로 처리
+        
+        ====================
+        [LOOKUP의 서버필터 우선순위]
+        ====================
+        LOOKUP 하드필터 우선순위:
+        1) PJT_ID == x
+        2) PJT_NO == x
+        3) PJT_NO == x AND stan_yr == y
+        4) 성과 식별자(doi/issn/patent_no/perf_id 등) 키 must
+        
+        ====================
+        [JOIN(2-hop) 정책: 그룹 vs 인스턴스]
+        ====================
+        - JOIN은 project↔perf가 명확할 때만 사용합니다.
+        
+        1) relation="project_perf"
+          - PJT_ID가 있으면: Hop2(perf)에서 pjt_id == PJT_ID를 must로 강제
+          - PJT_NO만 있으면(그룹):
+            Hop1(project)에서 PJT_NO==X로 PJT_ID 목록을 확보하고,
+            Hop2(perf)에서 (가능하면 pjt_no==X must, 없으면 pjt_id IN {{Hop1 PJT_ID들}} must)로 강제
+        
+        2) relation="perf_project"
+          - Hop1(perf)에서 성과 식별자를 must로 확정 후,
+            Hop2(project)에서 연결된 PJT_ID/PJT_NO로 강제
+        
+        ====================
+        [retrieval_query 규칙]
+        ====================
+        retrieval_query는 검색 최적화용 짧은 쿼리입니다.
+        - 최대 120자, 핵심 개념 5개 이내
+        - 사람/기관명이 있으면 반드시 포함
+        - 불필요한 기능어(목록/조회/알려줘/무엇/어떤 등)는 제거
+        
+        ====================
+        [limit 규칙]
+        ====================
+        - limit는 1~{MAX_TOP_K_SIZE} 범위 정수
+        - 사용자가 상위 N개 명시 시 반영(단 MAX 초과 금지)
+        - 불명확하면 20
+        
+        ====================
+        [필수 출력 JSON 스키마]
+        ====================
+        반드시 아래 키를 모두 포함한 JSON 객체만 출력:
+        - strategy_version: "v2"
+        - mode: "SEARCH" | "LOOKUP" | "JOIN"
+        - head: "project" | "perf" | "people" | "org" | "support"
+        - action: "topic" | "list" | "detail" | "stats" | "download"
+        - relation: "project_perf" | "perf_project" | null
+        - target_cols: string 배열
+        - ids_map: dict
+        - filters: dict
+        - limit: int
+        - retrieval_query: string
+        - confidence: float (0.0~1.0)
     
-        "====================\n"
-        "[출력 강제 규칙]\n"
-        "====================\n"
-        "1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)\n"
-        "2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.\n"
-        "3) 모호하면 문장으로 회피하지 말고(confidence 낮춤), 관련 필드는 null/[] 처리.\n"
-        "4) related_docs는 FOLLOW_UP일 때만 채우고, 아니면 [] 입니다.\n"
-        "5) researchers/organizations는 '특정' 대상이 식별될 때만 포함합니다. (없으면 [])\n"
-        "6) 값이 없으면 문자열 'None'을 쓰지 말고 반드시 null/[]로 표기합니다.\n\n"
-    
-        "====================\n"
-        "[Category 분류 규칙]\n"
-        "====================\n"
-        "1) 질문이 특정 데이터 유형을 명시/강하게 암시하면 해당 category를 포함합니다.\n"
-        "2) QNA는 '시스템 사용법/절차/메뉴얼/오류/이용 안내'에만 해당합니다.\n"
-        "3) 복수 영역이 명확하면 category는 복수 선택 가능합니다.\n"
-        "4) 사람/기관 이름이 나오더라도, 목적이 과제/성과 목록이면 PROJECT/PERFORMANCE를 반드시 포함합니다.\n\n"
-    
-        "====================\n"
-        "[Category 정의]\n"
-        "====================\n"
-        "- PROJECT: 과제, 연구개발, 참여인력, 참여기관, 과제번호/기간/주관/참여기관/책임자/참여자\n"
-        "- PERFORMANCE: 논문, 특허, SW, 연구보고서, 시설장비 등 성과 전반(ISSN/DOI/특허번호 포함)\n"
-        "- RESEARCHER: 연구자 정보(연구자번호/이력/소속/식별)\n"
-        "- QNA: 시스템 사용법, 절차, 메뉴얼, 오류\n"
-        "- ETC: 그 외\n\n"
-    
-        "====================\n"
-        "[QuestionType 정의]\n"
-        "====================\n"
-        "- DEFAULT\n"
-        "- FOLLOW_UP: 아래 중 하나라도 만족\n"
-        "  1) 질문의 핵심 대상이 이전 응답에서 정의된 특정 엔트리(특정 과제/특정 출처번호/특정 문서)에 종속\n"
-        '  2) "그 과제", "해당 연구", "출처 N", "앞서 언급한" 등 지시어 포함\n'
-        "  3) 단, '목록을 더 보여줘/추가로 알려줘' 같은 단순 확장 요청은 FOLLOW_UP이 아님\n\n"
-    
-        "====================\n"
-        "[Mode / Head / Relation 결정 힌트]\n"
-        "====================\n"
-        "아래 항목은 힌트이며, 최종 mode/head/relation 결정은 플래너가 수행합니다.\n\n"
-        "- people_terms(연구자/기관명) 또는 researchers/organizations가 추출되면 관계형 질의 가능성 힌트\n"
-        "- ids_map에 값이 존재하면 식별자 기반 조회 가능성 힌트\n\n"
-    
-        "A) FOLLOW_UP이면\n"
-        "- 이전 문맥에서 지칭한 대상이 있으면 head 후보로 고려(불명확하면 null).\n"
-        "- mode는 LOOKUP 후보로 고려.\n\n"
-    
-        "B) 명시적 식별자(id) 질의이면 (ids_map에 값이 들어가는 경우)\n"
-        "- mode는 LOOKUP 후보로 고려.\n"
-        "- head는 식별자가 가리키는 데이터가 강한 힌트\n"
-        "  * pjt_id/과제번호 => head=project\n"
-        "  * doi/issn/특허번호/성과식별자 => head=perf\n\n"
-    
-        "C) 관계형 질의(참여/소속/연관/목록 요청) 판단 힌트\n"
-        "- 다음 중 하나라도 있으면 관계형 질의입니다:\n"
-        "  * 사람/기관(고유명) + (참여/소속/연관/목록/과제/성과/논문/특허/SW/보고서 등)\n"
-        "  * 'OOO의 과제', 'OOO 연구자의 논문', 'OO기관 성과' 같은 소유/관계 표현\n"
-        "- 관계형 질의는 LOOKUP/SEARCH 모두 가능하므로 문맥에 따라 선택.\n"
-        "- prtcp_mp/prtcp_org가 모든 데이터에 포함되는 경우 JOIN 필요성이 낮다는 힌트.\n"
-        "- head는 '출발점 엔티티'를 우선 고려:\n"
-        "  * 과제가 출발점이면 head=project\n"
-        "  * 성과가 출발점이면 head=perf\n"
-        "  * 연구자/기관 자체 상세/식별 요청이면 head=people/org\n"
-        "- relation은 기본 null이지만, project<->perf 관계가 명확하면 고려:\n"
-        "  * project_perf, perf_project\n"
-        "- project_perf일 때는 head=project, output_type=relation(perf) 힌트\n\n"
-    
-        "D) 목록/통계/다운로드/필터 중심 조회이면\n"
-        "- mode는 LOOKUP 후보로 고려.\n\n"
-    
-        "E) 위 조건에 해당하지 않는 주제/개념 중심 탐색이면\n"
-        "- mode는 SEARCH 후보로 고려.\n"   
-        "- head는 가장 중심 데이터가 힌트(애매하면 project)\n\n"
-    
-        "====================\n"
-        "[Relation enum]\n"
-        "====================\n"
-        "relation은 아래 중 하나 또는 null:\n"
-        "- project_perf, perf_project\n\n"
-    
-        "====================\n"
-        "[ids_map 규칙]\n"
-        "====================\n"
-        "ids_map은 dict이며, 키는 아래 허용 키만 사용합니다. 값은 문자열 배열입니다.\n"
-        "허용 키 예시: pjt_id, pjt_no, person_no(참여인력 hm_id), org_id, org_code, biz_no,\n"
-        "doi, issn, eissn, pissn, patent_reg_no, patent_app_no, paper_id, perf_id, rst_id\n"
-        "추출하지 못하면 빈 dict로 둡니다.\n\n"
-    
-        "====================\n"
-        "[filters 규칙]\n"
-        "====================\n"
-        "filters는 dict입니다. 필요한 것만 포함합니다.\n"
-        "가능한 키: year_from, year_to, title_terms, keywords, tag_filters, perf_types\n"
-        "participant_researcher_name, participant_researcher_id,\n"
-        "lead_org_name, participant_org_name, people_affiliation_org_name, org_role\n"
-        "관계형 질의에서 참여인력/기관이 잡히면 participant_* / lead_org_name / people_affiliation_org_name를 우선 사용합니다.\n\n"
-    
-        "====================\n"
-        "[tag_filters 매핑 규칙]\n"
-        "====================\n"
-        "1) 과제/참여/기관/연구책임/참여인력 => IRD_NAI_PJT_INFO\n"
-        "2) 논문/학술지/ISSN/DOI => IRD_NAI_RI_PAPER\n"
-        "3) 특허/출원/등록/특허번호 => IRD_NAI_RI_IPR\n"
-        "4) 소프트웨어/SW => IRD_NAI_RI_SW\n"
-        "5) 연구보고서 => IRD_NAI_RI_RSCH_RPT\n"
-        "6) 시설장비 => IRD_NAI_RI_FCLT_EQUIP\n"
-        "7) 기술요약 => IRD_NAI_RI_TECH_INFO\n"
-        "8) 성과 키워드(논문/특허/SW/보고서 등)가 있으면 성과 태그를 우선 적용\n"
-        "9) 모르면 tag_filters 생략 가능(단, PROJECT/PERFORMANCE가 명확하면 채우는 쪽 우선)\n\n"
-    
-        "====================\n"
-        "[retrieval_query 생성 규칙]\n"
-        "====================\n"
-        "retrieval_query는 검색 최적화용 짧은 쿼리입니다.\n"
-        "- 핵심 개념 5개 이내, 최대 120자\n"
-        "- 불필요한 기능어 제거: '목록', '조회', '알려줘', '무엇', '어떤' 등은 제외\n"
-        "- 사람/기관명이 있으면 반드시 포함\n"
-        "- 연도 범위가 있으면 포함(예: '2018~2020')\n\n"
-    
-        "====================\n"
-        "[limit 규칙]\n"
-        "====================\n"
-        f"- limit는 1~{MAX_TOP_K_SIZE} 범위 정수\n"
-        "- 사용자가 '상위 N개' 등 명시하면 반영(단, MAX 초과 금지)\n"
-        "- 불명확하면 20\n\n"
-    
-        "====================\n"
-        "[history_summary 규칙]\n"
-        "====================\n"
-        "- 대화 이력 기반으로 질문 핵심을 1문장 요약\n"
-        "- 이력이 없으면 '이전 문맥 없음'을 반영\n\n"
-    
-        "====================\n"
-        "[출력 형식]\n"
-        "====================\n"
-        "아래 키를 반드시 모두 포함한 JSON 객체만 출력:\n"
-        "1) category: 배열 (PROJECT|PERFORMANCE|RESEARCHER|QNA|ETC)\n"
-        "2) question_type: (DEFAULT|FOLLOW_UP)\n"
-        "3) related_docs: int 배열\n"
-        "4) researchers: 객체 배열 (각 요소는 name, affiliation, researcher_id 키를 가짐)\n"
-        "5) organizations: 객체 배열 (각 요소는 name, org_id 키를 가짐)\n"
-        "6) mode: SEARCH | LOOKUP | JOIN\n"
-        "7) head: project | perf | people | org | support\n"
-        "8) action: topic | list | detail | stats | download\n"
-        "9) relation: project_perf | perf_project | null\n"
-        "10) target_cols: string 배열 (ntis_project_v2 / ntis_perf_v2)\n"
-        "11) ids_map: dict\n"
-        "12) filters: dict\n"
-        f"13) limit: int (<= {MAX_TOP_K_SIZE})\n"
-        "14) history_summary: string\n"
-        "15) retrieval_query: string\n"
-        "16) confidence: float (0.0~1.0)\n\n"
-    
-        "{format_instructions}"
-    )
+        {{format_instructions}}
+    """
 
 
     prompt = ChatPromptTemplate.from_messages([
@@ -587,11 +596,7 @@ async def _run_question_analysis(
         log_section(
             "QUESTION ANALYSIS",
             f"coq: {conversation_id}{question}\n"
-            f"Category: {result.category}\n"
-            f"QuestionType: {result.question_type}\n"
-            f"RelatedDocs: {result.related_docs}\n"
-            f"Researchers: {result.researchers}\n"
-            f"Organizations: {result.organizations}\n"
+            f"StrategyVersion: {result.strategy_version}\n"
             f"Mode: {result.mode}\n"
             f"Head: {result.head}\n"
             f"Relation: {result.relation}\n"
@@ -600,31 +605,26 @@ async def _run_question_analysis(
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
-            f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
-            f"Confidence: {result.confidence:.2f}"
+            f"Confidence: {result.confidence:.2f}\n"
+            f"planner_failed=0"
         )
         return result
 
     except Exception as e:
-        logger.error(f"Question Analysis Error: {e}")
+        logger.error(f"[PLANNER.V2] parse failed: {e}")
         return QuestionAnalysis(
-            category=[ContentCategory.ETC],
-            question_type=QuestionType.DEFAULT,
-            related_docs=[],
-            researchers=[],
-            organizations=[],
-            mode=None,
-            head=None,
+            strategy_version="v2",
+            mode="SEARCH",
+            head="support",
+            action="topic",
             relation=None,
-            action=None,
             target_cols=[],
             ids_map={},
             filters={},
             limit=20,
-            history_summary=question,
             retrieval_query=question[:120],
-            confidence=0.5
+            confidence=0.0,
         )
 
 
@@ -661,7 +661,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "content",
     }
 
-    if qa and qa.question_type == QuestionType.DEFAULT and not state.prev_context:
+    if qa and not state.prev_context:
         result = KnowledgeSufficiency(
             requires_new_knowledge="high",
             search_intent="이전 문맥이 없어 새로운 검색이 필요함",
@@ -697,44 +697,19 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     prev_context_str = None
 
 
-    if qa.question_type == QuestionType.FOLLOW_UP:
-        if len(qa.related_docs) > 0:
-            related_doc_indexes = set(qa.related_docs)
-            related_context = [
-                doc
-                for doc in state.prev_context
-                if doc.get("source_index") in related_doc_indexes
-            ]
-            if related_context:
-                prev_context_str = refine_documents_rule_based(
-                    related_context,
-                    True,
-                    researchers=(qa.researchers if qa else None),
-                    organizations=(qa.organizations if qa else None),
-                    org_filters=(qa.filters if qa else None),
-                    ids_map=(qa.ids_map if qa else None),
-                )
-            else:
-                # fallback: 전체 prev_context 사용
-                related_context = state.prev_context
-                prev_context_str = refine_documents_rule_based(
-                    related_context,
-                    researchers=(qa.researchers if qa else None),
-                    organizations=(qa.organizations if qa else None),
-                    org_filters=(qa.filters if qa else None),
-                    ids_map=(qa.ids_map if qa else None),
-                )
-        else:
-            # fallback: 전체 prev_context 사용
-            related_context = state.prev_context
-            prev_context_str = refine_documents_rule_based(
-                related_context,
-                researchers=(qa.researchers if qa else None),
-                organizations=(qa.organizations if qa else None),
-                org_filters=(qa.filters if qa else None),
-                ids_map=(qa.ids_map if qa else None),
-            )
-
+    if qa and qa.mode == "JOIN":
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            True,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
+    else:
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
 
 
     system_prompt = (
@@ -876,18 +851,12 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         hint = SearchHint(
             coq=f"{state.conversation_id}{state.question}",
-            category=[c.value if hasattr(c, "value") else str(c) for c in (qa.category or [])] if qa else [],
-            researchers=[
-                {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
-            ] if qa else [],
-            organizations=list(qa.organizations or []) if qa else [],
             mode=(qa.mode if qa else None),
             head=(qa.head if qa else None),
             relation=(qa.relation if qa else None),
             ids_map=dict(qa.ids_map or {}) if qa else {},
             filters=dict(qa.filters or {}) if qa else {},
             limit=search_num,
-            history_summary=(qa.history_summary if qa else ""),
             retrieval_query=hint_query,
             confidence=confidence,
         )
@@ -960,23 +929,14 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
 
-    # ✅ 2) FOLLOW_UP이면 필요한 것만 좁히고(detail로)
-    if qa and qa.question_type == QuestionType.FOLLOW_UP:
+    # ✅ 2) JOIN이면 detail 우선
+    if qa and qa.mode == "JOIN":
         is_detail = True
-        if qa.related_docs:
-            related_context = [
-                state.prev_context[i - 1]
-                for i in qa.related_docs
-                if 1 <= i <= len(state.prev_context)
-            ]
-            docs_for_ctx = related_context or docs_for_ctx
 
     context_text = (
         refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
-            researchers=(qa.researchers if qa else None),
-            organizations=(qa.organizations if qa else None),
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
@@ -991,7 +951,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
-        f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
@@ -1120,6 +1079,7 @@ async def build_intent_payload(
 ) -> Dict[str, Any]:
     precheck = _cheap_precheck(question)
     question_analysis = None
+    planner_failed = 0
     if not precheck:
         question_analysis = await _run_question_analysis(
             question=question,
@@ -1127,16 +1087,15 @@ async def build_intent_payload(
             chat_history=chat_history,
             prev_context=prev_context,
         )
+        planner_failed = int((question_analysis is None) or (float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0))
 
     kws: List[str] = []
     hint_people_terms: List[str] = []
     hint_org_terms: List[str] = []
+    hint_lead_org_terms: List[str] = []
+    hint_participant_org_terms: List[str] = []
+    hint_people_affiliation_org_terms: List[str] = []
     hint_org_role = None
-    if question_analysis:
-        hint_people_terms = _normalize_hint_terms(
-            [r.name for r in (question_analysis.researchers or []) if r.name]
-        )
-        hint_org_terms = _normalize_hint_terms(list(question_analysis.organizations or []))
 
     if question_analysis and isinstance(question_analysis.filters, dict):
         filters = dict(question_analysis.filters or {})
@@ -1161,11 +1120,29 @@ async def build_intent_payload(
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
+        lead_org_terms_hint = _normalize_hint_terms(
+            filters.get("lead_org_name") or filters.get("performing_org_name")
+        )
+        participant_org_terms_hint = _normalize_hint_terms(filters.get("participant_org_name"))
+        people_affiliation_org_terms_hint = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
+        generic_org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+
+        if lead_org_terms_hint:
+            hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
+        if participant_org_terms_hint:
+            hint_participant_org_terms = _normalize_hint_terms(
+                [*hint_participant_org_terms, *participant_org_terms_hint]
+            )
+        if people_affiliation_org_terms_hint:
+            hint_people_affiliation_org_terms = _normalize_hint_terms(
+                [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
+            )
+
         org_terms_hint = _normalize_hint_terms([
-            *(_normalize_hint_terms(filters.get("org_name") or filters.get("org"))),
-            *(_normalize_hint_terms(filters.get("participant_org_name"))),
-            *(_normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))),
-            *(_normalize_hint_terms(filters.get("people_affiliation_org_name"))),
+            *generic_org_terms_hint,
+            *lead_org_terms_hint,
+            *participant_org_terms_hint,
+            *people_affiliation_org_terms_hint,
         ])
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
@@ -1174,6 +1151,9 @@ async def build_intent_payload(
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
         "org_role": hint_org_role,
+        "lead_org_terms": hint_lead_org_terms,
+        "participant_org_terms": hint_participant_org_terms,
+        "people_affiliation_org_terms": hint_people_affiliation_org_terms,
     }
 
     raw_intent = classify_query_intent(
@@ -1186,14 +1166,21 @@ async def build_intent_payload(
         raw_intent,
         query=question,
         keywords=kws,
+        hint_people_terms=hint_people_terms,
+        hint_org_terms=hint_org_terms,
+        hint_org_role=hint_org_role,
+        hint_lead_org_terms=hint_lead_org_terms,
+        hint_participant_org_terms=hint_participant_org_terms,
+        hint_people_affiliation_org_terms=hint_people_affiliation_org_terms,
     )
+    normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
 
     strategy = PlannerStrategy(
         mode=(question_analysis.mode if question_analysis else None),
         head=(question_analysis.head if question_analysis else None),
         relation=(question_analysis.relation if question_analysis else None),
         action=(question_analysis.action if question_analysis and question_analysis.action else getattr(normalized_intent, "action", None)),
-        query_text=(question_analysis.retrieval_query if question_analysis else question),
+        query_text=((question_analysis.retrieval_query if question_analysis else None) or question),
         filter_spec=(dict(question_analysis.filters or {}) if question_analysis else {}),
         topk_spec={
             "limit": int(question_analysis.limit) if question_analysis else MAX_TOP_K_SIZE,
@@ -1210,8 +1197,52 @@ async def build_intent_payload(
         "normalized_intent": normalized_intent,
         "keywords": kws,
         "strategy": strategy,
+        "planner_applied": int(planner_applied),
+        "planner_failed": int(planner_failed),
     }
 
+
+
+
+def _build_planner_override_request(analysis: QuestionAnalysis, intent: Any) -> Optional[Dict[str, Any]]:
+    requested_mode = str(getattr(analysis, "mode", "") or "").strip().lower()
+    current_action = str(getattr(intent, "action", "") or "").strip().lower()
+    if not requested_mode or not current_action:
+        return None
+
+    lookup_actions = {"list", "detail", "stats", "download", "id_exact", "id_fuzzy", "relation"}
+    if requested_mode == "lookup" and current_action not in lookup_actions:
+        return {
+            "requested_mode": requested_mode,
+            "current_action": current_action,
+        }
+    return None
+
+
+def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+    if qa is None:
+        return intent, False
+    confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
+    if confidence < 0.2:
+        return intent, False
+
+    relation_map = {
+        "project_perf": ("project", "perf"),
+        "perf_project": ("perf", "project"),
+    }
+    relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
+
+    patched = replace(
+        intent,
+        base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
+        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        relation=relation,
+        ids_map=dict(getattr(qa, "ids_map", {}) or {}),
+        planner_limit=int(getattr(qa, "limit", 20) or 20),
+        retrieval_query=getattr(qa, "retrieval_query", None),
+        planner_confidence=confidence,
+    )
+    return patched, True
 
 def _normalize_hint_terms(values: Any) -> list[str]:
     if values is None:
@@ -1328,11 +1359,7 @@ def _normalize_researcher_token(value: Optional[str]) -> str:
 
 
 def _extract_researcher_fields(researcher: Any) -> tuple[str, str, str]:
-    if isinstance(researcher, Researcher):
-        name = researcher.name
-        affiliation = researcher.affiliation
-        researcher_id = researcher.researcher_id
-    elif isinstance(researcher, dict):
+    if isinstance(researcher, dict):
         name = researcher.get("name")
         affiliation = researcher.get("affiliation")
         researcher_id = researcher.get("researcher_id")

@@ -1975,6 +1975,38 @@ def _run_rag_with_vectors(
         except Exception:
             return None
 
+    def _extract_org_filter_hints(filters_obj: Any) -> Dict[str, List[str]]:
+        if not isinstance(filters_obj, dict):
+            return {
+                "lead_org_terms": [],
+                "participant_org_terms": [],
+                "people_affiliation_org_terms": [],
+                "org_terms": [],
+            }
+
+        lead_org_terms = _normalize_hint_terms(
+            filters_obj.get("lead_org_name") or filters_obj.get("performing_org_name")
+        )
+        participant_org_terms = _normalize_hint_terms(filters_obj.get("participant_org_name"))
+        people_affiliation_org_terms = _normalize_hint_terms(filters_obj.get("people_affiliation_org_name"))
+        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name") or filters_obj.get("org"))
+
+        org_terms = _normalize_hint_terms(
+            [
+                *generic_org_terms,
+                *lead_org_terms,
+                *participant_org_terms,
+                *people_affiliation_org_terms,
+            ]
+        )
+
+        return {
+            "lead_org_terms": lead_org_terms,
+            "participant_org_terms": participant_org_terms,
+            "people_affiliation_org_terms": people_affiliation_org_terms,
+            "org_terms": org_terms,
+        }
+
     # keywords (payload/hint only)
     t0 = time.time()
     payload_kws = _get_attr(intent_payload, "keywords", None)
@@ -2030,6 +2062,9 @@ def _run_rag_with_vectors(
             hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
             if isinstance(hint_org_terms, str):
                 hint_org_terms = [hint_org_terms]
+            org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
+            if org_filter_hints["org_terms"]:
+                hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_filter_hints["org_terms"]])
 
             it = normalize_intent(
                 raw_intent,
@@ -2038,6 +2073,9 @@ def _run_rag_with_vectors(
                 hint_people_terms=hint_people_terms,
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
+                hint_lead_org_terms=org_filter_hints["lead_org_terms"],
+                hint_participant_org_terms=org_filter_hints["participant_org_terms"],
+                hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
             )
             intent_perf_types = list(getattr(it, "perf_types", []) or [])
             if intent_perf_types:
@@ -2079,6 +2117,9 @@ def _run_rag_with_vectors(
             hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
             if isinstance(hint_org_terms, str):
                 hint_org_terms = [hint_org_terms]
+            org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
+            if org_filter_hints["org_terms"]:
+                hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_filter_hints["org_terms"]])
 
             it = normalize_intent(
                 raw_intent,
@@ -2087,6 +2128,9 @@ def _run_rag_with_vectors(
                 hint_people_terms=hint_people_terms,
                 hint_org_terms=hint_org_terms,
                 hint_org_role=hint_org_role,
+                hint_lead_org_terms=org_filter_hints["lead_org_terms"],
+                hint_participant_org_terms=org_filter_hints["participant_org_terms"],
+                hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
             )
             intent_perf_types = list(getattr(it, "perf_types", []) or [])
             if intent_perf_types:
@@ -2114,9 +2158,15 @@ def _run_rag_with_vectors(
                 merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
             ctx.ids_map = merged_ids
         if isinstance(hint_filters, dict):
-            org_terms_hint = _normalize_hint_terms(hint_filters.get("org_name") or hint_filters.get("org"))
-            if org_terms_hint:
-                ctx.org_terms = org_terms_hint
+            org_filter_hints = _extract_org_filter_hints(hint_filters)
+            if org_filter_hints["lead_org_terms"]:
+                ctx.lead_org_terms = org_filter_hints["lead_org_terms"]
+            if org_filter_hints["participant_org_terms"]:
+                ctx.participant_org_terms = org_filter_hints["participant_org_terms"]
+            if org_filter_hints["people_affiliation_org_terms"]:
+                ctx.people_affiliation_org_terms = org_filter_hints["people_affiliation_org_terms"]
+            if org_filter_hints["org_terms"]:
+                ctx.org_terms = org_filter_hints["org_terms"]
             people_terms_hint = _normalize_hint_terms(
                 hint_filters.get("researcher_name") or hint_filters.get("people_name")
             )
@@ -2201,6 +2251,8 @@ def _run_rag_with_vectors(
     planner_limit = ctx.planner_limit
     planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
     planner_meta_source = "qa" if hint_conf_ok else "intent"
+    planner_applied = int(_get_attr(intent_payload, "planner_applied", 0) or 0)
+    planner_failed = int(_get_attr(intent_payload, "planner_failed", 0) or 0)
 
     if not hint_conf_ok:
         if planner_retrieval_query:
@@ -2243,6 +2295,8 @@ def _run_rag_with_vectors(
         hint_conf=qa_conf,
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
+        planner_applied=planner_applied,
+        planner_failed=planner_failed,
         hinted_base=hinted_base,
         hinted_limit=hinted_limit,
         hinted_cols=hinted_cols,
@@ -2273,15 +2327,50 @@ def _run_rag_with_vectors(
 
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
+    lead_org_terms = [t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()]
+    participant_org_terms = [
+        t.strip() for t in (list(getattr(ctx, "participant_org_terms", []) or []) or []) if str(t).strip()
+    ]
+    people_affiliation_org_terms = [
+        t.strip()
+        for t in (list(getattr(ctx, "people_affiliation_org_terms", []) or []) or [])
+        if str(t).strip()
+    ]
+    if (not org_terms) and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
+        org_terms = _normalize_hint_terms([
+            *lead_org_terms,
+            *participant_org_terms,
+            *people_affiliation_org_terms,
+        ])
     ctx.org_terms = org_terms
+    ctx.lead_org_terms = lead_org_terms
+    ctx.participant_org_terms = participant_org_terms
+    ctx.people_affiliation_org_terms = people_affiliation_org_terms
+
     org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
+
+    effective_lead_org_terms = list(lead_org_terms)
+    effective_participant_org_terms = list(participant_org_terms)
+    effective_people_affiliation_org_terms = list(people_affiliation_org_terms)
+
+    # 명시 키가 없을 때만 org_role을 보조 신호로 사용한다.
+    if not effective_lead_org_terms and not effective_participant_org_terms and org_terms:
+        if org_role in ("performer", "lead", "performing"):
+            effective_lead_org_terms = list(org_terms)
+        elif org_role == "participant":
+            effective_participant_org_terms = list(org_terms)
+    if not effective_people_affiliation_org_terms and org_terms and org_role == "affiliation":
+        effective_people_affiliation_org_terms = list(org_terms)
+
+    # 컨텍스트 호환 필드 유지
     ctx.org_role = org_role
+
     people_filter_spec = dict(pending_strategy_filter_spec or {})
-    org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
+    org_filter = build_org_filter(OrgFilterInput(effective_lead_org_terms, role="lead")) if effective_lead_org_terms else None
     participant_org_filter = (
-        build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
-        if org_terms and org_role == "participant"
+        build_prtcp_org_nested_filter(OrgFilterInput(effective_participant_org_terms, role="participant"))
+        if effective_participant_org_terms
         else None
     )
 
@@ -2334,7 +2423,7 @@ def _run_rag_with_vectors(
                 seen_ids.add(pid)
                 deduped_ids.append(pid)
             people_ids = deduped_ids
-    people_org_terms = org_terms if org_role == "affiliation" else []
+    people_org_terms = list(effective_people_affiliation_org_terms)
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
         person_ids=people_ids,
@@ -2926,6 +3015,8 @@ def _run_rag_with_vectors(
         target_cols=list(target_collections or []),
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
+        planner_applied=planner_applied,
+        planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
@@ -3127,7 +3218,9 @@ def _run_rag_with_vectors(
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
-        seed_join_ids = list(dict.fromkeys(pjt_ids + pjt_nos))
+        seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
+        seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
+        seed_join_ids = list(dict.fromkeys(seed_join_pjt_ids + seed_join_pjt_nos))
 
 
 
@@ -3179,13 +3272,23 @@ def _run_rag_with_vectors(
             hop2_q = q
 
             join_ids: List[str] = []
+            join_pjt_ids: List[str] = []
+            join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
             hop1_filter = None
 
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
             if seed_join_ids:
+                join_pjt_ids = seed_join_pjt_ids[:]
+                join_pjt_nos = seed_join_pjt_nos[:]
                 join_ids = seed_join_ids[:]
-                log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_join_ids", join_ids=join_ids[:10])
+                log_kv(
+                    "RAG.JOIN.HOP1.SKIP",
+                    reason="explicit_join_ids",
+                    join_ids=join_ids[:10],
+                    join_pjt_ids=join_pjt_ids[:10],
+                    join_pjt_nos=join_pjt_nos[:10],
+                )
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
                 if hop1_kind == "people" and people_filter:
@@ -3367,9 +3470,12 @@ def _run_rag_with_vectors(
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
+                join_key_mode = "group" if hop2_col == COL_PERF else "instance"
                 hop2_filter = build_join_filter(
                     JoinFilterInput(
-                        join_ids=join_ids,
+                        join_ids=join_pjt_ids or join_ids,
+                        pjt_nos=join_pjt_nos,
+                        join_key_mode=join_key_mode,
                         tag_filters=hop2_tag_filters,
                         people_terms=people_terms,
                         org_terms=org_terms,

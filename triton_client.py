@@ -159,39 +159,6 @@ def _get_max_seq_len(model_name: str) -> int:
     except Exception:
         return int(DEFAULT_MAX_MODEL_LEN)
 
-
-def _trim_prompt_to_max_length(
-        model_name: str,
-        prompt: str,
-        *,
-        min_new_tokens: int = 64,
-) -> str:
-    prompt_tokens = _get_prompt_tokens(model_name, prompt)
-    max_seq_len = _get_max_seq_len(model_name)
-    max_prompt_tokens = max(1, max_seq_len - CTX_SAFETY_MARGIN - int(min_new_tokens))
-
-    if prompt_tokens <= max_prompt_tokens:
-        return prompt
-
-    try:
-        tok = get_tokenizer_for_model(model_name)
-        ids = tok.encode(prompt, add_special_tokens=False)
-        trimmed_ids = ids[-max_prompt_tokens:]
-        trimmed_prompt = tok.decode(trimmed_ids, skip_special_tokens=False)
-        logger.warning(
-            "[TRITON] prompt가 최대 길이를 초과하여 마지막 토큰 기준으로 절단했습니다: "
-            f"prompt_tokens={prompt_tokens}, max_prompt_tokens={max_prompt_tokens}, "
-            f"max_seq_len={max_seq_len}"
-        )
-        return trimmed_prompt
-    except Exception as e:
-        logger.warning(
-            "[TRITON] prompt 절단 실패, 문자 기준으로 fallback 처리: "
-            f"{e}"
-        )
-        return prompt[-max(1, max_prompt_tokens * 4):]
-
-
 def _compute_max_new_tokens(
         model_name: str,
         prompt: str,
