@@ -3460,7 +3460,7 @@ def _run_rag_with_vectors(
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
-        def _relation_lookup_filter_for_col() -> Any:
+        def _relation_lookup_filter_for_col(apply_name_filters: bool) -> Any:
             if not relation_lookup_enforce or not relation:
                 return None
             route = get_relation_route(relation)
@@ -3475,32 +3475,30 @@ def _run_rag_with_vectors(
             base_filter = _build_tag_only_filter(tag_filters_local) if tag_filters_local else None
             relation_parts = set(route.relation)
             if col == COL_PROJECT:
-                if "people" in relation_parts and people_filter:
+                if "people" in relation_parts and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
-                if "org" in relation_parts and (participant_org_filter or org_filter):
+                if "org" in relation_parts and (participant_org_filter or org_filter) and apply_name_filters:
                     base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
             return base_filter
 
-        relation_filter = _relation_lookup_filter_for_col()
-
-        def _build_soft_filter_for_col(col_name: str) -> Any:
+        def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
                 if title_filter and (plan.mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
-                if people_filter or participant_org_filter or org_filter:
+                if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                     base_filter = _and_filter(base_filter, tag_filter_local)
-                if people_filter:
+                if apply_name_filters and people_filter:
                     base_filter = _and_filter(base_filter, people_filter)
-                if participant_org_filter or org_filter:
+                if apply_name_filters and (participant_org_filter or org_filter):
                     base_filter = _and_filter(base_filter, participant_org_filter or org_filter)
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
                 if title_filter and (plan.mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
-                if base_route == "perf" and people_filter:
+                if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
                 if perf_tag_filter:
                     base_filter = _and_filter(base_filter, perf_tag_filter)
@@ -3517,20 +3515,39 @@ def _run_rag_with_vectors(
                 combined = _and_filter(combined, perf_followup_filter) if combined else perf_followup_filter
             return combined
 
+        ids_map = getattr(it, "ids_map", {}) or {}
+        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
+        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        perf_id_keys = (
+            "doi",
+            "issn",
+            "eissn",
+            "pissn",
+            "patent_reg_no",
+            "patent_app_no",
+            "paper_id",
+            "perf_id",
+            "rst_id",
+        )
+        has_perf_ids = any(ids_map.get(key) for key in perf_id_keys)
+        if payload_project_terms:
+            pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
+        lookup_has_ids = bool(pjt_ids or pjt_nos or has_perf_ids)
+        apply_name_filters = plan.mode != "lookup" or lookup_has_ids
+
+        relation_filter = _relation_lookup_filter_for_col(apply_name_filters)
+
         if plan.mode != "lookup":
             if plan.mode == "search" and search_filter_enabled:
-                return _apply_extra_filters(_build_soft_filter_for_col(col))
+                return _apply_extra_filters(_build_soft_filter_for_col(col, apply_name_filters))
             if plan.mode == "search" and col == COL_PROJECT and relation == ("people", "project") and people_filter:
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
             return _apply_extra_filters(None)
 
-        base_filter_lookup = _build_soft_filter_for_col(col) if lookup_filter_enabled else None
+        base_filter_lookup = _build_soft_filter_for_col(col, apply_name_filters) if lookup_filter_enabled else None
 
-        ids_map = getattr(it, "ids_map", {}) or {}
-        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
-        if relation and not (pjt_ids or pjt_nos):
+        if relation and not (pjt_ids or pjt_nos or has_perf_ids):
             log_kv(
                 "RAG.LOOKUP.IDS_MAP.EMPTY",
                 build_project_id_filter="skip",
@@ -3538,9 +3555,8 @@ def _run_rag_with_vectors(
                 pjt_id=pjt_ids,
                 pjt_no=pjt_nos,
                 relation=relation,
+                perf_ids=has_perf_ids,
             )
-        if payload_project_terms:
-            pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
@@ -3553,12 +3569,12 @@ def _run_rag_with_vectors(
             return _apply_extra_filters(combined)
 
         # (선택) org_filter는 project 컬렉션에서만
-        if col == COL_PROJECT and relation == ("people", "project") and people_filter:
+        if col == COL_PROJECT and relation == ("people", "project") and people_filter and lookup_has_ids:
             tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
             combined = _and_filter(_and_filter(tag_filter_local, people_filter), base_filter_lookup) if base_filter_lookup else _and_filter(tag_filter_local, people_filter)
             return _apply_extra_filters(combined)
 
-        if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people"):
+        if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people") and lookup_has_ids:
             if org_role == "participant":
                 combined = _and_filter(participant_org_filter or org_filter, base_filter_lookup) if base_filter_lookup else (participant_org_filter or org_filter)
                 return _apply_extra_filters(combined)
@@ -3570,13 +3586,13 @@ def _run_rag_with_vectors(
         if col == COL_PROJECT:
             if base_route == "people":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                base_filter = _and_filter(tag_filter_local, people_filter) if people_filter else tag_filter_local
+                base_filter = _and_filter(tag_filter_local, people_filter) if (people_filter and lookup_has_ids) else tag_filter_local
                 return _apply_extra_filters(base_filter)
             if base_route == "org":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 base_filter = (
                     _and_filter(tag_filter_local, participant_org_filter or org_filter)
-                    if (participant_org_filter or org_filter)
+                    if (participant_org_filter or org_filter) and lookup_has_ids
                     else tag_filter_local
                 )
                 return _apply_extra_filters(base_filter)
@@ -3584,16 +3600,16 @@ def _run_rag_with_vectors(
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 combined_filter = tag_filter_local
-                if people_filter:
+                if people_filter and lookup_has_ids:
                     combined_filter = _and_filter(combined_filter, people_filter)
-                if participant_org_filter or org_filter:
+                if (participant_org_filter or org_filter) and lookup_has_ids:
                     combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
                 combined_filter = _and_filter(combined_filter, base_filter_lookup) if base_filter_lookup else combined_filter
                 return _apply_extra_filters(combined_filter)
 
         if col == COL_PERF and base_route == "perf":
             combined_filter = base_filter_lookup
-            if people_filter:
+            if people_filter and lookup_has_ids:
                 combined_filter = _and_filter(combined_filter, people_filter) if combined_filter else people_filter
             if perf_tag_filter:
                 combined_filter = _and_filter(combined_filter, perf_tag_filter) if combined_filter else perf_tag_filter
