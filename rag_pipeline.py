@@ -2380,7 +2380,7 @@ def _run_rag_with_vectors(
     keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
     keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
-    if plan.mode == "lookup" and title_terms:
+    if title_terms:
         keyword_terms = _merge_keywords_with_priority(title_terms, keyword_terms)
     it.keywords = keyword_terms
     kws = keyword_terms
@@ -2742,18 +2742,19 @@ def _run_rag_with_vectors(
         plan.target_collections = filtered if filtered else list(effective_allow)
 
     title_filter_applied_to = None
-    if title_filter and (plan.mode == "search" and search_filter_conf_ok):
+    if title_filter and plan.mode == "lookup":
         title_filter_applied_to = "project/perf"
     tag_filter_applied_to = None
-    if (project_tag_filter or perf_tag_filter) and (
-        plan.mode == "lookup" or (plan.mode == "search" and search_filter_conf_ok)
-    ):
+    if (project_tag_filter or perf_tag_filter) and plan.mode == "lookup":
         tag_targets: list[str] = []
         if project_tag_filter:
             tag_targets.append("project")
         if perf_tag_filter:
             tag_targets.append("perf")
         tag_filter_applied_to = "/".join(tag_targets) if tag_targets else None
+
+    search_filter_server_policy = "must_not_only" if plan.mode == "search" else "lookup_only"
+    search_filter_server_applied = False
 
     log_kv(
         "RAG.FILTERS",
@@ -2782,6 +2783,8 @@ def _run_rag_with_vectors(
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
         tag_filter_applied_to=tag_filter_applied_to,
+        search_filter_server_policy=search_filter_server_policy,
+        search_filter_server_applied=int(search_filter_server_applied),
     )
 
     strategy_key = build_strategy_key(action, plan.mode)
@@ -2808,6 +2811,8 @@ def _run_rag_with_vectors(
             "lookup_title_filter_policy": lookup_title_filter_policy,
             "filter_signal": search_filter_signal,
             "filter_conf_ok": search_filter_conf_ok,
+            "search_filter_server_policy": search_filter_server_policy,
+            "search_filter_server_applied": search_filter_server_applied,
         },
         "mix_weights": {
             "dense": {k: float(v) for k, v in (w_dense_map or {}).items()},
@@ -2852,6 +2857,8 @@ def _run_rag_with_vectors(
         search_filter_enabled=int(search_filter_enabled),
         lookup_filter_enabled=int(lookup_filter_enabled),
         relation_lookup_enforce=int(relation_lookup_enforce),
+        search_filter_server_policy=search_filter_server_policy,
+        search_filter_server_applied=int(search_filter_server_applied),
     )
     log_kv(
         "RAG.PRESET/PLAN.POST",
@@ -3460,7 +3467,15 @@ def _run_rag_with_vectors(
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
-        def _relation_lookup_filter_for_col(apply_name_filters: bool) -> Any:
+        def _safe_exclusion_only(filter_obj: Any) -> Any:
+            if qmodels is None or filter_obj is None:
+                return None
+            must_not = list(getattr(filter_obj, "must_not", None) or [])
+            if not must_not:
+                return None
+            return qmodels.Filter(must_not=must_not)
+
+        def _relation_lookup_filter_for_col() -> Any:
             if not relation_lookup_enforce or not relation:
                 return None
             route = get_relation_route(relation)
@@ -3539,11 +3554,8 @@ def _run_rag_with_vectors(
 
         if plan.mode != "lookup":
             if plan.mode == "search" and search_filter_enabled:
-                return _apply_extra_filters(_build_soft_filter_for_col(col, apply_name_filters))
-            if plan.mode == "search" and col == COL_PROJECT and relation == ("people", "project") and people_filter:
-                tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
-                return _apply_extra_filters(_and_filter(tag_filter_local, people_filter))
-            return _apply_extra_filters(None)
+                return _safe_exclusion_only(_apply_extra_filters(None))
+            return None
 
         base_filter_lookup = _build_soft_filter_for_col(col, apply_name_filters) if lookup_filter_enabled else None
 
