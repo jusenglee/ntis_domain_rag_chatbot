@@ -121,7 +121,7 @@ class QueryIntentRelationTests(unittest.TestCase):
             filters={"year_from": None, "year_to": "None"},
         )
 
-        _apply_question_analysis_to_intent(intent, analysis)
+        intent = _apply_question_analysis_to_intent(intent, analysis)
 
         self.assertEqual(intent.years, [])
         self.assertIsNone(getattr(intent, "year_from", None))
@@ -147,7 +147,7 @@ class QueryIntentRelationTests(unittest.TestCase):
             filters={"year_from": "null", "year_to": "2020"},
         )
 
-        _apply_question_analysis_to_intent(intent, analysis)
+        intent = _apply_question_analysis_to_intent(intent, analysis)
 
         self.assertEqual(intent.years, ["2020"])
         self.assertEqual(getattr(intent, "year_from", None), "2020")

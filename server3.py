@@ -6,6 +6,7 @@ import time
 import os
 import re
 from typing import Annotated, Optional, List, Dict, Any, Literal
+from dataclasses import replace
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -1125,11 +1126,13 @@ async def build_intent_payload(
     if question_analysis and isinstance(question_analysis.filters, dict):
         hint_org_role = question_analysis.filters.get("org_role")
 
+    planner_hint = _build_planner_hint(question_analysis)
+
     raw_intent = classify_query_intent(
         question,
         kws,
         domain_hint=question_analysis.head if question_analysis else None,
-        hint=question_analysis.model_dump() if question_analysis else None,
+        hint=planner_hint,
     )
 
     normalized_intent = normalize_intent(
@@ -1140,8 +1143,6 @@ async def build_intent_payload(
         hint_org_terms=hint_org_terms,
         hint_org_role=hint_org_role,
     )
-
-    _apply_question_analysis_to_intent(normalized_intent, question_analysis)
 
     return {
         "question_analysis": question_analysis,
@@ -1204,110 +1205,156 @@ def _merge_ids_map(base: dict[str, list[str]], incoming: dict[str, Any]) -> dict
     return merged
 
 
-def _apply_question_analysis_to_intent(normalized_intent, question_analysis: QuestionAnalysis) -> None:
+def _build_planner_hint(question_analysis: Optional[QuestionAnalysis]) -> Optional[dict[str, Any]]:
     if not question_analysis:
-        return
+        return None
+
+    planner_hint = dict(question_analysis.model_dump())
+    filters = question_analysis.filters if isinstance(question_analysis.filters, dict) else {}
+
+    people_terms = _normalize_hint_terms(
+        [r.name for r in (question_analysis.researchers or []) if getattr(r, "name", None)]
+    )
+    participant_people_terms = _normalize_hint_terms(filters.get("participant_researcher_name"))
+    named_people_terms = _normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))
+    merged_people_terms = _normalize_hint_terms([*people_terms, *participant_people_terms, *named_people_terms])
+    if merged_people_terms:
+        planner_hint["people_terms"] = merged_people_terms
+
+    org_terms = _normalize_hint_terms(question_analysis.organizations)
+    org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+    participant_org_terms = _normalize_hint_terms(filters.get("participant_org_name"))
+    lead_org_terms = _normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+    merged_org_terms = _normalize_hint_terms([*org_terms_hint, *participant_org_terms, *lead_org_terms, *org_terms])
+    if merged_org_terms:
+        planner_hint["org_terms"] = merged_org_terms
+
+    year_terms_hint = _normalize_hint_terms([filters.get("year_from"), filters.get("year_to")])
+    if year_terms_hint:
+        planner_hint["years"] = year_terms_hint
+
+    tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
+    relation_text = str(question_analysis.relation or "").strip().lower()
+    if not tag_filters_hint and relation_text == "project_perf":
+        tag_filters_hint = ["IRD_NAI_PJT_INFO"]
+    if tag_filters_hint:
+        if question_analysis.head == "perf":
+            planner_hint["perf_tag_filters"] = tag_filters_hint
+        if question_analysis.head == "project":
+            planner_hint["project_tag_filters"] = tag_filters_hint
+
+    org_role = filters.get("org_role")
+    if org_role:
+        planner_hint["org_role"] = str(org_role).strip().lower() or None
+    elif participant_org_terms:
+        planner_hint["org_role"] = "participant"
+    elif lead_org_terms:
+        planner_hint["org_role"] = "performer"
+
+    return planner_hint
+
+
+def _apply_question_analysis_to_intent(normalized_intent, question_analysis: QuestionAnalysis):
+    if not question_analysis:
+        return normalized_intent
+
+    updates: dict[str, Any] = {}
+
     if question_analysis.head:
-        normalized_intent.base_route = question_analysis.head
+        updates["base_route"] = question_analysis.head
     relation = _parse_relation_hint(question_analysis.relation)
     if relation:
-        normalized_intent.relation = relation
+        updates["relation"] = relation
 
-    normalized_intent.ids_map = _merge_ids_map(
+    ids_map = _merge_ids_map(
         getattr(normalized_intent, "ids_map", {}),
         dict(question_analysis.ids_map or {}),
     )
+    updates["ids_map"] = ids_map
 
     org_terms = _normalize_hint_terms(question_analysis.organizations)
     if org_terms:
-        normalized_intent.org_terms = org_terms
+        updates["org_terms"] = org_terms
 
-    people_terms = [r.name for r in (question_analysis.researchers or []) if r.name]
-    people_terms = _normalize_hint_terms(people_terms)
+    people_terms = _normalize_hint_terms([r.name for r in (question_analysis.researchers or []) if r.name])
     if people_terms:
-        normalized_intent.people_terms = people_terms
+        updates["people_terms"] = people_terms
 
     filters = question_analysis.filters or {}
     if isinstance(filters, dict):
         org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
         if org_terms_hint:
-            normalized_intent.org_terms = org_terms_hint
+            updates["org_terms"] = org_terms_hint
         participant_people_terms = _normalize_hint_terms(filters.get("participant_researcher_name"))
-        people_terms_hint = _normalize_hint_terms(
-            filters.get("researcher_name") or filters.get("people_name")
-        )
+        people_terms_hint = _normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))
         people_terms_hint = _normalize_hint_terms([*participant_people_terms, *people_terms_hint])
         if people_terms_hint:
-            normalized_intent.people_terms = people_terms_hint
+            updates["people_terms"] = people_terms_hint
         participant_people_ids = _normalize_hint_terms(filters.get("participant_researcher_id"))
         if participant_people_ids:
-            normalized_intent.ids_map = _merge_ids_map(
-                getattr(normalized_intent, "ids_map", {}),
+            updates["ids_map"] = _merge_ids_map(
+                dict(updates.get("ids_map", ids_map)),
                 {"person_no": participant_people_ids},
             )
         participant_org_terms = _normalize_hint_terms(filters.get("participant_org_name"))
         lead_org_terms = _normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
         if participant_org_terms:
-            normalized_intent.org_terms = participant_org_terms
-            if not getattr(normalized_intent, "org_role", None):
-                normalized_intent.org_role = "participant"
+            updates["org_terms"] = participant_org_terms
+            if not getattr(normalized_intent, "org_role", None) and "org_role" not in updates:
+                updates["org_role"] = "participant"
         if lead_org_terms:
-            normalized_intent.org_terms = lead_org_terms
-            if not getattr(normalized_intent, "org_role", None):
-                normalized_intent.org_role = "performer"
-        year_terms_hint = _normalize_hint_terms(
-            [filters.get("year_from"), filters.get("year_to")]
-        )
+            updates["org_terms"] = lead_org_terms
+            if not getattr(normalized_intent, "org_role", None) and "org_role" not in updates:
+                updates["org_role"] = "performer"
+        year_terms_hint = _normalize_hint_terms([filters.get("year_from"), filters.get("year_to")])
         if year_terms_hint:
-            normalized_intent.years = year_terms_hint
-            normalized_intent.year_from = year_terms_hint[0]
-            normalized_intent.year_to = year_terms_hint[-1]
+            updates["years"] = year_terms_hint
+            updates["year_from"] = year_terms_hint[0]
+            updates["year_to"] = year_terms_hint[-1]
         year_from = filters.get("year_from")
-        year_to = filters.get("year_to")
         if year_from is not None:
             year_from_value = str(year_from).strip()
             if year_from_value and year_from_value.lower() not in ("none", "null"):
-                normalized_intent.year_from = year_from_value
+                updates["year_from"] = year_from_value
+        year_to = filters.get("year_to")
         if year_to is not None:
             year_to_value = str(year_to).strip()
             if year_to_value and year_to_value.lower() not in ("none", "null"):
-                normalized_intent.year_to = year_to_value
+                updates["year_to"] = year_to_value
         tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
         if tag_filters_hint:
-            normalized_intent.tag_filters = tag_filters_hint
+            updates["tag_filters"] = tag_filters_hint
             if question_analysis.head == "perf":
-                normalized_intent.perf_tag_filters = tag_filters_hint
+                updates["perf_tag_filters"] = tag_filters_hint
             if question_analysis.head == "project":
-                normalized_intent.project_tag_filters = tag_filters_hint
+                updates["project_tag_filters"] = tag_filters_hint
         relation_text = str(question_analysis.relation or "").strip().lower()
-        existing_tag_filters = _normalize_hint_terms(getattr(normalized_intent, "tag_filters", None))
+        existing_tag_filters = _normalize_hint_terms(updates.get("tag_filters", getattr(normalized_intent, "tag_filters", None)))
         if not tag_filters_hint and not existing_tag_filters and relation_text == "project_perf":
             default_tag_filters = ["IRD_NAI_PJT_INFO"]
-            normalized_intent.tag_filters = default_tag_filters
+            updates["tag_filters"] = default_tag_filters
             if question_analysis.head == "perf":
-                normalized_intent.perf_tag_filters = default_tag_filters
+                updates["perf_tag_filters"] = default_tag_filters
             if question_analysis.head == "project":
-                normalized_intent.project_tag_filters = default_tag_filters
+                updates["project_tag_filters"] = default_tag_filters
         perf_types_hint = _normalize_hint_terms(filters.get("perf_types"))
         if perf_types_hint:
             perf_type_norm = normalize_perf_types(perf_types_hint)
-            normalized_intent.perf_types = (
-                perf_type_norm["tags"] or perf_type_norm["unknown"]
-            )
+            updates["perf_types"] = perf_type_norm["tags"] or perf_type_norm["unknown"]
         keywords_hint = _normalize_hint_terms(filters.get("keywords"))
         if keywords_hint:
-            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
-            normalized_intent.keywords = list(dict.fromkeys([*keywords_hint, *current_keywords]))
-        title_hint = _normalize_hint_terms(
-            filters.get("title") or filters.get("ame")
-        )
+            current_keywords = list(updates.get("keywords", getattr(normalized_intent, "keywords", []) or []))
+            updates["keywords"] = list(dict.fromkeys([*keywords_hint, *current_keywords]))
+        title_hint = _normalize_hint_terms(filters.get("title") or filters.get("ame"))
         if title_hint:
-            normalized_intent.title = title_hint
-            current_keywords = list(getattr(normalized_intent, "keywords", []) or [])
-            normalized_intent.keywords = list(dict.fromkeys([*current_keywords, *title_hint]))
+            updates["title"] = title_hint
+            current_keywords = list(updates.get("keywords", getattr(normalized_intent, "keywords", []) or []))
+            updates["keywords"] = list(dict.fromkeys([*current_keywords, *title_hint]))
         org_role = filters.get("org_role")
         if org_role:
-            normalized_intent.org_role = str(org_role).strip().lower() or None
+            updates["org_role"] = str(org_role).strip().lower() or None
+
+    return replace(normalized_intent, **updates)
 
 # --- Graph Construction ---
 def build_advanced_workflow():
