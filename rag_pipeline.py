@@ -22,10 +22,10 @@ import time
 import inspect
 import json
 from pprint import pformat
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent, resolve_join_hops
+from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
@@ -58,8 +58,6 @@ from rag_parts.constants import (
     normalize_perf_types,
 )
 from rag_parts.query_intent import (
-    QueryIntent,
-    classify_query as _classify_query,
     get_relation_route,
     relation_target_collections,
     normalize_categories,
@@ -77,7 +75,6 @@ from rag_parts.search_strategy import (
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
-    norm_tag_from_payload as _norm_tag_from_payload,
     tag_match_bonus as _tag_match_bonus,
 )
 from rag_parts.join import (

@@ -24,7 +24,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
-from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -39,11 +39,8 @@ from settings import (
     REDIS_URL,
     REDIS_TTL,
     MAX_TOP_K_SIZE,
-    MAX_CONTEXT_CHARS,
     MAX_DOC_SENTENCES,
     MAX_DOC_TOKENS,
-    SUMMARY_DOC_SENTENCES,
-    SUMMARY_DOC_TOKENS,
 )
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
@@ -821,13 +818,10 @@ class CustomRAGRetriever(BaseModel):
         for idx, hit in enumerate(hits[:self.top_k], start=1):
             if hasattr(hit, "payload"):
                 hit_data = hit.payload
-                score = getattr(hit, "score", 0.0)
             elif isinstance(hit, dict):
                 hit_data = hit
-                score = hit.get("score", 0.0)
             else:
                 hit_data = getattr(hit, "__dict__", {})
-                score = 0.0
 
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
@@ -1972,11 +1966,6 @@ async def query_stream(payload: QueryRequest):
 
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-
-    inputs = {
-        "conversation_id": conversation_id,
-        "messages": [HumanMessage(content=question)]
-    }
 
     graph = app.state.graph
 

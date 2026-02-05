@@ -11,14 +11,6 @@ from .constants import (
     TAG_PJT_INFO,
     normalize_perf_types,
 )
-from .filters import (
-    OrgFilterInput,
-    PeopleFilterInput,
-    build_org_filter,
-    build_people_filter,
-    build_prtcp_org_nested_filter,
-    build_tag_only_filter,
-)
 from .query_intent import QueryIntent, classify_query as _classify_query, normalize_categories
 
 
