@@ -2163,7 +2163,7 @@ def _run_rag_with_vectors(
     payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
     payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
     payload_title = _normalize_hint_terms(
-        _get_attr(intent_payload, "itle", None) or _get_attr(intent_payload, "title", None)
+        _get_attr(intent_payload, "title", None) or _get_attr(intent_payload, "title", None)
     )
     payload_year_from = _get_attr(intent_payload, "year_from", None)
     payload_year_to = _get_attr(intent_payload, "year_to", None)
