@@ -1454,6 +1454,7 @@ class QueryPlan:
     filter_spec: Dict[str, Any] = field(default_factory=dict)
     topk_spec: Dict[str, Any] = field(default_factory=dict)
     rerank_spec: Dict[str, Any] = field(default_factory=dict)
+    strategy: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -2869,13 +2870,38 @@ def _run_rag_with_vectors(
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
     }
+    strategy = {
+        "mode": plan.mode,
+        "action": action,
+        "relation": relation,
+        "people_terms": list(people_terms or []),
+        "target_collections": list(ctx.target_collections or []),
+        "search_filter_enabled": bool(search_filter_enabled),
+        "lookup_filter_enabled": bool(lookup_filter_enabled),
+        "relation_lookup_enforce": bool(relation_lookup_enforce),
+        "lookup_filter_policy": lookup_filter_policy,
+        "lookup_title_filter_policy": lookup_title_filter_policy,
+        "search_filter_server_policy": search_filter_server_policy,
+    }
     plan = replace(
         plan,
+        relation=relation,
+        target_collections=list(ctx.target_collections or []),
         filter_spec=filter_spec,
         topk_spec=topk_spec,
         rerank_spec=rerank_spec,
+        strategy=strategy,
     )
     ctx.plan = plan
+
+    strategy = dict(plan.strategy or {})
+    mode = (strategy.get("mode") or plan.mode or "search").strip().lower()
+    relation = strategy.get("relation")
+    people_terms = [t.strip() for t in (strategy.get("people_terms") or []) if str(t).strip()]
+    target_collections = list(strategy.get("target_collections") or plan.target_collections or [])
+    search_filter_enabled = bool(strategy.get("search_filter_enabled", False))
+    lookup_filter_enabled = bool(strategy.get("lookup_filter_enabled", False))
+    relation_lookup_enforce = bool(strategy.get("relation_lookup_enforce", False))
 
     log_kv(
         "RAG.FILTERS",
@@ -2956,7 +2982,7 @@ def _run_rag_with_vectors(
         action=action,
         relation=relation,
         output_type=getattr(plan, "output_type", None),
-        target_cols=list(ctx.target_collections or []),
+        target_cols=list(target_collections or []),
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
         planner_first_applied=int(planner_first_applied),
@@ -2983,7 +3009,7 @@ def _run_rag_with_vectors(
         action=plan.action,
         relation=ctx.relation,
         output_type=getattr(plan, "output_type", None),
-        target_cols=ctx.target_collections,
+        target_cols=target_collections,
         filter_spec=plan.filter_spec,
         topk_spec=plan.topk_spec,
         rerank_spec=plan.rerank_spec,
@@ -3000,9 +3026,9 @@ def _run_rag_with_vectors(
         ids_map = getattr(it, "ids_map", None) or {}
         if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
             return []
-        if plan.mode == "join":
+        if mode == "join":
             return []
-        target_cols = list(ctx.target_collections or _default_target_collections())
+        target_cols = list(target_collections or _default_target_collections())
         if COL_PROJECT not in target_cols or COL_PERF not in target_cols:
             log_kv(
                 "RAG.PERF.FOLLOWUP.SKIP",
@@ -3146,7 +3172,7 @@ def _run_rag_with_vectors(
     # -------------------------
     # JOIN mode (2-hop)
     # -------------------------
-    if plan.mode == "join" and relation:
+    if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
@@ -3162,29 +3188,30 @@ def _run_rag_with_vectors(
         hop2_tag_filters: Optional[List[str]] = None
         hop2_label = ""
 
-        route = get_relation_route(relation)
+        join_relation = relation
+        route = get_relation_route(join_relation)
         if route is None:
             # unknown relation -> fall back to base SEARCH
-            relation = None
+            join_relation = None
         else:
             hop1_col, hop2_col = route.hop1_col, route.hop2_col
             hop1_kind, hop2_kind = route.hop1_kind, route.hop2_kind
             hop1_tag_filters, hop2_tag_filters = route.hop1_tag_filters, route.hop2_tag_filters
             hop2_label = route.hop2_label
 
-        if relation:
-            allowed_cols = set(ctx.target_collections or [])
+        if join_relation:
+            allowed_cols = set(target_collections or [])
             if allowed_cols and (hop1_col not in allowed_cols or hop2_col not in allowed_cols):
                 log_kv(
                     "RAG.JOIN.SKIP",
                     reason="target_collections",
-                    target_cols=list(ctx.target_collections or []),
+                    target_cols=list(target_collections or []),
                     hop1_col=hop1_col,
                     hop2_col=hop2_col,
                 )
-                relation = None
+                join_relation = None
 
-        if relation:
+        if join_relation:
             hop1_keep = int(os.getenv("RAG_HOP1_KEEP", "5"))
             hop2_keep = int(os.getenv("RAG_HOP2_KEEP", "10"))
             hop1_k_base = int(os.getenv("RAG_HOP1_TOPK_BASE", "250"))
@@ -3537,7 +3564,7 @@ def _run_rag_with_vectors(
     t0 = time.time()
 
     # collection list
-    target_cols = list(ctx.target_collections or _default_target_collections())
+    target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
         build_perf_filter(PerfFilterInput(query=q, join_ids=perf_followup_join_ids))
@@ -3613,7 +3640,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and (plan.mode == "search" and search_filter_conf_ok):
+                if title_filter and (mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -3625,7 +3652,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and (plan.mode == "search" and search_filter_conf_ok):
+                if title_filter and (mode == "search" and search_filter_conf_ok):
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
@@ -3662,12 +3689,12 @@ def _run_rag_with_vectors(
         if payload_project_terms:
             pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         lookup_has_ids = bool(pjt_ids or pjt_nos or has_perf_ids)
-        apply_name_filters = plan.mode != "lookup" or lookup_has_ids
+        apply_name_filters = mode != "lookup" or lookup_has_ids
 
         relation_filter = _relation_lookup_filter_for_col(apply_name_filters)
 
-        if plan.mode != "lookup":
-            if plan.mode == "search" and search_filter_enabled:
+        if mode != "lookup":
+            if mode == "search" and search_filter_enabled:
                 return _safe_exclusion_only(_apply_extra_filters(None))
             return None
 
