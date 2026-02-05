@@ -535,7 +535,7 @@ async def _run_question_analysis(
           - PJT_ID가 있으면: Hop2(perf)에서 pjt_id == PJT_ID를 must로 강제
           - PJT_NO만 있으면(그룹):
             Hop1(project)에서 PJT_NO==X로 PJT_ID 목록을 확보하고,
-            Hop2(perf)에서 (가능하면 pjt_no==X must, 없으면 pjt_id IN {hop1_pjt_ids}  must)로 강제
+            Hop2(perf)에서 (가능하면 pjt_no==X must, 없으면 pjt_id ==X must)로 강제
         
         2) relation="perf_project"
           - Hop1(perf)에서 성과 식별자를 must로 확정 후,
