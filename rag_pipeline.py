@@ -83,6 +83,7 @@ from rag_parts.join import (
     sanitize_query_by_terms as _sanitize_query_by_terms,
     normalize_relation_hint as _normalize_relation_hint,
 )
+from rag_parts.promotion import promote_mode_from_search_hits as _promote_mode_from_search_hits
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
@@ -1513,6 +1514,7 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     if action in ("topic", "search"):
         return "search", "topic_search"
     return "search", "default"
+
 
 def _build_plan(
     it: NormalizedIntent,
@@ -4033,16 +4035,74 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
+    # SEARCH 결과 후처리 승격(Planner 허용 정책 기반)
+    promotion_mode = mode
+    promotion_intent = it
+    promotion_info: Dict[str, Any] = {
+        "mode": mode,
+        "kind": None,
+        "reason": None,
+        "ids_map": dict(getattr(it, "ids_map", {}) or {}),
+        "allowed": {},
+        "signals": {},
+    }
+    if mode == "search":
+        promotion_info = _promote_mode_from_search_hits(
+            current_mode=mode,
+            search_hits=merged_rrf[: max(1, min(len(merged_rrf), 30))],
+            ids_map=getattr(it, "ids_map", None) or {},
+            planner_strategy=planner_strategy,
+        )
+        log_kv(
+            "RAG.PROMOTION.CHECK",
+            policy=promotion_info.get("allowed", {}).get("policy"),
+            current_mode=mode,
+            promoted_mode=promotion_info.get("mode"),
+            promoted_kind=promotion_info.get("kind"),
+            reason=promotion_info.get("reason"),
+            allowed=promotion_info.get("allowed"),
+            signals=promotion_info.get("signals"),
+        )
+        promoted_ids_map = promotion_info.get("ids_map") or {}
+        if isinstance(promoted_ids_map, dict) and promoted_ids_map != (getattr(it, "ids_map", None) or {}):
+            ids_flat_promoted: List[str] = []
+            ids_seen: set[str] = set()
+            for values in promoted_ids_map.values():
+                for value in values or []:
+                    sv = str(value).strip()
+                    if not sv or sv in ids_seen:
+                        continue
+                    ids_seen.add(sv)
+                    ids_flat_promoted.append(sv)
+            promotion_intent = replace(promotion_intent, ids_map=promoted_ids_map, ids_flat=ids_flat_promoted)
+        if promotion_info.get("mode") in ("lookup", "join"):
+            promotion_mode = str(promotion_info.get("mode"))
+            log_kv(
+                "RAG.PROMOTION.APPLIED",
+                policy=promotion_info.get("allowed", {}).get("policy"),
+                from_mode=mode,
+                to_mode=promotion_mode,
+                promotion_kind=promotion_info.get("kind"),
+                reason=promotion_info.get("reason"),
+            )
+        else:
+            log_kv(
+                "RAG.PROMOTION.SKIP",
+                policy=promotion_info.get("allowed", {}).get("policy"),
+                mode=mode,
+                reason=promotion_info.get("reason") or "no_signal_or_not_allowed",
+            )
+
     # final rerank
     t0 = time.time()
     final_keep = int((rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
         merged_rrf,
-        it=it,
+        it=promotion_intent,
         kws=kws,
         lex_w=lex_w_eff,
         base_route=base_route,
-        mode=plan.mode,
+        mode=promotion_mode,
         keep=final_keep,
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),

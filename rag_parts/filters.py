@@ -410,7 +410,9 @@ def _normalize_min_should(min_should: Any) -> Optional[Any]:
 
     min_should_cls = getattr(qmodels, "MinShould", None)
     if min_should_cls is None:
-        return value
+        # qdrant-client 버전에 따라 int가 아닌 dict/MinShould만 허용될 수 있으므로
+        # 기본 fallback은 dict 형태로 고정한다.
+        return {"min_count": value}
     for kwargs in ({"min_count": value}, {"count": value}):
         try:
             return min_should_cls(**kwargs)
