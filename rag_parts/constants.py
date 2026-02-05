@@ -8,7 +8,7 @@ import re
 # Common keys / collections
 # -----------------------------
 
-COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project_v3").strip() or "ntis_project_v3")
+COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project_v1").strip() or "ntis_project_v1")
 COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf_v2").strip() or "ntis_perf_v2")
 COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_project_v2").strip() or "ntis_project_v2")
 
