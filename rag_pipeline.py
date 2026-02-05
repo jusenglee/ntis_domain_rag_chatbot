@@ -2503,22 +2503,31 @@ def _run_rag_with_vectors(
             return "join"
         return None
 
-    def validate_strategy(strategy: StrategySpec) -> bool:
+    def validate_strategy(strategy: StrategySpec) -> tuple[bool, list[str]]:
+        errors: list[str] = []
         mode = (strategy.mode or "").strip().lower()
         action_value = (strategy.action or "").strip().lower()
         relation_value = strategy.relation
 
         if mode not in ("search", "lookup", "join"):
-            return False
+            errors.append(f"invalid_mode:{mode or 'empty'}")
 
         expected_mode = _planner_action_to_mode(action_value)
         if expected_mode and mode != expected_mode:
-            return False
+            errors.append(f"action_mode_mismatch:{action_value}->{mode}")
 
         if mode == "join" and not relation_value:
-            return False
+            errors.append("join_without_relation")
 
-        return True
+        return (len(errors) == 0), errors
+
+    def _build_safe_search_plan() -> tuple[QueryPlan, str]:
+        safe_it = ctx.intent_view()
+        return _build_plan(
+            safe_it,
+            preferred_mode="search",
+            preferred_mode_source="SAFE_SEARCH",
+        )
 
     # plan
     planner_mode = hint_mode
@@ -2569,25 +2578,65 @@ def _run_rag_with_vectors(
         action=action,
         relation=relation,
     )
-    if not validate_strategy(strategy_snapshot):
+    strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
+    if not strategy_ok:
         logger.warning(
-            "[RAG] invalid 전략 폴백: mode=%s action=%s relation=%s",
+            "[RAG] invalid 전략 감지: mode=%s action=%s relation=%s errors=%s",
             plan.mode,
             action,
             relation,
+            strategy_errors,
         )
         log_kv(
-            "RAG.PLAN.INVALID_STRATEGY_FALLBACK",
+            "RAG.PLAN.INVALID_STRATEGY",
             level="warning",
             mode=plan.mode,
             action=action,
             relation=relation,
+            errors=strategy_errors,
         )
-        plan, policy_reason = _build_plan(
-            ctx.intent_view(),
-            preferred_mode="search",
-            preferred_mode_source="invalid_strategy",
-        )
+
+        planner_recalled = False
+        if planner_mode_source:
+            # planner 힌트가 전략을 오염시킨 경우, planner 우선 모드를 해제한 정책 기반 플랜으로 재호출
+            plan, policy_reason = _build_plan(
+                ctx.intent_view(),
+                preferred_mode=None,
+                preferred_mode_source="planner_recall",
+            )
+            recalled_snapshot = StrategySpec(
+                mode=plan.mode,
+                action=action,
+                relation=relation,
+            )
+            recalled_ok, recalled_errors = validate_strategy(recalled_snapshot)
+            planner_recalled = True
+            if not recalled_ok:
+                logger.warning(
+                    "[RAG] planner 재호출 후에도 전략 불일치, SAFE_SEARCH로 폴백: errors=%s",
+                    recalled_errors,
+                )
+                log_kv(
+                    "RAG.PLAN.INVALID_STRATEGY_RECALL_FAILED",
+                    level="warning",
+                    recalled_errors=recalled_errors,
+                )
+                plan, policy_reason = _build_safe_search_plan()
+            else:
+                log_kv(
+                    "RAG.PLAN.INVALID_STRATEGY_RECALL_OK",
+                    planner_mode_source=planner_mode_source,
+                    recalled_mode=plan.mode,
+                )
+        else:
+            plan, policy_reason = _build_safe_search_plan()
+
+        if not planner_recalled:
+            log_kv(
+                "RAG.PLAN.SAFE_SEARCH_FALLBACK",
+                level="warning",
+                reason="invalid_strategy_without_planner_mode",
+            )
         ctx.plan = plan
         ctx.target_collections = list(plan.target_collections)
 
@@ -2789,7 +2838,10 @@ def _run_rag_with_vectors(
     ctx.plan = plan
     ctx.strategy = strategy
 
-    mode = (strategy.mode or plan.mode or "search").strip().lower()
+    mode_raw = (strategy.mode or plan.mode or "").strip().lower()
+    if mode_raw not in ("search", "lookup", "join"):
+        raise ValueError(f"invalid execution mode: {mode_raw!r}")
+    mode = mode_raw
     relation = strategy.relation
     people_terms = [t.strip() for t in strategy.people_terms if str(t).strip()]
     target_collections = list(strategy.target_collections or plan.target_collections or ())
