@@ -103,6 +103,34 @@ class FilterMinShouldTests(unittest.TestCase):
         self.assertIsNotNone(flt)
         self.assertEqual(getattr(flt.min_should, "min_count", None), 1)
 
+
+    def test_same_org_name_serializes_to_distinct_role_filters(self) -> None:
+        term = ["한국과학기술연구원"]
+
+        lead_filter = filters.build_org_filter(filters.OrgFilterInput(terms=term, role="lead"))
+        participant_filter = filters.build_prtcp_org_nested_filter(
+            filters.OrgFilterInput(terms=term, role="participant")
+        )
+        affiliation_filter = filters.build_people_filter(filters.PeopleFilterInput(org_terms=term))
+
+        self.assertIsNotNone(lead_filter)
+        self.assertIsNotNone(participant_filter)
+        self.assertIsNotNone(affiliation_filter)
+
+        lead_keys = {cond.key for cond in (lead_filter.should or []) if getattr(cond, "key", None)}
+        self.assertIn("org_nm", lead_keys)
+        self.assertIn("meta_basic.pjt_prfrm_org_nm", lead_keys)
+
+        participant_should = list(getattr(participant_filter, "should", None) or [participant_filter])
+        participant_nested_keys = {
+            getattr(getattr(cond, "nested", None), "key", None)
+            for cond in participant_should
+        }
+        self.assertIn("prtcp_org", participant_nested_keys)
+
+        affiliation_keys = {cond.key for cond in (affiliation_filter.should or []) if getattr(cond, "key", None)}
+        self.assertIn("prtcp_mp[].blng_org_nm", affiliation_keys)
+
     def test_lookup_path_keeps_name_only_gate_enabled(self) -> None:
         with open("rag_pipeline.py", "r", encoding="utf-8") as fp:
             src = fp.read()

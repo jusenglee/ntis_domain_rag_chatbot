@@ -1131,6 +1131,9 @@ async def build_intent_payload(
     kws: List[str] = []
     hint_people_terms: List[str] = []
     hint_org_terms: List[str] = []
+    hint_lead_org_terms: List[str] = []
+    hint_participant_org_terms: List[str] = []
+    hint_people_affiliation_org_terms: List[str] = []
     hint_org_role = None
     if question_analysis:
         hint_people_terms = _normalize_hint_terms(
@@ -1161,11 +1164,29 @@ async def build_intent_payload(
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
+        lead_org_terms_hint = _normalize_hint_terms(
+            filters.get("lead_org_name") or filters.get("performing_org_name")
+        )
+        participant_org_terms_hint = _normalize_hint_terms(filters.get("participant_org_name"))
+        people_affiliation_org_terms_hint = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
+        generic_org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+
+        if lead_org_terms_hint:
+            hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
+        if participant_org_terms_hint:
+            hint_participant_org_terms = _normalize_hint_terms(
+                [*hint_participant_org_terms, *participant_org_terms_hint]
+            )
+        if people_affiliation_org_terms_hint:
+            hint_people_affiliation_org_terms = _normalize_hint_terms(
+                [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
+            )
+
         org_terms_hint = _normalize_hint_terms([
-            *(_normalize_hint_terms(filters.get("org_name") or filters.get("org"))),
-            *(_normalize_hint_terms(filters.get("participant_org_name"))),
-            *(_normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))),
-            *(_normalize_hint_terms(filters.get("people_affiliation_org_name"))),
+            *generic_org_terms_hint,
+            *lead_org_terms_hint,
+            *participant_org_terms_hint,
+            *people_affiliation_org_terms_hint,
         ])
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
@@ -1174,6 +1195,9 @@ async def build_intent_payload(
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
         "org_role": hint_org_role,
+        "lead_org_terms": hint_lead_org_terms,
+        "participant_org_terms": hint_participant_org_terms,
+        "people_affiliation_org_terms": hint_people_affiliation_org_terms,
     }
 
     raw_intent = classify_query_intent(
@@ -1186,6 +1210,12 @@ async def build_intent_payload(
         raw_intent,
         query=question,
         keywords=kws,
+        hint_people_terms=hint_people_terms,
+        hint_org_terms=hint_org_terms,
+        hint_org_role=hint_org_role,
+        hint_lead_org_terms=hint_lead_org_terms,
+        hint_participant_org_terms=hint_participant_org_terms,
+        hint_people_affiliation_org_terms=hint_people_affiliation_org_terms,
     )
 
     strategy = PlannerStrategy(
