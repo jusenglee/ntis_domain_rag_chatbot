@@ -3143,14 +3143,15 @@ def _run_rag_with_vectors(
             if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                 log_kv("RAG.PERF.FOLLOWUP.MISSING_KEYS", **missing)
 
-        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        join_ids, join_nos = _extract_pjt_ids(hop1_top, max_ids=50, include_pjt_no_fallback=True)
+        join_keys = list(dict.fromkeys(join_ids + join_nos))
         log_kv(
             "RAG.PERF.FOLLOWUP.JOIN_IDS",
-            join_ids_preview=join_ids[:10],
-            join_ids_count=len(join_ids),
+            join_ids_preview=join_keys[:10],
+            join_ids_count=len(join_keys),
             timings={k: float(v) for k, v in (local_timings_h1 or {}).items()},
         )
-        return join_ids
+        return join_keys
 
     # -------------------------
     # JOIN mode (2-hop)
@@ -3354,7 +3355,12 @@ def _run_rag_with_vectors(
                     if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                         log_kv("RAG.JOIN.HOP1.MISSING_KEYS", **missing)
 
-                join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+                join_pjt_ids, join_pjt_nos = _extract_pjt_ids(
+                    hop1_top,
+                    max_ids=50,
+                    include_pjt_no_fallback=True,
+                )
+                join_ids = list(dict.fromkeys(join_pjt_ids + join_pjt_nos))
 
                 log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
                 log_section("RAG.JOIN.JOIN_IDS", join_ids[: min(len(join_ids), 30)])
