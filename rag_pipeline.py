@@ -2561,37 +2561,48 @@ def _run_rag_with_vectors(
         preferred_mode_source=planner_mode_source,
     )
     planner_first_applied = bool(planner_mode)
-    mode_override_applied = False
+    mode_override_requested = False
     mode_override_reason = None
     mode_override_from = None
     mode_override_to = None
 
-    def _apply_mode_override(
-        enforced_mode: str,
+    def _request_mode_override(
+        requested_mode: str,
         *,
         reason: str,
         **extra: Any,
     ) -> bool:
-        nonlocal mode_override_applied, mode_override_reason, mode_override_from, mode_override_to
-        if plan.mode == enforced_mode:
+        nonlocal (
+            mode_override_requested,
+            mode_override_reason,
+            mode_override_from,
+            mode_override_to,
+            plan,
+            policy_reason,
+        )
+        if plan.mode == requested_mode:
             return False
-        mode_override_applied = True
+        mode_override_requested = True
         mode_override_reason = reason
         mode_override_from = plan.mode
-        mode_override_to = enforced_mode
+        mode_override_to = requested_mode
         log_kv(
-            "RAG.PLAN.MODE_OVERRIDE",
+            "RAG.PLAN.MODE_OVERRIDE_REQUEST",
             level="warning",
-            enforced_mode=enforced_mode,
-            requested_mode=plan.mode,
+            requested_mode=requested_mode,
+            current_mode=plan.mode,
             reason=reason,
             **extra,
         )
-        plan.mode = enforced_mode
+        plan, policy_reason = _build_plan(
+            it,
+            preferred_mode=requested_mode,
+            preferred_mode_source="override_request",
+        )
         return True
 
     if planner_mode and relation == ("people", "project") and list(getattr(it, "people_terms", []) or []):
-        _apply_mode_override(
+        _request_mode_override(
             "lookup",
             reason="people_project_lookup",
             action=action,
@@ -2601,7 +2612,7 @@ def _run_rag_with_vectors(
         )
 
     if planner_mode and _has_explicit_identifiers(it):
-        _apply_mode_override(
+        _request_mode_override(
             "lookup",
             reason="explicit_identifiers",
             action=action,
@@ -2613,10 +2624,17 @@ def _run_rag_with_vectors(
     if people_relation_disabled:
         plan.relation = None
         if plan.mode == "join":
-            plan.mode = (
+            requested_mode = (
                 "lookup"
                 if (action in ("list", "stats", "download") or _has_explicit_identifiers(it) or _has_any_ids(it))
                 else "search"
+            )
+            _request_mode_override(
+                requested_mode,
+                reason="people_relation_disabled",
+                action=action,
+                base_route=base_route,
+                relation=relation,
             )
         if forced_target_cols:
             plan.target_collections = forced_target_cols
@@ -2683,17 +2701,30 @@ def _run_rag_with_vectors(
     relation_lookup_enforce = False
     if relation and plan.mode == "lookup":
         if relation_action:
-            plan.mode = "join"
             logger.warning(
-                "[RAG] promoting lookup+relation(action) to join (relation=%s)",
+                "[RAG] lookup+relation(action) requested to join (relation=%s)",
                 relation,
             )
+            _request_mode_override(
+                "join",
+                reason="relation_action",
+                action=action,
+                base_route=base_route,
+                relation=relation,
+            )
         elif relation_lookup_policy == "join" and has_relation_join_ids:
-            plan.mode = "join"
             logger.warning(
-                "[RAG] promoting lookup+relation to join (policy=%s, relation=%s)",
+                "[RAG] lookup+relation requested to join (policy=%s, relation=%s)",
                 relation_lookup_policy,
                 relation,
+            )
+            _request_mode_override(
+                "join",
+                reason="relation_lookup_policy",
+                action=action,
+                base_route=base_route,
+                relation=relation,
+                policy=relation_lookup_policy,
             )
         else:
             relation_lookup_enforce = bool(has_relation_join_ids)
@@ -2724,15 +2755,21 @@ def _run_rag_with_vectors(
                 relation=relation,
             )
         else:
-            plan.mode = "lookup"
             logger.warning(
-                "[RAG] join skipped due to missing relation ids (relation=%s)",
+                "[RAG] join skipped due to missing relation ids; override requested (relation=%s)",
                 relation,
             )
             log_kv(
                 "RAG.PLAN.JOIN_SKIPPED",
                 level="warning",
                 reason="missing_relation_ids",
+                relation=relation,
+            )
+            _request_mode_override(
+                "lookup",
+                reason="missing_relation_ids",
+                action=action,
+                base_route=base_route,
                 relation=relation,
             )
 
@@ -2798,7 +2835,7 @@ def _run_rag_with_vectors(
             "planner_first_applied": planner_first_applied,
             "planner_mode": planner_mode,
             "planner_action": planner_action,
-            "mode_override_applied": mode_override_applied,
+            "mode_override_requested": mode_override_requested,
             "mode_override_reason": mode_override_reason,
             "mode_override_from": mode_override_from,
             "mode_override_to": mode_override_to,
@@ -2849,7 +2886,7 @@ def _run_rag_with_vectors(
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
-        mode_override_applied=int(mode_override_applied),
+        mode_override_requested=int(mode_override_requested),
         mode_override_reason=mode_override_reason,
         mode_override_from=mode_override_from,
         mode_override_to=mode_override_to,
