@@ -4,6 +4,7 @@ import unittest
 os.environ.setdefault("QUERY_INTENT_USE_LLM", "0")
 
 from rag_parts.constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO
+from rag_parts.planner_contract import planner_contract_mode
 from rag_parts.filters import extract_org_terms as extract_org_terms_filters
 from rag_parts.pipeline_steps import normalize_intent
 from rag_parts.query_intent import (
@@ -100,6 +101,18 @@ class QueryIntentRelationTests(unittest.TestCase):
         )
 
         self.assertEqual(normalized.org_terms, ["농업생명과학연구원"])
+
+
+    def test_planner_contract_lookup_mode_is_not_overridden(self) -> None:
+        mode, errors = planner_contract_mode(
+            strategy_mode="lookup",
+            strategy_action="topic",
+            strategy_relation=None,
+            fallback_mode="search",
+        )
+
+        self.assertEqual(mode, "lookup")
+        self.assertIn("action_mode_mismatch:topic->lookup", errors)
 
     def test_build_planner_override_request_when_mode_and_action_conflict(self) -> None:
         intent = QueryIntent(
