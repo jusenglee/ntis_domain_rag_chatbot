@@ -3212,7 +3212,9 @@ def _run_rag_with_vectors(
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
-        seed_join_ids = list(dict.fromkeys(pjt_ids + pjt_nos))
+        seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
+        seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
+        seed_join_ids = list(dict.fromkeys(seed_join_pjt_ids + seed_join_pjt_nos))
 
 
 
@@ -3264,13 +3266,23 @@ def _run_rag_with_vectors(
             hop2_q = q
 
             join_ids: List[str] = []
+            join_pjt_ids: List[str] = []
+            join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
             hop1_filter = None
 
             # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
             if seed_join_ids:
+                join_pjt_ids = seed_join_pjt_ids[:]
+                join_pjt_nos = seed_join_pjt_nos[:]
                 join_ids = seed_join_ids[:]
-                log_kv("RAG.JOIN.HOP1.SKIP", reason="explicit_join_ids", join_ids=join_ids[:10])
+                log_kv(
+                    "RAG.JOIN.HOP1.SKIP",
+                    reason="explicit_join_ids",
+                    join_ids=join_ids[:10],
+                    join_pjt_ids=join_pjt_ids[:10],
+                    join_pjt_nos=join_pjt_nos[:10],
+                )
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
                 if hop1_kind == "people" and people_filter:
@@ -3452,9 +3464,12 @@ def _run_rag_with_vectors(
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
+                join_key_mode = "group" if hop2_col == COL_PERF else "instance"
                 hop2_filter = build_join_filter(
                     JoinFilterInput(
-                        join_ids=join_ids,
+                        join_ids=join_pjt_ids or join_ids,
+                        pjt_nos=join_pjt_nos,
+                        join_key_mode=join_key_mode,
                         tag_filters=hop2_tag_filters,
                         people_terms=people_terms,
                         org_terms=org_terms,
