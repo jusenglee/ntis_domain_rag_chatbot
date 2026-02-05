@@ -564,17 +564,16 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
     """
     relation 감지:
     - project -> perf : "~ 과제의 성과"
-    - project -> people/org : 참여인력/참여기관
     - perf -> project : "이 성과가 어느 과제?"
-    - people/org -> project : "이한조 연구자의 과제", "DMS 참여 과제"
+
+    현재 people/org 관련 질의는 JOIN relation 대신
+    prtcp_mp / prtcp_org 단일 컬렉션 필터로 처리한다.
     """
     t = (q or "").strip().lower()
     if not t:
         return None
 
     wants_perf_to_project = has_perf and (has_project or any(c in t for c in PERF_TO_PROJECT_CUES))
-    wants_people = has_people or any(c in t for c in REL_PEOPLE_CUES)
-    wants_org = has_org or any(c in t for c in REL_ORG_CUES)
 
     if base_route == "people":
         # 사람 → 과제/성과 (JOIN 비활성화: prtcp_mp 필터로 처리)
