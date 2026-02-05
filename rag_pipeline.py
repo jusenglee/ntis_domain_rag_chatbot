@@ -2607,6 +2607,23 @@ def _run_rag_with_vectors(
             return "join"
         return None
 
+    def validate_strategy(strategy: Dict[str, Any]) -> bool:
+        mode = (strategy.get("mode") or "").strip().lower()
+        action_value = (strategy.get("action") or "").strip().lower()
+        relation_value = strategy.get("relation")
+
+        if mode not in ("search", "lookup", "join"):
+            return False
+
+        expected_mode = _planner_action_to_mode(action_value)
+        if expected_mode and mode != expected_mode:
+            return False
+
+        if mode == "join" and not relation_value:
+            return False
+
+        return True
+
     # plan
     planner_mode = hint_mode
     planner_mode_source = "qa.mode" if planner_mode else None
@@ -2637,86 +2654,46 @@ def _run_rag_with_vectors(
     mode_override_reason = None
     mode_override_from = None
     mode_override_to = None
-
-    def _request_mode_override(
-        requested_mode: str,
-        *,
-        reason: str,
-        **extra: Any,
-    ) -> bool:
-        nonlocal (
-            mode_override_requested,
-            mode_override_reason,
-            mode_override_from,
-            mode_override_to,
-            plan,
-            policy_reason,
-        )
-        if plan.mode == requested_mode:
-            return False
-        mode_override_requested = True
-        mode_override_reason = reason
-        mode_override_from = plan.mode
-        mode_override_to = requested_mode
-        log_kv(
-            "RAG.PLAN.MODE_OVERRIDE_REQUEST",
-            level="warning",
-            requested_mode=requested_mode,
-            current_mode=plan.mode,
-            reason=reason,
-            **extra,
-        )
-        plan, policy_reason = _build_plan(
-            ctx.intent_view(),
-            preferred_mode=requested_mode,
-            preferred_mode_source="override_request",
-        )
-        ctx.plan = plan
-        ctx.target_collections = list(plan.target_collections or [])
-        return True
-
-    if planner_mode and relation == ("people", "project") and list(ctx.people_terms or []):
-        _request_mode_override(
-            "lookup",
-            reason="people_project_lookup",
-            action=action,
-            base_route=base_route,
-            relation=relation,
-            people_terms=people_terms[:4],
-        )
-
-    if planner_mode and _has_explicit_identifiers(intent_view):
-        _request_mode_override(
-            "lookup",
-            reason="explicit_identifiers",
-            action=action,
-            base_route=base_route,
-            relation=relation,
-        )
     if hinted_cols:
         ctx.target_collections = hinted_cols
     if people_relation_disabled:
         ctx.relation = None
         if plan.mode == "join":
-            requested_mode = (
-                "lookup"
-                if (
-                    action in ("list", "stats", "download")
-                    or _has_explicit_identifiers(intent_view)
-                    or _has_any_ids(intent_view)
-                )
-                else "search"
-            )
-            _request_mode_override(
-                requested_mode,
-                reason="people_relation_disabled",
-                action=action,
-                base_route=base_route,
-                relation=relation,
+            logger.warning(
+                "[RAG] people_relation_disabled while join mode (action=%s, base_route=%s)",
+                action,
+                base_route,
             )
         if forced_target_cols:
             ctx.target_collections = forced_target_cols
         relation = ctx.relation
+
+    strategy_snapshot = {
+        "mode": plan.mode,
+        "action": action,
+        "relation": relation,
+    }
+    if not validate_strategy(strategy_snapshot):
+        logger.warning(
+            "[RAG] invalid 전략 폴백: mode=%s action=%s relation=%s",
+            plan.mode,
+            action,
+            relation,
+        )
+        log_kv(
+            "RAG.PLAN.INVALID_STRATEGY_FALLBACK",
+            level="warning",
+            mode=plan.mode,
+            action=action,
+            relation=relation,
+        )
+        plan, policy_reason = _build_plan(
+            ctx.intent_view(),
+            preferred_mode="search",
+            preferred_mode_source="invalid_strategy",
+        )
+        ctx.plan = plan
+        ctx.target_collections = list(plan.target_collections or [])
 
     preset_intent_view = ctx.intent_view()
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
@@ -2813,35 +2790,19 @@ def _run_rag_with_vectors(
                 "[RAG] lookup+relation(action) requested to join (relation=%s)",
                 relation,
             )
-            _request_mode_override(
-                "join",
-                reason="relation_action",
-                action=action,
-                base_route=base_route,
-                relation=relation,
-            )
         elif relation_lookup_policy == "join" and has_relation_join_ids:
             logger.warning(
                 "[RAG] lookup+relation requested to join (policy=%s, relation=%s)",
                 relation_lookup_policy,
                 relation,
             )
-            _request_mode_override(
-                "join",
-                reason="relation_lookup_policy",
-                action=action,
-                base_route=base_route,
-                relation=relation,
-                policy=relation_lookup_policy,
+        relation_lookup_enforce = bool(has_relation_join_ids)
+        if relation_lookup_enforce:
+            logger.warning(
+                "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
+                relation_lookup_policy,
+                relation,
             )
-        else:
-            relation_lookup_enforce = bool(has_relation_join_ids)
-            if relation_lookup_enforce:
-                logger.warning(
-                    "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
-                    relation_lookup_policy,
-                    relation,
-                )
         log_kv(
             "RAG.PLAN.RELATION_LOOKUP_POLICY",
             level="warning",
@@ -2864,7 +2825,7 @@ def _run_rag_with_vectors(
             )
         else:
             logger.warning(
-                "[RAG] join skipped due to missing relation ids; override requested (relation=%s)",
+                "[RAG] join skipped due to missing relation ids (relation=%s)",
                 relation,
             )
             log_kv(
@@ -2873,12 +2834,9 @@ def _run_rag_with_vectors(
                 reason="missing_relation_ids",
                 relation=relation,
             )
-            _request_mode_override(
-                "lookup",
-                reason="missing_relation_ids",
-                action=action,
-                base_route=base_route,
-                relation=relation,
+            logger.warning(
+                "[RAG] join without relation ids; continuing without override (relation=%s)",
+                relation,
             )
 
     # allow 적용 (force/allow)
