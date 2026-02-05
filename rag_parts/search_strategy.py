@@ -59,3 +59,12 @@ def build_strategy_key(action: str, mode: str) -> str:
 
 def get_mode_policy(mode: str) -> Dict[str, object]:
     return dict(MODE_POLICY.get((mode or "").strip().lower(), MODE_POLICY["search"]))
+
+
+def build_rerank_spec(mode: str) -> Dict[str, object]:
+    policy = get_mode_policy(mode)
+    return {
+        "rerank_weights": dict(policy.get("rerank_weights", {})),
+        "strict_ids": bool(policy.get("strict_ids", False)),
+        "filter_scope": policy.get("filter_scope"),
+    }

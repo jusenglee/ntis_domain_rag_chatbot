@@ -66,11 +66,12 @@ from rag_parts.query_intent import (
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
     build_search_preset as _build_search_preset,
+    build_topk_spec as _build_topk_spec,
 )
 from rag_parts.search_strategy import (
     SEARCH_STRATEGY_VERSION,
     build_strategy_key,
-    get_mode_policy,
+    build_rerank_spec as _build_rerank_spec,
 )
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
@@ -1450,6 +1451,9 @@ class QueryPlan:
     target_collections: List[str]
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
+    filter_spec: Dict[str, Any] = field(default_factory=dict)
+    topk_spec: Dict[str, Any] = field(default_factory=dict)
+    rerank_spec: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -2349,21 +2353,6 @@ def _run_rag_with_vectors(
     )
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
-    # preset (topK etc)
-    preset_intent_view = ctx.intent_view()
-    preset: _SearchPreset = _build_search_preset(preset_intent_view)
-    lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
-
-    if hinted_limit > 0:
-        preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
-        preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
-        preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
-        preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
-
-    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
-    sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
-    # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
-    sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
     org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
     ctx.org_terms = org_terms
@@ -2576,24 +2565,6 @@ def _run_rag_with_vectors(
         tag_filters=list(ctx.tag_filters or []),
         ids_flat=_flatten_ids_from_intent(intent_view)[:20],
     )
-    log_kv(
-        "RAG.PRESET/PLAN.PRE",
-        strategy_version=SEARCH_STRATEGY_VERSION,
-        preset_key=getattr(preset, "strategy_key", None),
-        top_k_dense=int(preset.top_k_dense),
-        top_k_lex_cand=int(preset.top_k_lex_cand),
-        top_k_lex=int(preset.top_k_lex),
-        use_dense_threshold=int(preset.use_dense_threshold),
-        min_dense_score=float(preset.min_dense_score),
-        sparse_vector_name=sparse_vector_name_eff,
-        sparse_topk=int(sparse_topk_eff),
-        sparse_weight=float(sparse_weight_eff),
-        tag_boost=float(getattr(preset, "tag_boost", 0.0)),
-        tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
-        max_ctx_items=int(preset.max_ctx_items),
-        ctx_budget=int(ctx_budget),
-    )
-
     # precompute embedding cache
     pre_vecs_cache: Dict[str, Dict[str, _PrecomputedEmbedding]] = {}
 
@@ -2747,6 +2718,36 @@ def _run_rag_with_vectors(
             ctx.target_collections = forced_target_cols
         relation = ctx.relation
 
+    preset_intent_view = ctx.intent_view()
+    preset: _SearchPreset = _build_search_preset(preset_intent_view)
+    lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
+
+    if hinted_limit > 0:
+        preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
+        preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
+        preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
+        preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
+
+    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
+    sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
+    # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
+    sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
+    topk_spec = _build_topk_spec(
+        preset,
+        sparse_vector_name=sparse_vector_name_eff,
+        sparse_topk=sparse_topk_eff,
+        sparse_weight=sparse_weight_eff,
+    )
+    rerank_spec = _build_rerank_spec(plan.mode)
+
+    log_kv(
+        "RAG.PRESET/PLAN.PRE",
+        strategy_version=SEARCH_STRATEGY_VERSION,
+        preset_key=getattr(preset, "strategy_key", None),
+        topk_spec=topk_spec,
+        ctx_budget=int(ctx_budget),
+    )
+
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     lookup_filter_policy = str(os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")).strip().lower()
@@ -2899,6 +2900,24 @@ def _run_rag_with_vectors(
 
     search_filter_server_policy = "must_not_only" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
+    filter_spec = {
+        "search_filter_enabled": search_filter_enabled,
+        "lookup_filter_enabled": lookup_filter_enabled,
+        "relation_lookup_enforce": relation_lookup_enforce,
+        "lookup_filter_policy": lookup_filter_policy,
+        "lookup_title_filter_policy": lookup_title_filter_policy,
+        "filter_signal": search_filter_signal,
+        "filter_conf_ok": search_filter_conf_ok,
+        "search_filter_server_policy": search_filter_server_policy,
+        "search_filter_server_applied": search_filter_server_applied,
+    }
+    plan = replace(
+        plan,
+        filter_spec=filter_spec,
+        topk_spec=topk_spec,
+        rerank_spec=rerank_spec,
+    )
+    ctx.plan = plan
 
     log_kv(
         "RAG.FILTERS",
@@ -2932,7 +2951,6 @@ def _run_rag_with_vectors(
     )
 
     strategy_key = build_strategy_key(action, plan.mode)
-    mode_policy = get_mode_policy(plan.mode)
     strategy_summary = {
         "mode": plan.mode,
         "strategy_version": SEARCH_STRATEGY_VERSION,
@@ -2947,21 +2965,14 @@ def _run_rag_with_vectors(
             "mode_override_from": mode_override_from,
             "mode_override_to": mode_override_to,
         },
-        "filter": {
-            "search_filter_enabled": search_filter_enabled,
-            "lookup_filter_enabled": lookup_filter_enabled,
-            "relation_lookup_enforce": relation_lookup_enforce,
-            "lookup_filter_policy": lookup_filter_policy,
-            "lookup_title_filter_policy": lookup_title_filter_policy,
-            "filter_signal": search_filter_signal,
-            "filter_conf_ok": search_filter_conf_ok,
-            "search_filter_server_policy": search_filter_server_policy,
-            "search_filter_server_applied": search_filter_server_applied,
-        },
+        "filter": plan.filter_spec,
+        "filter_spec": plan.filter_spec,
+        "topk_spec": plan.topk_spec,
+        "rerank_spec": plan.rerank_spec,
         "mix_weights": {
             "dense": {k: float(v) for k, v in (w_dense_map or {}).items()},
             "sparse": float(sparse_weight_eff),
-            "rerank": mode_policy.get("rerank_weights"),
+            "rerank": plan.rerank_spec.get("rerank_weights"),
         },
     }
 
@@ -3013,10 +3024,11 @@ def _run_rag_with_vectors(
         base_route=plan.base_route,
         action=plan.action,
         relation=ctx.relation,
-        use_dense_threshold=int(preset.use_dense_threshold),
-        min_dense_score=float(preset.min_dense_score),
         output_type=getattr(plan, "output_type", None),
         target_cols=ctx.target_collections,
+        filter_spec=plan.filter_spec,
+        topk_spec=plan.topk_spec,
+        rerank_spec=plan.rerank_spec,
         planner_categories=planner_categories,
         planner_limit=planner_limit,
         planner_retrieval_query=planner_retrieval_query,
