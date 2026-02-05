@@ -2210,7 +2210,6 @@ def _run_rag_with_vectors(
             if hinted_limit < 0:
                 hinted_limit = 0
 
-    pending_strategy_filter_spec: Optional[Dict[str, Any]] = None
     if strategy_enabled:
         if strategy_head in ("project", "perf", "people", "org", "support"):
             ctx.base_route = strategy_head
@@ -2219,7 +2218,7 @@ def _run_rag_with_vectors(
         if strategy_action:
             ctx.action = strategy_action
         if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
-            pending_strategy_filter_spec = dict(strategy_filter_spec)
+            plan = replace(plan, filters=dict(strategy_filter_spec))
 
     action = ctx.action
     base_route = ctx.base_route
@@ -3598,7 +3597,7 @@ def _run_rag_with_vectors(
                 return None
             return qmodels.Filter(must_not=must_not)
 
-        def _relation_lookup_filter_for_col() -> Any:
+        def _relation_lookup_filter_for_col(apply_name_filters: bool) -> Any:
             if not relation_lookup_enforce or not relation:
                 return None
             route = get_relation_route(relation)
