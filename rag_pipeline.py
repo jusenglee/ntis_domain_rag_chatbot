@@ -2360,6 +2360,7 @@ def _run_rag_with_vectors(
     org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
     ctx.org_role = org_role
+    planner_filter_spec = dict(getattr(plan, "filter_spec", None) or {})
     org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
         build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
@@ -2422,6 +2423,7 @@ def _run_rag_with_vectors(
         person_ids=people_ids,
         gender_terms=gender_terms,
         org_terms=people_org_terms,
+        filter_spec=planner_filter_spec.get("people_filter"),
     )
     people_filter = (
         build_people_filter(people_spec)
@@ -2861,6 +2863,7 @@ def _run_rag_with_vectors(
     search_filter_server_policy = "must_not_only" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
     filter_spec = {
+        **planner_filter_spec,
         "search_filter_enabled": search_filter_enabled,
         "lookup_filter_enabled": lookup_filter_enabled,
         "relation_lookup_enforce": relation_lookup_enforce,
@@ -3428,6 +3431,7 @@ def _run_rag_with_vectors(
                         people_terms=people_terms,
                         org_terms=org_terms,
                         relation=relation,
+                        filter_spec=planner_filter_spec.get("join_filter"),
                     )
                 )
                 if hop2_kind in ("project", "org") and org_filter:
