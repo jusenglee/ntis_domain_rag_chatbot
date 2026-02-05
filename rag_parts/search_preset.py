@@ -140,7 +140,14 @@ def build_topk_spec(
     sparse_topk: int,
     sparse_weight: float,
 ) -> Dict[str, object]:
+    # planner가 실행 레이어에 전달하는 retrieval 정책 스냅샷.
+    # (실행 레이어에서 env 정책으로 재덮어쓰지 않도록 정규화)
     spec = dict(preset.as_debug())
+    spec["top_k_dense"] = int(spec.get("top_k_dense", preset.top_k_dense))
+    spec["top_k_lex_cand"] = int(spec.get("top_k_lex_cand", preset.top_k_lex_cand))
+    spec["top_k_lex"] = int(spec.get("top_k_lex", preset.top_k_lex))
+    spec["use_dense_threshold"] = bool(spec.get("use_dense_threshold", preset.use_dense_threshold))
+    spec["min_dense_score"] = float(spec.get("min_dense_score", preset.min_dense_score))
     spec.update(
         {
             "sparse_vector_name": sparse_vector_name,
