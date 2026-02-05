@@ -133,6 +133,23 @@ class SearchPreset:
             "strategy_key": self.strategy_key,
         }
 
+def build_topk_spec(
+    preset: SearchPreset,
+    *,
+    sparse_vector_name: str,
+    sparse_topk: int,
+    sparse_weight: float,
+) -> Dict[str, object]:
+    spec = dict(preset.as_debug())
+    spec.update(
+        {
+            "sparse_vector_name": sparse_vector_name,
+            "sparse_topk": int(sparse_topk),
+            "sparse_weight": float(sparse_weight),
+        }
+    )
+    return spec
+
 
 def _f(name: str, default: float) -> float:
     try:
