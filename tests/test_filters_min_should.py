@@ -131,6 +131,50 @@ class FilterMinShouldTests(unittest.TestCase):
         affiliation_keys = {cond.key for cond in (affiliation_filter.should or []) if getattr(cond, "key", None)}
         self.assertIn("prtcp_mp[].blng_org_nm", affiliation_keys)
 
+    def test_join_filter_group_mode_prefers_pjt_no_in_must(self) -> None:
+        flt = filters.build_join_filter(
+            filters.JoinFilterInput(
+                join_ids=["PJT-ID-1"],
+                pjt_nos=["PJT-NO-1"],
+                join_key_mode="group",
+            )
+        )
+        self.assertIsNotNone(flt)
+        self.assertEqual(len(flt.must or []), 1)
+        self.assertEqual((flt.must or [])[0].key, "pjt_no")
+        self.assertEqual(getattr((flt.must or [])[0].match, "any", None), ["PJT-NO-1"])
+
+    def test_join_filter_group_mode_falls_back_to_pjt_id_must(self) -> None:
+        flt = filters.build_join_filter(
+            filters.JoinFilterInput(
+                join_ids=["PJT-ID-1", "PJT-ID-2"],
+                join_key_mode="group",
+            )
+        )
+        self.assertIsNotNone(flt)
+        self.assertEqual(len(flt.must or []), 1)
+        self.assertEqual((flt.must or [])[0].key, "pjt_id")
+        self.assertEqual(getattr((flt.must or [])[0].match, "any", None), ["PJT-ID-1", "PJT-ID-2"])
+
+    def test_join_filter_instance_mode_prioritizes_pjt_id_must(self) -> None:
+        flt = filters.build_join_filter(
+            filters.JoinFilterInput(
+                join_ids=["PJT-ID-1"],
+                pjt_nos=["PJT-NO-1"],
+                join_key_mode="instance",
+            )
+        )
+        self.assertIsNotNone(flt)
+        self.assertEqual(len(flt.must or []), 1)
+        self.assertEqual((flt.must or [])[0].key, "pjt_id")
+
+    def test_join_hop2_uses_group_mode_for_perf_with_must_constraints(self) -> None:
+        with open("rag_pipeline.py", "r", encoding="utf-8") as fp:
+            src = fp.read()
+        self.assertIn('join_key_mode = "group" if hop2_col == COL_PERF else "instance"', src)
+        self.assertIn("pjt_nos=join_pjt_nos", src)
+        self.assertIn("join_ids=join_pjt_ids or join_ids", src)
+
     def test_lookup_path_keeps_name_only_gate_enabled(self) -> None:
         with open("rag_pipeline.py", "r", encoding="utf-8") as fp:
             src = fp.read()

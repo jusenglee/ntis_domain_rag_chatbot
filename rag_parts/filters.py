@@ -30,6 +30,8 @@ class PeopleFilterInput:
 @dataclass(frozen=True)
 class JoinFilterInput:
     join_ids: List[str] = field(default_factory=list)
+    pjt_nos: List[str] = field(default_factory=list)
+    join_key_mode: str = "instance"
     tag_filters: Optional[List[str]] = None
     people_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
@@ -581,18 +583,52 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
         compiled = compile_filter(spec.filter_spec)
         return compiled or qmodels.Filter(must=[])
 
-    join_ids = list(spec.join_ids)
-    if not join_ids:
+    join_ids = list(dict.fromkeys(str(x).strip() for x in (spec.join_ids or []) if str(x).strip()))
+    pjt_nos = list(dict.fromkeys(str(x).strip() for x in (spec.pjt_nos or []) if str(x).strip()))
+
+    if not join_ids and not pjt_nos:
         return qmodels.Filter(must=[])
 
-    return qmodels.Filter(
-        should=[
-            qmodels.FieldCondition(
-                key="pjt_id",
-                match=make_match_any(join_ids),
+    mode = str(spec.join_key_mode or "instance").strip().lower()
+    if mode not in ("instance", "group"):
+        mode = "instance"
+
+    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+
+    must: List["qmodels.Condition"] = []
+    if mode == "group":
+        if pjt_nos:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_no,
+                    match=make_match_any(pjt_nos),
+                )
             )
-        ]
-    )
+        elif join_ids:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_id,
+                    match=make_match_any(join_ids),
+                )
+            )
+    else:
+        if join_ids:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_id,
+                    match=make_match_any(join_ids),
+                )
+            )
+        elif pjt_nos:
+            must.append(
+                qmodels.FieldCondition(
+                    key=primary_no,
+                    match=make_match_any(pjt_nos),
+                )
+            )
+
+    return qmodels.Filter(must=must)
 
 
 def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
