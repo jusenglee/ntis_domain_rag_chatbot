@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent, resolve_join_hops
+from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -1441,114 +1442,6 @@ def _final_rerank(
 # -------------------------
 # Plan
 # -------------------------
-@dataclass(frozen=True)
-class QueryPlan:
-    mode: str  # "search" | "lookup" | "join"
-    base_route: str
-    action: str
-    relation: Optional[Tuple[str, str]]
-    output_type: Optional[str]
-    target_collections: List[str]
-    # server-side filters by collection (optional)
-    filters: Dict[str, Any]
-    filter_spec: Dict[str, Any] = field(default_factory=dict)
-    topk_spec: Dict[str, Any] = field(default_factory=dict)
-    rerank_spec: Dict[str, Any] = field(default_factory=dict)
-    strategy: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class ExecutionContext:
-    intent: NormalizedIntent
-    base_route: str
-    action: str
-    relation: Optional[Tuple[str, str]]
-    is_id_query: bool
-    output_type: Optional[str]
-    categories: List[str]
-    planner_limit: Optional[int]
-    retrieval_query: Optional[str]
-    planner_confidence: Optional[float]
-    years: List[str]
-    year_from: Optional[str]
-    year_to: Optional[str]
-    people_terms: List[str]
-    gender_terms: List[str]
-    org_terms: List[str]
-    org_role: Optional[str]
-    perf_types: List[str]
-    keywords: List[str]
-    title: List[str]
-    perf_tag_filters: List[str]
-    project_tag_filters: List[str]
-    tag_filters: List[str]
-    ids_map: Dict[str, List[str]]
-    ids_flat: List[str]
-    remove_terms_for_head: List[str]
-    plan: Optional[QueryPlan] = None
-    target_collections: List[str] = field(default_factory=list)
-
-    @classmethod
-    def from_intent(cls, intent: NormalizedIntent) -> "ExecutionContext":
-        return cls(
-            intent=intent,
-            base_route=intent.base_route,
-            action=intent.action,
-            relation=intent.relation,
-            is_id_query=intent.is_id_query,
-            output_type=intent.output_type,
-            categories=list(intent.categories),
-            planner_limit=intent.planner_limit,
-            retrieval_query=intent.retrieval_query,
-            planner_confidence=intent.planner_confidence,
-            years=list(intent.years),
-            year_from=intent.year_from,
-            year_to=intent.year_to,
-            people_terms=list(intent.people_terms),
-            gender_terms=list(intent.gender_terms),
-            org_terms=list(intent.org_terms),
-            org_role=intent.org_role,
-            perf_types=list(intent.perf_types),
-            keywords=list(intent.keywords),
-            title=list(intent.title),
-            perf_tag_filters=list(intent.perf_tag_filters),
-            project_tag_filters=list(intent.project_tag_filters),
-            tag_filters=list(intent.tag_filters),
-            ids_map=dict(intent.ids_map),
-            ids_flat=list(intent.ids_flat),
-            remove_terms_for_head=list(intent.remove_terms_for_head),
-        )
-
-    def intent_view(self) -> NormalizedIntent:
-        return replace(
-            self.intent,
-            base_route=self.base_route,
-            action=self.action,
-            relation=self.relation,
-            is_id_query=self.is_id_query,
-            output_type=self.output_type,
-            categories=list(self.categories),
-            planner_limit=self.planner_limit,
-            retrieval_query=self.retrieval_query,
-            planner_confidence=self.planner_confidence,
-            years=list(self.years),
-            year_from=self.year_from,
-            year_to=self.year_to,
-            people_terms=list(self.people_terms),
-            gender_terms=list(self.gender_terms),
-            org_terms=list(self.org_terms),
-            org_role=self.org_role,
-            perf_types=list(self.perf_types),
-            keywords=list(self.keywords),
-            title=list(self.title),
-            perf_tag_filters=list(self.perf_tag_filters),
-            project_tag_filters=list(self.project_tag_filters),
-            tag_filters=list(self.tag_filters),
-            ids_map=dict(self.ids_map),
-            ids_flat=list(self.ids_flat),
-            remove_terms_for_head=list(self.remove_terms_for_head),
-        )
-
 def _has_any_ids(it: NormalizedIntent) -> bool:
     ids_map = getattr(it, "ids_map", None)
     if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
@@ -1693,7 +1586,7 @@ def _build_plan(
         action=action,
         relation=rel,
         output_type=output_type,
-        target_collections=target_cols,
+        target_collections=tuple(target_cols),
         filters={},
     ), mode_reason
 
@@ -2360,7 +2253,7 @@ def _run_rag_with_vectors(
     org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
     ctx.org_role = org_role
-    planner_filter_spec = dict(getattr(plan, "filter_spec", None) or {})
+    planner_filter_spec = dict(plan.filters or {})
     org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
         build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
@@ -2610,10 +2503,10 @@ def _run_rag_with_vectors(
             return "join"
         return None
 
-    def validate_strategy(strategy: Dict[str, Any]) -> bool:
-        mode = (strategy.get("mode") or "").strip().lower()
-        action_value = (strategy.get("action") or "").strip().lower()
-        relation_value = strategy.get("relation")
+    def validate_strategy(strategy: StrategySpec) -> bool:
+        mode = (strategy.mode or "").strip().lower()
+        action_value = (strategy.action or "").strip().lower()
+        relation_value = strategy.relation
 
         if mode not in ("search", "lookup", "join"):
             return False
@@ -2651,7 +2544,7 @@ def _run_rag_with_vectors(
         preferred_mode_source=planner_mode_source,
     )
     ctx.plan = plan
-    ctx.target_collections = list(plan.target_collections or [])
+    ctx.target_collections = list(plan.target_collections)
     planner_first_applied = bool(planner_mode)
     mode_override_requested = False
     mode_override_reason = None
@@ -2671,11 +2564,11 @@ def _run_rag_with_vectors(
             ctx.target_collections = forced_target_cols
         relation = ctx.relation
 
-    strategy_snapshot = {
-        "mode": plan.mode,
-        "action": action,
-        "relation": relation,
-    }
+    strategy_snapshot = StrategySpec(
+        mode=plan.mode,
+        action=action,
+        relation=relation,
+    )
     if not validate_strategy(strategy_snapshot):
         logger.warning(
             "[RAG] invalid 전략 폴백: mode=%s action=%s relation=%s",
@@ -2696,7 +2589,7 @@ def _run_rag_with_vectors(
             preferred_mode_source="invalid_strategy",
         )
         ctx.plan = plan
-        ctx.target_collections = list(plan.target_collections or [])
+        ctx.target_collections = list(plan.target_collections)
 
     preset_intent_view = ctx.intent_view()
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
@@ -2874,38 +2767,35 @@ def _run_rag_with_vectors(
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
     }
-    strategy = {
-        "mode": plan.mode,
-        "action": action,
-        "relation": relation,
-        "people_terms": list(people_terms or []),
-        "target_collections": list(ctx.target_collections or []),
-        "search_filter_enabled": bool(search_filter_enabled),
-        "lookup_filter_enabled": bool(lookup_filter_enabled),
-        "relation_lookup_enforce": bool(relation_lookup_enforce),
-        "lookup_filter_policy": lookup_filter_policy,
-        "lookup_title_filter_policy": lookup_title_filter_policy,
-        "search_filter_server_policy": search_filter_server_policy,
-    }
+    strategy = StrategySpec(
+        mode=plan.mode,
+        action=action,
+        relation=relation,
+        people_terms=tuple(people_terms or []),
+        target_collections=tuple(ctx.target_collections or []),
+        search_filter_enabled=bool(search_filter_enabled),
+        lookup_filter_enabled=bool(lookup_filter_enabled),
+        relation_lookup_enforce=bool(relation_lookup_enforce),
+        lookup_filter_policy=lookup_filter_policy,
+        lookup_title_filter_policy=lookup_title_filter_policy,
+        search_filter_server_policy=search_filter_server_policy,
+    )
     plan = replace(
         plan,
         relation=relation,
-        target_collections=list(ctx.target_collections or []),
-        filter_spec=filter_spec,
-        topk_spec=topk_spec,
-        rerank_spec=rerank_spec,
-        strategy=strategy,
+        target_collections=tuple(ctx.target_collections or []),
+        filters=filter_spec,
     )
     ctx.plan = plan
+    ctx.strategy = strategy
 
-    strategy = dict(plan.strategy or {})
-    mode = (strategy.get("mode") or plan.mode or "search").strip().lower()
-    relation = strategy.get("relation")
-    people_terms = [t.strip() for t in (strategy.get("people_terms") or []) if str(t).strip()]
-    target_collections = list(strategy.get("target_collections") or plan.target_collections or [])
-    search_filter_enabled = bool(strategy.get("search_filter_enabled", False))
-    lookup_filter_enabled = bool(strategy.get("lookup_filter_enabled", False))
-    relation_lookup_enforce = bool(strategy.get("relation_lookup_enforce", False))
+    mode = (strategy.mode or plan.mode or "search").strip().lower()
+    relation = strategy.relation
+    people_terms = [t.strip() for t in strategy.people_terms if str(t).strip()]
+    target_collections = list(strategy.target_collections or plan.target_collections or ())
+    search_filter_enabled = bool(strategy.search_filter_enabled)
+    lookup_filter_enabled = bool(strategy.lookup_filter_enabled)
+    relation_lookup_enforce = bool(strategy.relation_lookup_enforce)
 
     log_kv(
         "RAG.FILTERS",
@@ -2940,7 +2830,7 @@ def _run_rag_with_vectors(
 
     strategy_key = build_strategy_key(action, plan.mode)
     strategy_summary = {
-        "mode": plan.mode,
+        "mode": mode,
         "strategy_version": SEARCH_STRATEGY_VERSION,
         "strategy_key": strategy_key,
         "policy_reason": policy_reason,
@@ -2953,14 +2843,14 @@ def _run_rag_with_vectors(
             "mode_override_from": mode_override_from,
             "mode_override_to": mode_override_to,
         },
-        "filter": plan.filter_spec,
-        "filter_spec": plan.filter_spec,
-        "topk_spec": plan.topk_spec,
-        "rerank_spec": plan.rerank_spec,
+        "filter": filter_spec,
+        "filter_spec": filter_spec,
+        "topk_spec": topk_spec,
+        "rerank_spec": rerank_spec,
         "mix_weights": {
             "dense": {k: float(v) for k, v in (w_dense_map or {}).items()},
             "sparse": float(sparse_weight_eff),
-            "rerank": plan.rerank_spec.get("rerank_weights"),
+            "rerank": rerank_spec.get("rerank_weights"),
         },
     }
 
@@ -3014,9 +2904,9 @@ def _run_rag_with_vectors(
         relation=ctx.relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=target_collections,
-        filter_spec=plan.filter_spec,
-        topk_spec=plan.topk_spec,
-        rerank_spec=plan.rerank_spec,
+        filter_spec=filter_spec,
+        topk_spec=topk_spec,
+        rerank_spec=rerank_spec,
         planner_categories=planner_categories,
         planner_limit=planner_limit,
         planner_retrieval_query=planner_retrieval_query,
@@ -3025,7 +2915,7 @@ def _run_rag_with_vectors(
     )
 
     # planner 정책(topk_spec/rerank_spec)을 실행 레이어에서 그대로 사용
-    policy_topk = plan.topk_spec or {}
+    policy_topk = topk_spec or {}
     topk_dense = int(policy_topk.get("top_k_dense", preset.top_k_dense))
     topk_lex_cand = int(policy_topk.get("top_k_lex_cand", preset.top_k_lex_cand))
     topk_lex = int(policy_topk.get("top_k_lex", sparse_topk_eff))
@@ -3987,7 +3877,7 @@ def _run_rag_with_vectors(
 
     # final rerank
     t0 = time.time()
-    final_keep = int((plan.rerank_spec or {}).get("final_keep", 80))
+    final_keep = int((rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
         merged_rrf,
         it=it,
