@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from enum import Enum
+from dataclasses import replace
 
 # Redis
 import redis.asyncio as redis
@@ -95,9 +95,9 @@ MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
         return None
-    if qa.question_type == QuestionType.FOLLOW_UP:
+    if qa.mode == "JOIN":
         return FOLLOW_UP_MAX_TOKENS_HINT
-    if qa.question_type == QuestionType.DEFAULT and qa.mode in (None, "SEARCH"):
+    if qa.mode in (None, "SEARCH", "LOOKUP"):
         return SHORT_ANSWER_MAX_TOKENS_HINT
     return None
 
@@ -167,35 +167,18 @@ def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
     if preferred_title:
         mapped_doc["title"] = preferred_title
 
-class ContentCategory(str, Enum):
-
-    PROJECT = "project"          # 과제/연구개발
-    RESEARCHER = "researcher"    # 연구자
-    PERFORMANCE = "performance"  # 성과
-    QNA = "qna"                  # 질의응답/매뉴얼
-    ETC = "etc"                  # 기타
-
-class QuestionType(str, Enum):
-    DEFAULT = "default"
-    FOLLOW_UP = "follow_up"
-
-class Researcher(BaseModel):
-    name: str | None = None
-    affiliation: str | None = None
-    researcher_id: str | None = None
+Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
+Head = Literal["project", "perf", "people", "org", "support"]
+Action = Literal["topic", "list", "detail", "stats", "download"]
 
 # --- Pydantic Schemas for Structured Output ---
-class QuestionAnalysis(BaseModel):
-    """질문 분석 결과"""
-    category: list[ContentCategory] = Field(description="질문 카테고리")
-    question_type: QuestionType = Field(description="질문유형")
-    related_docs: list[int] = Field(description="follow_up 의 관련 출처 번호 리스트")
-    researchers: list[Researcher] = Field(default_factory=list)
-    organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
-    mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
-    head: str | None = Field(default=None, description="project | perf | people | org | support")
-    relation: str | None = Field(default=None, description="project_perf | perf_project | null")
-    action: str | None = Field(default=None, description="topic | list | detail | stats | download")
+class QuestionAnalysisV2(BaseModel):
+    """질문 분석 결과(v2 Planner Schema)"""
+    strategy_version: Literal["v2"] = "v2"
+    mode: Mode
+    head: Head
+    action: Action
+    relation: Optional[str] = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     target_cols: list[str] = Field(default_factory=list, description="실행 대상 컬렉션")
@@ -204,16 +187,15 @@ class QuestionAnalysis(BaseModel):
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
         le=MAX_TOP_K_SIZE,
     )
-    history_summary: str = Field(description="대화 이력 기반 질문 요약")
-    retrieval_query: str = Field(description="벡터 검색용 최적화된 쿼리")
+    retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
+
+
+QuestionAnalysis = QuestionAnalysisV2
 
 class SearchHint(BaseModel):
     """RAG 검색 힌트"""
     coq: str = ""
-    category: list[str] = Field(default_factory=list)
-    researchers: list[dict[str, str | None]] = Field(default_factory=list)
-    organizations: list[str] = Field(default_factory=list)
     mode: str | None = None
     head: str | None = None
     relation: str | None = None
@@ -226,7 +208,6 @@ class SearchHint(BaseModel):
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
         le=MAX_TOP_K_SIZE,
     )
-    history_summary: str = ""
     retrieval_query: str = ""
     confidence: float = 0.0
 
@@ -435,9 +416,12 @@ async def _run_question_analysis(
         ====================
         1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
         2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        3) 모호하면 문장으로 회피하지 말고 confidence를 낮추고 관련 필드는 null/[] 처리.
-        4) 값이 없으면 문자열 "None" 금지. 반드시 null 또는 [].
-        5) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
+        3) strategy_version은 항상 "v2"로 고정합니다.
+        4) 아래 키를 반드시 모두 포함합니다:
+           strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
+        5) 값이 없으면 null/[]/{{}}/0.0 등 기본값을 사용합니다.
+        6) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}}를 사용합니다.
+        7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
         [Mode 정의]
@@ -612,11 +596,7 @@ async def _run_question_analysis(
         log_section(
             "QUESTION ANALYSIS",
             f"coq: {conversation_id}{question}\n"
-            f"Category: {result.category}\n"
-            f"QuestionType: {result.question_type}\n"
-            f"RelatedDocs: {result.related_docs}\n"
-            f"Researchers: {result.researchers}\n"
-            f"Organizations: {result.organizations}\n"
+            f"StrategyVersion: {result.strategy_version}\n"
             f"Mode: {result.mode}\n"
             f"Head: {result.head}\n"
             f"Relation: {result.relation}\n"
@@ -625,31 +605,26 @@ async def _run_question_analysis(
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
-            f"Summary: {result.history_summary}\n"
             f"Query: {result.retrieval_query}\n"
-            f"Confidence: {result.confidence:.2f}"
+            f"Confidence: {result.confidence:.2f}\n"
+            f"planner_failed=0"
         )
         return result
 
     except Exception as e:
-        logger.error(f"Question Analysis Error: {e}")
+        logger.error(f"[PLANNER.V2] parse failed: {e}")
         return QuestionAnalysis(
-            category=[ContentCategory.ETC],
-            question_type=QuestionType.DEFAULT,
-            related_docs=[],
-            researchers=[],
-            organizations=[],
-            mode=None,
-            head=None,
+            strategy_version="v2",
+            mode="SEARCH",
+            head="support",
+            action="topic",
             relation=None,
-            action=None,
             target_cols=[],
             ids_map={},
             filters={},
             limit=20,
-            history_summary=question,
             retrieval_query=question[:120],
-            confidence=0.5
+            confidence=0.0,
         )
 
 
@@ -686,7 +661,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "content",
     }
 
-    if qa and qa.question_type == QuestionType.DEFAULT and not state.prev_context:
+    if qa and not state.prev_context:
         result = KnowledgeSufficiency(
             requires_new_knowledge="high",
             search_intent="이전 문맥이 없어 새로운 검색이 필요함",
@@ -722,44 +697,19 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     prev_context_str = None
 
 
-    if qa.question_type == QuestionType.FOLLOW_UP:
-        if len(qa.related_docs) > 0:
-            related_doc_indexes = set(qa.related_docs)
-            related_context = [
-                doc
-                for doc in state.prev_context
-                if doc.get("source_index") in related_doc_indexes
-            ]
-            if related_context:
-                prev_context_str = refine_documents_rule_based(
-                    related_context,
-                    True,
-                    researchers=(qa.researchers if qa else None),
-                    organizations=(qa.organizations if qa else None),
-                    org_filters=(qa.filters if qa else None),
-                    ids_map=(qa.ids_map if qa else None),
-                )
-            else:
-                # fallback: 전체 prev_context 사용
-                related_context = state.prev_context
-                prev_context_str = refine_documents_rule_based(
-                    related_context,
-                    researchers=(qa.researchers if qa else None),
-                    organizations=(qa.organizations if qa else None),
-                    org_filters=(qa.filters if qa else None),
-                    ids_map=(qa.ids_map if qa else None),
-                )
-        else:
-            # fallback: 전체 prev_context 사용
-            related_context = state.prev_context
-            prev_context_str = refine_documents_rule_based(
-                related_context,
-                researchers=(qa.researchers if qa else None),
-                organizations=(qa.organizations if qa else None),
-                org_filters=(qa.filters if qa else None),
-                ids_map=(qa.ids_map if qa else None),
-            )
-
+    if qa and qa.mode == "JOIN":
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            True,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
+    else:
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
 
 
     system_prompt = (
@@ -901,18 +851,12 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         hint = SearchHint(
             coq=f"{state.conversation_id}{state.question}",
-            category=[c.value if hasattr(c, "value") else str(c) for c in (qa.category or [])] if qa else [],
-            researchers=[
-                {"name": r.name, "researcher_id": r.researcher_id} for r in (qa.researchers or [])
-            ] if qa else [],
-            organizations=list(qa.organizations or []) if qa else [],
             mode=(qa.mode if qa else None),
             head=(qa.head if qa else None),
             relation=(qa.relation if qa else None),
             ids_map=dict(qa.ids_map or {}) if qa else {},
             filters=dict(qa.filters or {}) if qa else {},
             limit=search_num,
-            history_summary=(qa.history_summary if qa else ""),
             retrieval_query=hint_query,
             confidence=confidence,
         )
@@ -985,23 +929,14 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
 
-    # ✅ 2) FOLLOW_UP이면 필요한 것만 좁히고(detail로)
-    if qa and qa.question_type == QuestionType.FOLLOW_UP:
+    # ✅ 2) JOIN이면 detail 우선
+    if qa and qa.mode == "JOIN":
         is_detail = True
-        if qa.related_docs:
-            related_context = [
-                state.prev_context[i - 1]
-                for i in qa.related_docs
-                if 1 <= i <= len(state.prev_context)
-            ]
-            docs_for_ctx = related_context or docs_for_ctx
 
     context_text = (
         refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
-            researchers=(qa.researchers if qa else None),
-            organizations=(qa.organizations if qa else None),
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
@@ -1016,7 +951,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
-        f"[질문 요약]\n{(qa.history_summary if qa else '')}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
@@ -1145,6 +1079,7 @@ async def build_intent_payload(
 ) -> Dict[str, Any]:
     precheck = _cheap_precheck(question)
     question_analysis = None
+    planner_failed = 0
     if not precheck:
         question_analysis = await _run_question_analysis(
             question=question,
@@ -1152,6 +1087,7 @@ async def build_intent_payload(
             chat_history=chat_history,
             prev_context=prev_context,
         )
+        planner_failed = int((question_analysis is None) or (float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0))
 
     kws: List[str] = []
     hint_people_terms: List[str] = []
@@ -1160,11 +1096,6 @@ async def build_intent_payload(
     hint_participant_org_terms: List[str] = []
     hint_people_affiliation_org_terms: List[str] = []
     hint_org_role = None
-    if question_analysis:
-        hint_people_terms = _normalize_hint_terms(
-            [r.name for r in (question_analysis.researchers or []) if r.name]
-        )
-        hint_org_terms = _normalize_hint_terms(list(question_analysis.organizations or []))
 
     if question_analysis and isinstance(question_analysis.filters, dict):
         filters = dict(question_analysis.filters or {})
@@ -1242,13 +1173,14 @@ async def build_intent_payload(
         hint_participant_org_terms=hint_participant_org_terms,
         hint_people_affiliation_org_terms=hint_people_affiliation_org_terms,
     )
+    normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
 
     strategy = PlannerStrategy(
         mode=(question_analysis.mode if question_analysis else None),
         head=(question_analysis.head if question_analysis else None),
         relation=(question_analysis.relation if question_analysis else None),
         action=(question_analysis.action if question_analysis and question_analysis.action else getattr(normalized_intent, "action", None)),
-        query_text=(question_analysis.retrieval_query if question_analysis else question),
+        query_text=((question_analysis.retrieval_query if question_analysis else None) or question),
         filter_spec=(dict(question_analysis.filters or {}) if question_analysis else {}),
         topk_spec={
             "limit": int(question_analysis.limit) if question_analysis else MAX_TOP_K_SIZE,
@@ -1265,8 +1197,52 @@ async def build_intent_payload(
         "normalized_intent": normalized_intent,
         "keywords": kws,
         "strategy": strategy,
+        "planner_applied": int(planner_applied),
+        "planner_failed": int(planner_failed),
     }
 
+
+
+
+def _build_planner_override_request(analysis: QuestionAnalysis, intent: Any) -> Optional[Dict[str, Any]]:
+    requested_mode = str(getattr(analysis, "mode", "") or "").strip().lower()
+    current_action = str(getattr(intent, "action", "") or "").strip().lower()
+    if not requested_mode or not current_action:
+        return None
+
+    lookup_actions = {"list", "detail", "stats", "download", "id_exact", "id_fuzzy", "relation"}
+    if requested_mode == "lookup" and current_action not in lookup_actions:
+        return {
+            "requested_mode": requested_mode,
+            "current_action": current_action,
+        }
+    return None
+
+
+def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+    if qa is None:
+        return intent, False
+    confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
+    if confidence < 0.2:
+        return intent, False
+
+    relation_map = {
+        "project_perf": ("project", "perf"),
+        "perf_project": ("perf", "project"),
+    }
+    relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
+
+    patched = replace(
+        intent,
+        base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
+        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        relation=relation,
+        ids_map=dict(getattr(qa, "ids_map", {}) or {}),
+        planner_limit=int(getattr(qa, "limit", 20) or 20),
+        retrieval_query=getattr(qa, "retrieval_query", None),
+        planner_confidence=confidence,
+    )
+    return patched, True
 
 def _normalize_hint_terms(values: Any) -> list[str]:
     if values is None:
@@ -1383,11 +1359,7 @@ def _normalize_researcher_token(value: Optional[str]) -> str:
 
 
 def _extract_researcher_fields(researcher: Any) -> tuple[str, str, str]:
-    if isinstance(researcher, Researcher):
-        name = researcher.name
-        affiliation = researcher.affiliation
-        researcher_id = researcher.researcher_id
-    elif isinstance(researcher, dict):
+    if isinstance(researcher, dict):
         name = researcher.get("name")
         affiliation = researcher.get("affiliation")
         researcher_id = researcher.get("researcher_id")

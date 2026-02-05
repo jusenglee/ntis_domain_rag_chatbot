@@ -2251,6 +2251,8 @@ def _run_rag_with_vectors(
     planner_limit = ctx.planner_limit
     planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
     planner_meta_source = "qa" if hint_conf_ok else "intent"
+    planner_applied = int(_get_attr(intent_payload, "planner_applied", 0) or 0)
+    planner_failed = int(_get_attr(intent_payload, "planner_failed", 0) or 0)
 
     if not hint_conf_ok:
         if planner_retrieval_query:
@@ -2293,6 +2295,8 @@ def _run_rag_with_vectors(
         hint_conf=qa_conf,
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
+        planner_applied=planner_applied,
+        planner_failed=planner_failed,
         hinted_base=hinted_base,
         hinted_limit=hinted_limit,
         hinted_cols=hinted_cols,
@@ -3011,6 +3015,8 @@ def _run_rag_with_vectors(
         target_cols=list(target_collections or []),
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
+        planner_applied=planner_applied,
+        planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
         planner_action=planner_action,
