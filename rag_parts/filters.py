@@ -394,13 +394,18 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
 
 def _normalize_min_should(min_should: Any) -> Optional[Any]:
+    if qmodels is None:
+        return None
     if min_should in (None, ""):
         return None
+
+    # dict로 들어온 경우도 숫자만 추출
     if isinstance(min_should, dict):
         for key in ("min_count", "count", "value"):
             if key in min_should:
                 return _normalize_min_should(min_should.get(key))
         return None
+
     try:
         value = int(min_should)
     except Exception:
@@ -408,17 +413,34 @@ def _normalize_min_should(min_should: Any) -> Optional[Any]:
     if value <= 0:
         return None
 
+    # 1) MinShould 시도
     min_should_cls = getattr(qmodels, "MinShould", None)
-    if min_should_cls is None:
-        # qdrant-client 버전에 따라 int가 아닌 dict/MinShould만 허용될 수 있으므로
-        # 기본 fallback은 dict 형태로 고정한다.
-        return {"min_count": value}
-    for kwargs in ({"min_count": value}, {"count": value}):
+    candidates: List[Any] = []
+    if min_should_cls is not None:
+        # 보통 min_count, 일부 count
+        for kwargs in ({"min_count": value}, {"count": value}):
+            try:
+                candidates.append(min_should_cls(**kwargs))
+            except Exception:
+                pass
+
+    # 2) dict 시도 (신버전에서 흔히 먹힘)
+    candidates.append({"min_count": value})
+    candidates.append({"count": value})
+
+    # 3) int (구버전 호환용)
+    candidates.append(value)
+
+    # ✅ 중요한 부분: "실제로 Filter가 받아들이는 타입"을 테스트로 확정
+    dummy_should = [qmodels.FieldCondition(key="__dummy__", match=qmodels.MatchValue(value="__dummy__"))]
+    for cand in candidates:
         try:
-            return min_should_cls(**kwargs)
+            _ = qmodels.Filter(should=dummy_should, min_should=cand)
+            return cand
         except Exception:
             continue
-    return value
+
+    return None
 
 
 def _build_filter(
