@@ -393,15 +393,12 @@ def _qdrant_hybrid_query_once(
         lexical_fields_eff,
     )
 
-    fusion_query = _get_fusion_rrf()
-    if fusion_query is None:
-        return None
-    query_model = _build_hybrid_query_model(prefetch=prefetch, fusion=fusion)
+    query = fusion
     try:
         res = client.query_points(
             collection_name=collection_name,
-            prefetch=prefetch,  # ✅ 여기!
-            query=fusion_query, # ✅ 여기!
+            prefetch=prefetch,
+            query=query,
             limit=int(max(int(top_k_dense), int(top_k_lexical))),
             with_payload=with_payload,
             with_vectors=False,
