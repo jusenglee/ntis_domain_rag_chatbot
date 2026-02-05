@@ -1111,17 +1111,42 @@ async def build_intent_payload(
     hint_people_terms: List[str] = []
     hint_org_terms: List[str] = []
     hint_org_role = None
+    if question_analysis:
+        hint_people_terms = _normalize_hint_terms(
+            [r.name for r in (question_analysis.researchers or []) if r.name]
+        )
+        hint_org_terms = _normalize_hint_terms(list(question_analysis.organizations or []))
+
     if question_analysis and isinstance(question_analysis.filters, dict):
-        raw_keywords = question_analysis.filters.get("keywords")
+        filters = dict(question_analysis.filters or {})
+
+        raw_keywords = filters.get("keywords")
         if isinstance(raw_keywords, (list, tuple, set)):
             kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             kws = [raw_keywords.strip()]
-        title_hint = question_analysis.filters.get("title") or question_analysis.filters.get("name")
+
+        title_hint = filters.get("title") or filters.get("name")
         if title_hint:
             title_terms = _normalize_hint_terms(title_hint)
             kws = list(dict.fromkeys([*kws, *title_terms]))
-        hint_org_role = question_analysis.filters.get("org_role")
+
+        hint_org_role = filters.get("org_role")
+
+        people_terms_hint = _normalize_hint_terms([
+            *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
+            *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
+        ])
+        if people_terms_hint:
+            hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
+
+        org_terms_hint = _normalize_hint_terms([
+            *(_normalize_hint_terms(filters.get("org_name") or filters.get("org"))),
+            *(_normalize_hint_terms(filters.get("participant_org_name"))),
+            *(_normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))),
+        ])
+        if org_terms_hint:
+            hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
 
     if question_analysis:
         hint_people_terms = _normalize_hint_terms([r.name for r in (question_analysis.researchers or []) if r.name])
