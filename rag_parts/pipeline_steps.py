@@ -75,7 +75,7 @@ def _flatten_ids(ids_map: Dict[str, List[str]]) -> List[str]:
     return out
 
 
-@dataclass
+@dataclass(frozen=True)
 class NormalizedIntent:
     action: str
     base_route: str

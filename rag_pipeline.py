@@ -22,7 +22,7 @@ import time
 import inspect
 import json
 from pprint import pformat
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent, resolve_join_hops
@@ -1440,7 +1440,7 @@ def _final_rerank(
 # -------------------------
 # Plan
 # -------------------------
-@dataclass
+@dataclass(frozen=True)
 class QueryPlan:
     mode: str  # "search" | "lookup" | "join"
     base_route: str
@@ -1450,6 +1450,99 @@ class QueryPlan:
     target_collections: List[str]
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
+
+
+@dataclass
+class ExecutionContext:
+    intent: NormalizedIntent
+    base_route: str
+    action: str
+    relation: Optional[Tuple[str, str]]
+    is_id_query: bool
+    output_type: Optional[str]
+    categories: List[str]
+    planner_limit: Optional[int]
+    retrieval_query: Optional[str]
+    planner_confidence: Optional[float]
+    years: List[str]
+    year_from: Optional[str]
+    year_to: Optional[str]
+    people_terms: List[str]
+    gender_terms: List[str]
+    org_terms: List[str]
+    org_role: Optional[str]
+    perf_types: List[str]
+    keywords: List[str]
+    title: List[str]
+    perf_tag_filters: List[str]
+    project_tag_filters: List[str]
+    tag_filters: List[str]
+    ids_map: Dict[str, List[str]]
+    ids_flat: List[str]
+    remove_terms_for_head: List[str]
+    plan: Optional[QueryPlan] = None
+    target_collections: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_intent(cls, intent: NormalizedIntent) -> "ExecutionContext":
+        return cls(
+            intent=intent,
+            base_route=intent.base_route,
+            action=intent.action,
+            relation=intent.relation,
+            is_id_query=intent.is_id_query,
+            output_type=intent.output_type,
+            categories=list(intent.categories),
+            planner_limit=intent.planner_limit,
+            retrieval_query=intent.retrieval_query,
+            planner_confidence=intent.planner_confidence,
+            years=list(intent.years),
+            year_from=intent.year_from,
+            year_to=intent.year_to,
+            people_terms=list(intent.people_terms),
+            gender_terms=list(intent.gender_terms),
+            org_terms=list(intent.org_terms),
+            org_role=intent.org_role,
+            perf_types=list(intent.perf_types),
+            keywords=list(intent.keywords),
+            title=list(intent.title),
+            perf_tag_filters=list(intent.perf_tag_filters),
+            project_tag_filters=list(intent.project_tag_filters),
+            tag_filters=list(intent.tag_filters),
+            ids_map=dict(intent.ids_map),
+            ids_flat=list(intent.ids_flat),
+            remove_terms_for_head=list(intent.remove_terms_for_head),
+        )
+
+    def intent_view(self) -> NormalizedIntent:
+        return replace(
+            self.intent,
+            base_route=self.base_route,
+            action=self.action,
+            relation=self.relation,
+            is_id_query=self.is_id_query,
+            output_type=self.output_type,
+            categories=list(self.categories),
+            planner_limit=self.planner_limit,
+            retrieval_query=self.retrieval_query,
+            planner_confidence=self.planner_confidence,
+            years=list(self.years),
+            year_from=self.year_from,
+            year_to=self.year_to,
+            people_terms=list(self.people_terms),
+            gender_terms=list(self.gender_terms),
+            org_terms=list(self.org_terms),
+            org_role=self.org_role,
+            perf_types=list(self.perf_types),
+            keywords=list(self.keywords),
+            title=list(self.title),
+            perf_tag_filters=list(self.perf_tag_filters),
+            project_tag_filters=list(self.project_tag_filters),
+            tag_filters=list(self.tag_filters),
+            ids_map=dict(self.ids_map),
+            ids_flat=list(self.ids_flat),
+            remove_terms_for_head=list(self.remove_terms_for_head),
+        )
 
 def _has_any_ids(it: NormalizedIntent) -> bool:
     ids_map = getattr(it, "ids_map", None)
@@ -2089,7 +2182,8 @@ def _run_rag_with_vectors(
                 perf_types_source = "intent"
                 log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
-    planner_keywords = _normalize_hint_terms(getattr(it, "keywords", None))
+    ctx = ExecutionContext.from_intent(it)
+    planner_keywords = _normalize_hint_terms(ctx.keywords)
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
@@ -2100,53 +2194,53 @@ def _run_rag_with_vectors(
 
     if not intent_from_payload and hint_conf_ok:
         if hint_head in ("project", "perf", "people", "org", "support"):
-            it.base_route = hint_head
+            ctx.base_route = hint_head
         if hint_relation:
-            it.relation = hint_relation
+            ctx.relation = hint_relation
         if hint_ids_map:
-            merged_ids = dict(it.ids_map or {})
+            merged_ids = dict(ctx.ids_map or {})
             for key, values in hint_ids_map.items():
                 merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
-            it.ids_map = merged_ids
+            ctx.ids_map = merged_ids
         if isinstance(hint_filters, dict):
             org_terms_hint = _normalize_hint_terms(hint_filters.get("org_name") or hint_filters.get("org"))
             if org_terms_hint:
-                it.org_terms = org_terms_hint
+                ctx.org_terms = org_terms_hint
             people_terms_hint = _normalize_hint_terms(
                 hint_filters.get("researcher_name") or hint_filters.get("people_name")
             )
             if people_terms_hint:
-                it.people_terms = people_terms_hint
+                ctx.people_terms = people_terms_hint
             year_terms_hint = _normalize_hint_terms(
                 [hint_filters.get("year_from"), hint_filters.get("year_to")]
             )
             if year_terms_hint:
-                it.years = year_terms_hint
-                it.year_from = year_terms_hint[0]
-                it.year_to = year_terms_hint[-1]
+                ctx.years = year_terms_hint
+                ctx.year_from = year_terms_hint[0]
+                ctx.year_to = year_terms_hint[-1]
             year_from = hint_filters.get("year_from")
             year_to = hint_filters.get("year_to")
             if year_from is not None:
-                it.year_from = str(year_from).strip() or None
+                ctx.year_from = str(year_from).strip() or None
             if year_to is not None:
-                it.year_to = str(year_to).strip() or None
+                ctx.year_to = str(year_to).strip() or None
             tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
             if tag_filters_hint:
-                it.tag_filters = tag_filters_hint
+                ctx.tag_filters = tag_filters_hint
             perf_types_hint = _normalize_hint_terms(hint_filters.get("perf_types"))
             if perf_types_hint:
-                it.perf_types = perf_types_hint
+                ctx.perf_types = perf_types_hint
                 perf_types_source = "hint"
                 log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=perf_types_hint)
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
-                it.keywords = keywords_hint
+                ctx.keywords = keywords_hint
             title_hint = _normalize_hint_terms(
                 hint_filters.get("title") or hint_filters.get("name")
             )
             if title_hint:
-                it.title = title_hint
-                it.keywords = list(dict.fromkeys([*list(it.keywords or []), *title_hint]))
+                ctx.title = title_hint
+                ctx.keywords = list(dict.fromkeys([*list(ctx.keywords or []), *title_hint]))
 
     payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
     payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
@@ -2165,36 +2259,36 @@ def _run_rag_with_vectors(
     payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
 
     if payload_relation:
-        it.relation = payload_relation
+        ctx.relation = payload_relation
     if payload_is_id_query is not None:
-        it.is_id_query = bool(payload_is_id_query)
+        ctx.is_id_query = bool(payload_is_id_query)
     if payload_org_terms:
-        it.org_terms = payload_org_terms
+        ctx.org_terms = payload_org_terms
     if payload_people_terms:
-        it.people_terms = payload_people_terms
+        ctx.people_terms = payload_people_terms
     if payload_perf_types:
-        it.perf_types = payload_perf_types
+        ctx.perf_types = payload_perf_types
         perf_types_source = "payload"
         log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=payload_perf_types)
     if payload_keywords:
-        it.keywords = payload_keywords
+        ctx.keywords = payload_keywords
     if payload_tag_filters:
-        it.tag_filters = payload_tag_filters
+        ctx.tag_filters = payload_tag_filters
     if payload_perf_tag_filters:
-        it.perf_tag_filters = payload_perf_tag_filters
+        ctx.perf_tag_filters = payload_perf_tag_filters
     if payload_project_tag_filters:
-        it.project_tag_filters = payload_project_tag_filters
+        ctx.project_tag_filters = payload_project_tag_filters
     if payload_title:
-        it.title = payload_title
-        it.keywords = list(dict.fromkeys([*list(it.keywords or []), *payload_title]))
+        ctx.title = payload_title
+        ctx.keywords = list(dict.fromkeys([*list(ctx.keywords or []), *payload_title]))
     if payload_year_from is not None:
-        it.year_from = str(payload_year_from).strip() or None
+        ctx.year_from = str(payload_year_from).strip() or None
     if payload_year_to is not None:
-        it.year_to = str(payload_year_to).strip() or None
+        ctx.year_to = str(payload_year_to).strip() or None
 
-    planner_categories = normalize_categories(getattr(it, "categories", None))
-    planner_limit = getattr(it, "planner_limit", None)
-    planner_retrieval_query = str(getattr(it, "retrieval_query", "") or "").strip() or None
+    planner_categories = normalize_categories(ctx.categories)
+    planner_limit = ctx.planner_limit
+    planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
     planner_meta_source = "qa" if hint_conf_ok else "intent"
 
     if not hint_conf_ok:
@@ -2205,9 +2299,9 @@ def _run_rag_with_vectors(
             if hinted_limit < 0:
                 hinted_limit = 0
 
-    action = it.action
-    base_route = it.base_route
-    relation = it.relation
+    action = ctx.action
+    base_route = ctx.base_route
+    relation = ctx.relation
     if planner_confidence is not None:
         try:
             planner_confidence = float(planner_confidence)
@@ -2256,7 +2350,8 @@ def _run_rag_with_vectors(
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # preset (topK etc)
-    preset: _SearchPreset = _build_search_preset(it)
+    preset_intent_view = ctx.intent_view()
+    preset: _SearchPreset = _build_search_preset(preset_intent_view)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
 
     if hinted_limit > 0:
@@ -2270,10 +2365,11 @@ def _run_rag_with_vectors(
     # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(it.org_terms or []) or []) if str(t).strip()]
-    it.org_terms = org_terms
-    org_role = _get_attr(qa, "org_role", None) or getattr(it, "org_role", None)
+    org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
+    ctx.org_terms = org_terms
+    org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
+    ctx.org_role = org_role
     org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
         build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
@@ -2282,8 +2378,8 @@ def _run_rag_with_vectors(
     )
 
     # people terms/filter (필요 시)
-    people_terms = [t.strip() for t in (list(it.people_terms or []) or []) if str(t).strip()]
-    gender_terms = [t.strip() for t in (list(getattr(it, "gender_terms", []) or []) or []) if str(t).strip()]
+    people_terms = [t.strip() for t in (list(ctx.people_terms or []) or []) if str(t).strip()]
+    gender_terms = [t.strip() for t in (list(ctx.gender_terms or []) or []) if str(t).strip()]
     people_org_terms: List[str] = []
     if org_role == "affiliation" and org_terms:
         people_org_terms = list(org_terms)
@@ -2317,8 +2413,8 @@ def _run_rag_with_vectors(
                 seen_people.add(term)
                 deduped_people.append(term)
             people_terms = deduped_people
-    it.people_terms = people_terms
-    people_ids = list((getattr(it, "ids_map", None) or {}).get("person_no") or [])
+    ctx.people_terms = people_terms
+    people_ids = list((ctx.ids_map or {}).get("person_no") or [])
     if hint_people_ids:
         if hint_policy == "merge":
             merged_ids = hint_people_ids + people_ids
@@ -2343,24 +2439,24 @@ def _run_rag_with_vectors(
         else None
     )
 
-    year_from = str(getattr(it, "year_from", "") or "").strip() or None
-    year_to = str(getattr(it, "year_to", "") or "").strip() or None
-    if not year_from and (it.years or []):
-        year_from = str(it.years[0]).strip() or None
-    if not year_to and (it.years or []):
-        year_to = str(it.years[-1]).strip() or year_from
-    it.year_from = year_from
-    it.year_to = year_to
+    year_from = str(ctx.year_from or "").strip() or None
+    year_to = str(ctx.year_to or "").strip() or None
+    if not year_from and (ctx.years or []):
+        year_from = str(ctx.years[0]).strip() or None
+    if not year_to and (ctx.years or []):
+        year_to = str(ctx.years[-1]).strip() or year_from
+    ctx.year_from = year_from
+    ctx.year_to = year_to
     year_range_filter = build_year_range_filter(year_from, year_to) if (year_from or year_to) else None
 
     perf_types_raw = [
         t.strip()
-        for t in (list(getattr(it, "perf_types", None) or []) or [])
+        for t in (list(ctx.perf_types or []) or [])
         if str(t).strip()
     ]
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
-    it.perf_types = perf_types
+    ctx.perf_types = perf_types
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
     if perf_types or perf_types_source:
         log_kv(
@@ -2371,28 +2467,28 @@ def _run_rag_with_vectors(
 
     title_terms = [
         t.strip()
-        for t in (list(getattr(it, "title", None) or []) or [])
+        for t in (list(ctx.title or []) or [])
         if str(t).strip()
     ]
-    it.title = title_terms
+    ctx.title = title_terms
     title_filter = build_title_filter(title_terms) if title_terms else None
 
-    keyword_terms = [t.strip() for t in (list(getattr(it, "keywords", None) or []) or []) if str(t).strip()]
+    keyword_terms = [t.strip() for t in (list(ctx.keywords or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
     keyword_terms = _merge_keywords_with_priority(planner_keywords, keyword_terms)
     if title_terms:
         keyword_terms = _merge_keywords_with_priority(title_terms, keyword_terms)
-    it.keywords = keyword_terms
+    ctx.keywords = keyword_terms
     kws = keyword_terms
 
     # perf/project tag filter (필요 시) + generic tag 분리 적용
-    generic_tag_filter_raw = _build_tag_only_filter(list(it.tag_filters)) if it.tag_filters else None
+    generic_tag_filter_raw = _build_tag_only_filter(list(ctx.tag_filters)) if ctx.tag_filters else None
 
     generic_project_tags, generic_perf_tags, generic_other_tags = _split_tag_filters_by_family(
-        list(it.tag_filters or [])
+        list(ctx.tag_filters or [])
     )
-    project_tag_filters_for_col = list(it.project_tag_filters or []) + generic_project_tags + generic_other_tags
-    perf_tag_filters_for_col = list(it.perf_tag_filters or []) + generic_perf_tags + generic_other_tags
+    project_tag_filters_for_col = list(ctx.project_tag_filters or []) + generic_project_tags + generic_other_tags
+    perf_tag_filters_for_col = list(ctx.perf_tag_filters or []) + generic_perf_tags + generic_other_tags
     project_tag_filter = (
         _build_tag_only_filter(project_tag_filters_for_col) if project_tag_filters_for_col else None
     )
@@ -2420,9 +2516,9 @@ def _run_rag_with_vectors(
         or title_terms
         or people_terms
         or org_terms
-        or it.tag_filters
-        or it.project_tag_filters
-        or it.perf_tag_filters
+        or ctx.tag_filters
+        or ctx.project_tag_filters
+        or ctx.perf_tag_filters
     )
     search_filter_conf_ok = bool(
         (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
@@ -2443,8 +2539,11 @@ def _run_rag_with_vectors(
             forced_target_cols=forced_target_cols,
             people_terms=people_terms[:4],
         )
-        it.relation = None
+        ctx.relation = None
         relation = None
+
+    intent_view = ctx.intent_view()
+    it = intent_view
 
     # -------------------------
     # 상세 로그: INTENT / PRESET / KEYWORDS
@@ -2463,19 +2562,19 @@ def _run_rag_with_vectors(
         base_route=base_route,
         relation=relation,
         domain_hint=domain_hint,
-        is_id_query=getattr(it, "is_id_query", None),
-        years=getattr(it, "years", None),
-        year_from=getattr(it, "year_from", None),
-        year_to=getattr(it, "year_to", None),
-        people_terms=list(getattr(it, "people_terms", []) or []),
-        gender_terms=list(getattr(it, "gender_terms", []) or []),
-        org_terms=list(getattr(it, "org_terms", []) or []),
+        is_id_query=ctx.is_id_query,
+        years=ctx.years,
+        year_from=ctx.year_from,
+        year_to=ctx.year_to,
+        people_terms=list(ctx.people_terms or []),
+        gender_terms=list(ctx.gender_terms or []),
+        org_terms=list(ctx.org_terms or []),
         org_role=org_role,
-        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
-        perf_types=list(getattr(it, "perf_types", []) or []),
-        keywords=list(getattr(it, "keywords", []) or []),
-        tag_filters=list(getattr(it, "tag_filters", []) or []),
-        ids_flat=_flatten_ids_from_intent(it)[:20],
+        perf_tag_filters=list(ctx.perf_tag_filters or []),
+        perf_types=list(ctx.perf_types or []),
+        keywords=list(ctx.keywords or []),
+        tag_filters=list(ctx.tag_filters or []),
+        ids_flat=_flatten_ids_from_intent(intent_view)[:20],
     )
     log_kv(
         "RAG.PRESET/PLAN.PRE",
@@ -2556,10 +2655,12 @@ def _run_rag_with_vectors(
         planner_mode_source = None
 
     plan, policy_reason = _build_plan(
-        it,
+        intent_view,
         preferred_mode=planner_mode,
         preferred_mode_source=planner_mode_source,
     )
+    ctx.plan = plan
+    ctx.target_collections = list(plan.target_collections or [])
     planner_first_applied = bool(planner_mode)
     mode_override_requested = False
     mode_override_reason = None
@@ -2595,13 +2696,15 @@ def _run_rag_with_vectors(
             **extra,
         )
         plan, policy_reason = _build_plan(
-            it,
+            ctx.intent_view(),
             preferred_mode=requested_mode,
             preferred_mode_source="override_request",
         )
+        ctx.plan = plan
+        ctx.target_collections = list(plan.target_collections or [])
         return True
 
-    if planner_mode and relation == ("people", "project") and list(getattr(it, "people_terms", []) or []):
+    if planner_mode and relation == ("people", "project") and list(ctx.people_terms or []):
         _request_mode_override(
             "lookup",
             reason="people_project_lookup",
@@ -2611,7 +2714,7 @@ def _run_rag_with_vectors(
             people_terms=people_terms[:4],
         )
 
-    if planner_mode and _has_explicit_identifiers(it):
+    if planner_mode and _has_explicit_identifiers(intent_view):
         _request_mode_override(
             "lookup",
             reason="explicit_identifiers",
@@ -2620,13 +2723,17 @@ def _run_rag_with_vectors(
             relation=relation,
         )
     if hinted_cols:
-        plan.target_collections = hinted_cols
+        ctx.target_collections = hinted_cols
     if people_relation_disabled:
-        plan.relation = None
+        ctx.relation = None
         if plan.mode == "join":
             requested_mode = (
                 "lookup"
-                if (action in ("list", "stats", "download") or _has_explicit_identifiers(it) or _has_any_ids(it))
+                if (
+                    action in ("list", "stats", "download")
+                    or _has_explicit_identifiers(intent_view)
+                    or _has_any_ids(intent_view)
+                )
                 else "search"
             )
             _request_mode_override(
@@ -2637,8 +2744,8 @@ def _run_rag_with_vectors(
                 relation=relation,
             )
         if forced_target_cols:
-            plan.target_collections = forced_target_cols
-        relation = None
+            ctx.target_collections = forced_target_cols
+        relation = ctx.relation
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
@@ -2775,8 +2882,8 @@ def _run_rag_with_vectors(
 
     # allow 적용 (force/allow)
     if effective_allow:
-        filtered = _pick_collections((plan.target_collections or []), effective_allow)
-        plan.target_collections = filtered if filtered else list(effective_allow)
+        filtered = _pick_collections((ctx.target_collections or []), effective_allow)
+        ctx.target_collections = filtered if filtered else list(effective_allow)
 
     title_filter_applied_to = None
     if title_filter and plan.mode == "lookup":
@@ -2806,9 +2913,9 @@ def _run_rag_with_vectors(
         year_to=year_to,
         perf_types=perf_types,
         keywords=keyword_terms,
-        perf_tag_filters=list(getattr(it, "perf_tag_filters", []) or []),
+        perf_tag_filters=list(ctx.perf_tag_filters or []),
         title_terms=title_terms,
-        tag_filters=list(getattr(it, "tag_filters", []) or []),
+        tag_filters=list(ctx.tag_filters or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
         people_filter=str(people_filter) if people_filter is not None else None,
@@ -2880,7 +2987,7 @@ def _run_rag_with_vectors(
         action=action,
         relation=relation,
         output_type=getattr(plan, "output_type", None),
-        target_cols=list(getattr(plan, "target_collections", []) or []),
+        target_cols=list(ctx.target_collections or []),
         qa_conf=qa_conf,
         hint_applied=int(hint_conf_ok),
         planner_first_applied=int(planner_first_applied),
@@ -2905,11 +3012,11 @@ def _run_rag_with_vectors(
         mode=plan.mode,
         base_route=plan.base_route,
         action=plan.action,
-        relation=plan.relation,
+        relation=ctx.relation,
         use_dense_threshold=int(preset.use_dense_threshold),
         min_dense_score=float(preset.min_dense_score),
         output_type=getattr(plan, "output_type", None),
-        target_cols=plan.target_collections,
+        target_cols=ctx.target_collections,
         planner_categories=planner_categories,
         planner_limit=planner_limit,
         planner_retrieval_query=planner_retrieval_query,
@@ -2925,7 +3032,7 @@ def _run_rag_with_vectors(
             return []
         if plan.mode == "join":
             return []
-        target_cols = list(plan.target_collections or _default_target_collections())
+        target_cols = list(ctx.target_collections or _default_target_collections())
         if COL_PROJECT not in target_cols or COL_PERF not in target_cols:
             log_kv(
                 "RAG.PERF.FOLLOWUP.SKIP",
@@ -3096,12 +3203,12 @@ def _run_rag_with_vectors(
             hop2_label = route.hop2_label
 
         if relation:
-            allowed_cols = set(plan.target_collections or [])
+            allowed_cols = set(ctx.target_collections or [])
             if allowed_cols and (hop1_col not in allowed_cols or hop2_col not in allowed_cols):
                 log_kv(
                     "RAG.JOIN.SKIP",
                     reason="target_collections",
-                    target_cols=list(plan.target_collections or []),
+                    target_cols=list(ctx.target_collections or []),
                     hop1_col=hop1_col,
                     hop2_col=hop2_col,
                 )
@@ -3460,7 +3567,7 @@ def _run_rag_with_vectors(
     t0 = time.time()
 
     # collection list
-    target_cols = list(plan.target_collections or _default_target_collections())
+    target_cols = list(ctx.target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
         build_perf_filter(PerfFilterInput(query=q, join_ids=perf_followup_join_ids))
