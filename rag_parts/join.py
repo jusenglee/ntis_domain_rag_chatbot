@@ -105,9 +105,27 @@ def extract_pjt_ids(
 
         if pid:
             if pid in seen_pjt_id:
+                if include_pjt_no_fallback:
+                    pjt_no = None
+                    for key_path in FALLBACK_PJT_NO_KEYS:
+                        pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                        if pjt_no:
+                            break
+                    if pjt_no and pjt_no not in seen_pjt_no:
+                        pjt_nos.append(pjt_no)
+                        seen_pjt_no.add(pjt_no)
                 continue
             pjt_ids.append(pid)
             seen_pjt_id.add(pid)
+            if include_pjt_no_fallback:
+                pjt_no = None
+                for key_path in FALLBACK_PJT_NO_KEYS:
+                    pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                    if pjt_no:
+                        break
+                if pjt_no and pjt_no not in seen_pjt_no:
+                    pjt_nos.append(pjt_no)
+                    seen_pjt_no.add(pjt_no)
             if len(pjt_ids) >= max_ids:
                 return (pjt_ids, pjt_nos) if include_pjt_no_fallback else pjt_ids
             continue
