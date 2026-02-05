@@ -24,6 +24,7 @@ class PeopleFilterInput:
     person_ids: List[str] = field(default_factory=list)
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
+    filter_spec: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class JoinFilterInput:
     people_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     relation: Optional[tuple[str, str]] = None
+    filter_spec: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,76 @@ def make_match_any(values: List[str]):
             if values:
                 return qmodels.MatchValue(value=values[0])
             return qmodels.MatchValue(value="")
+
+
+def compile_filter(filter_spec: Optional[Dict[str, Any]]) -> Optional[Any]:
+    """구조화된 filter_spec을 Qdrant 모델로 직렬화한다."""
+    if qmodels is None or not filter_spec:
+        return None
+
+    def _to_condition(spec: Any) -> Optional[Any]:
+        if spec is None:
+            return None
+        if not isinstance(spec, dict):
+            return None
+
+        nested_spec = spec.get("nested")
+        if isinstance(nested_spec, dict):
+            nested_cls = getattr(qmodels, "NestedCondition", None)
+            nested_filter_cls = getattr(qmodels, "NestedFilter", None)
+            if nested_cls is None:
+                return None
+            nested_key = str(nested_spec.get("key") or "").strip()
+            nested_filter = _to_filter(nested_spec.get("filter") or {})
+            if not nested_key or nested_filter is None:
+                return None
+            return _make_nested_condition(nested_cls, nested_filter_cls, nested_key, nested_filter)
+
+        key = spec.get("field") or spec.get("key")
+        if key:
+            key = str(key).strip()
+            if not key:
+                return None
+
+            match_values = spec.get("match_any")
+            if isinstance(match_values, list) and match_values:
+                return qmodels.FieldCondition(key=key, match=make_match_any(match_values))
+
+            match_value = spec.get("match")
+            if match_value not in (None, ""):
+                return qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=match_value))
+
+            range_payload = spec.get("range")
+            if isinstance(range_payload, dict):
+                range_obj = _make_range_filter(range_payload.get("gte"), range_payload.get("lte"))
+                if range_obj is None:
+                    range_obj = _make_range_filter(range_payload.get("min"), range_payload.get("max"))
+                if range_obj is not None:
+                    return qmodels.FieldCondition(key=key, range=range_obj)
+        return _to_filter(spec)
+
+    def _to_filter(spec: Any) -> Optional[Any]:
+        if not isinstance(spec, dict):
+            return None
+
+        must = [_to_condition(item) for item in (spec.get("must") or [])]
+        must = [item for item in must if item is not None]
+        should = [_to_condition(item) for item in (spec.get("should") or [])]
+        should = [item for item in should if item is not None]
+        must_not = [_to_condition(item) for item in (spec.get("must_not") or [])]
+        must_not = [item for item in must_not if item is not None]
+
+        if not (must or should or must_not):
+            return None
+
+        kwargs: Dict[str, Any] = {
+            "must": must or None,
+            "should": should or None,
+            "must_not": must_not or None,
+        }
+        return qmodels.Filter(**kwargs)
+
+    return _to_filter(filter_spec)
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
     from .query_intent import extract_org_terms as extract_org_terms_llm
@@ -345,78 +417,41 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if qmodels is None:
         return None
 
-    terms = list(spec.people_terms)
-    ids = list(spec.person_ids)
-    genders = list(spec.gender_terms)
-    orgs = list(spec.org_terms)
+    if spec.filter_spec is not None:
+        return compile_filter(spec.filter_spec)
 
     should: List["qmodels.Condition"] = []
+    if spec.people_terms:
+        should.append(
+            qmodels.FieldCondition(
+                key="prtcp_mp[].hm_nm",
+                match=make_match_any(list(spec.people_terms)),
+            )
+        )
+    if spec.person_ids:
+        should.append(
+            qmodels.FieldCondition(
+                key="prtcp_mp[].hm_id",
+                match=make_match_any(list(spec.person_ids)),
+            )
+        )
+    if spec.gender_terms:
+        should.append(
+            qmodels.FieldCondition(
+                key="prtcp_mp[].gender_slct_nm",
+                match=make_match_any(list(spec.gender_terms)),
+            )
+        )
+    if spec.org_terms:
+        should.append(
+            qmodels.FieldCondition(
+                key="prtcp_mp[].blng_org_nm",
+                match=make_match_any(list(spec.org_terms)),
+            )
+        )
 
-    if terms:
-        name_keys = [
-            "prtcp_mp[].hm_nm",
-        ]
-        for key in name_keys:
-            should.append(qmodels.FieldCondition(key=key, match=make_match_any(terms)))
+    return qmodels.Filter(should=should) if should else None
 
-    if ids:
-        id_keys = [
-            "prtcp_mp[].hm_id",
-        ]
-        for key in id_keys:
-            should.append(qmodels.FieldCondition(key=key, match=make_match_any(ids)))
-
-    if orgs:
-        org_keys = [
-            "prtcp_mp[].blng_org_nm",
-        ]
-        for key in org_keys:
-            should.append(qmodels.FieldCondition(key=key, match=make_match_any(orgs)))
-        nested_mp_org = _build_prtcp_mp_org_nested_filter(orgs)
-        if nested_mp_org is not None:
-            should.append(nested_mp_org)
-
-    nested_filter = _build_prtcp_mp_nested_filter(
-        people_terms=terms,
-        person_ids=ids,
-        gender_terms=genders,
-        org_terms=orgs,
-    )
-    if genders and nested_filter is not None:
-        return qmodels.Filter(must=[nested_filter])
-
-    if genders:
-        for key in ["gender_slct", "gender_slct_nm"]:
-            should.append(qmodels.FieldCondition(key=key, match=make_match_any(genders)))
-
-    if nested_filter is not None:
-        should.append(nested_filter)
-
-    if not should:
-        return None
-
-    filter_fields = None
-    for attr in ("model_fields", "__fields__"):
-        fields = getattr(qmodels.Filter, attr, None)
-        if isinstance(fields, dict):
-            filter_fields = fields
-            break
-
-    if filter_fields and "min_should" in filter_fields:
-        min_should_cls = getattr(qmodels, "MinShould", None)
-        if min_should_cls is not None:
-            try:
-                min_should_value = min_should_cls(conditions=should, min_count=1)
-            except Exception:
-                try:
-                    min_should_value = min_should_cls(min_should=1)
-                except Exception:
-                    min_should_value = min_should_cls(value=1)
-        else:
-            min_should_value = {"min_should": 1}
-        return qmodels.Filter(should=should, min_should=min_should_value)
-
-    return qmodels.Filter(should=should)
 
 def and_filter(a: Any, b: Any) -> Any:
     if qmodels is None:
@@ -551,51 +586,27 @@ def build_title_filter(terms: List[str]) -> Optional[Any]:
     return _build_title_filter_with_keys(terms, keys)
 
 def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
-    """JOIN Hop2용 필터: PJT_ID 기반으로 후보군을 강제 제한합니다.
-
-    누락 방지를 위해 PJT_ID 키 변형(meta_basic/payload)을 OR로 묶습니다.
-    """
+    """JOIN Hop2용 필터를 명시 스펙 기반으로 직렬화한다."""
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for build_join_filter()")
+
+    if spec.filter_spec is not None:
+        compiled = compile_filter(spec.filter_spec)
+        return compiled or qmodels.Filter(must=[])
 
     join_ids = list(spec.join_ids)
     if not join_ids:
         return qmodels.Filter(must=[])
 
-    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-    id_key_cands = []
-    for k in [primary_id, "meta_basic.pjt_id", "pjt_id"]:
-        if k and k not in id_key_cands:
-            id_key_cands.append(k)
-    no_key_cands = []
-    for k in [primary_no, "meta_basic.pjt_no", "pjt_no"]:
-        if k and k not in no_key_cands:
-            no_key_cands.append(k)
-
-    join_should: List["qmodels.Condition"] = []
-    if id_key_cands:
-        join_should.extend(
+    return qmodels.Filter(
+        should=[
             qmodels.FieldCondition(
-                key=k,
-                match=qmodels.MatchAny(any=join_ids),
+                key="pjt_id",
+                match=make_match_any(join_ids),
             )
-            for k in id_key_cands
-        )
-    if no_key_cands:
-        join_should.extend(
-            qmodels.FieldCondition(
-                key=k,
-                match=qmodels.MatchAny(any=join_ids),
-            )
-            for k in no_key_cands
-        )
+        ]
+    )
 
-    join_any = qmodels.Filter(should=join_should)
-
-    must: List["qmodels.Condition"] = [join_any]
-
-    return qmodels.Filter(must=must)
 
 def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
     """성과(perf) 컬렉션에서 LOOKUP/JOIN 시 사용할 서버단 필터입니다.
