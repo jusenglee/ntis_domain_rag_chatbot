@@ -72,6 +72,7 @@ from rag_parts.search_strategy import (
     build_strategy_key,
     build_rerank_spec as _build_rerank_spec,
 )
+from rag_parts.planner_contract import planner_contract_mode
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
@@ -259,6 +260,8 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
     for p in (points or [])[: max(0, topn)]:
         arr.append(_point_summary(p))
     log_section(title, arr, level=level)
+
+
 
 # =====================================================================
 # Timings 규칙
@@ -2525,30 +2528,16 @@ def _run_rag_with_vectors(
         return None
 
     def validate_strategy(strategy: StrategySpec) -> tuple[bool, list[str]]:
-        errors: list[str] = []
-        mode = (strategy.mode or "").strip().lower()
-        action_value = (strategy.action or "").strip().lower()
-        relation_value = strategy.relation
-
-        if mode not in ("search", "lookup", "join"):
-            errors.append(f"invalid_mode:{mode or 'empty'}")
-
-        expected_mode = _planner_action_to_mode(action_value)
-        if expected_mode and mode != expected_mode:
-            errors.append(f"action_mode_mismatch:{action_value}->{mode}")
-
-        if mode == "join" and not relation_value:
-            errors.append("join_without_relation")
-
+        _mode, errors = planner_contract_mode(
+            strategy_mode=strategy.mode,
+            strategy_action=strategy.action,
+            strategy_relation=strategy.relation,
+            fallback_mode=strategy.mode,
+        )
         return (len(errors) == 0), errors
 
-    def _build_safe_search_plan() -> tuple[QueryPlan, str]:
-        safe_it = ctx.intent_view()
-        return _build_plan(
-            safe_it,
-            preferred_mode="search",
-            preferred_mode_source="SAFE_SEARCH",
-        )
+    def _is_safe_search_fallback_enabled() -> bool:
+        return str(os.getenv("RAG_ENABLE_SAFE_SEARCH_FALLBACK", "0")).strip().lower() in ("1", "true", "yes", "y")
 
     # plan
     planner_mode = strategy_mode or hint_mode
@@ -2596,72 +2585,43 @@ def _run_rag_with_vectors(
             ctx.target_collections = forced_target_cols
         relation = ctx.relation
 
+    planner_mode_error = None
+    planner_recalled = False
+    planner_strategy_mode = strategy_mode or plan.mode
+    planner_strategy_action = strategy_action or action
+    planner_strategy_relation = strategy_relation if strategy_relation is not None else relation
     strategy_snapshot = StrategySpec(
-        mode=plan.mode,
-        action=action,
-        relation=relation,
+        mode=planner_strategy_mode,
+        action=planner_strategy_action,
+        relation=planner_strategy_relation,
     )
     strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
     if not strategy_ok:
+        planner_mode_error = ",".join(strategy_errors)
+        planner_confidence = min(float(planner_confidence), 0.01) if planner_confidence is not None else 0.01
         logger.warning(
-            "[RAG] invalid 전략 감지: mode=%s action=%s relation=%s errors=%s",
-            plan.mode,
-            action,
-            relation,
+            "[RAG] invalid planner strategy: mode=%s action=%s relation=%s errors=%s",
+            planner_strategy_mode,
+            planner_strategy_action,
+            planner_strategy_relation,
             strategy_errors,
         )
         log_kv(
             "RAG.PLAN.INVALID_STRATEGY",
             level="warning",
-            mode=plan.mode,
-            action=action,
-            relation=relation,
+            mode=planner_strategy_mode,
+            action=planner_strategy_action,
+            relation=planner_strategy_relation,
             errors=strategy_errors,
+            planner_confidence=planner_confidence,
         )
-
-        planner_recalled = False
-        if planner_mode_source:
-            # planner 힌트가 전략을 오염시킨 경우, planner 우선 모드를 해제한 정책 기반 플랜으로 재호출
-            plan, policy_reason = _build_plan(
-                ctx.intent_view(),
-                preferred_mode=None,
-                preferred_mode_source="planner_recall",
-            )
-            recalled_snapshot = StrategySpec(
-                mode=plan.mode,
-                action=action,
-                relation=relation,
-            )
-            recalled_ok, recalled_errors = validate_strategy(recalled_snapshot)
-            planner_recalled = True
-            if not recalled_ok:
-                logger.warning(
-                    "[RAG] planner 재호출 후에도 전략 불일치, SAFE_SEARCH로 폴백: errors=%s",
-                    recalled_errors,
-                )
-                log_kv(
-                    "RAG.PLAN.INVALID_STRATEGY_RECALL_FAILED",
-                    level="warning",
-                    recalled_errors=recalled_errors,
-                )
-                plan, policy_reason = _build_safe_search_plan()
-            else:
-                log_kv(
-                    "RAG.PLAN.INVALID_STRATEGY_RECALL_OK",
-                    planner_mode_source=planner_mode_source,
-                    recalled_mode=plan.mode,
-                )
-        else:
-            plan, policy_reason = _build_safe_search_plan()
-
-        if not planner_recalled:
+        if _is_safe_search_fallback_enabled():
             log_kv(
-                "RAG.PLAN.SAFE_SEARCH_FALLBACK",
+                "RAG.PLAN.SAFE_SEARCH_FALLBACK_FLAG_ON",
                 level="warning",
-                reason="invalid_strategy_without_planner_mode",
+                flag="RAG_ENABLE_SAFE_SEARCH_FALLBACK",
+                note="fallback_path_removed_keep_planner_mode",
             )
-        ctx.plan = plan
-        ctx.target_collections = list(plan.target_collections)
 
     planner_filter_spec = dict(plan.filters or {})
 
@@ -2669,6 +2629,10 @@ def _run_rag_with_vectors(
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
 
+    # -----------------------------------------------------------------
+    # Compile Stage: planner 정책(filter/topk/rerank)을 실행 스펙으로 컴파일한다.
+    # 이 단계는 실행 mode를 바꾸지 않으며, mode 결정 이후에만 동작한다.
+    # -----------------------------------------------------------------
     strategy_limit = _coerce_int(_get_attr(strategy_topk_spec, "limit", 0), 0) if strategy_enabled else 0
     if strategy_limit > 0:
         hinted_limit = strategy_limit
@@ -2919,6 +2883,8 @@ def _run_rag_with_vectors(
             "planner_first_applied": planner_first_applied,
             "planner_mode": planner_mode,
             "planner_action": planner_action,
+            "planner_recalled": planner_recalled,
+            "planner_mode_error": planner_mode_error,
             "mode_override_requested": mode_override_requested,
             "mode_override_reason": mode_override_reason,
             "mode_override_from": mode_override_from,
