@@ -1150,9 +1150,11 @@ def build_context_docstyle(
         if not pl:
             continue
 
-        meta_basic = pl.get("meta_basic") if isinstance(pl.get("meta_basic"), dict) else {}
         meta_detail = pl.get("meta_detail") if isinstance(pl.get("meta_detail"), dict) else {}
-        if meta_source == "detail_only" or (fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset):
+        detail_only = meta_source == "detail_only" or (
+            fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset
+        )
+        if detail_only:
             meta = dict(meta_detail)
         else:
             meta = _merge_meta(pl)
