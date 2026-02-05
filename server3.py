@@ -1108,8 +1108,24 @@ async def build_intent_payload(
         )
 
     kws: List[str] = []
+    hint_people_terms: List[str] = []
+    hint_org_terms: List[str] = []
+    hint_org_role = None
+    if question_analysis and isinstance(question_analysis.filters, dict):
+        raw_keywords = question_analysis.filters.get("keywords")
+        if isinstance(raw_keywords, (list, tuple, set)):
+            kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
+        elif isinstance(raw_keywords, str) and raw_keywords.strip():
+            kws = [raw_keywords.strip()]
+        title_hint = question_analysis.filters.get("title") or question_analysis.filters.get("name")
+        if title_hint:
+            title_terms = _normalize_hint_terms(title_hint)
+            kws = list(dict.fromkeys([*kws, *title_terms]))
+        hint_org_role = question_analysis.filters.get("org_role")
 
-    planner_hint = _build_planner_hint(question_analysis)
+    if question_analysis:
+        hint_people_terms = _normalize_hint_terms([r.name for r in (question_analysis.researchers or []) if r.name])
+        hint_org_terms = _normalize_hint_terms(list(question_analysis.organizations or []))
 
     raw_intent = classify_query_intent(
         question,
@@ -1132,6 +1148,9 @@ async def build_intent_payload(
         query=question,
         keywords=kws,
     )
+
+    # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
+    # normalize_intent 이후 실행 레이어에서 intent를 재작성하지 않는다.
 
     return {
         "question_analysis": question_analysis,
@@ -1160,77 +1179,6 @@ def _normalize_hint_terms(values: Any) -> list[str]:
         out.append(s)
     return out
 
-
-def _build_planner_hint(question_analysis: Optional[QuestionAnalysis]) -> Optional[dict[str, Any]]:
-    if not question_analysis:
-        return None
-
-    planner_hint = dict(question_analysis.model_dump())
-    filters = question_analysis.filters if isinstance(question_analysis.filters, dict) else {}
-
-    people_terms = _normalize_hint_terms(
-        [r.name for r in (question_analysis.researchers or []) if getattr(r, "name", None)]
-    )
-    participant_people_terms = _normalize_hint_terms(filters.get("participant_researcher_name"))
-    named_people_terms = _normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))
-    merged_people_terms = _normalize_hint_terms([*people_terms, *participant_people_terms, *named_people_terms])
-    if merged_people_terms:
-        planner_hint["people_terms"] = merged_people_terms
-
-    org_terms = _normalize_hint_terms(question_analysis.organizations)
-    org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
-    participant_org_terms = _normalize_hint_terms(filters.get("participant_org_name"))
-    lead_org_terms = _normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
-    merged_org_terms = _normalize_hint_terms([*org_terms_hint, *participant_org_terms, *lead_org_terms, *org_terms])
-    if merged_org_terms:
-        planner_hint["org_terms"] = merged_org_terms
-
-    year_terms_hint = _normalize_hint_terms([filters.get("year_from"), filters.get("year_to")])
-    if year_terms_hint:
-        planner_hint["years"] = year_terms_hint
-
-    tag_filters_hint = _normalize_hint_terms(filters.get("tag_filters"))
-    relation_text = str(question_analysis.relation or "").strip().lower()
-    if not tag_filters_hint and relation_text == "project_perf":
-        tag_filters_hint = ["IRD_NAI_PJT_INFO"]
-    if tag_filters_hint:
-        if question_analysis.head == "perf":
-            planner_hint["perf_tag_filters"] = tag_filters_hint
-        if question_analysis.head == "project":
-            planner_hint["project_tag_filters"] = tag_filters_hint
-
-    org_role = filters.get("org_role")
-    if org_role:
-        planner_hint["org_role"] = str(org_role).strip().lower() or None
-    elif participant_org_terms:
-        planner_hint["org_role"] = "participant"
-    elif lead_org_terms:
-        planner_hint["org_role"] = "performer"
-
-    return planner_hint
-
-
-def _build_planner_override_request(
-    question_analysis: QuestionAnalysis,
-    query_intent: Any,
-) -> Optional[dict[str, Any]]:
-    requested_mode = str(question_analysis.mode or "").strip().lower()
-    if requested_mode not in ("search", "lookup", "join"):
-        return None
-
-    intent_action = str(getattr(query_intent, "action", "") or "").strip().lower()
-    if requested_mode == "lookup" and intent_action in ("list", "stats", "download", "id_exact", "id_fuzzy"):
-        return None
-    if requested_mode == "search" and intent_action in ("topic", "search"):
-        return None
-    if requested_mode == "join" and intent_action == "join":
-        return None
-
-    return {
-        "reason": "question_analysis_mode_mismatch",
-        "requested_mode": requested_mode,
-        "current_action": intent_action or None,
-    }
 
 # --- Graph Construction ---
 def build_advanced_workflow():
