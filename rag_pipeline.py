@@ -2717,6 +2717,7 @@ def _run_rag_with_vectors(
         sparse_weight=sparse_weight_eff,
     )
     rerank_spec = _build_rerank_spec(plan.mode)
+    rerank_spec.setdefault("final_keep", 80)
 
     log_kv(
         "RAG.PRESET/PLAN.PRE",
@@ -3020,6 +3021,14 @@ def _run_rag_with_vectors(
         planner_meta_source=planner_meta_source,
     )
 
+    # planner 정책(topk_spec/rerank_spec)을 실행 레이어에서 그대로 사용
+    policy_topk = plan.topk_spec or {}
+    topk_dense = int(policy_topk.get("top_k_dense", preset.top_k_dense))
+    topk_lex_cand = int(policy_topk.get("top_k_lex_cand", preset.top_k_lex_cand))
+    topk_lex = int(policy_topk.get("top_k_lex", sparse_topk_eff))
+    use_dense_threshold_policy = bool(policy_topk.get("use_dense_threshold", preset.use_dense_threshold))
+    min_dense_score_policy = float(policy_topk.get("min_dense_score", preset.min_dense_score))
+
     def _maybe_followup_perf_hop_from_project() -> List[str]:
         if relation != ("project", "perf"):
             return []
@@ -3075,7 +3084,7 @@ def _run_rag_with_vectors(
             lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=min(hop1_k_base, 80),
-            top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
+            top_k_dense=(topk_dense if emb_map_h1 else 0),
             top_k_lex_cand=hop1_k_base,
             top_k_lex=min(hop1_k_base, 80),
             query_filter=hop1_filter,
@@ -3083,8 +3092,8 @@ def _run_rag_with_vectors(
         )
         _apply_dense_threshold(
             sr1,
-            use_dense_threshold=bool(preset.use_dense_threshold),
-            min_dense_score=float(preset.min_dense_score),
+            use_dense_threshold=use_dense_threshold_policy,
+            min_dense_score=min_dense_score_policy,
             log_prefix="RAG.DENSE.THRESHOLD.FOLLOWUP",
             col=COL_PROJECT,
             action=action,
@@ -3276,7 +3285,7 @@ def _run_rag_with_vectors(
                     lexical_fields=preset.lexical_fields,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
-                    top_k_dense=(preset.top_k_dense if emb_map_h1 else 0),
+                    top_k_dense=(topk_dense if emb_map_h1 else 0),
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
                     query_filter=hop1_filter,  # ✅ 실제 적용
@@ -3284,8 +3293,8 @@ def _run_rag_with_vectors(
                 )
                 _apply_dense_threshold(
                     sr1,
-                    use_dense_threshold=bool(preset.use_dense_threshold),
-                    min_dense_score=float(preset.min_dense_score),
+                    use_dense_threshold=use_dense_threshold_policy,
+                    min_dense_score=min_dense_score_policy,
                     log_prefix="RAG.DENSE.THRESHOLD.HOP1",
                     col=hop1_col,
                     action=action,
@@ -3461,7 +3470,7 @@ def _run_rag_with_vectors(
                 lexical_fields=preset.lexical_fields,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
-                top_k_dense=(preset.top_k_dense if emb_map_h2 else 0),
+                top_k_dense=(topk_dense if emb_map_h2 else 0),
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
                 query_filter=hop2_filter,  # ✅ JOIN 필터 강제 적용
@@ -3469,8 +3478,8 @@ def _run_rag_with_vectors(
             )
             _apply_dense_threshold(
                 sr2,
-                use_dense_threshold=bool(preset.use_dense_threshold),
-                min_dense_score=float(preset.min_dense_score),
+                use_dense_threshold=use_dense_threshold_policy,
+                min_dense_score=min_dense_score_policy,
                 log_prefix="RAG.DENSE.THRESHOLD.HOP2",
                 col=hop2_col,
                 action=action,
@@ -3571,11 +3580,6 @@ def _run_rag_with_vectors(
         if perf_followup_join_ids
         else None
     )
-
-    # topK caps
-    topk_dense = int(preset.top_k_dense)
-    topk_lex_cand = min(int(preset.top_k_lex_cand), int(os.getenv("RAG_FED_LEX_CAND_CAP", "260")))
-    topk_lex = int(sparse_topk_eff)
 
     def _expand_vector_names(names: List[str]) -> List[str]:
         expanded: List[str] = []
@@ -3817,8 +3821,8 @@ def _run_rag_with_vectors(
         )
         _apply_dense_threshold(
             sr,
-            use_dense_threshold=bool(preset.use_dense_threshold),
-            min_dense_score=float(preset.min_dense_score),
+            use_dense_threshold=use_dense_threshold_policy,
+            min_dense_score=min_dense_score_policy,
             log_prefix="RAG.DENSE.THRESHOLD.COL",
             col=col,
             action=action,
@@ -3979,7 +3983,7 @@ def _run_rag_with_vectors(
 
     # final rerank
     t0 = time.time()
-    final_keep = int(os.getenv("RAG_RERANK_K", "80"))
+    final_keep = int((plan.rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
         merged_rrf,
         it=it,
