@@ -104,7 +104,7 @@ class NormalizedIntent:
     remove_terms_for_head: List[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(frozen=True)
 class FilterBundle:
     org_terms: List[str]
     org_role: Optional[str]
@@ -118,7 +118,7 @@ class FilterBundle:
     perf_tag_filter: Any
 
 
-@dataclass
+@dataclass(frozen=True)
 class JoinHopPlan:
     hop1_col: str
     hop2_col: str
