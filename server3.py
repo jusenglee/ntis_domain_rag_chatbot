@@ -419,8 +419,8 @@ async def _run_question_analysis(
         3) strategy_version은 항상 "v2"로 고정합니다.
         4) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        5) 값이 없으면 null/[]/{{}}/0.0 등 기본값을 사용합니다.
-        6) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}}를 사용합니다.
+        5) 값이 없으면 null/[]/0.0 등 기본값을 사용합니다.
+        6) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
         7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
