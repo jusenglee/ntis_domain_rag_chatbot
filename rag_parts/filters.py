@@ -295,22 +295,12 @@ def _build_prtcp_mp_nested_filter(
     if nested_cls is None:
         return None
 
-    name_cond = (
-        qmodels.FieldCondition(key="hm_nm", match=make_match_any(people_terms))
-        if people_terms
-        else None
-    )
     id_cond = (
         qmodels.FieldCondition(key="hm_id", match=make_match_any(person_ids))
         if person_ids
         else None
     )
-    org_cond = (
-        qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(org_terms))
-        if org_terms
-        else None
-    )
-    base_must = [c for c in (name_cond, id_cond, org_cond) if c is not None]
+    base_must = [c for c in (id_cond,) if c is not None]
     if not base_must and not gender_terms:
         return None
 
@@ -572,10 +562,6 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     if not join_ids:
         return qmodels.Filter(must=[])
 
-    people_terms = list(spec.people_terms or [])
-    org_terms = list(spec.org_terms or [])
-    relation = spec.relation
-
     primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
     id_key_cands = []
@@ -608,28 +594,6 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     join_any = qmodels.Filter(should=join_should)
 
     must: List["qmodels.Condition"] = [join_any]
-
-    apply_people_org = True
-    if relation:
-        apply_people_org = any(part in ("people", "org") for part in relation)
-
-    if apply_people_org:
-        nested_people_org = _build_prtcp_mp_nested_filter(
-            people_terms=people_terms,
-            person_ids=[],
-            gender_terms=[],
-            org_terms=org_terms,
-        )
-        if nested_people_org is not None:
-            must.append(nested_people_org)
-
-    if spec.tag_filters:
-        must.append(
-            qmodels.FieldCondition(
-                key="tag",
-                match=qmodels.MatchAny(any=spec.tag_filters),
-            )
-        )
 
     return qmodels.Filter(must=must)
 
