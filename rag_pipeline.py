@@ -1835,6 +1835,17 @@ def _run_rag_with_vectors(
     hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
     hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
     hint_policy = "merge" if hint_conf_ok else "ignore"
+    planner_strategy = _get_attr(intent_payload, "strategy", None)
+    strategy_mode = str(_get_attr(planner_strategy, "mode", "") or "").strip().lower() or None
+    strategy_head = str(_get_attr(planner_strategy, "head", "") or "").strip().lower() or None
+    strategy_relation = _normalize_relation_hint(_get_attr(planner_strategy, "relation", None))
+    strategy_action = str(_get_attr(planner_strategy, "action", "") or "").strip().lower() or None
+    strategy_query_text = normalize_query(_get_attr(planner_strategy, "query_text", "") or "") or None
+    strategy_filter_spec = _get_attr(planner_strategy, "filter_spec", None) or {}
+    strategy_topk_spec = _get_attr(planner_strategy, "topk_spec", None) or {}
+    strategy_rerank_spec = _get_attr(planner_strategy, "rerank_spec", None) or {}
+    strategy_enabled = any((strategy_mode, strategy_head, strategy_relation, strategy_action, strategy_query_text))
+
 
     hinted_base = None
     hinted_limit = 0
@@ -1847,7 +1858,9 @@ def _run_rag_with_vectors(
     if payload_target_cols:
         hinted_cols = payload_target_cols
 
-    if hint_conf_ok:
+    if strategy_query_text:
+        q_for_retrieval = strategy_query_text
+    elif hint_conf_ok:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
         hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
@@ -2090,7 +2103,7 @@ def _run_rag_with_vectors(
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
-    if not intent_from_payload and hint_conf_ok:
+    if (not strategy_enabled) and (not intent_from_payload and hint_conf_ok):
         if hint_head in ("project", "perf", "people", "org", "support"):
             ctx.base_route = hint_head
         if hint_relation:
@@ -2156,7 +2169,7 @@ def _run_rag_with_vectors(
     payload_year_to = _get_attr(intent_payload, "year_to", None)
     payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
 
-    if payload_relation:
+    if (not strategy_enabled) and payload_relation:
         ctx.relation = payload_relation
     if payload_is_id_query is not None:
         ctx.is_id_query = bool(payload_is_id_query)
@@ -2196,6 +2209,16 @@ def _run_rag_with_vectors(
             hinted_limit = _coerce_int(planner_limit, hinted_limit)
             if hinted_limit < 0:
                 hinted_limit = 0
+
+    if strategy_enabled:
+        if strategy_head in ("project", "perf", "people", "org", "support"):
+            ctx.base_route = strategy_head
+        if strategy_relation:
+            ctx.relation = strategy_relation
+        if strategy_action:
+            ctx.action = strategy_action
+        if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
+            plan = replace(plan, filters=dict(strategy_filter_spec))
 
     action = ctx.action
     base_route = ctx.base_route
@@ -2530,8 +2553,8 @@ def _run_rag_with_vectors(
         )
 
     # plan
-    planner_mode = hint_mode
-    planner_mode_source = "qa.mode" if planner_mode else None
+    planner_mode = strategy_mode or hint_mode
+    planner_mode_source = "strategy.mode" if strategy_mode else ("qa.mode" if planner_mode else None)
     if not planner_mode:
         planner_mode = _planner_action_to_mode(planner_action)
         planner_mode_source = "qa.action" if planner_mode else None
@@ -2644,6 +2667,10 @@ def _run_rag_with_vectors(
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
     lex_w_eff = dict(lexical_field_weights) if lexical_field_weights is not None else dict(preset.lexical_field_weights)
 
+    strategy_limit = _coerce_int(_get_attr(strategy_topk_spec, "limit", 0), 0) if strategy_enabled else 0
+    if strategy_limit > 0:
+        hinted_limit = strategy_limit
+
     if hinted_limit > 0:
         preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
@@ -2660,7 +2687,7 @@ def _run_rag_with_vectors(
         sparse_topk=sparse_topk_eff,
         sparse_weight=sparse_weight_eff,
     )
-    rerank_spec = _build_rerank_spec(plan.mode)
+    rerank_spec = dict(strategy_rerank_spec) if (strategy_enabled and isinstance(strategy_rerank_spec, dict) and strategy_rerank_spec) else _build_rerank_spec(plan.mode)
     rerank_spec.setdefault("final_keep", 80)
 
     log_kv(

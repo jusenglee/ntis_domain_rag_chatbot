@@ -229,6 +229,23 @@ class SearchHint(BaseModel):
     retrieval_query: str = ""
     confidence: float = 0.0
 
+
+class PlannerStrategy(BaseModel):
+    """LLM planner가 결정한 실행 전략(불변 스냅샷)"""
+
+    mode: str | None = None
+    head: str | None = None
+    relation: str | None = None
+    action: str | None = None
+    query_text: str = ""
+    filter_spec: dict[str, Any] = Field(default_factory=dict)
+    topk_spec: dict[str, Any] = Field(default_factory=dict)
+    rerank_spec: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {
+        "frozen": True,
+    }
+
 class KnowledgeSufficiency(BaseModel):
     """지식 충분성 판단 결과"""
     requires_new_knowledge: Literal["low", "medium", "high"] = Field(
@@ -1148,9 +1165,11 @@ async def build_intent_payload(
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
 
-    if question_analysis:
-        hint_people_terms = _normalize_hint_terms([r.name for r in (question_analysis.researchers or []) if r.name])
-        hint_org_terms = _normalize_hint_terms(list(question_analysis.organizations or []))
+    planner_hint = {
+        "people_terms": hint_people_terms,
+        "org_terms": hint_org_terms,
+        "org_role": hint_org_role,
+    }
 
     raw_intent = classify_query_intent(
         question,
@@ -1158,20 +1177,23 @@ async def build_intent_payload(
         hint=planner_hint,
     )
 
-    if planner_hint and question_analysis:
-        override_request = _build_planner_override_request(question_analysis, raw_intent)
-        if override_request:
-            planner_hint["override_request"] = override_request
-            raw_intent = classify_query_intent(
-                question,
-                kws,
-                hint=planner_hint,
-            )
-
     normalized_intent = normalize_intent(
         raw_intent,
         query=question,
         keywords=kws,
+    )
+
+    strategy = PlannerStrategy(
+        mode=(question_analysis.mode if question_analysis else None),
+        head=(question_analysis.head if question_analysis else None),
+        relation=(question_analysis.relation if question_analysis else None),
+        action=getattr(normalized_intent, "action", None),
+        query_text=(question_analysis.retrieval_query if question_analysis else question),
+        filter_spec=(dict(question_analysis.filters or {}) if question_analysis else {}),
+        topk_spec={
+            "limit": int(question_analysis.limit) if question_analysis else MAX_TOP_K_SIZE,
+        },
+        rerank_spec={},
     )
 
     # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
@@ -1182,6 +1204,7 @@ async def build_intent_payload(
         "query_intent": raw_intent,
         "normalized_intent": normalized_intent,
         "keywords": kws,
+        "strategy": strategy,
     }
 
 
