@@ -2276,7 +2276,7 @@ def _run_rag_with_vectors(
     org_role = _get_attr(qa, "org_role", None) or ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
     ctx.org_role = org_role
-    planner_filter_spec = dict(plan.filters or {})
+    people_filter_spec = dict(pending_strategy_filter_spec or {})
     org_filter = build_org_filter(OrgFilterInput(org_terms, role=org_role)) if org_terms else None
     participant_org_filter = (
         build_prtcp_org_nested_filter(OrgFilterInput(org_terms, role="participant"))
@@ -2339,7 +2339,7 @@ def _run_rag_with_vectors(
         person_ids=people_ids,
         gender_terms=gender_terms,
         org_terms=people_org_terms,
-        filter_spec=planner_filter_spec.get("people_filter"),
+        filter_spec=people_filter_spec.get("people_filter"),
     )
     people_filter = (
         build_people_filter(people_spec)
@@ -2575,6 +2575,8 @@ def _run_rag_with_vectors(
         preferred_mode=planner_mode,
         preferred_mode_source=planner_mode_source,
     )
+    if pending_strategy_filter_spec:
+        plan = replace(plan, filters=pending_strategy_filter_spec)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     planner_first_applied = bool(planner_mode)
@@ -2662,6 +2664,8 @@ def _run_rag_with_vectors(
             )
         ctx.plan = plan
         ctx.target_collections = list(plan.target_collections)
+
+    planner_filter_spec = dict(plan.filters or {})
 
     preset_intent_view = ctx.intent_view()
     preset: _SearchPreset = _build_search_preset(preset_intent_view)
