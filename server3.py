@@ -194,9 +194,11 @@ class QuestionAnalysis(BaseModel):
     organizations: list[str] = Field(default_factory=list, description="질문에서 특정 기관이 식별되는 경우")
     mode: str | None = Field(default=None, description="SEARCH | LOOKUP | JOIN")
     head: str | None = Field(default=None, description="project | perf | people | org | support")
-    relation: str | None = Field(default=None, description="project_perf | people_project 등")
+    relation: str | None = Field(default=None, description="project_perf | perf_project | null")
+    action: str | None = Field(default=None, description="topic | list | detail | stats | download")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
+    target_cols: list[str] = Field(default_factory=list, description="실행 대상 컬렉션")
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -215,8 +217,10 @@ class SearchHint(BaseModel):
     mode: str | None = None
     head: str | None = None
     relation: str | None = None
+    action: str | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
+    target_cols: list[str] = Field(default_factory=list)
     limit: int = Field(
         MAX_TOP_K_SIZE,
         description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
@@ -498,10 +502,10 @@ async def _run_question_analysis(
         "[filters 규칙]\n"
         "====================\n"
         "filters는 dict입니다. 필요한 것만 포함합니다.\n"
-        "가능한 키: year_from, year_to, org_name, researcher_name, tag_filters, perf_types, keywords, title\n"
+        "가능한 키: year_from, year_to, title_terms, keywords, tag_filters, perf_types\n"
         "participant_researcher_name, participant_researcher_id,\n"
-        "participant_org_name, lead_org_name, performing_org_name, org_role\n"
-        "관계형 질의에서 참여인력/참가기관이 잡히면 participant_* 키를 우선 사용합니다.\n\n"
+        "lead_org_name, participant_org_name, people_affiliation_org_name, org_role\n"
+        "관계형 질의에서 참여인력/기관이 잡히면 participant_* / lead_org_name / people_affiliation_org_name를 우선 사용합니다.\n\n"
     
         "====================\n"
         "[tag_filters 매핑 규칙]\n"
@@ -521,7 +525,7 @@ async def _run_question_analysis(
         "====================\n"
         "retrieval_query는 검색 최적화용 짧은 쿼리입니다.\n"
         "- 핵심 개념 5개 이내, 최대 120자\n"
-        "- 불필요한 기능어 제거: '연구자', '참여한', '참여', '소속', '연관', '목록', '조회', '알려줘', '무엇', '어떤' 등은 되도록 제외\n"
+        "- 불필요한 기능어 제거: '목록', '조회', '알려줘', '무엇', '어떤' 등은 제외\n"
         "- 사람/기관명이 있으면 반드시 포함\n"
         "- 연도 범위가 있으면 포함(예: '2018~2020')\n\n"
     
@@ -549,13 +553,15 @@ async def _run_question_analysis(
         "5) organizations: 객체 배열 (각 요소는 name, org_id 키를 가짐)\n"
         "6) mode: SEARCH | LOOKUP | JOIN\n"
         "7) head: project | perf | people | org | support\n"
-        "8) relation: Relation enum 중 하나 또는 null\n"
-        "9) ids_map: dict\n"
-        "10) filters: dict\n"
-        f"11) limit: int (<= {MAX_TOP_K_SIZE})\n"
-        "12) history_summary: string\n"
-        "13) retrieval_query: string\n"
-        "14) confidence: float (0.0~1.0)\n\n"
+        "8) action: topic | list | detail | stats | download\n"
+        "9) relation: project_perf | perf_project | null\n"
+        "10) target_cols: string 배열 (ntis_project_v2 / ntis_perf_v2)\n"
+        "11) ids_map: dict\n"
+        "12) filters: dict\n"
+        f"13) limit: int (<= {MAX_TOP_K_SIZE})\n"
+        "14) history_summary: string\n"
+        "15) retrieval_query: string\n"
+        "16) confidence: float (0.0~1.0)\n\n"
     
         "{format_instructions}"
     )
@@ -589,6 +595,8 @@ async def _run_question_analysis(
             f"Mode: {result.mode}\n"
             f"Head: {result.head}\n"
             f"Relation: {result.relation}\n"
+            f"Action: {result.action}\n"
+            f"TargetCols: {result.target_cols}\n"
             f"IdsMap: {result.ids_map}\n"
             f"Filters: {result.filters}\n"
             f"Limit: {result.limit}\n"
@@ -609,6 +617,8 @@ async def _run_question_analysis(
             mode=None,
             head=None,
             relation=None,
+            action=None,
+            target_cols=[],
             ids_map={},
             filters={},
             limit=20,
@@ -1137,7 +1147,7 @@ async def build_intent_payload(
         elif isinstance(raw_keywords, str) and raw_keywords.strip():
             kws = [raw_keywords.strip()]
 
-        title_hint = filters.get("title") or filters.get("name")
+        title_hint = filters.get("title_terms") or filters.get("title") or filters.get("name")
         if title_hint:
             title_terms = _normalize_hint_terms(title_hint)
             kws = list(dict.fromkeys([*kws, *title_terms]))
@@ -1155,6 +1165,7 @@ async def build_intent_payload(
             *(_normalize_hint_terms(filters.get("org_name") or filters.get("org"))),
             *(_normalize_hint_terms(filters.get("participant_org_name"))),
             *(_normalize_hint_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))),
+            *(_normalize_hint_terms(filters.get("people_affiliation_org_name"))),
         ])
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
@@ -1181,7 +1192,7 @@ async def build_intent_payload(
         mode=(question_analysis.mode if question_analysis else None),
         head=(question_analysis.head if question_analysis else None),
         relation=(question_analysis.relation if question_analysis else None),
-        action=getattr(normalized_intent, "action", None),
+        action=(question_analysis.action if question_analysis and question_analysis.action else getattr(normalized_intent, "action", None)),
         query_text=(question_analysis.retrieval_query if question_analysis else question),
         filter_spec=(dict(question_analysis.filters or {}) if question_analysis else {}),
         topk_spec={
