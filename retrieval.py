@@ -137,13 +137,11 @@ def _qdrant_query_points_sparse(
     # 디버깅에 필요한 정보만 남김 (nnz=non-zero terms)
     nnz = len(getattr(sparse_vector, "indices", []) or [])
     logger.debug(
-        "[retrieval] sparse_query: col=%s using=%s limit=%d nnz=%d filter=%s payload=%s",
+        "[retrieval] sparse_query: col=%s using=%s limit=%d nnz=%d",
         collection_name,
         sparse_vector_name,
         int(limit),
         int(nnz),
-        type(query_filter).__name__,
-        type(with_payload).__name__,
     )
 
     # 1) new-style
@@ -158,10 +156,17 @@ def _qdrant_query_points_sparse(
             query_filter=query_filter,        # query_points 쪽 파라미터명
             timeout=int(timeout),
         )
-        logger.warning(f"[retrieval] sparse client.search res: {res}")
+        logger.debug(
+            "[retrieval] sparse query_points success: col=%s using=%s limit=%d nnz=%d hits=%d",
+            collection_name,
+            sparse_vector_name,
+            int(limit),
+            int(nnz),
+            len(getattr(res, "points", []) or []),
+        )
         return list(getattr(res, "points", []) or [])
     except Exception as e:  # pragma: no cover
-        logger.warning(f"[retrieval] sparse client.search failed: {e}")
+        logger.warning(f"[retrieval] sparse query_points failed: {e}")
         return []
 
 
