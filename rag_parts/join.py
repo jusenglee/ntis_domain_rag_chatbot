@@ -7,10 +7,6 @@ JOIN(2-hop)에서 Hop1 결과(예: 과제/참여인력/기관 등)로부터 join
 
 - extract_pjt_ids(points): Qdrant ScoredPoint(or dict) 목록에서 PJT_ID 후보를 최대 max_ids개 추출
 - sanitize_query_by_terms(q, remove_terms): 제거 대상 용어를 질의에서 제거(공백 정리)
-
-주의:
-- PJT_ID는 저장 스키마에 따라 payload/meta_basic/meta_detail에 여러 키 변형으로 존재할 수 있어
-  payload 최상위 → meta 순서로 여러 키 변형을 모두 확인합니다.
 """
 
 from __future__ import annotations
