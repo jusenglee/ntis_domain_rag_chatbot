@@ -503,8 +503,7 @@ def build_context_list_light(
             title = _payload_title(pl, meta)
             pjt_id = _pjt_id(pl)
             org = _pick_first(
-                pl.get("org_nm"),
-                meta.get("pjt_prfrm_org_nm"),
+                pl.get("org_nm")
             )
             year = _pick_first(pl.get("stan_yr"), meta.get("stan_yr"))
             year = _normalize_year(year)
@@ -542,7 +541,6 @@ def build_context_list_light(
         if kind == "org":
             org = _pick_first(
                 pl.get("org_nm"),
-                meta.get("pjt_prfrm_org_nm"),
                 _pick_nested_first(pl, "prtcp_org", "org_nm"),
             )
             role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")

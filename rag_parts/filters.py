@@ -153,7 +153,6 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     if role in ("performer", "lead", "performing"):
         keys = [
             "org_nm",
-            "meta_basic.pjt_prfrm_org_nm",
         ]
     elif role is None:
         keys = [
