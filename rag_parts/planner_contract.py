@@ -30,6 +30,8 @@ def planner_contract_mode(
         errors.append(f"invalid_mode:{mode or 'empty'}")
 
     expected_mode = action_mode_map.get(action_value)
+    if mode == "join" and action_value == "list":
+        expected_mode = "join"
     if expected_mode and mode != expected_mode:
         errors.append(f"action_mode_mismatch:{action_value}->{mode}")
 

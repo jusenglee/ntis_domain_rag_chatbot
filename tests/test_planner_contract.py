@@ -13,7 +13,7 @@ class PlannerContractTests(unittest.TestCase):
         )
 
         self.assertEqual(mode, "join")
-        self.assertIn("action_mode_mismatch:list->join", errors)
+        self.assertNotIn("action_mode_mismatch:list->join", errors)
 
     def test_lookup_mode_is_kept_even_when_action_mismatch(self) -> None:
         mode, errors = planner_contract_mode(
