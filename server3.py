@@ -468,11 +468,11 @@ async def _run_question_analysis(
         [target_cols 규칙]
         ====================
         target_cols는 실행할 컬렉션 리스트입니다.
-        - "ntis_project_v1" / "ntis_perf_v2" 중 선택
+        - "ntis_project_v1" / "ntis_perf_v1" 중 선택
         - LOOKUP/JOIN은 필요한 컬렉션만 최소로 선택합니다.
           * "신동구 참여과제" => ["ntis_project_v1"]
-          * "OO기관 성과" => ["ntis_perf_v2"]
-          * project↔perf JOIN => ["ntis_project_v1","ntis_perf_v2"]
+          * "OO기관 성과" => ["ntis_perf_v1"]
+          * project↔perf JOIN => ["ntis_project_v1","ntis_perf_v1"]
         - SEARCH는 기본적으로 두 컬렉션 모두 가능하나, head가 명확하면 1개만 선택 가능합니다.
         
         ====================

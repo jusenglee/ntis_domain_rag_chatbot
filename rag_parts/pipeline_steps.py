@@ -97,7 +97,9 @@ class NormalizedIntent:
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
     remove_terms_for_head: List[str] = field(default_factory=list)
-
+    people_terms_match_mode: Optional[str] = None
+    people_terms_min_should: Optional[int] = None
+    lookup_filter_policy: Optional[str] = None
 
 @dataclass(frozen=True)
 class FilterBundle:

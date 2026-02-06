@@ -16,7 +16,6 @@ def planner_contract_mode(
     action_value = str(strategy_action or "").strip().lower()
 
     action_mode_map = {
-        "list": "lookup",
         "stats": "lookup",
         "download": "lookup",
         "id_exact": "lookup",
