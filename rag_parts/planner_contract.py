@@ -38,3 +38,15 @@ def planner_contract_mode(
 
     # planner 확정 mode를 보존: 오류가 있어도 mode를 바꾸지 않는다.
     return mode, errors
+
+
+LOOKUP_FILTER_POLICIES = {"hard", "off", "must_one_then_should"}
+
+
+def normalize_lookup_filter_policy(policy: Optional[str]) -> Optional[str]:
+    value = str(policy or "").strip().lower()
+    if not value:
+        return None
+    if value not in LOOKUP_FILTER_POLICIES:
+        return None
+    return value

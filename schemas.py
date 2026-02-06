@@ -16,6 +16,9 @@ class StrategySpec:
     lookup_filter_enabled: bool = False
     relation_lookup_enforce: bool = False
     lookup_filter_policy: Optional[str] = None
+    lookup_filter_min_should: Optional[int] = None
+    lookup_filter_gate: Optional[str] = None
+    lookup_filter_promote_one_must: bool = False
     lookup_title_filter_policy: Optional[str] = None
     search_filter_server_policy: Optional[str] = None
 
@@ -63,6 +66,9 @@ class ExecutionContext:
     ids_map: Dict[str, list[str]]
     ids_flat: list[str]
     remove_terms_for_head: list[str]
+    people_terms_match_mode: Optional[str] = None
+    people_terms_min_should: Optional[int] = None
+    lookup_filter_policy_hint: Optional[str] = None
     plan: Optional[QueryPlan] = None
     strategy: Optional[StrategySpec] = None
     target_collections: list[str] = field(default_factory=list)
@@ -99,6 +105,9 @@ class ExecutionContext:
             ids_map=dict(intent.ids_map),
             ids_flat=list(intent.ids_flat),
             remove_terms_for_head=list(intent.remove_terms_for_head),
+            people_terms_match_mode=getattr(intent, "people_terms_match_mode", None),
+            people_terms_min_should=getattr(intent, "people_terms_min_should", None),
+            lookup_filter_policy_hint=getattr(intent, "lookup_filter_policy", None),
         )
 
     def intent_view(self) -> Any:
@@ -134,4 +143,7 @@ class ExecutionContext:
             ids_map=dict(self.ids_map),
             ids_flat=list(self.ids_flat),
             remove_terms_for_head=list(self.remove_terms_for_head),
+            people_terms_match_mode=self.people_terms_match_mode,
+            people_terms_min_should=self.people_terms_min_should,
+            lookup_filter_policy=self.lookup_filter_policy_hint,
         )

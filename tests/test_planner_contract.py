@@ -1,6 +1,6 @@
 import unittest
 
-from rag_parts.planner_contract import planner_contract_mode
+from rag_parts.planner_contract import planner_contract_mode, normalize_lookup_filter_policy
 
 
 class PlannerContractTests(unittest.TestCase):
@@ -26,6 +26,11 @@ class PlannerContractTests(unittest.TestCase):
         self.assertEqual(mode, "lookup")
         self.assertIn("action_mode_mismatch:topic->lookup", errors)
 
+
+
+    def test_lookup_filter_policy_must_one_then_should(self) -> None:
+        self.assertEqual(normalize_lookup_filter_policy("must_one_then_should"), "must_one_then_should")
+        self.assertIsNone(normalize_lookup_filter_policy("unknown"))
 
 if __name__ == "__main__":
     unittest.main()
