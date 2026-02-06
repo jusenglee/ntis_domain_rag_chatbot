@@ -2219,7 +2219,7 @@ def _run_rag_with_vectors(
             if keywords_hint:
                 ctx.keywords = keywords_hint
             title_hint = _normalize_hint_terms(
-                hint_filters.get("title") or hint_filters.get("name")
+                hint_filters.get("title_terms") or hint_filters.get("title") or hint_filters.get("name")
             )
             if title_hint:
                 ctx.title = title_hint
