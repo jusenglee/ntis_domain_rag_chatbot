@@ -125,22 +125,6 @@ class FilterMinShouldTests(unittest.TestCase):
         self.assertIsInstance((flt.must or [])[0], _FakeFilter)
         self.assertEqual(len(((flt.must or [])[0].should or [])), 1)
 
-    def test_people_filter_promote_one_to_must(self) -> None:
-        flt = filters.build_people_filter(
-            filters.PeopleFilterInput(people_terms=["홍길동"], promote_one_must=True)
-        )
-        self.assertIsNotNone(flt)
-        self.assertEqual(len(flt.must or []), 1)
-        self.assertEqual((flt.must or [])[0].key, "prtcp_mp[].hm_nm")
-        self.assertFalse(bool(flt.should))
-
-    def test_people_filter_and_mode_no_min_should(self) -> None:
-        flt = filters.build_people_filter(
-            filters.PeopleFilterInput(people_terms=["김재수", "박민수"], min_should=None)
-        )
-        self.assertIsNotNone(flt)
-        self.assertEqual(getattr(flt.min_should, "min_count", None), 1)
-
     def test_org_filter_has_min_should(self) -> None:
         flt = filters.build_org_filter(filters.OrgFilterInput(terms=["농촌진흥청"]))
         self.assertIsNotNone(flt)

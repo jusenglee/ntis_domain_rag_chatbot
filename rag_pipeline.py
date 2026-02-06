@@ -2456,12 +2456,8 @@ def _run_rag_with_vectors(
         people_min_should = 1
     else:
         people_min_should = None
-    people_promote_one_must = bool(
-        lookup_filter_enabled
-        and lookup_filter_policy == "must_one_then_should"
-        and not people_ids
-        and len(people_terms) == 1
-    )
+    # lookup 정책 계산 전 단계이므로 초기값은 False로 둔다.
+    people_promote_one_must = False
 
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
@@ -2828,6 +2824,30 @@ def _run_rag_with_vectors(
         and search_filter_signal
         and search_filter_conf_ok
     )
+
+    # lookup 정책 확정 후 people must 승격 여부를 재계산하고 필요 시 필터를 재컴파일한다.
+    people_promote_one_must_resolved = bool(
+        lookup_filter_enabled
+        and lookup_filter_policy == "must_one_then_should"
+        and not people_ids
+        and len(people_terms) == 1
+    )
+    if people_promote_one_must_resolved != people_promote_one_must:
+        people_promote_one_must = people_promote_one_must_resolved
+        people_spec = PeopleFilterInput(
+            people_terms=people_terms,
+            person_ids=people_ids,
+            gender_terms=gender_terms,
+            org_terms=people_org_terms,
+            filter_spec=people_filter_spec.get("people_filter"),
+            min_should=people_min_should,
+            promote_one_must=people_promote_one_must,
+        )
+        people_filter = (
+            build_people_filter(people_spec)
+            if (people_terms or people_ids or gender_terms or people_org_terms)
+            else None
+        )
 
     force_people_terms = _normalize_hint_terms(
         (people_filter_spec or {}).get("participant_researcher_name")
