@@ -25,6 +25,8 @@ class PeopleFilterInput:
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     filter_spec: Optional[Dict[str, Any]] = None
+    min_should: Optional[int] = None
+    promote_one_must: bool = False
 
 
 @dataclass(frozen=True)
@@ -356,15 +358,19 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if spec.filter_spec is not None:
         return compile_filter(spec.filter_spec)
 
+    force_one_must = bool(spec.promote_one_must and not spec.person_ids and len(spec.people_terms or []) == 1)
+
     must: List["qmodels.Condition"] = []
     should: List["qmodels.Condition"] = []
     if spec.people_terms:
-        should.append(
-            qmodels.FieldCondition(
-                key="prtcp_mp[].hm_nm",
-                match=make_match_any(list(spec.people_terms)),
-            )
+        people_name_cond = qmodels.FieldCondition(
+            key="prtcp_mp[].hm_nm",
+            match=make_match_any(list(spec.people_terms)),
         )
+        if force_one_must:
+            must.append(people_name_cond)
+        else:
+            should.append(people_name_cond)
     if spec.person_ids:
         must.append(
             qmodels.FieldCondition(
@@ -389,7 +395,9 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
 
     if not must and not should:
         return None
-    min_should = 1 if should else None
+    min_should = spec.min_should if should else None
+    if min_should is None and should:
+        min_should = 1
     return _build_filter(must=must, should=should, must_not=None, min_should=min_should)
 
 

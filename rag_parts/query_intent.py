@@ -715,6 +715,9 @@ class QueryIntent:
     planner_limit: Optional[int] = None
     retrieval_query: Optional[str] = None
     planner_confidence: Optional[float] = None
+    people_terms_match_mode: Optional[str] = None
+    people_terms_min_should: Optional[int] = None
+    lookup_filter_policy: Optional[str] = None
 
     def debug_dict(self) -> Dict[str, object]:
         return {
@@ -743,6 +746,9 @@ class QueryIntent:
             "planner_limit": self.planner_limit,
             "retrieval_query": self.retrieval_query,
             "planner_confidence": self.planner_confidence,
+            "people_terms_match_mode": self.people_terms_match_mode,
+            "people_terms_min_should": self.people_terms_min_should,
+            "lookup_filter_policy": self.lookup_filter_policy,
         }
 
 def normalize_categories(cat) -> list[str]:
@@ -1065,6 +1071,12 @@ def _classify_query_heuristic(
 
     ids_flat = flatten_ids(ids_map)
 
+    people_terms_match_mode = "or"
+    people_terms_min_should = 1 if len(people_terms) >= 2 else None
+    if len(people_terms) >= 2 and re.search(r"\b(and|모두|둘\s*다|동시)\b", tl):
+        people_terms_match_mode = "and"
+        people_terms_min_should = None
+
     return QueryIntent(
         base_route=base_route,
         relation=relation,
@@ -1086,6 +1098,9 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        people_terms_match_mode=people_terms_match_mode,
+        people_terms_min_should=people_terms_min_should,
+        lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
     )
 
 
@@ -1249,6 +1264,12 @@ def classify_query(
     )
     relation = _strip_non_join_relation(relation)
 
+    people_terms_match_mode = "or"
+    people_terms_min_should = 1 if len(people_terms) >= 2 else None
+    if len(people_terms) >= 2 and re.search(r"\b(and|모두|둘\s*다|동시)\b", tl):
+        people_terms_match_mode = "and"
+        people_terms_min_should = None
+
     return QueryIntent(
         base_route=base_route,
         relation=relation,
@@ -1275,4 +1296,7 @@ def classify_query(
         planner_limit=limit,
         retrieval_query=retrieval_query or None,
         planner_confidence=confidence if plan else None,
+        people_terms_match_mode=people_terms_match_mode,
+        people_terms_min_should=people_terms_min_should,
+        lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
     )
