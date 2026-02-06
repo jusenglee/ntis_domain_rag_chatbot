@@ -1095,6 +1095,7 @@ async def build_intent_payload(
     hint_lead_org_terms: List[str] = []
     hint_participant_org_terms: List[str] = []
     hint_people_affiliation_org_terms: List[str] = []
+    hint_title_terms: List[str] = []
     hint_org_role = None
 
     if question_analysis and isinstance(question_analysis.filters, dict):
@@ -1109,6 +1110,7 @@ async def build_intent_payload(
         title_hint = filters.get("title_terms") or filters.get("title") or filters.get("name")
         if title_hint:
             title_terms = _normalize_hint_terms(title_hint)
+            hint_title_terms = _normalize_hint_terms([*hint_title_terms, *title_terms])
             kws = list(dict.fromkeys([*kws, *title_terms]))
 
         hint_org_role = filters.get("org_role")
@@ -1150,6 +1152,7 @@ async def build_intent_payload(
     planner_hint = {
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
+        "title_terms": hint_title_terms,
         "org_role": hint_org_role,
         "lead_org_terms": hint_lead_org_terms,
         "participant_org_terms": hint_participant_org_terms,
