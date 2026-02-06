@@ -2888,7 +2888,8 @@ def _run_rag_with_vectors(
 
     relation_action = bool(relation and action == "relation")
     has_relation_join_ids = _has_relation_join_ids(it)
-    relation_lookup_enforce = False
+    relation_lookup_enforce_raw = (planner_filter_spec or {}).get("relation_lookup_enforce")
+    relation_lookup_enforce = str(relation_lookup_enforce_raw).strip().lower() in ("1", "true", "yes", "y")
     if relation and plan.mode == "lookup":
         if relation_action:
             logger.warning(
@@ -2901,7 +2902,7 @@ def _run_rag_with_vectors(
                 relation_lookup_policy,
                 relation,
             )
-        relation_lookup_enforce = bool(has_relation_join_ids)
+        relation_lookup_enforce = bool(relation_lookup_enforce or has_relation_join_ids)
         if relation_lookup_enforce:
             logger.warning(
                 "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
@@ -2915,6 +2916,27 @@ def _run_rag_with_vectors(
             mode=plan.mode,
             relation=relation,
             enforced=int(relation_lookup_enforce),
+        )
+
+    join_hop1_lookup_filter_enabled = bool(
+        plan.mode == "join"
+        and (
+            relation_lookup_enforce
+            or (
+                base_route == "project"
+                and relation == ("project", "perf")
+                and bool(people_terms)
+            )
+        )
+    )
+    if join_hop1_lookup_filter_enabled:
+        log_kv(
+            "RAG.JOIN.HOP1.LOOKUP_FILTER.ENFORCE",
+            mode=plan.mode,
+            base_route=base_route,
+            relation=relation,
+            people_terms=people_terms[:4],
+            relation_lookup_enforce=int(relation_lookup_enforce),
         )
     if relation and plan.mode == "join" and not has_relation_join_ids:
         if relation_action:
@@ -3375,6 +3397,61 @@ def _run_rag_with_vectors(
                     hop1_filter = _and_filter(hop1_filter, people_filter)
                 if hop1_kind == "org" and org_filter:
                     hop1_filter = _and_filter(hop1_filter, org_filter)
+                if join_hop1_lookup_filter_enabled and hop1_col in (COL_PROJECT, COL_PERF):
+                    join_people_filter = people_filter
+                    join_promote_one_must = bool(
+                        people_promote_one_must
+                        or (
+                            join_hop1_lookup_filter_enabled
+                            and lookup_filter_policy == "must_one_then_should"
+                            and not people_ids
+                            and len(people_terms) == 1
+                        )
+                    )
+                    if join_people_filter is None and people_terms:
+                        join_people_filter = build_people_filter(
+                            PeopleFilterInput(
+                                people_terms=people_terms,
+                                person_ids=people_ids,
+                                gender_terms=gender_terms,
+                                org_terms=people_org_terms,
+                                min_should=people_min_should,
+                                promote_one_must=join_promote_one_must,
+                            )
+                        )
+                        if join_people_filter is None:
+                            log_kv(
+                                "RAG.JOIN.HOP1.LOOKUP_FILTER.PEOPLE_MISSING",
+                                level="warning",
+                                reason="people_filter_unavailable",
+                                people_terms=people_terms[:4],
+                                people_ids=people_ids[:4],
+                                match_mode=people_match_mode,
+                                min_should=people_min_should,
+                            )
+                    hop1_lookup_filter = None
+                    if hop1_col == COL_PROJECT:
+                        if join_people_filter or participant_org_filter or org_filter:
+                            hop1_lookup_filter = _and_filter(
+                                hop1_lookup_filter,
+                                _build_tag_only_filter([TAG_PJT_INFO]),
+                            )
+                        if join_people_filter:
+                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
+                        if participant_org_filter or org_filter:
+                            hop1_lookup_filter = _and_filter(
+                                hop1_lookup_filter,
+                                participant_org_filter or org_filter,
+                            )
+                        if project_tag_filter:
+                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, project_tag_filter)
+                    elif hop1_col == COL_PERF:
+                        if base_route == "perf" and join_people_filter:
+                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
+                        if perf_tag_filter:
+                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, perf_tag_filter)
+                    if hop1_lookup_filter is not None:
+                        hop1_filter = _and_filter(hop1_filter, hop1_lookup_filter)
                 if hop1_col in (COL_PROJECT, COL_PERF):
                     if year_range_filter:
                         hop1_filter = _and_filter(hop1_filter, year_range_filter)
