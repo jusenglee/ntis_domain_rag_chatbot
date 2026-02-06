@@ -4235,6 +4235,34 @@ def _run_rag_with_vectors(
             missing_kor or "none",
         )
 
+        # 공통 필터 적용 검증(관측용): LOOKUP/JOIN에서 인명 하드 필터가 걸렸는데 topN에 0건이면 경고
+        probe_terms = [str(t).strip() for t in (force_people_terms or []) if str(t).strip()]
+        if not probe_terms and mode in ("lookup", "join"):
+            if bool(people_terms) and not bool(people_ids):
+                probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()][:1]
+        if probe_terms and mode in ("lookup", "join"):
+            inspect_topn = min(max(1, int(os.getenv("RAG_FILTER_PROBE_TOPN", "10"))), len(reranked))
+            matched = 0
+            for p in reranked[:inspect_topn]:
+                payload = getattr(p, "payload", None) or {}
+                names_raw = _payload_get(payload, "prtcp_mp[].hm_nm")
+                if isinstance(names_raw, list):
+                    names = [str(x).strip() for x in names_raw if str(x).strip()]
+                else:
+                    names = [str(names_raw).strip()] if str(names_raw).strip() else []
+                if any(term in names for term in probe_terms):
+                    matched += 1
+            if matched == 0:
+                log_kv(
+                    "FILTER_MISS_SUSPECTED",
+                    level="warning",
+                    mode=mode,
+                    filter="participant_researcher_name",
+                    values=probe_terms,
+                    topN=inspect_topn,
+                    matched=matched,
+                )
+
     # build context
     t0 = time.time()
     if fallback_chat:

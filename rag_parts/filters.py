@@ -339,6 +339,65 @@ def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
     return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", nested_filter)
 
 
+def _build_prtcp_mp_people_nested_filter(
+    *,
+    people_terms: Optional[List[str]] = None,
+    person_ids: Optional[List[str]] = None,
+    gender_terms: Optional[List[str]] = None,
+    org_terms: Optional[List[str]] = None,
+    min_should: Optional[Any] = None,
+    promote_one_must: bool = False,
+) -> Optional[Any]:
+    if qmodels is None:
+        return None
+
+    nested_cls = getattr(qmodels, "NestedCondition", None)
+    nested_filter_cls = getattr(qmodels, "NestedFilter", None)
+    if nested_cls is None:
+        return None
+
+    people_terms = [str(x).strip() for x in (people_terms or []) if str(x).strip()]
+    person_ids = [str(x).strip() for x in (person_ids or []) if str(x).strip()]
+    gender_terms = [str(x).strip() for x in (gender_terms or []) if str(x).strip()]
+    org_terms = [str(x).strip() for x in (org_terms or []) if str(x).strip()]
+
+    force_one_must = bool(promote_one_must and not person_ids and len(people_terms) == 1)
+
+    nested_must: List[Any] = []
+    nested_should: List[Any] = []
+
+    if people_terms:
+        name_cond = qmodels.FieldCondition(key="hm_nm", match=make_match_any(people_terms))
+        if force_one_must:
+            nested_must.append(name_cond)
+        else:
+            nested_should.append(name_cond)
+
+    if person_ids:
+        nested_must.append(qmodels.FieldCondition(key="hm_id", match=make_match_any(person_ids)))
+
+    if gender_terms:
+        nested_should.append(qmodels.FieldCondition(key="gender_slct_nm", match=make_match_any(gender_terms)))
+
+    if org_terms:
+        nested_should.append(qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(org_terms)))
+
+    if not nested_must and not nested_should:
+        return None
+
+    min_should_value = min_should if nested_should else None
+    if min_should_value is None and nested_should:
+        min_should_value = 1
+
+    nested_filter = _build_filter(
+        must=nested_must,
+        should=nested_should,
+        must_not=None,
+        min_should=min_should_value,
+    )
+    return _make_nested_condition(nested_cls, nested_filter_cls, "prtcp_mp", nested_filter)
+
+
 def _make_nested_condition(nested_cls, nested_filter_cls, key: str, flt):
     if nested_filter_cls is not None:
         try:
@@ -358,47 +417,18 @@ def build_people_filter(spec: PeopleFilterInput) -> Optional[Any]:
     if spec.filter_spec is not None:
         return compile_filter(spec.filter_spec)
 
-    force_one_must = bool(spec.promote_one_must and not spec.person_ids and len(spec.people_terms or []) == 1)
+    nested_people = _build_prtcp_mp_people_nested_filter(
+        people_terms=list(spec.people_terms or []),
+        person_ids=list(spec.person_ids or []),
+        gender_terms=list(spec.gender_terms or []),
+        org_terms=list(spec.org_terms or []),
+        min_should=spec.min_should,
+        promote_one_must=bool(spec.promote_one_must),
+    )
+    if nested_people is not None:
+        return _build_filter(must=[nested_people], should=None, must_not=None)
 
-    must: List["qmodels.Condition"] = []
-    should: List["qmodels.Condition"] = []
-    if spec.people_terms:
-        people_name_cond = qmodels.FieldCondition(
-            key="prtcp_mp[].hm_nm",
-            match=make_match_any(list(spec.people_terms)),
-        )
-        if force_one_must:
-            must.append(people_name_cond)
-        else:
-            should.append(people_name_cond)
-    if spec.person_ids:
-        must.append(
-            qmodels.FieldCondition(
-                key="prtcp_mp[].hm_id",
-                match=make_match_any(list(spec.person_ids)),
-            )
-        )
-    if spec.gender_terms:
-        should.append(
-            qmodels.FieldCondition(
-                key="prtcp_mp[].gender_slct_nm",
-                match=make_match_any(list(spec.gender_terms)),
-            )
-        )
-    if spec.org_terms:
-        should.append(
-            qmodels.FieldCondition(
-                key="prtcp_mp[].blng_org_nm",
-                match=make_match_any(list(spec.org_terms)),
-            )
-        )
-
-    if not must and not should:
-        return None
-    min_should = spec.min_should if should else None
-    if min_should is None and should:
-        min_should = 1
-    return _build_filter(must=must, should=should, must_not=None, min_should=min_should)
+    return None
 
 
 def _normalize_min_should(min_should: Any) -> Optional[Any]:
@@ -448,7 +478,9 @@ def _normalize_min_should(min_should: Any) -> Optional[Any]:
         except Exception:
             continue
 
-    return None
+    # client에서 min_should 시그니처를 거부해도 _build_filter()의 TypeError fallback으로
+    # OR gate를 보존할 수 있도록 원시 값은 반환한다.
+    return value
 
 
 def _build_filter(
@@ -469,6 +501,20 @@ def _build_filter(
     try:
         return qmodels.Filter(**kwargs)
     except TypeError:
+        # min_should 미지원 client 호환:
+        # should를 제거하지 않고 must=[Filter(should=...)] 게이트 형태로 재구성 시도
+        if kwargs.get("min_should") is not None and kwargs.get("should"):
+            should_only_kwargs: Dict[str, Any] = {
+                "must": None,
+                "should": kwargs.get("should"),
+                "must_not": None,
+            }
+            try:
+                should_gate = qmodels.Filter(**should_only_kwargs)
+                gate_must = list(kwargs.get("must") or []) + [should_gate]
+                return qmodels.Filter(must=gate_must or None, should=None, must_not=kwargs.get("must_not"))
+            except Exception:
+                pass
         kwargs.pop("min_should", None)
         return qmodels.Filter(**kwargs)
 
