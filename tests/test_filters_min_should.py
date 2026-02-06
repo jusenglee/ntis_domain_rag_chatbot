@@ -33,10 +33,13 @@ class _FakeMinShould:
 
 class _FakeFilter:
     reject_min_should = False
+    reject_min_should_with_validation_error = False
 
     def __init__(self, must=None, should=None, must_not=None, min_should=None):
         if self.__class__.reject_min_should and min_should is not None:
             raise TypeError("min_should unsupported")
+        if self.__class__.reject_min_should_with_validation_error and min_should is not None:
+            raise ValueError("1 validation error for Filter: min_should")
         self.must = must
         self.should = should
         self.must_not = must_not
@@ -71,6 +74,7 @@ class FilterMinShouldTests(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_qmodels = filters.qmodels
         _FakeFilter.reject_min_should = False
+        _FakeFilter.reject_min_should_with_validation_error = False
         filters.qmodels = _FakeQModels()
 
     def tearDown(self) -> None:
@@ -114,6 +118,19 @@ class FilterMinShouldTests(unittest.TestCase):
 
     def test_build_filter_fallback_preserves_should_gate_when_min_should_unsupported(self) -> None:
         _FakeFilter.reject_min_should = True
+        flt = filters._build_filter(
+            must=None,
+            should=[_FakeFieldCondition(key="a", match=_FakeMatchValue(value="x"))],
+            must_not=None,
+            min_should=1,
+        )
+        self.assertIsNotNone(flt)
+        self.assertEqual(len(flt.must or []), 1)
+        self.assertIsInstance((flt.must or [])[0], _FakeFilter)
+        self.assertEqual(len(((flt.must or [])[0].should or [])), 1)
+
+    def test_build_filter_fallback_preserves_should_gate_when_min_should_validation_error(self) -> None:
+        _FakeFilter.reject_min_should_with_validation_error = True
         flt = filters._build_filter(
             must=None,
             should=[_FakeFieldCondition(key="a", match=_FakeMatchValue(value="x"))],

@@ -2447,6 +2447,9 @@ def _run_rag_with_vectors(
             people_ids = deduped_ids
     people_org_terms = list(effective_people_affiliation_org_terms)
     people_match_mode = str(getattr(ctx, "people_terms_match_mode", "") or "").strip().lower() or None
+    # 분기 순서와 무관하게 참조 가능하도록 초기값 고정
+    lookup_filter_enabled = False
+    lookup_filter_policy = "off"
     people_min_should_hint = getattr(ctx, "people_terms_min_should", None)
     if people_match_mode == "and" and len(people_terms) >= 2:
         people_min_should = None

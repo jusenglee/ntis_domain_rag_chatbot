@@ -133,7 +133,12 @@ def compile_filter(filter_spec: Optional[Dict[str, Any]]) -> Optional[Any]:
         min_should = _normalize_min_should(min_should_raw)
         if min_should is not None and should:
             kwargs["min_should"] = min_should
-        return qmodels.Filter(**kwargs)
+        return _build_filter(
+            must=kwargs.get("must"),
+            should=kwargs.get("should"),
+            must_not=kwargs.get("must_not"),
+            min_should=kwargs.get("min_should"),
+        )
 
     return _to_filter(filter_spec)
 
@@ -495,13 +500,16 @@ def _build_filter(
         "should": should or None,
         "must_not": must_not or None,
     }
-    normalized_min_should = _normalize_min_should(min_should)
+    if min_should is not None and not isinstance(min_should, (str, int, dict)):
+        normalized_min_should = min_should
+    else:
+        normalized_min_should = _normalize_min_should(min_should)
     if normalized_min_should is not None and kwargs["should"]:
         kwargs["min_should"] = normalized_min_should
     try:
         return qmodels.Filter(**kwargs)
-    except TypeError:
-        # min_should 미지원 client 호환:
+    except Exception:
+        # min_should 미지원/타입 불일치(client 스키마 차이) 호환:
         # should를 제거하지 않고 must=[Filter(should=...)] 게이트 형태로 재구성 시도
         if kwargs.get("min_should") is not None and kwargs.get("should"):
             should_only_kwargs: Dict[str, Any] = {
