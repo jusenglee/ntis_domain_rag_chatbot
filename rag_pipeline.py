@@ -3536,7 +3536,7 @@ def _run_rag_with_vectors(
             if hop2_col == COL_PERF and perf_type_filter:
                 hop2_filter = _and_filter(hop2_filter, perf_type_filter)
 
-            hop2_dense_enabled = False
+
             log_kv(
                 "RAG.JOIN.HOP2",
                 hop2_col=hop2_col, hop2_kind=hop2_kind, hop2_q=hop2_q,
@@ -3555,8 +3555,6 @@ def _run_rag_with_vectors(
                 pe = pre_vecs_h2.get(vname)
                 emb_map_h2[vname] = pe if pe is not None else fallback_emb.get(vname)
             emb_map_h2 = {k: v for k, v in emb_map_h2.items() if v is not None}
-            if not hop2_dense_enabled:
-                emb_map_h2 = {}
 
             local_timings_h2: Dict[str, float] = {}
             sr2 = _call_dense_retrieve_hybrid_multi(
