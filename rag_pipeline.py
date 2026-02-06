@@ -72,7 +72,7 @@ from rag_parts.search_strategy import (
     build_strategy_key,
     build_rerank_spec as _build_rerank_spec,
 )
-from rag_parts.planner_contract import planner_contract_mode
+from rag_parts.planner_contract import planner_contract_mode, normalize_lookup_filter_policy
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
@@ -2446,12 +2446,27 @@ def _run_rag_with_vectors(
                 deduped_ids.append(pid)
             people_ids = deduped_ids
     people_org_terms = list(effective_people_affiliation_org_terms)
+    people_match_mode = str(getattr(ctx, "people_terms_match_mode", "") or "").strip().lower() or None
+    people_min_should_hint = getattr(ctx, "people_terms_min_should", None)
+    if people_match_mode == "and" and len(people_terms) >= 2:
+        people_min_should = None
+    elif people_min_should_hint is not None:
+        people_min_should = people_min_should_hint
+    elif len(people_terms) >= 2:
+        people_min_should = 1
+    else:
+        people_min_should = None
+    # lookup 정책 계산 전 단계이므로 초기값은 False로 둔다.
+    people_promote_one_must = False
+
     people_spec = PeopleFilterInput(
         people_terms=people_terms,
         person_ids=people_ids,
         gender_terms=gender_terms,
         org_terms=people_org_terms,
         filter_spec=people_filter_spec.get("people_filter"),
+        min_should=people_min_should,
+        promote_one_must=people_promote_one_must,
     )
     people_filter = (
         build_people_filter(people_spec)
@@ -2777,11 +2792,15 @@ def _run_rag_with_vectors(
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
-    lookup_filter_policy = str(os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")).strip().lower()
-    if lookup_filter_policy not in ("hard", "off"):
+    lookup_filter_policy_raw = (
+        getattr(ctx, "lookup_filter_policy_hint", None)
+        or os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")
+    )
+    lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_raw)
+    if lookup_filter_policy is None:
         logger.warning(
             "[RAG] invalid RAG_LOOKUP_FILTER_POLICY=%s, falling back to 'hard'",
-            lookup_filter_policy,
+            lookup_filter_policy_raw,
         )
         lookup_filter_policy = "hard"
 
@@ -2801,13 +2820,35 @@ def _run_rag_with_vectors(
 
     lookup_filter_enabled = bool(
         plan.mode == "lookup"
-        and lookup_filter_policy == "hard"
+        and lookup_filter_policy in ("hard", "must_one_then_should")
         and search_filter_signal
         and search_filter_conf_ok
     )
 
-    # qdrant-client 버전에 따라 should+min_should가 무시될 수 있어,
-    # lookup hard 정책에서는 planner/filters에서 명시된 연구자명만 must로 한 번 더 강제한다.
+    # lookup 정책 확정 후 people must 승격 여부를 재계산하고 필요 시 필터를 재컴파일한다.
+    people_promote_one_must_resolved = bool(
+        lookup_filter_enabled
+        and lookup_filter_policy == "must_one_then_should"
+        and not people_ids
+        and len(people_terms) == 1
+    )
+    if people_promote_one_must_resolved != people_promote_one_must:
+        people_promote_one_must = people_promote_one_must_resolved
+        people_spec = PeopleFilterInput(
+            people_terms=people_terms,
+            person_ids=people_ids,
+            gender_terms=gender_terms,
+            org_terms=people_org_terms,
+            filter_spec=people_filter_spec.get("people_filter"),
+            min_should=people_min_should,
+            promote_one_must=people_promote_one_must,
+        )
+        people_filter = (
+            build_people_filter(people_spec)
+            if (people_terms or people_ids or gender_terms or people_org_terms)
+            else None
+        )
+
     force_people_terms = _normalize_hint_terms(
         (people_filter_spec or {}).get("participant_researcher_name")
     ) if isinstance(people_filter_spec, dict) else []
@@ -2816,18 +2857,6 @@ def _run_rag_with_vectors(
             *force_people_terms,
             *(hint_filters.get("participant_researcher_name") or []),
         ])
-    if lookup_filter_enabled and force_people_terms and qmodels is not None:
-        forced_set = set(force_people_terms)
-        must_people_terms = [t for t in people_terms if t in forced_set] or force_people_terms
-        hard_people_filter = qmodels.Filter(
-            must=[
-                qmodels.FieldCondition(
-                    key="prtcp_mp[].hm_nm",
-                    match=make_match_any(list(must_people_terms)),
-                )
-            ]
-        )
-        people_filter = _and_filter(people_filter, hard_people_filter) if people_filter is not None else hard_people_filter
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
@@ -2953,6 +2982,9 @@ def _run_rag_with_vectors(
         lookup_filter_enabled=bool(lookup_filter_enabled),
         relation_lookup_enforce=bool(relation_lookup_enforce),
         lookup_filter_policy=lookup_filter_policy,
+        lookup_filter_min_should=people_min_should,
+        lookup_filter_gate=people_match_mode,
+        lookup_filter_promote_one_must=people_promote_one_must,
         lookup_title_filter_policy=lookup_title_filter_policy,
         search_filter_server_policy=search_filter_server_policy,
     )
@@ -3795,7 +3827,7 @@ def _run_rag_with_vectors(
         relation_filter = _relation_lookup_filter_for_col(apply_name_filters)
 
         if mode != "lookup":
-            if mode == "search" and search_filter_enabled:
+            if mode == "search" and search_filter_server_policy == "must_not_only":
                 return _safe_exclusion_only(_apply_extra_filters(None))
             return None
 
@@ -4222,6 +4254,34 @@ def _run_rag_with_vectors(
             check_top_k,
             missing_kor or "none",
         )
+
+        # 공통 필터 적용 검증(관측용): LOOKUP/JOIN에서 인명 하드 필터가 걸렸는데 topN에 0건이면 경고
+        probe_terms = [str(t).strip() for t in (force_people_terms or []) if str(t).strip()]
+        if not probe_terms and mode in ("lookup", "join"):
+            if bool(people_terms) and not bool(people_ids):
+                probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()][:1]
+        if probe_terms and mode in ("lookup", "join"):
+            inspect_topn = min(max(1, int(os.getenv("RAG_FILTER_PROBE_TOPN", "10"))), len(reranked))
+            matched = 0
+            for p in reranked[:inspect_topn]:
+                payload = getattr(p, "payload", None) or {}
+                names_raw = _payload_get(payload, "prtcp_mp[].hm_nm")
+                if isinstance(names_raw, list):
+                    names = [str(x).strip() for x in names_raw if str(x).strip()]
+                else:
+                    names = [str(names_raw).strip()] if str(names_raw).strip() else []
+                if any(term in names for term in probe_terms):
+                    matched += 1
+            if matched == 0:
+                log_kv(
+                    "FILTER_MISS_SUSPECTED",
+                    level="warning",
+                    mode=mode,
+                    filter="participant_researcher_name",
+                    values=probe_terms,
+                    topN=inspect_topn,
+                    matched=matched,
+                )
 
     # build context
     t0 = time.time()

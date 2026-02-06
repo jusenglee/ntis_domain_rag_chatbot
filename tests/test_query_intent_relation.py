@@ -52,6 +52,20 @@ class QueryIntentRelationTests(unittest.TestCase):
             list(dict.fromkeys([COL_PROJECT, COL_PERF])),
         )
 
+    def test_people_or_query_sets_min_should(self) -> None:
+        q = "김재수, 박민수 참여과제"
+        intent = classify_query(q, q.split())
+
+        self.assertEqual(intent.people_terms_match_mode, "or")
+        self.assertEqual(intent.people_terms_min_should, 1)
+
+    def test_people_and_query_sets_and_mode(self) -> None:
+        q = "김재수 AND 박민수 둘 다 참여한 과제"
+        intent = classify_query(q, q.split())
+
+        self.assertEqual(intent.people_terms_match_mode, "and")
+        self.assertIsNone(intent.people_terms_min_should)
+
     def test_extract_org_terms_excludes_task_only_query(self) -> None:
         q = "과제"
         kws = q.split()
