@@ -239,6 +239,36 @@ COUNT_CUES = ["건수", "몇건", "통계", "count", "총 몇", "총몇", "몇 �
 DETAIL_CUES = ["상세", "세부", "자세히", "정보", "내용", "설명", "프로필"]
 LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘", "이력", "내역"]
 
+_REQUEST_LIMIT_RE = re.compile(r"(\d{1,2})\s*(개년|개|건|명)")
+_REQUEST_LIMIT_POSITIVE_CUES = ["목록", "리스트", "보여", "보여줘", "조회", "상위", "대표", "과제", "성과", "최대"]
+_REQUEST_LIMIT_NEGATIVE_CUES = ["개년", "단계", "분류", "유형"]
+
+
+def _extract_requested_limit(q: str) -> Optional[int]:
+    text = (q or "").strip().lower()
+    if not text:
+        return None
+
+    if not any(cue in text for cue in _REQUEST_LIMIT_POSITIVE_CUES):
+        return None
+
+    for match in _REQUEST_LIMIT_RE.finditer(text):
+        unit = (match.group(2) or "").strip()
+        if unit == "개년":
+            continue
+
+        context_start = max(0, match.start() - 8)
+        context_end = min(len(text), match.end() + 8)
+        context = text[context_start:context_end]
+        if any(cue in context for cue in _REQUEST_LIMIT_NEGATIVE_CUES):
+            continue
+
+        limit = _coerce_int(match.group(1), INTENT_MAX_LIMIT)
+        limit = max(1, min(limit, INTENT_MAX_LIMIT))
+        return limit
+
+    return None
+
 
 def pick_perf_tag_filters(q: str) -> List[str]:
     """질의에서 성과 유형(논문/특허/...)을 감지해 tag 필터 리스트를 만든다."""
@@ -1077,6 +1107,8 @@ def _classify_query_heuristic(
         people_terms_match_mode = "and"
         people_terms_min_should = None
 
+    requested_limit = _extract_requested_limit(q)
+
     return QueryIntent(
         base_route=base_route,
         relation=relation,
@@ -1098,6 +1130,7 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        planner_limit=requested_limit,
         people_terms_match_mode=people_terms_match_mode,
         people_terms_min_should=people_terms_min_should,
         lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
@@ -1245,8 +1278,13 @@ def classify_query(
     if not perf_tag_filters and base_route in ("perf", "project"):
         perf_tag_filters = pick_perf_tag_filters(q)
 
-    limit = _coerce_int(plan.get("limit"), INTENT_MAX_LIMIT)
-    limit = max(1, min(limit, INTENT_MAX_LIMIT))
+    plan_limit = plan.get("limit")
+    limit: Optional[int] = None
+    if plan_limit is not None:
+        limit = _coerce_int(plan_limit, INTENT_MAX_LIMIT)
+        limit = max(1, min(limit, INTENT_MAX_LIMIT))
+    else:
+        limit = _extract_requested_limit(q)
     retrieval_query = str(plan.get("retrieval_query") or "").strip()
     if retrieval_query:
         retrieval_query = retrieval_query[:INTENT_MAX_RETRIEVAL_QUERY]
