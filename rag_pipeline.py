@@ -68,7 +68,7 @@ from rag_parts.search_preset import (
     build_topk_spec as _build_topk_spec,
 )
 from rag_parts.search_strategy import (
-    SEARCH_STRATEGY_VERSION,
+    SEARCH_POLICY_VERSION,
     build_strategy_key,
     build_rerank_spec as _build_rerank_spec,
 )
@@ -2811,7 +2811,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.PRESET/PLAN.PRE",
-        policy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_POLICY_VERSION,
         preset_key=getattr(preset, "strategy_key", None),
         topk_spec=topk_spec,
         ctx_budget=int(ctx_budget),
@@ -3052,7 +3052,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.FILTERS",
-        policy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_POLICY_VERSION,
         org_terms=org_terms,
         org_role=org_role,
         people_terms=people_terms,
@@ -3082,9 +3082,10 @@ def _run_rag_with_vectors(
     )
 
     strategy_key = build_strategy_key(action, plan.mode)
+    # 로그 키 구분: strategy_version(planner 계약 버전) vs policy_version(내부 검색 정책 버전)
     strategy_summary = {
         "mode": mode,
-        "policy_version": SEARCH_STRATEGY_VERSION,
+        "policy_version": SEARCH_POLICY_VERSION,
         "strategy_key": strategy_key,
         "policy_reason": policy_reason,
         "planner": {
@@ -3153,7 +3154,7 @@ def _run_rag_with_vectors(
     log_kv(
         "RAG.PRESET/PLAN.POST",
         strategy_summary=strategy_summary,
-        policy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_POLICY_VERSION,
         strategy_key=strategy_key,
         mode=plan.mode,
         base_route=plan.base_route,

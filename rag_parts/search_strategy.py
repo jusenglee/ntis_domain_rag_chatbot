@@ -4,12 +4,16 @@
 
 - 프리셋(action 기반 파라미터)와 파이프라인(mode 기반 rerank/필터 정책)을
   하나의 매트릭스로 묶어 버전/키를 관리합니다.
+
+운영 로그 키 네이밍:
+- strategy_version: planner 스키마 버전(server3 planner contract)
+- policy_version: 내부 검색 정책/매트릭스 버전(이 모듈 상수)
 """
 from __future__ import annotations
 
 from typing import Dict
 
-SEARCH_STRATEGY_VERSION = "v1.0"
+SEARCH_POLICY_VERSION = "v1.0"
 
 PRESET_KEYS_BY_ACTION: Dict[str, str] = {
     "support": "support",
@@ -42,7 +46,7 @@ MODE_POLICY: Dict[str, Dict[str, object]] = {
 }
 
 STRATEGY_MATRIX = {
-    "version": SEARCH_STRATEGY_VERSION,
+    "version": SEARCH_POLICY_VERSION,
     "preset_keys_by_action": PRESET_KEYS_BY_ACTION,
     "mode_policy": MODE_POLICY,
 }
