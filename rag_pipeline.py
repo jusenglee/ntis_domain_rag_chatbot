@@ -3933,8 +3933,6 @@ def _run_rag_with_vectors(
             "rst_id",
         )
         has_perf_ids = any(ids_map.get(key) for key in perf_id_keys)
-        if payload_project_terms:
-            pjt_ids = list(dict.fromkeys(pjt_ids + payload_project_terms))
         lookup_has_ids = bool(pjt_ids or pjt_nos or has_perf_ids)
         lookup_has_name_filters = bool(people_terms or people_ids or org_terms)
         apply_name_filters = mode != "lookup" or lookup_has_ids or lookup_has_name_filters

@@ -448,7 +448,7 @@ async def _run_question_analysis(
            strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
         5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
         6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
-        7) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}} 를 사용합니다.
+        7) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
         8) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
@@ -512,7 +512,15 @@ async def _run_question_analysis(
         - patent_reg_no, patent_app_no
         - paper_id, perf_id, rst_id
         - person_no(참여인력 hm_id), org_id, org_code, biz_no
+        
         추출하지 못하면 빈 dict.
+        [JOIN 추가 불변 규칙]
+        - mode="JOIN"은 ids_map에 pjt_id 또는 pjt_no가 존재할 때만 허용한다.
+        - 사람/기관 이름만 있는 경우 JOIN 금지. 반드시 mode="LOOKUP"으로 처리한다.
+        
+        [ID 필드 규칙]
+        - ids_map.person_no는 참여인력 ID(hm_id)일 때만 사용한다.
+        - 한글 이름(예: 김재수)은 ids_map에 넣지 말고 filters.participant_researcher_name에만 넣는다.
         
         ====================
         [filters 규칙(계약)]
