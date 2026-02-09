@@ -53,7 +53,7 @@ _SHORT_PROMPT_CHAR_THRESHOLD = 2000
 _SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
 
 # gpt-oss 계열이 최종 답변 앞에 붙이는 마커
-ASSISTANT_FINAL_MARKER = "assistantfinal"
+ASSISTANT_FINAL_MARKER = "<|assistant|final>"
 
 
 # ---------------------------------------------------------------------------

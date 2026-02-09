@@ -41,7 +41,7 @@ from settings import (
     REDIS_TTL,
     MAX_TOP_K_SIZE,
     MAX_DOC_SENTENCES,
-    MAX_DOC_TOKENS,
+    MAX_DOC_TOKENS, DEFAULT_MODEL_NAME,
 )
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
@@ -373,7 +373,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = TritonChatModel(model_name="gpt_oss_0")  # GPT
+    llm = TritonChatModel(model_name=DEFAULT_MODEL_NAME)  # GPT
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]

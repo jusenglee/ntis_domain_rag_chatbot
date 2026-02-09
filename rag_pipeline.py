@@ -80,7 +80,6 @@ from rag_parts.post_policy import (
 )
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
-    sanitize_query_by_terms as _sanitize_query_by_terms,
     normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.promotion import promote_mode_from_search_hits as _promote_mode_from_search_hits
@@ -3404,9 +3403,9 @@ def _run_rag_with_vectors(
                 )
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
-                if hop1_kind == "people" and people_filter:
+                if  people_filter:
                     hop1_filter = _and_filter(hop1_filter, people_filter)
-                if hop1_kind == "org" and org_filter:
+                if  org_filter:
                     hop1_filter = _and_filter(hop1_filter, org_filter)
                 if join_hop1_lookup_filter_enabled and hop1_col in (COL_PROJECT, COL_PERF):
                     join_people_filter = people_filter
@@ -3544,17 +3543,6 @@ def _run_rag_with_vectors(
                     tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
                 )
 
-                # head term 강제 포함(people/org head일 때만, 옵션)
-                head_terms: List[str] = []
-                if hop1_kind == "people":
-                    head_terms = _extract_quoted_terms(q) or list(it.people_terms or [])
-                    if not head_terms:
-                        m = re.search(r"([가-힣]{2,4})\s*(?:이|가|은|는)?\s*(?:참여인력|참여연구|연구자|연구원)", q)
-                        if m:
-                            head_terms = [m.group(1)]
-                elif hop1_kind == "org":
-                    head_terms = (org_terms or [])[:2]
-
                 if head_terms:
                     head_filtered = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
                     if head_filtered:
@@ -3593,12 +3581,12 @@ def _run_rag_with_vectors(
                     if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                         log_kv("RAG.JOIN.HOP1.MISSING_KEYS", **missing)
 
-                join_pjt_ids, join_pjt_nos = _extract_pjt_ids(
+                join_pjt_ids = _extract_pjt_ids(
                     hop1_top,
                     max_ids=50,
                     include_pjt_no_fallback=True,
                 )
-                join_ids = list(dict.fromkeys(join_pjt_ids + join_pjt_nos))
+                join_ids = list(dict.fromkeys(join_pjt_ids))
 
                 log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
                 log_section("RAG.JOIN.JOIN_IDS", join_ids[: min(len(join_ids), 30)])
