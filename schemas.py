@@ -5,10 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 
 
-class StrategyViolation(ValueError):
-    """Planner-Execution 계약 위반."""
-
-
 @dataclass(frozen=True)
 class StrategySpec:
     mode: str

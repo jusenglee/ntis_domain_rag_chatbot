@@ -26,7 +26,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
-from schemas import ExecutionContext, QueryPlan, StrategySpec, StrategyViolation
+from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -107,12 +107,6 @@ try:
 except Exception:
     qmodels = None
 
-
-class StrategyViolation(ValueError):
-    def __init__(self, code: str, cause: str):
-        self.code = str(code).strip() or "STRATEGY_VIOLATION"
-        self.cause = str(cause).strip() or "unknown"
-        super().__init__(f"[{self.code}] {self.cause}")
 
 def _normalize_tag_value(tag: object) -> str:
     if tag is None:
@@ -715,6 +709,7 @@ def _call_dense_retrieve_hybrid_multi(
         timings_out: Dict[str, float],
         require_hybrid_both_sides: bool = False,
         contract_scope: Optional[str] = None,
+        violation_on_contract: bool = False,
 ) -> Dict[str, Any]:
     params = set(_DENSE_MULTI_SIG.parameters.keys()) if _DENSE_MULTI_SIG else set()
     common_kwargs = {
@@ -734,20 +729,30 @@ def _call_dense_retrieve_hybrid_multi(
         common_kwargs["contract_scope"] = contract_scope
 
     sparse_vector_name_eff = str(sparse_vector_name or "").strip()
-    sparse_enabled = bool(sparse_topk and int(sparse_topk) > 0 and sparse_vector_name_eff)
-    dense_enabled = bool(int(top_k_dense) > 0 and bool(emb_map))
+    sparse_topk_int = int(sparse_topk or 0)
+    sparse_enabled = bool(sparse_topk_int > 0 and sparse_vector_name_eff)
+    top_k_dense_int = int(top_k_dense or 0)
+    dense_enabled = bool(top_k_dense_int > 0 and bool(emb_map))
 
     if require_hybrid_both_sides:
         if not dense_enabled:
-            raise RuntimeError(
-                f"[RAG.CONTRACT] dense disabled for {contract_scope or collection}: "
-                f"top_k_dense={top_k_dense} emb_map={bool(emb_map)}"
+            code = "LOOKUP_JOIN_DENSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
+            msg = (
+                f"dense disabled for {contract_scope or collection}: "
+                f"top_k_dense={top_k_dense_int} emb_map={bool(emb_map)}"
             )
+            if violation_on_contract:
+                raise StrategyViolation(error_code=code, reason=msg)
+            raise RuntimeError(f"[{code}] {msg}")
         if not sparse_enabled:
-            raise RuntimeError(
-                f"[RAG.CONTRACT] sparse disabled for {contract_scope or collection}: "
-                f"sparse_topk={sparse_topk} sparse_vector_name={sparse_vector_name!r}"
+            code = "LOOKUP_JOIN_SPARSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
+            msg = (
+                f"sparse disabled for {contract_scope or collection}: "
+                f"sparse_topk={sparse_topk_int} sparse_vector_name={sparse_vector_name!r}"
             )
+            if violation_on_contract:
+                raise StrategyViolation(error_code=code, reason=msg)
+            raise RuntimeError(f"[{code}] {msg}")
 
     if "client" in params and "collection_name" in params:
         return dense_retrieve_hybrid_multi(
@@ -778,6 +783,37 @@ def _call_dense_retrieve_hybrid_multi(
         query_filter=query_filter,
         **common_kwargs,
     )
+
+def _validate_lookup_join_hybrid_metrics(
+    *,
+    mode: str,
+    contract_scope: str,
+    timings: Mapping[str, Any],
+) -> None:
+    if str(mode).strip().lower() not in ("lookup", "join"):
+        return
+    dense_queries = float(timings.get("dense_queries", 0.0) or 0.0)
+    sparse_hits = float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+    hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
+    sparse_metric = max(sparse_hits, hybrid_once_hits)
+    log_kv(
+        "RAG.LOOKUP_JOIN.HYBRID.METRICS",
+        mode=mode,
+        contract_scope=contract_scope,
+        dense_queries=dense_queries,
+        sparse_hits=sparse_hits,
+        hybrid_once_hits=hybrid_once_hits,
+    )
+    if dense_queries <= 0:
+        raise StrategyViolation(
+            error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
+            reason=f"dense_queries must be >0 for {contract_scope}; got {dense_queries}",
+        )
+    if sparse_metric <= 0:
+        raise StrategyViolation(
+            error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
+            reason=f"sparse_hits/hybrid_once_hits must be >0 for {contract_scope}; got sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}",
+        )
 
 def _attach_collection(p: Any, col: str) -> Any:
     if p is None or not col:
@@ -2649,23 +2685,23 @@ def _run_rag_with_vectors(
 
         if mode_norm != "join":
             if join_norm is not None:
-                raise StrategyViolation("join_key_mode must be null when mode is not JOIN")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join_key_mode must be null when mode is not JOIN")
             return
 
         if join_norm not in ("instance", "group"):
-            raise StrategyViolation("join mode requires join_key_mode in {'instance','group'}")
+            raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join mode requires join_key_mode in {'instance','group'}")
         if has_pjt_id and has_pjt_no:
-            raise StrategyViolation("ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
+            raise StrategyViolation(error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS", reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
         if join_norm == "instance":
             if has_pjt_no:
-                raise StrategyViolation("join_key_mode=instance only allows ids_map.pjt_id")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance only allows ids_map.pjt_id")
             if not has_pjt_id:
-                raise StrategyViolation("join_key_mode=instance requires ids_map.pjt_id")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance requires ids_map.pjt_id")
         if join_norm == "group":
             if has_pjt_id:
-                raise StrategyViolation("join_key_mode=group only allows ids_map.pjt_no")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group only allows ids_map.pjt_no")
             if not has_pjt_no:
-                raise StrategyViolation("join_key_mode=group requires ids_map.pjt_no")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group requires ids_map.pjt_no")
 
     def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
         if not action_value:
@@ -2772,7 +2808,7 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        raise StrategyViolation(f"invalid planner strategy: {planner_mode_error}")
+        raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
@@ -3259,13 +3295,14 @@ def _run_rag_with_vectors(
             lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=min(hop1_k_base, 80),
-            top_k_dense=(topk_dense if emb_map_h1 else 0),
+            top_k_dense=topk_dense,
             top_k_lex_cand=hop1_k_base,
             top_k_lex=min(hop1_k_base, 80),
             query_filter=hop1_filter,
             timings_out=local_timings_h1,
             require_hybrid_both_sides=True,
             contract_scope="join_hop1_followup",
+            violation_on_contract=True,
         )
         _apply_dense_threshold(
             sr1,
@@ -3520,13 +3557,14 @@ def _run_rag_with_vectors(
                     lexical_fields=preset.lexical_fields,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
-                    top_k_dense=(topk_dense if emb_map_h1 else 0),
+                    top_k_dense=topk_dense,
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
                     query_filter=hop1_filter,  # ✅ 실제 적용
                     timings_out=local_timings_h1,
                     require_hybrid_both_sides=True,
                     contract_scope="join_hop1",
+                    violation_on_contract=True,
                 )
                 _apply_dense_threshold(
                     sr1,
@@ -3615,6 +3653,11 @@ def _run_rag_with_vectors(
                     sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
                     hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
                     **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
+                )
+                _validate_lookup_join_hybrid_metrics(
+                    mode="join",
+                    contract_scope=f"join_hop1:{hop1_col}",
+                    timings=local_timings_h1,
                 )
 
             # Hop1 context
@@ -3706,13 +3749,14 @@ def _run_rag_with_vectors(
                 lexical_fields=preset.lexical_fields,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
-                top_k_dense=(topk_dense if emb_map_h2 else 0),
+                top_k_dense=topk_dense,
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
                 query_filter=hop2_filter,  # ✅ JOIN 필터 강제 적용
                 timings_out=local_timings_h2,
                 require_hybrid_both_sides=True,
                 contract_scope="join_hop2",
+                violation_on_contract=True,
             )
             _apply_dense_threshold(
                 sr2,
@@ -3766,6 +3810,11 @@ def _run_rag_with_vectors(
                 sparse_hits=float(local_timings_h2.get("lexical_scored", 0.0)),
                 hybrid_once_hits=float(local_timings_h2.get("hybrid_once_hits", 0.0)),
                 **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
+            )
+            _validate_lookup_join_hybrid_metrics(
+                mode="join",
+                contract_scope=f"join_hop2:{hop2_col}",
+                timings=local_timings_h2,
             )
 
             # Hop2 context
@@ -4055,14 +4104,22 @@ def _run_rag_with_vectors(
             lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=sparse_topk_eff,
-            top_k_dense=use_dense_k,
+            top_k_dense=topk_dense if plan.mode == "lookup" else use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,
             query_filter=qfilter,  # ✅ plan 기반 적용
             timings_out=local_timings,
             require_hybrid_both_sides=(plan.mode == "lookup"),
             contract_scope=f"{plan.mode}:{col}",
+            violation_on_contract=(plan.mode == "lookup"),
         )
+        if plan.mode in ("lookup", "join"):
+            _validate_lookup_join_hybrid_metrics(
+                mode=plan.mode,
+                contract_scope=f"{plan.mode}:{col}",
+                timings=local_timings,
+            )
+
         _apply_dense_threshold(
             sr,
             use_dense_threshold=use_dense_threshold_policy,
