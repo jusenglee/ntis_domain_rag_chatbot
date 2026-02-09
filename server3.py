@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from dataclasses import replace
 
 # Redis
@@ -93,6 +93,21 @@ FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 PLANNER_SCHEMA_VERSION = "v2"
+PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
+PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+QUESTION_ANALYSIS_REQUIRED_KEYS = {
+    "strategy_version",
+    "mode",
+    "head",
+    "action",
+    "relation",
+    "target_cols",
+    "ids_map",
+    "filters",
+    "limit",
+    "retrieval_query",
+    "confidence",
+}
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -201,6 +216,36 @@ class QuestionAnalysisV2(BaseModel):
 
 
 QuestionAnalysis = QuestionAnalysisV2
+
+class PlannerV2ParseError(ValueError):
+    """QuestionAnalysisV2 파싱/검증 실패."""
+
+
+def _build_question_analysis_fallback(question: str) -> QuestionAnalysis:
+    return QuestionAnalysis(
+        strategy_version=PLANNER_SCHEMA_VERSION,
+        mode="SEARCH",
+        head="support",
+        action="topic",
+        relation=None,
+        target_cols=[],
+        ids_map={},
+        filters={},
+        limit=20,
+        retrieval_query=question[:120],
+        confidence=0.0,
+    )
+
+
+def _validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
+    missing_keys = sorted(QUESTION_ANALYSIS_REQUIRED_KEYS - set(payload.keys()))
+    if missing_keys:
+        raise PlannerV2ParseError(f"missing required keys: {missing_keys}")
+
+
+def _planner_v2_backoff_seconds(attempt_no: int) -> float:
+    return PLANNER_V2_RETRY_BACKOFF_SEC * (2 ** max(0, attempt_no - 1))
+
 
 class KnowledgeSufficiency(BaseModel):
     """지식 충분성 판단 결과"""
@@ -393,9 +438,10 @@ async def _run_question_analysis(
         3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
         4) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        5) 값이 없으면 null/[]/0.0 등 기본값을 사용합니다.
-        6) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
-        7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
+        5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
+        6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
+        7) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}} 를 사용합니다.
+        8) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
         [Mode 정의]
@@ -555,51 +601,77 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    try:
-        chain = prompt | llm | sanitize_llm_json | parser
-        result: QuestionAnalysis = await chain.ainvoke({
-            "format_instructions": parser.get_format_instructions(),
-            "history": history_str or "없음",
-            "prev_context": prev_context_str or "없음",
-            "question": question
-        })
-        normalized_payload = _normalize_none_string(result.model_dump())
-        result = QuestionAnalysis.model_validate(normalized_payload)
-        result.limit = min(result.limit, MAX_TOP_K_SIZE)
+    chain = prompt | llm | sanitize_llm_json | parser
+    max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
+    last_error: Optional[Exception] = None
 
-        log_section(
-            "QUESTION ANALYSIS",
-            f"coq: {conversation_id}{question}\n"
-            f"StrategyVersion: {result.strategy_version}\n"
-            f"Mode: {result.mode}\n"
-            f"Head: {result.head}\n"
-            f"Relation: {result.relation}\n"
-            f"Action: {result.action}\n"
-            f"TargetCols: {result.target_cols}\n"
-            f"IdsMap: {result.ids_map}\n"
-            f"Filters: {result.filters}\n"
-            f"Limit: {result.limit}\n"
-            f"Query: {result.retrieval_query}\n"
-            f"Confidence: {result.confidence:.2f}\n"
-            f"planner_failed=0"
-        )
-        return result
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result: QuestionAnalysis = await chain.ainvoke({
+                "format_instructions": parser.get_format_instructions(),
+                "history": history_str or "없음",
+                "prev_context": prev_context_str or "없음",
+                "question": question
+            })
+            normalized_payload = _normalize_none_string(result.model_dump())
+            _validate_question_analysis_required_keys(normalized_payload)
+            result = QuestionAnalysis.model_validate(normalized_payload)
+            result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
-    except Exception as e:
-        logger.error(f"[PLANNER.V2] parse failed: {e}")
-        return QuestionAnalysis(
-            strategy_version=PLANNER_SCHEMA_VERSION,
-            mode="SEARCH",
-            head="support",
-            action="topic",
-            relation=None,
-            target_cols=[],
-            ids_map={},
-            filters={},
-            limit=20,
-            retrieval_query=question[:120],
-            confidence=0.0,
-        )
+            logger.info(
+                "[PLANNER.V2] event=analysis_succeeded conversation_id=%s attempt=%s retries=%s fallback=%s",
+                conversation_id,
+                attempt,
+                attempt - 1,
+                0,
+            )
+            log_section(
+                "QUESTION ANALYSIS",
+                f"coq: {conversation_id}{question}\n"
+                f"StrategyVersion: {result.strategy_version}\n"
+                f"Mode: {result.mode}\n"
+                f"Head: {result.head}\n"
+                f"Relation: {result.relation}\n"
+                f"Action: {result.action}\n"
+                f"TargetCols: {result.target_cols}\n"
+                f"IdsMap: {result.ids_map}\n"
+                f"Filters: {result.filters}\n"
+                f"Limit: {result.limit}\n"
+                f"Query: {result.retrieval_query}\n"
+                f"Confidence: {result.confidence:.2f}\n"
+                f"planner_failed=0\n"
+                f"planner_retry_count={attempt - 1}\n"
+                f"planner_fallback=0"
+            )
+            return result
+
+        except (ValidationError, LLMJSONExtractionError, PlannerV2ParseError, ValueError) as e:
+            last_error = e
+            should_retry = attempt < max_attempts
+            backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
+            logger.warning(
+                "[PLANNER.V2] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s",
+                conversation_id,
+                attempt,
+                max_attempts,
+                int(should_retry),
+                backoff_seconds,
+                int(not should_retry),
+                type(e).__name__,
+                e,
+            )
+            if should_retry:
+                await asyncio.sleep(backoff_seconds)
+                continue
+
+    logger.error(
+        "[PLANNER.V2] event=fallback_applied conversation_id=%s retries=%s error_type=%s error=%s",
+        conversation_id,
+        max_attempts - 1,
+        type(last_error).__name__ if last_error else "unknown",
+        last_error,
+    )
+    return _build_question_analysis_fallback(question)
 
 
 # --- Node 4: Knowledge Sufficiency Judge ---
