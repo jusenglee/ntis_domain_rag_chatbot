@@ -26,7 +26,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
-from schemas import ExecutionContext, QueryPlan, StrategySpec
+from schemas import ExecutionContext, QueryPlan, StrategySpec, StrategyViolation
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -1605,6 +1605,7 @@ def _build_plan(
         base_route=base_route,
         action=action,
         relation=rel,
+        join_key_mode=getattr(it, "join_key_mode", None),
         output_type=output_type,
         target_collections=tuple(target_cols),
         filters={},
@@ -1903,7 +1904,7 @@ def _run_rag_with_vectors(
             }
 
         allowed = {
-            "mode", "head", "action", "relation", "ids_map", "filters",
+            "mode", "head", "action", "relation", "join_key_mode", "ids_map", "filters",
             "target_cols", "limit", "retrieval_query", "confidence",
         }
         unknown = sorted(str(k) for k in source.keys() if str(k) not in allowed)
@@ -1929,6 +1930,7 @@ def _run_rag_with_vectors(
     strategy_head = None
     strategy_relation = None
     strategy_action = None
+    strategy_join_key_mode = None
     strategy_query_text = None
     strategy_filter_spec = {}
     strategy_topk_spec = {}
@@ -2146,6 +2148,9 @@ def _run_rag_with_vectors(
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
     hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
     hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
+    hint_join_key_mode = str(_get_attr(qa, "join_key_mode", "") or "").strip().lower() or None
+    if hint_join_key_mode in ("instance", "group"):
+        strategy_join_key_mode = hint_join_key_mode
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
@@ -2154,6 +2159,8 @@ def _run_rag_with_vectors(
             ctx.base_route = hint_head
         if hint_relation:
             ctx.relation = hint_relation
+        if hint_join_key_mode in ("instance", "group"):
+            ctx.join_key_mode = hint_join_key_mode
         if hint_ids_map:
             merged_ids = dict(ctx.ids_map or {})
             for key, values in hint_ids_map.items():
@@ -2582,6 +2589,32 @@ def _run_rag_with_vectors(
 
     pre_vecs = _get_pre_vecs(q)
 
+    def _validate_join_key_contract(mode_value: Optional[str], join_key_mode: Optional[str], ids_map_obj: Dict[str, List[str]]) -> None:
+        mode_norm = str(mode_value or "").strip().lower()
+        join_norm = str(join_key_mode or "").strip().lower() or None
+        has_pjt_id = bool(ids_map_obj.get("pjt_id"))
+        has_pjt_no = bool(ids_map_obj.get("pjt_no"))
+
+        if mode_norm != "join":
+            if join_norm is not None:
+                raise StrategyViolation("join_key_mode must be null when mode is not JOIN")
+            return
+
+        if join_norm not in ("instance", "group"):
+            raise StrategyViolation("join mode requires join_key_mode in {'instance','group'}")
+        if has_pjt_id and has_pjt_no:
+            raise StrategyViolation("ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
+        if join_norm == "instance":
+            if has_pjt_no:
+                raise StrategyViolation("join_key_mode=instance only allows ids_map.pjt_id")
+            if not has_pjt_id:
+                raise StrategyViolation("join_key_mode=instance requires ids_map.pjt_id")
+        if join_norm == "group":
+            if has_pjt_id:
+                raise StrategyViolation("join_key_mode=group only allows ids_map.pjt_no")
+            if not has_pjt_no:
+                raise StrategyViolation("join_key_mode=group requires ids_map.pjt_no")
+
     def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
         if not action_value:
             return None
@@ -2601,6 +2634,10 @@ def _run_rag_with_vectors(
             strategy_relation=strategy.relation,
             fallback_mode=strategy.mode,
         )
+        try:
+            _validate_join_key_contract(strategy.mode, strategy.join_key_mode, dict(ctx.ids_map or {}))
+        except StrategyViolation as exc:
+            errors.append(str(exc))
         return (len(errors) == 0), errors
 
     def _is_safe_search_fallback_enabled() -> bool:
@@ -2661,6 +2698,7 @@ def _run_rag_with_vectors(
         mode=planner_strategy_mode,
         action=planner_strategy_action,
         relation=planner_strategy_relation,
+        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
     )
     strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
     if not strategy_ok:
@@ -2682,13 +2720,7 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        if _is_safe_search_fallback_enabled():
-            log_kv(
-                "RAG.PLAN.SAFE_SEARCH_FALLBACK_FLAG_ON",
-                level="warning",
-                flag="RAG_ENABLE_SAFE_SEARCH_FALLBACK",
-                note="fallback_path_removed_keep_planner_mode",
-            )
+        raise StrategyViolation(f"invalid planner strategy: {planner_mode_error}")
 
     planner_filter_spec = dict(plan.filters or {})
 
@@ -2932,6 +2964,7 @@ def _run_rag_with_vectors(
         mode=plan.mode,
         action=action,
         relation=relation,
+        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
         people_terms=tuple(people_terms or []),
         target_collections=tuple(ctx.target_collections or []),
         search_filter_enabled=bool(search_filter_enabled),
@@ -2947,6 +2980,7 @@ def _run_rag_with_vectors(
     plan = replace(
         plan,
         relation=relation,
+        join_key_mode=(strategy.join_key_mode or plan.join_key_mode),
         target_collections=tuple(ctx.target_collections or []),
         filters=filter_spec,
     )
@@ -3250,11 +3284,12 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
+        join_key_mode = str((getattr(strategy, "join_key_mode", None) or "")).strip().lower() or None
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
-        seed_join_ids = list(dict.fromkeys(seed_join_pjt_ids + seed_join_pjt_nos))
+        seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
 
 
 
@@ -3534,7 +3569,6 @@ def _run_rag_with_vectors(
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
                 hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
             else:
-                join_key_mode = "group" if hop2_col == COL_PERF else "instance"
                 hop2_filter = build_join_filter(
                     JoinFilterInput(
                         join_ids=join_pjt_ids or join_ids,

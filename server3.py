@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from dataclasses import replace
 
 # Redis
@@ -101,6 +101,7 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "head",
     "action",
     "relation",
+    "join_key_mode",
     "target_cols",
     "ids_map",
     "filters",
@@ -196,6 +197,7 @@ class QuestionAnalysisV2(BaseModel):
     head: Head
     action: Action
     relation: Optional[str] = None
+    join_key_mode: Literal["instance", "group"] | None = None
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     target_cols: list[str] = Field(default_factory=list, description="실행 대상 컬렉션")
@@ -214,6 +216,27 @@ class QuestionAnalysisV2(BaseModel):
             raise ValueError(f"strategy_version must be {PLANNER_SCHEMA_VERSION!r}")
         return value
 
+    @model_validator(mode="after")
+    def validate_join_contract(self) -> "QuestionAnalysisV2":
+        has_pjt_id = bool((self.ids_map or {}).get("pjt_id"))
+        has_pjt_no = bool((self.ids_map or {}).get("pjt_no"))
+        if self.mode != "JOIN":
+            if self.join_key_mode is not None:
+                raise ValueError("join_key_mode must be null when mode is not JOIN")
+            return self
+
+        if self.join_key_mode not in ("instance", "group"):
+            raise ValueError("join_key_mode is required for JOIN mode")
+        if has_pjt_id and has_pjt_no:
+            raise ValueError("ids_map.pjt_id and ids_map.pjt_no cannot coexist in JOIN mode")
+        if self.join_key_mode == "instance":
+            if has_pjt_no or not has_pjt_id:
+                raise ValueError("join_key_mode=instance requires ids_map.pjt_id only")
+        if self.join_key_mode == "group":
+            if has_pjt_id or not has_pjt_no:
+                raise ValueError("join_key_mode=group requires ids_map.pjt_no only")
+        return self
+
 
 QuestionAnalysis = QuestionAnalysisV2
 
@@ -228,6 +251,7 @@ def _build_question_analysis_fallback(question: str) -> QuestionAnalysis:
         head="support",
         action="topic",
         relation=None,
+        join_key_mode=None,
         target_cols=[],
         ids_map={},
         filters={},
@@ -437,7 +461,7 @@ async def _run_question_analysis(
         2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
         3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
         4) 아래 키를 반드시 모두 포함합니다:
-           strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
+           strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
         5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
         6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
         7) 문자열 "None" 금지. 반드시 null 또는 [] 또는 {{}} 를 사용합니다.
@@ -550,16 +574,19 @@ async def _run_question_analysis(
         [JOIN(2-hop) 정책: 그룹 vs 인스턴스]
         ====================
         - JOIN은 project↔perf가 명확할 때만 사용합니다.
+        - mode="JOIN"이면 join_key_mode는 필수이며 "instance" | "group" 중 하나여야 합니다.
+        - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
+        - JOIN에서 ids_map 키는 XOR 규칙을 반드시 지킵니다(동시 존재 금지):
+          * join_key_mode="instance" => ids_map.pjt_id만 허용
+          * join_key_mode="group" => ids_map.pjt_no만 허용
         
         1) relation="project_perf"
-          - PJT_ID가 있으면: Hop2(perf)에서 pjt_id == PJT_ID를 must로 강제
-          - PJT_NO만 있으면(그룹):
-            Hop1(project)에서 PJT_NO==X로 PJT_ID 목록을 확보하고,
-            Hop2(perf)에서 (가능하면 pjt_no==X must, 없으면 pjt_id ==X must)로 강제
+          - join_key_mode="instance": Hop2(perf)에서 pjt_id == PJT_ID must
+          - join_key_mode="group": Hop2(perf)에서 pjt_no == PJT_NO must
         
         2) relation="perf_project"
-          - Hop1(perf)에서 성과 식별자를 must로 확정 후,
-            Hop2(project)에서 연결된 PJT_ID/PJT_NO로 강제
+          - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
+          - join_key_mode="group": Hop2(project)에서 pjt_no == PJT_NO must
         
         ====================
         [retrieval_query 규칙]
@@ -585,6 +612,7 @@ async def _run_question_analysis(
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
         - relation: "project_perf" | "perf_project" | null
+        - join_key_mode: "instance" | "group" | null
         - target_cols: string 배열
         - ids_map: dict
         - filters: dict
@@ -632,6 +660,7 @@ async def _run_question_analysis(
                 f"Mode: {result.mode}\n"
                 f"Head: {result.head}\n"
                 f"Relation: {result.relation}\n"
+                f"JoinKeyMode: {result.join_key_mode}\n"
                 f"Action: {result.action}\n"
                 f"TargetCols: {result.target_cols}\n"
                 f"IdsMap: {result.ids_map}\n"
@@ -1254,6 +1283,7 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
         action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
         relation=relation,
+        join_key_mode=getattr(qa, "join_key_mode", None),
         ids_map=dict(getattr(qa, "ids_map", {}) or {}),
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),

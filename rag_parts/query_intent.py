@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .constants import (
     RARE_TOKEN_RE,
@@ -710,6 +710,7 @@ class QueryIntent:
     wants_list: bool = False
     wants_detail: bool = False
     output_type: Optional[str] = None
+    join_key_mode: Optional[Literal["instance", "group"]] = None
     # planner meta
     categories: List[str] = field(default_factory=list)
     planner_limit: Optional[int] = None
@@ -723,6 +724,7 @@ class QueryIntent:
         return {
             "base_route": self.base_route,
             "relation": self.relation,
+            "join_key_mode": self.join_key_mode,
             "intent": self.intent,
             "action": self.action,
             "is_id": int(self.is_id_query),
