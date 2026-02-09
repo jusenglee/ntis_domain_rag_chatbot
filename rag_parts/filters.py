@@ -73,6 +73,9 @@ class PerfFilterInput:
     join_ids: List[str] = field(default_factory=list)
 
 
+_PJT_ID_VALUE_RE = re.compile(r"^\d{8,12}$")
+
+
 # -----------------------------
 # qdrant helpers / feature detect
 # -----------------------------
@@ -746,38 +749,66 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     return qmodels.Filter(must=must)
 
 
-def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
-    """perf 컬렉션 LOOKUP/JOIN 서버단 필터.
-    - join_ids 있으면 PJT_ID 기반으로 후보군 강제 제한 (키 변형 OR)
-    - query에서 감지한 하위 유형 있으면 tag로 추가 제한
-    """
+def _dedupe_non_empty(values: List[str]) -> List[str]:
+    return list(dict.fromkeys(str(v).strip() for v in (values or []) if str(v).strip()))
+
+
+def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], query: str = "") -> "qmodels.Filter":
     if qmodels is None:
-        raise RuntimeError("qdrant_client is required for build_perf_filter()")
+        raise RuntimeError("qdrant_client is required for perf filter build")
 
     must: List[Any] = []
-    must_not: List[Any] = []
-
-    join_ids = list(spec.join_ids)
-    if join_ids:
-        primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-        key_cands: List[str] = []
-        for k in [primary, "meta_basic.pjt_id", "meta_basic.pjt_no", "pjt_id"]:
-            if k and k not in key_cands:
-                key_cands.append(k)
-
+    join_values_norm = _dedupe_non_empty(join_values)
+    if join_values_norm:
         join_any = qmodels.Filter(
             should=[
                 qmodels.FieldCondition(
                     key=k,
-                    match=make_match_any(join_ids),
+                    match=make_match_any(join_values_norm),
                 )
                 for k in key_cands
             ]
         )
         must.append(join_any)
 
-    tag_filters = pick_perf_tag_filters(spec.query)
+    tag_filters = pick_perf_tag_filters(query)
     if tag_filters:
         must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
 
-    return qmodels.Filter(must=must, must_not=must_not)
+    return qmodels.Filter(must=must, must_not=[])
+
+
+def build_perf_filter_by_pjt_id(pjt_ids: List[str], query: str = "") -> "qmodels.Filter":
+    """PJT_ID 키 계열만 사용해서 perf 필터를 생성한다."""
+    primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
+    key_cands: List[str] = []
+    for k in [primary, "meta_basic.pjt_id", "pjt_id"]:
+        if k and k not in key_cands:
+            key_cands.append(k)
+    return _build_perf_filter_for_keys(pjt_ids, key_cands, query)
+
+
+def build_perf_filter_by_pjt_no(pjt_nos: List[str], query: str = "") -> "qmodels.Filter":
+    """PJT_NO 키 계열만 사용해서 perf 필터를 생성한다."""
+    primary = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    key_cands: List[str] = []
+    for k in [primary, "meta_basic.pjt_no", "pjt_no"]:
+        if k and k not in key_cands:
+            key_cands.append(k)
+    return _build_perf_filter_for_keys(pjt_nos, key_cands, query)
+
+
+def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
+    """(호환용) join_ids 타입을 검증해 pjt_id/pjt_no 전용 API로 위임한다."""
+    join_ids = _dedupe_non_empty(spec.join_ids)
+    if not join_ids:
+        return _build_perf_filter_for_keys([], [], spec.query)
+
+    has_pjt_id = any(_PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
+    has_pjt_no = any(not _PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
+    if has_pjt_id and has_pjt_no:
+        raise ValueError("PerfFilterInput.join_ids는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
+
+    if has_pjt_id:
+        return build_perf_filter_by_pjt_id(join_ids, spec.query)
+    return build_perf_filter_by_pjt_no(join_ids, spec.query)

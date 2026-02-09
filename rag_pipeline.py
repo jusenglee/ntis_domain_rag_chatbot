@@ -85,7 +85,8 @@ from rag_parts.join import (
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
-    build_perf_filter as build_perf_filter,
+    build_perf_filter_by_pjt_id,
+    build_perf_filter_by_pjt_no,
     build_year_range_filter,
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
@@ -93,7 +94,7 @@ from rag_parts.filters import (
     build_project_id_filter,
     build_title_filter,
     JoinFilterInput,
-    PerfFilterInput, PeopleFilterInput, OrgFilterInput,
+    PeopleFilterInput, OrgFilterInput,
 )
 
 try:
@@ -3532,7 +3533,11 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
+                join_key_mode = "group" if relation in (("project", "perf"), ("org", "perf")) else "instance"
+                if join_key_mode == "group" and join_pjt_nos:
+                    hop2_filter = build_perf_filter_by_pjt_no(join_pjt_nos, q)
+                else:
+                    hop2_filter = build_perf_filter_by_pjt_id(join_pjt_ids or join_ids, q)
             else:
                 join_key_mode = "group" if hop2_col == COL_PERF else "instance"
                 hop2_filter = build_join_filter(
@@ -3691,7 +3696,7 @@ def _run_rag_with_vectors(
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
-        build_perf_filter(PerfFilterInput(query=q, join_ids=perf_followup_join_ids))
+        build_perf_filter_by_pjt_id(perf_followup_join_ids, q)
         if perf_followup_join_ids
         else None
     )
