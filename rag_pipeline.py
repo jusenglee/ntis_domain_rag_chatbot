@@ -26,7 +26,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
-from schemas import ExecutionContext, QueryPlan, StrategySpec, StrategyViolation
+from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -107,12 +107,6 @@ try:
 except Exception:
     qmodels = None
 
-
-class StrategyViolation(ValueError):
-    def __init__(self, code: str, cause: str):
-        self.code = str(code).strip() or "STRATEGY_VIOLATION"
-        self.cause = str(cause).strip() or "unknown"
-        super().__init__(f"[{self.code}] {self.cause}")
 
 def _normalize_tag_value(tag: object) -> str:
     if tag is None:
@@ -748,7 +742,7 @@ def _call_dense_retrieve_hybrid_multi(
                 f"top_k_dense={top_k_dense_int} emb_map={bool(emb_map)}"
             )
             if violation_on_contract:
-                raise StrategyViolation(code, msg)
+                raise StrategyViolation(error_code=code, reason=msg)
             raise RuntimeError(f"[{code}] {msg}")
         if not sparse_enabled:
             code = "LOOKUP_JOIN_SPARSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
@@ -757,7 +751,7 @@ def _call_dense_retrieve_hybrid_multi(
                 f"sparse_topk={sparse_topk_int} sparse_vector_name={sparse_vector_name!r}"
             )
             if violation_on_contract:
-                raise StrategyViolation(code, msg)
+                raise StrategyViolation(error_code=code, reason=msg)
             raise RuntimeError(f"[{code}] {msg}")
 
     if "client" in params and "collection_name" in params:
@@ -812,13 +806,13 @@ def _validate_lookup_join_hybrid_metrics(
     )
     if dense_queries <= 0:
         raise StrategyViolation(
-            "LOOKUP_JOIN_DENSE_METRIC_ZERO",
-            f"dense_queries must be >0 for {contract_scope}; got {dense_queries}",
+            error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
+            reason=f"dense_queries must be >0 for {contract_scope}; got {dense_queries}",
         )
     if sparse_metric <= 0:
         raise StrategyViolation(
-            "LOOKUP_JOIN_SPARSE_METRIC_ZERO",
-            f"sparse_hits/hybrid_once_hits must be >0 for {contract_scope}; got sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}",
+            error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
+            reason=f"sparse_hits/hybrid_once_hits must be >0 for {contract_scope}; got sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}",
         )
 
 def _attach_collection(p: Any, col: str) -> Any:
@@ -2691,23 +2685,23 @@ def _run_rag_with_vectors(
 
         if mode_norm != "join":
             if join_norm is not None:
-                raise StrategyViolation("join_key_mode must be null when mode is not JOIN")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join_key_mode must be null when mode is not JOIN")
             return
 
         if join_norm not in ("instance", "group"):
-            raise StrategyViolation("join mode requires join_key_mode in {'instance','group'}")
+            raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join mode requires join_key_mode in {'instance','group'}")
         if has_pjt_id and has_pjt_no:
-            raise StrategyViolation("ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
+            raise StrategyViolation(error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS", reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
         if join_norm == "instance":
             if has_pjt_no:
-                raise StrategyViolation("join_key_mode=instance only allows ids_map.pjt_id")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance only allows ids_map.pjt_id")
             if not has_pjt_id:
-                raise StrategyViolation("join_key_mode=instance requires ids_map.pjt_id")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance requires ids_map.pjt_id")
         if join_norm == "group":
             if has_pjt_id:
-                raise StrategyViolation("join_key_mode=group only allows ids_map.pjt_no")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group only allows ids_map.pjt_no")
             if not has_pjt_no:
-                raise StrategyViolation("join_key_mode=group requires ids_map.pjt_no")
+                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group requires ids_map.pjt_no")
 
     def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
         if not action_value:
@@ -2814,7 +2808,7 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        raise StrategyViolation(f"invalid planner strategy: {planner_mode_error}")
+        raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
