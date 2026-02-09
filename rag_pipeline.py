@@ -24,7 +24,7 @@ import json
 from pprint import pformat
 from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+from promotion.py import _promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
@@ -82,7 +82,6 @@ from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
     normalize_relation_hint as _normalize_relation_hint,
 )
-from rag_parts.promotion import promote_mode_from_search_hits as _promote_mode_from_search_hits
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
@@ -1643,6 +1642,14 @@ def _hydrate_points_payload(
     - 내부 메타(_collection/_rrf/_final_*)는 보존하지 않고 DB payload로 덮어씀
     - include_fields는 호환용으로만 두고 무시
     """
+    _INTERNAL_KEYS = {
+        "_collection", "_rrf",
+        "_raw_rrf","_raw_kw","_raw_f","_raw_family","_raw_tag",
+        "_final_rrf","_final_kw","_final_f","_final_family","_final_tag",
+        "_final_total","_legacy_total",
+    }
+
+
     if not points:
         return
 
@@ -3312,8 +3319,8 @@ def _run_rag_with_vectors(
             if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                 log_kv("RAG.PERF.FOLLOWUP.MISSING_KEYS", **missing)
 
-        join_ids, join_nos = _extract_pjt_ids(hop1_top, max_ids=50, include_pjt_no_fallback=True)
-        join_keys = list(dict.fromkeys(join_ids + join_nos))
+        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        join_keys = list(dict.fromkeys(join_ids))
         log_kv(
             "RAG.PERF.FOLLOWUP.JOIN_IDS",
             join_ids_preview=join_keys[:10],
@@ -3367,20 +3374,16 @@ def _run_rag_with_vectors(
                 join_relation = None
 
         if join_relation:
-            hop1_keep = int(os.getenv("RAG_HOP1_KEEP", "5"))
+            hop1_keep_env = int(os.getenv("RAG_HOP1_KEEP", "5"))
+            planner_limit = int(planner_limit or 0)
+            hop1_keep = max(1, min(hop1_keep_env, planner_limit)) if planner_limit > 0 else hop1_keep_env
+
             hop2_keep = int(os.getenv("RAG_HOP2_KEEP", "10"))
             hop1_k_base = int(os.getenv("RAG_HOP1_TOPK_BASE", "250"))
             hop2_k_base = int(os.getenv("RAG_HOP2_TOPK_BASE", "300"))
 
             # Hop1 query sanitize (people/org head에서 잡음 제거)
             hop1_q = q
-            if hop1_kind in ("people", "org"):
-                remove_terms = list(getattr(it, 'remove_terms_for_head', []) or [])
-                if remove_terms:
-                    hop1_q2 = _sanitize_query_by_terms(q, remove_terms=remove_terms)
-                    if hop1_q2:
-                        hop1_q = hop1_q2
-
             hop2_q = q
 
             join_ids: List[str] = []
@@ -3543,13 +3546,6 @@ def _run_rag_with_vectors(
                     tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
                 )
 
-                if head_terms:
-                    head_filtered = [p for p in hop1_reranked if _must_contain_terms(p, head_terms)]
-                    if head_filtered:
-                        min_keep = max(2, min(int(hop1_keep), 5))
-                        if len(head_filtered) >= min_keep:
-                            hop1_reranked = head_filtered
-
                 if len(hop1_reranked) > ctx_hard_limit:
                     hop1_reranked = hop1_reranked[:ctx_hard_limit]
 
@@ -3581,11 +3577,7 @@ def _run_rag_with_vectors(
                     if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                         log_kv("RAG.JOIN.HOP1.MISSING_KEYS", **missing)
 
-                join_pjt_ids = _extract_pjt_ids(
-                    hop1_top,
-                    max_ids=50,
-                    include_pjt_no_fallback=True,
-                )
+                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
                 join_ids = list(dict.fromkeys(join_pjt_ids))
 
                 log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))

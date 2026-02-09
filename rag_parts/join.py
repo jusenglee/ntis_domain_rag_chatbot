@@ -39,7 +39,6 @@ def extract_pjt_ids(
     points: Iterable[Any],
     *,
     max_ids: int = 80,
-    include_pjt_no_fallback: bool = False,
 ) -> List[str] | Tuple[List[str], List[str]]:
     """
     Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다.
