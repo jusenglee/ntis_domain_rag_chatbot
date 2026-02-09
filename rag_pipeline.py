@@ -715,6 +715,7 @@ def _call_dense_retrieve_hybrid_multi(
         timings_out: Dict[str, float],
         require_hybrid_both_sides: bool = False,
         contract_scope: Optional[str] = None,
+        violation_on_contract: bool = False,
 ) -> Dict[str, Any]:
     params = set(_DENSE_MULTI_SIG.parameters.keys()) if _DENSE_MULTI_SIG else set()
     common_kwargs = {
@@ -734,20 +735,30 @@ def _call_dense_retrieve_hybrid_multi(
         common_kwargs["contract_scope"] = contract_scope
 
     sparse_vector_name_eff = str(sparse_vector_name or "").strip()
-    sparse_enabled = bool(sparse_topk and int(sparse_topk) > 0 and sparse_vector_name_eff)
-    dense_enabled = bool(int(top_k_dense) > 0 and bool(emb_map))
+    sparse_topk_int = int(sparse_topk or 0)
+    sparse_enabled = bool(sparse_topk_int > 0 and sparse_vector_name_eff)
+    top_k_dense_int = int(top_k_dense or 0)
+    dense_enabled = bool(top_k_dense_int > 0 and bool(emb_map))
 
     if require_hybrid_both_sides:
         if not dense_enabled:
-            raise RuntimeError(
-                f"[RAG.CONTRACT] dense disabled for {contract_scope or collection}: "
-                f"top_k_dense={top_k_dense} emb_map={bool(emb_map)}"
+            code = "LOOKUP_JOIN_DENSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
+            msg = (
+                f"dense disabled for {contract_scope or collection}: "
+                f"top_k_dense={top_k_dense_int} emb_map={bool(emb_map)}"
             )
+            if violation_on_contract:
+                raise StrategyViolation(code, msg)
+            raise RuntimeError(f"[{code}] {msg}")
         if not sparse_enabled:
-            raise RuntimeError(
-                f"[RAG.CONTRACT] sparse disabled for {contract_scope or collection}: "
-                f"sparse_topk={sparse_topk} sparse_vector_name={sparse_vector_name!r}"
+            code = "LOOKUP_JOIN_SPARSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
+            msg = (
+                f"sparse disabled for {contract_scope or collection}: "
+                f"sparse_topk={sparse_topk_int} sparse_vector_name={sparse_vector_name!r}"
             )
+            if violation_on_contract:
+                raise StrategyViolation(code, msg)
+            raise RuntimeError(f"[{code}] {msg}")
 
     if "client" in params and "collection_name" in params:
         return dense_retrieve_hybrid_multi(
@@ -778,6 +789,37 @@ def _call_dense_retrieve_hybrid_multi(
         query_filter=query_filter,
         **common_kwargs,
     )
+
+def _validate_lookup_join_hybrid_metrics(
+    *,
+    mode: str,
+    contract_scope: str,
+    timings: Mapping[str, Any],
+) -> None:
+    if str(mode).strip().lower() not in ("lookup", "join"):
+        return
+    dense_queries = float(timings.get("dense_queries", 0.0) or 0.0)
+    sparse_hits = float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+    hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
+    sparse_metric = max(sparse_hits, hybrid_once_hits)
+    log_kv(
+        "RAG.LOOKUP_JOIN.HYBRID.METRICS",
+        mode=mode,
+        contract_scope=contract_scope,
+        dense_queries=dense_queries,
+        sparse_hits=sparse_hits,
+        hybrid_once_hits=hybrid_once_hits,
+    )
+    if dense_queries <= 0:
+        raise StrategyViolation(
+            "LOOKUP_JOIN_DENSE_METRIC_ZERO",
+            f"dense_queries must be >0 for {contract_scope}; got {dense_queries}",
+        )
+    if sparse_metric <= 0:
+        raise StrategyViolation(
+            "LOOKUP_JOIN_SPARSE_METRIC_ZERO",
+            f"sparse_hits/hybrid_once_hits must be >0 for {contract_scope}; got sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}",
+        )
 
 def _attach_collection(p: Any, col: str) -> Any:
     if p is None or not col:
@@ -3259,13 +3301,14 @@ def _run_rag_with_vectors(
             lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=min(hop1_k_base, 80),
-            top_k_dense=(topk_dense if emb_map_h1 else 0),
+            top_k_dense=topk_dense,
             top_k_lex_cand=hop1_k_base,
             top_k_lex=min(hop1_k_base, 80),
             query_filter=hop1_filter,
             timings_out=local_timings_h1,
             require_hybrid_both_sides=True,
             contract_scope="join_hop1_followup",
+            violation_on_contract=True,
         )
         _apply_dense_threshold(
             sr1,
@@ -3520,13 +3563,14 @@ def _run_rag_with_vectors(
                     lexical_fields=preset.lexical_fields,
                     sparse_vector_name=sparse_vector_name_eff,
                     sparse_topk=min(hop1_k_base, 80),
-                    top_k_dense=(topk_dense if emb_map_h1 else 0),
+                    top_k_dense=topk_dense,
                     top_k_lex_cand=hop1_k_base,
                     top_k_lex=min(hop1_k_base, 80),
                     query_filter=hop1_filter,  # ✅ 실제 적용
                     timings_out=local_timings_h1,
                     require_hybrid_both_sides=True,
                     contract_scope="join_hop1",
+                    violation_on_contract=True,
                 )
                 _apply_dense_threshold(
                     sr1,
@@ -3615,6 +3659,11 @@ def _run_rag_with_vectors(
                     sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
                     hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
                     **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
+                )
+                _validate_lookup_join_hybrid_metrics(
+                    mode="join",
+                    contract_scope=f"join_hop1:{hop1_col}",
+                    timings=local_timings_h1,
                 )
 
             # Hop1 context
@@ -3706,13 +3755,14 @@ def _run_rag_with_vectors(
                 lexical_fields=preset.lexical_fields,
                 sparse_vector_name=sparse_vector_name_eff,
                 sparse_topk=min(hop2_k_base, 120),
-                top_k_dense=(topk_dense if emb_map_h2 else 0),
+                top_k_dense=topk_dense,
                 top_k_lex_cand=hop2_k_base,
                 top_k_lex=min(hop2_k_base, 120),
                 query_filter=hop2_filter,  # ✅ JOIN 필터 강제 적용
                 timings_out=local_timings_h2,
                 require_hybrid_both_sides=True,
                 contract_scope="join_hop2",
+                violation_on_contract=True,
             )
             _apply_dense_threshold(
                 sr2,
@@ -3766,6 +3816,11 @@ def _run_rag_with_vectors(
                 sparse_hits=float(local_timings_h2.get("lexical_scored", 0.0)),
                 hybrid_once_hits=float(local_timings_h2.get("hybrid_once_hits", 0.0)),
                 **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
+            )
+            _validate_lookup_join_hybrid_metrics(
+                mode="join",
+                contract_scope=f"join_hop2:{hop2_col}",
+                timings=local_timings_h2,
             )
 
             # Hop2 context
@@ -4057,14 +4112,22 @@ def _run_rag_with_vectors(
             lexical_fields=preset.lexical_fields,
             sparse_vector_name=sparse_vector_name_eff,
             sparse_topk=sparse_topk_eff,
-            top_k_dense=use_dense_k,
+            top_k_dense=topk_dense if plan.mode == "lookup" else use_dense_k,
             top_k_lex_cand=topk_lex_cand,
             top_k_lex=topk_lex,
             query_filter=qfilter,  # ✅ plan 기반 적용
             timings_out=local_timings,
             require_hybrid_both_sides=(plan.mode == "lookup"),
             contract_scope=f"{plan.mode}:{col}",
+            violation_on_contract=(plan.mode == "lookup"),
         )
+        if plan.mode in ("lookup", "join"):
+            _validate_lookup_join_hybrid_metrics(
+                mode=plan.mode,
+                contract_scope=f"{plan.mode}:{col}",
+                timings=local_timings,
+            )
+
         _apply_dense_threshold(
             sr,
             use_dense_threshold=use_dense_threshold_policy,
