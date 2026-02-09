@@ -24,7 +24,7 @@ import json
 from pprint import pformat
 from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from promotion.py import _promote_mode_from_search_hits
+from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
