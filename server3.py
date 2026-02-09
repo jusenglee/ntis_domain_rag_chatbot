@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dataclasses import replace
 
 # Redis
@@ -92,6 +92,7 @@ SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "10
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
+PLANNER_SCHEMA_VERSION = "v2"
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -175,7 +176,7 @@ Action = Literal["topic", "list", "detail", "stats", "download"]
 # --- Pydantic Schemas for Structured Output ---
 class QuestionAnalysisV2(BaseModel):
     """질문 분석 결과(v2 Planner Schema)"""
-    strategy_version: Literal["v2"] = "v2"
+    strategy_version: str = Field(default=PLANNER_SCHEMA_VERSION, validate_default=True)
     mode: Mode
     head: Head
     action: Action
@@ -190,6 +191,13 @@ class QuestionAnalysisV2(BaseModel):
     )
     retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
+
+    @field_validator("strategy_version")
+    @classmethod
+    def validate_strategy_version(cls, value: str) -> str:
+        if value != PLANNER_SCHEMA_VERSION:
+            raise ValueError(f"strategy_version must be {PLANNER_SCHEMA_VERSION!r}")
+        return value
 
 
 QuestionAnalysis = QuestionAnalysisV2
@@ -417,7 +425,7 @@ async def _run_question_analysis(
         ====================
         1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
         2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        3) strategy_version은 항상 "v2"로 고정합니다.
+        3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
         4) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, target_cols, ids_map, filters, limit, retrieval_query, confidence
         5) 값이 없으면 null/[]/0.0 등 기본값을 사용합니다.
@@ -561,7 +569,7 @@ async def _run_question_analysis(
         [필수 출력 JSON 스키마]
         ====================
         반드시 아래 키를 모두 포함한 JSON 객체만 출력:
-        - strategy_version: "v2"
+        - strategy_version: "{PLANNER_SCHEMA_VERSION}"
         - mode: "SEARCH" | "LOOKUP" | "JOIN"
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
@@ -615,7 +623,7 @@ async def _run_question_analysis(
     except Exception as e:
         logger.error(f"[PLANNER.V2] parse failed: {e}")
         return QuestionAnalysis(
-            strategy_version="v2",
+            strategy_version=PLANNER_SCHEMA_VERSION,
             mode="SEARCH",
             head="support",
             action="topic",

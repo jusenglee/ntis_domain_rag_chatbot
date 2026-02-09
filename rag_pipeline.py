@@ -2811,7 +2811,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.PRESET/PLAN.PRE",
-        strategy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_STRATEGY_VERSION,
         preset_key=getattr(preset, "strategy_key", None),
         topk_spec=topk_spec,
         ctx_budget=int(ctx_budget),
@@ -3052,7 +3052,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.FILTERS",
-        strategy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_STRATEGY_VERSION,
         org_terms=org_terms,
         org_role=org_role,
         people_terms=people_terms,
@@ -3084,7 +3084,7 @@ def _run_rag_with_vectors(
     strategy_key = build_strategy_key(action, plan.mode)
     strategy_summary = {
         "mode": mode,
-        "strategy_version": SEARCH_STRATEGY_VERSION,
+        "policy_version": SEARCH_STRATEGY_VERSION,
         "strategy_key": strategy_key,
         "policy_reason": policy_reason,
         "planner": {
@@ -3153,7 +3153,7 @@ def _run_rag_with_vectors(
     log_kv(
         "RAG.PRESET/PLAN.POST",
         strategy_summary=strategy_summary,
-        strategy_version=SEARCH_STRATEGY_VERSION,
+        policy_version=SEARCH_STRATEGY_VERSION,
         strategy_key=strategy_key,
         mode=plan.mode,
         base_route=plan.base_route,
