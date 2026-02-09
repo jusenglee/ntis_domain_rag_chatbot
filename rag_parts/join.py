@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # 흔한 중첩 경로 후보 (payload 안의 meta_basic/meta_detail dict)
 _META_KEYS = ("meta_basic", "meta_detail")
-TOP_PJT_ID_KEYS = ("pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id")
+TOP_PJT_ID_KEYS = ("pjt_id")
 FALLBACK_PJT_NO_KEYS = ("pjt_no", "meta_basic.pjt_no", "meta_detail.pjt_no")
 
 
@@ -94,19 +94,13 @@ def extract_pjt_ids(
             continue
 
         pid = None
-        for key_path in TOP_PJT_ID_KEYS:
-            pid = _normalize_pjt_id(_get_path_value(payload, key_path))
-            if pid:
-                break
+        pid = payload.get("pjt_id")
 
         if pid:
             if pid in seen_pjt_id:
                 if include_pjt_no_fallback:
                     pjt_no = None
-                    for key_path in FALLBACK_PJT_NO_KEYS:
-                        pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
-                        if pjt_no:
-                            break
+                    pjt_no = payload.get("pjt_no")
                     if pjt_no and pjt_no not in seen_pjt_no:
                         pjt_nos.append(pjt_no)
                         seen_pjt_no.add(pjt_no)
@@ -116,7 +110,7 @@ def extract_pjt_ids(
             if include_pjt_no_fallback:
                 pjt_no = None
                 for key_path in FALLBACK_PJT_NO_KEYS:
-                    pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
+                    pjt_no =  payload.get("pjt_no")
                     if pjt_no:
                         break
                 if pjt_no and pjt_no not in seen_pjt_no:
@@ -128,10 +122,7 @@ def extract_pjt_ids(
 
         if include_pjt_no_fallback:
             pjt_no = None
-            for key_path in FALLBACK_PJT_NO_KEYS:
-                pjt_no = _normalize_pjt_id(_get_path_value(payload, key_path))
-                if pjt_no:
-                    break
+            pjt_no =  payload.get("pjt_no")
             if pjt_no and pjt_no not in seen_pjt_no:
                 pjt_nos.append(pjt_no)
                 seen_pjt_no.add(pjt_no)

@@ -31,6 +31,7 @@ from langgraph.graph.message import add_messages
 
 # --- User Modules ---
 from rag_store import build_rag_objects
+from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
@@ -84,7 +85,7 @@ setup_file_logging()
 templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
-redis_client: Optional[redis.Redis] = None
+kv_store: Optional[KVStore] = None
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
@@ -954,10 +955,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"[원본 질문]\n{state.messages[-1].content}"
     )
 
-    # log_section(
-    #     f"FINAL PROMPT ({model_name})",
-    #     f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
-    # )
+    log_section(
+        f"FINAL PROMPT ({model_name})",
+        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
+    )
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
@@ -1017,22 +1018,19 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     serialized_hist = _serialize_history(trimmed_history)
 
-    if redis_client:
-        try:
-            await redis_client.set(
-                f"conversation:{cid}:history",
-                json.dumps(serialized_hist, ensure_ascii=False),
-                ex=REDIS_TTL,
-            )
+    if kv_store:
+        await kv_store.set(
+            f"conversation:{cid}:history",
+            json.dumps(serialized_hist, ensure_ascii=False),
+            ex=REDIS_TTL,
+        )
 
-            if state.context:
-                await redis_client.set(
-                    f"conversation:{cid}:last_context",
-                    json.dumps(state.context, ensure_ascii=False),
-                    ex=REDIS_TTL,
-                )
-        except Exception as e:
-            logger.error("Redis Save Error: %s", e, exc_info=True)
+    if state.context:
+        await kv_store.set(
+            f"conversation:{cid}:last_context",
+            json.dumps(state.context, ensure_ascii=False),
+            ex=REDIS_TTL,
+        )
 
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
@@ -1056,18 +1054,15 @@ async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessa
     loaded_history: List[BaseMessage] = []
     ctx_list: List[Dict[str, Any]] = []
 
-    if redis_client:
-        try:
-            raw_hist = await redis_client.get(f"conversation:{conversation_id}:history")
-            hist_list = _safe_json_loads(raw_hist)
-            loaded_history = _deserialize_history(hist_list)
+    if kv_store:
+        raw_hist = await kv_store.get(f"conversation:{conversation_id}:history")
+    hist_list = _safe_json_loads(raw_hist)
+    loaded_history = _deserialize_history(hist_list)
 
-            raw_ctx = await redis_client.get(f"conversation:{conversation_id}:last_context")
-            ctx_payload = _safe_json_loads(raw_ctx)
-            if isinstance(ctx_payload, list):
-                ctx_list = ctx_payload
-        except Exception as e:
-            logger.error("Redis Load Error: %s", e, exc_info=True)
+    raw_ctx = await kv_store.get(f"conversation:{conversation_id}:last_context")
+    ctx_payload = _safe_json_loads(raw_ctx)
+    if isinstance(ctx_payload, list):
+        ctx_list = ctx_payload
 
     return loaded_history, ctx_list
 
@@ -1275,7 +1270,7 @@ def build_advanced_workflow():
     workflow.add_node("load_memory", node_load_memory)
     workflow.add_node("rule_precheck", node_rule_precheck)
     workflow.add_node("analyze_question", node_analyze_question)
-    workflow.add_node("knowledge_sufficiency", node_knowledge_sufficiency)
+    workflow.add_node("judge_knowledge_sufficiency", node_knowledge_sufficiency)
     workflow.add_node("join_analysis", node_join_analysis)
 
     # 두 모델 각각의 Fast Answer 노드
@@ -1310,8 +1305,8 @@ def build_advanced_workflow():
         }
     )
 
-    workflow.add_edge("analyze_question", "knowledge_sufficiency")
-    workflow.add_edge("knowledge_sufficiency", "join_analysis")
+    workflow.add_edge("analyze_question", "judge_knowledge_sufficiency")
+    workflow.add_edge("judge_knowledge_sufficiency", "join_analysis")
 
     def route_after_join_analysis(state: AgentState):
         ks = state.knowledge_sufficiency
@@ -1964,31 +1959,60 @@ def sanitize_llm_json(msg) -> str:
 # --- Lifespan & App Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global redis_client
+    global kv_store
 
-    # RAG 초기화
     build_rag_objects()
 
-    # Redis 연결
-    try:
-        redis_client = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-        await redis_client.ping()
-        logger.info("✅ Redis connected: %s", REDIS_URL)
-    except Exception as e:
-        redis_client = None
-        logger.error("❌ Redis connection failed: %s", e, exc_info=True)
+    backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
+    # MEMORY_BACKEND=redis|memory|file
+
+    if backend == "redis":
+        try:
+            r = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            await r.ping()
+            # Redis를 KVStore처럼 쓰기 위한 얇은 어댑터
+            class RedisKVStore(KVStore):
+                def __init__(self, client):
+                    self.client = client
+                async def get(self, key: str) -> Optional[str]:
+                    return await self.client.get(key)
+                async def set(self, key: str, value: str, ex: Optional[int] = None) -> None:
+                    await self.client.set(key, value, ex=ex)
+                async def ping(self) -> bool:
+                    try:
+                        await self.client.ping()
+                        return True
+                    except Exception:
+                        return False
+                async def close(self) -> None:
+                    await self.client.close()
+
+            kv_store = RedisKVStore(r)
+            logger.info("✅ Redis connected: %s", REDIS_URL)
+        except Exception as e:
+            kv_store = None
+            logger.error("❌ Redis connection failed: %s", e, exc_info=True)
+
+    elif backend == "memory":
+        kv_store = MemoryKVStore()
+        logger.info("✅ MemoryKVStore enabled")
+
+    elif backend == "file":
+        kv_store = FileKVStore(root_dir=os.getenv("LOCAL_KV_DIR", "local_kvstore"))
+        logger.info("✅ FileKVStore enabled: %s", os.getenv("LOCAL_KV_DIR", "local_kvstore"))
+
+    else:
+        kv_store = MemoryKVStore()
+        logger.warning("⚠️ Unknown MEMORY_BACKEND=%s, fallback to MemoryKVStore", backend)
 
     try:
         workflow = build_advanced_workflow().compile()
         app.state.graph = workflow
         logger.info("✅ Advanced Dual-Model Pipeline compiled successfully")
         yield
-    except Exception as e:
-        logger.error(f"❌ Startup Error: {e}")
-        raise
     finally:
-        if redis_client:
-            await redis_client.close()
+        if kv_store:
+            await kv_store.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -2138,18 +2162,13 @@ async def query_debug(payload: QueryRequest):
 
 @app.get("/health")
 async def health_check():
-    """헬스 체크 엔드포인트"""
-    redis_ok = False
-    if redis_client:
-        try:
-            await redis_client.ping()
-            redis_ok = True
-        except Exception:
-            redis_ok = False
-
+    ok = False
+    if kv_store:
+        ok = await kv_store.ping()
     return {
         "status": "healthy",
-        "redis": "connected" if redis_ok else "disconnected",
+        "memory_backend": os.getenv("MEMORY_BACKEND", "redis"),
+        "kv": "connected" if ok else "disconnected",
         "graph": "compiled" if hasattr(app.state, "graph") else "not_ready"
     }
 

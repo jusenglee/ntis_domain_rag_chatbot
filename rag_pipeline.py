@@ -3528,7 +3528,7 @@ def _run_rag_with_vectors(
                     base_route=("perf" if hop1_kind == "perf" else base_route),
                     mode="search",
                     keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
-                    tag_boost=float(getattr(preset, "tag_boost", 0.0)),
+                    tag_boost=float(getattr(preset, "tag_boost", 0.2)),
                     tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
                 )
 
