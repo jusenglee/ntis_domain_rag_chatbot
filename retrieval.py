@@ -68,20 +68,28 @@ def _peek(points: Any, n: int = 3) -> List[Any]:
     return out
 
 
-def _get_sparse_encoder(model_name: str):
+def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
     """Per-model cached SparseTextEmbedding encoder (thread-safe)."""
-    # fastembed import는 여기서 한 번만 시도
     from fastembed import SparseTextEmbedding  # type: ignore
 
+    # ❗ model_id 검증 (경로 차단)
+    if "/" not in model_id or model_id.startswith("/"):
+        raise ValueError(
+            f"Invalid sparse model_id (must be like 'Qdrant/bm25'): {model_id}"
+        )
+
     with _SPARSE_LOCK:
-        enc = _SPARSE_ENCODERS.get(model_name)
+        enc = _SPARSE_ENCODERS.get(model_id)
         if enc is None:
-            enc = SparseTextEmbedding(model_name=model_name)
-            _SPARSE_ENCODERS[model_name] = enc
+            enc = SparseTextEmbedding(
+                model_name=model_id,
+                cache_dir="/workspace/Models",
+            )
+            _SPARSE_ENCODERS[model_id] = enc
         return enc
 
 
-def _encode_sparse_query(text: str, *, model_name: str) -> Optional[models.SparseVector]:
+def _encode_sparse_query(text: str, *, model_id: str) -> Optional[models.SparseVector]:
     """
     Encode query text into Qdrant SparseVector using fastembed.
 
@@ -93,7 +101,7 @@ def _encode_sparse_query(text: str, *, model_name: str) -> Optional[models.Spars
         return None
 
     try:
-        enc = _get_sparse_encoder(model_name)
+        enc = _get_sparse_encoder(model_id)
         # fastembed expects list[str] and yields SparseEmbedding (indices/values)
         emb = next(enc.embed([text]))
         idx = emb.indices.tolist() if hasattr(emb.indices, "tolist") else list(emb.indices)
@@ -184,8 +192,8 @@ def _qdrant_sparse_search(
     if not sparse_vector_name:
         return []
 
-    model_name = (os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25") or "").strip() or "Qdrant/bm25"
-    sv = _encode_sparse_query(query_text, model_name=model_name)
+    model_id = os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")
+    sv = _encode_sparse_query(query_text, model_id=model_id)
     if sv is None:
         logger.warning(
             "[retrieval] sparse_query skipped: encoder unavailable or empty query col=%s using=%s",
@@ -346,8 +354,8 @@ def _qdrant_hybrid_query_once(
             )
             return None
 
-    model_name = str(os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
-    sv = _encode_sparse_query(query_text, model_name=model_name)
+    model_id = os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")
+    sv = _encode_sparse_query(query_text, model_id=model_id)
     if sv is None:
         return None
     if supports_using:
