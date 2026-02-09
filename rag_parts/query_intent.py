@@ -575,12 +575,8 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
 
     wants_perf_to_project = has_perf and (has_project or any(c in t for c in PERF_TO_PROJECT_CUES))
 
-    if base_route == "people":
-        # 사람 → 과제/성과 (JOIN 비활성화: prtcp_mp 필터로 처리)
-        return None
-
-    if base_route == "org":
-        # 기관 → 과제/성과 (JOIN 비활성화: prtcp_org 필터로 처리)
+    if base_route in ("people", "org"):
+        # 사람/기관 → 과제/성과는 relation JOIN 대신 단일 컬렉션 필터를 우선
         return None
 
     if base_route == "project":
@@ -680,6 +676,75 @@ def _strip_non_join_relation(relation: Optional[Tuple[str, str]]) -> Optional[Tu
     if any(part in ("people", "org") for part in relation):
         return None
     return relation
+
+
+def _normalize_base_route_for_people_org_project_perf(
+    *,
+    base_route: str,
+    has_people: bool,
+    has_org: bool,
+    has_project: bool,
+    has_perf: bool,
+    wants_list: bool,
+) -> str:
+    """
+    사람/기관 + 과제 + 성과 신호가 동시에 있으면 head를 project/perf로 정규화한다.
+    - 성과 목록 요청이면 perf
+    - 그 외에는 project
+    """
+    if base_route not in ("people", "org"):
+        return base_route
+    if not ((has_people or has_org) and has_project and has_perf):
+        return base_route
+    if wants_list:
+        return "perf"
+    return "project"
+
+
+def _resolve_action(
+    *,
+    base_route: str,
+    relation: Optional[Tuple[str, str]],
+    wants_count: bool,
+    wants_list: bool,
+    wants_detail: bool,
+    intent: str,
+    ids_map: Dict[str, List[str]],
+    is_id_query: bool,
+) -> str:
+    if base_route == "support":
+        return "support"
+    if relation is not None:
+        if wants_count and not wants_list:
+            return "stats"
+        if wants_list:
+            return "list"
+        if wants_detail:
+            return "detail"
+        return "relation"
+
+    exact_id = bool(
+        ids_map.get("pjt_id")
+        or ids_map.get("pjt_no")
+        or ids_map.get("rst_id")
+        or ids_map.get("doi")
+        or ids_map.get("issn")
+        or ids_map.get("patent_reg_no")
+        or ids_map.get("biz_no")
+    )
+    if exact_id:
+        return "id_exact"
+    if is_id_query:
+        return "id_fuzzy"
+    if wants_count:
+        return "stats"
+    if wants_list or intent == "filter":
+        return "list"
+    if intent == "topic":
+        return "topic"
+    if wants_detail:
+        return "detail"
+    return "content"
 
 
 @dataclass
@@ -1013,6 +1078,19 @@ def _classify_query_heuristic(
         org_terms=org_terms,
     )
 
+    wants_count = any(c in tl for c in COUNT_CUES)
+    wants_list = any(c in tl for c in LIST_CUES)
+    wants_detail = any(c in tl for c in DETAIL_CUES)
+
+    base_route = _normalize_base_route_for_people_org_project_perf(
+        base_route=base_route,
+        has_people=has_people,
+        has_org=has_org,
+        has_project=has_project,
+        has_perf=has_perf,
+        wants_list=wants_list,
+    )
+
     relation = pick_relation(
         q, base_route,
         has_project=has_project,
@@ -1029,45 +1107,25 @@ def _classify_query_heuristic(
         relation=relation,
     )
 
+    if (has_people or has_org) and has_project and has_perf:
+        relation = ("project", "perf")
+
     intent = pick_structured_intent(base_route, q, is_id_query=is_id_query)
 
     # tag filters
     project_tag_filters = pick_project_tag_filters(q) if base_route in ("project", "people", "org") else []
     perf_tag_filters = pick_perf_tag_filters(q) if base_route in ("perf", "project") else []
 
-    # user ask signals
-    wants_count = any(c in tl for c in COUNT_CUES)
-    wants_list = any(c in tl for c in LIST_CUES)
-    wants_detail = any(c in tl for c in DETAIL_CUES)
-
-    # action (finer)
-    if base_route == "support":
-        action = "support"
-    elif relation is not None:
-        if wants_count and not wants_list:
-            action = "stats"
-        elif wants_list:
-            action = "list"
-        elif wants_detail:
-            action = "detail"
-        else:
-            action = "relation"
-    else:
-        exact_id = bool(ids_map.get("pjt_id") or ids_map.get("pjt_no") or ids_map.get("rst_id") or ids_map.get("doi") or ids_map.get("issn") or ids_map.get("patent_reg_no") or ids_map.get("biz_no"))
-        if exact_id:
-            action = "id_exact"
-        elif is_id_query:
-            action = "id_fuzzy"
-        elif wants_count:
-            action = "stats"
-        elif wants_list or intent == "filter":
-            action = "list"
-        elif intent == "topic":
-            action = "topic"
-        elif wants_detail:
-            action = "detail"
-        else:
-            action = "content"
+    action = _resolve_action(
+        base_route=base_route,
+        relation=relation,
+        wants_count=wants_count,
+        wants_list=wants_list,
+        wants_detail=wants_detail,
+        intent=intent,
+        ids_map=ids_map,
+        is_id_query=is_id_query,
+    )
 
     ids_flat = flatten_ids(ids_map)
 
@@ -1161,6 +1219,9 @@ def classify_query(
     if not categories:
         categories = _fallback_categories_for_route(base_route)
 
+    has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
+    has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
+
     relation = _parse_relation(plan.get("relation"))
     if relation not in RELATION_ROUTE_TABLES:
         relation = None
@@ -1173,6 +1234,10 @@ def classify_query(
     wants_count = bool(plan.get("wants_count", False))
     wants_list = bool(plan.get("wants_list", False))
     wants_detail = bool(plan.get("wants_detail", False))
+    if not (wants_count or wants_list or wants_detail):
+        wants_count = any(c in tl for c in COUNT_CUES)
+        wants_list = any(c in tl for c in LIST_CUES)
+        wants_detail = any(c in tl for c in DETAIL_CUES)
     output_type = str(plan.get("output_type") or "").strip().lower() or None
     if output_type not in ("stats", "list", "detail", "relation", "summary"):
         output_type = None
@@ -1180,42 +1245,6 @@ def classify_query(
     action = str(plan.get("action") or "").strip().lower()
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
         action = ""
-    if not action or (action == "relation" and relation is None):
-        if base_route == "support":
-            action = "support"
-        elif relation is not None:
-            if wants_count and not wants_list:
-                action = "stats"
-            elif wants_list:
-                action = "list"
-            elif wants_detail:
-                action = "detail"
-            else:
-                action = "relation"
-        else:
-            exact_id = bool(
-                ids_map.get("pjt_id")
-                or ids_map.get("pjt_no")
-                or ids_map.get("rst_id")
-                or ids_map.get("doi")
-                or ids_map.get("issn")
-                or ids_map.get("patent_reg_no")
-                or ids_map.get("biz_no")
-            )
-            if exact_id:
-                action = "id_exact"
-            elif ids_flat:
-                action = "id_fuzzy"
-            elif wants_count:
-                action = "stats"
-            elif wants_list or intent == "filter":
-                action = "list"
-            elif intent == "topic":
-                action = "topic"
-            elif wants_detail:
-                action = "detail"
-            else:
-                action = "content"
 
     people_terms = _normalize_str_list(plan.get("people_terms") or plan.get("researchers"))
     gender_terms = _normalize_str_list(plan.get("gender_terms"))
@@ -1232,11 +1261,23 @@ def classify_query(
     if org_role == "affiliation" and not people_terms:
         people_terms = _extract_people_terms_for_affiliation(q)
 
+    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
+    has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+
     if people_terms:
         if any(keyword in tl for keyword in ("과제", "프로젝트", "project")):
             base_route = "project"
         elif "성과" in tl:
             base_route = "perf"
+
+    base_route = _normalize_base_route_for_people_org_project_perf(
+        base_route=base_route,
+        has_people=has_people,
+        has_org=has_org,
+        has_project=has_project,
+        has_perf=has_perf,
+        wants_list=wants_list,
+    )
 
     project_tag_filters = _normalize_tag_filters(plan.get("project_tag_filters"), PROJECT_TAGS)
     perf_tag_filters = _normalize_tag_filters(plan.get("perf_tag_filters"), PERF_TAGS)
@@ -1263,6 +1304,20 @@ def classify_query(
         relation=relation,
     )
     relation = _strip_non_join_relation(relation)
+    if (has_people or has_org) and has_project and has_perf:
+        relation = ("project", "perf")
+
+    if not action or (action == "relation" and relation is None):
+        action = _resolve_action(
+            base_route=base_route,
+            relation=relation,
+            wants_count=wants_count,
+            wants_list=wants_list,
+            wants_detail=wants_detail,
+            intent=intent,
+            ids_map=ids_map,
+            is_id_query=bool(ids_flat),
+        )
 
     people_terms_match_mode = "or"
     people_terms_min_should = 1 if len(people_terms) >= 2 else None
