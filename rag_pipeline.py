@@ -1857,8 +1857,70 @@ def _run_rag_with_vectors(
         except Exception:
             return default
 
+    def _schema_fail_fast(scope: str, message: str) -> None:
+        strict = str(os.getenv("RAG_FAIL_FAST_SCHEMA", "0")).strip().lower() in ("1", "true", "yes", "y")
+        log_msg = f"[RAG] {scope} schema mismatch: {message}"
+        if strict:
+            logger.error(log_msg)
+            raise ValueError(log_msg)
+        logger.warning(log_msg)
+
+    def _extract_payload_normalized_intent(payload: Any) -> Any:
+        if payload is None:
+            return None
+        if isinstance(payload, Mapping):
+            allowed = {"normalized_intent"}
+            unknown = sorted(str(k) for k in payload.keys() if str(k) not in allowed)
+            if unknown:
+                _schema_fail_fast("intent_payload.v2", f"unknown fields={unknown}")
+                return None
+            return payload.get("normalized_intent")
+
+        normalized = getattr(payload, "normalized_intent", None)
+        has_query_intent = getattr(payload, "query_intent", None) is not None
+        has_raw_intent = getattr(payload, "raw_intent", None) is not None
+        if has_query_intent or has_raw_intent:
+            _schema_fail_fast("intent_payload.v2", "query_intent/raw_intent is no longer supported")
+        return normalized
+
+    def _normalize_hint_payload(raw: Any) -> Dict[str, Any]:
+        if raw is None:
+            return {}
+        if isinstance(raw, Mapping):
+            source = dict(raw)
+        else:
+            source = {
+                "mode": getattr(raw, "mode", None),
+                "head": getattr(raw, "head", None),
+                "action": getattr(raw, "action", None),
+                "relation": getattr(raw, "relation", None),
+                "ids_map": getattr(raw, "ids_map", None),
+                "filters": getattr(raw, "filters", None),
+                "target_cols": getattr(raw, "target_cols", None),
+                "limit": getattr(raw, "limit", None),
+                "retrieval_query": getattr(raw, "retrieval_query", None),
+                "confidence": getattr(raw, "confidence", None),
+            }
+
+        allowed = {
+            "mode", "head", "action", "relation", "ids_map", "filters",
+            "target_cols", "limit", "retrieval_query", "confidence",
+        }
+        unknown = sorted(str(k) for k in source.keys() if str(k) not in allowed)
+        if unknown:
+            _schema_fail_fast("hint.v2", f"unknown fields={unknown}")
+            return {}
+
+        normalized = {k: source.get(k) for k in allowed if source.get(k) is not None}
+        filters_obj = normalized.get("filters")
+        if filters_obj is not None and not isinstance(filters_obj, Mapping):
+            _schema_fail_fast("hint.v2", "filters must be an object")
+            return {}
+        return normalized
+
     # --- hint 적용 (single-pass) ---
-    qa = hint
+    qa = _normalize_hint_payload(hint)
+    payload_normalized_intent = _extract_payload_normalized_intent(intent_payload)
     qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
     hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
     hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
@@ -1875,18 +1937,14 @@ def _run_rag_with_vectors(
 
     hinted_base = None
     hinted_limit = 0
-    hinted_cols: List[str] = _normalize_target_collections(
-        _get_attr(qa, "target_collections", None) or _get_attr(qa, "target_cols", None) or _get_attr(qa, "collections", None)
-    )
-    payload_target_cols = _normalize_target_collections(
-        _get_attr(intent_payload, "target_collections", None) or _get_attr(intent_payload, "target_cols", None) or _get_attr(intent_payload, "collections", None)
-    )
+    hinted_cols: List[str] = _normalize_target_collections(_get_attr(qa, "target_cols", None))
+    payload_target_cols = _normalize_target_collections(_get_attr(payload_normalized_intent, "target_cols", None))
     if payload_target_cols:
         hinted_cols = payload_target_cols
 
     if hint_conf_ok:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
-        hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
+        hinted_base = str(_get_attr(qa, "head", "") or "").strip().lower() or None
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
     else:
         q_for_retrieval = q
@@ -2008,12 +2066,10 @@ def _run_rag_with_vectors(
                 "org_terms": [],
             }
 
-        lead_org_terms = _normalize_hint_terms(
-            filters_obj.get("lead_org_name") or filters_obj.get("performing_org_name")
-        )
+        lead_org_terms = _normalize_hint_terms(filters_obj.get("lead_org_name"))
         participant_org_terms = _normalize_hint_terms(filters_obj.get("participant_org_name"))
         people_affiliation_org_terms = _normalize_hint_terms(filters_obj.get("people_affiliation_org_name"))
-        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name") or filters_obj.get("org"))
+        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name"))
 
         org_terms = _normalize_hint_terms(
             [
@@ -2036,14 +2092,14 @@ def _run_rag_with_vectors(
             return []
         return _normalize_hint_terms(
             [
-                *(_normalize_hint_terms(filters_obj.get("researcher_name") or filters_obj.get("people_name"))),
+                *(_normalize_hint_terms(filters_obj.get("researcher_name"))),
                 *(_normalize_hint_terms(filters_obj.get("participant_researcher_name"))),
             ]
         )
 
     # keywords (payload/hint only)
     t0 = time.time()
-    payload_kws = _get_attr(intent_payload, "keywords", None)
+    payload_kws = _get_attr(payload_normalized_intent, "keywords", None)
     if isinstance(payload_kws, (list, tuple)) and payload_kws:
         kws = _normalize_hint_terms(payload_kws)
     else:
@@ -2053,123 +2109,35 @@ def _run_rag_with_vectors(
     intent_from_payload = False
     perf_types_source: Optional[str] = None
     planner_confidence: Optional[float] = None
-    it = _normalize_payload_intent(_get_attr(intent_payload, "normalized_intent", None))
-    if it is None:
-        it = _normalize_payload_intent(intent_payload)
+    normalized_intent_raw = payload_normalized_intent
+    it = _normalize_payload_intent(normalized_intent_raw)
+    if normalized_intent_raw is not None and it is None:
+        _schema_fail_fast("intent_payload.v2", "normalized_intent is invalid or missing required fields")
     if it is not None:
         intent_from_payload = True
-        planner_confidence = _get_attr(intent_payload, "planner_confidence", None)
-        if planner_confidence is None:
-            planner_confidence = _get_attr(_get_attr(intent_payload, "query_intent", None), "planner_confidence", None)
+        planner_confidence = _get_attr(it, "planner_confidence", None)
     else:
-        raw_intent = _get_attr(intent_payload, "query_intent", None) or _get_attr(intent_payload, "raw_intent", None)
-        if raw_intent is not None:
-            planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
-            qa_researchers = _get_attr(qa, "researchers", None) or []
-            if isinstance(qa_researchers, str):
-                qa_researchers = [qa_researchers]
+        domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
+        raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=qa)
+        planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
+        org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
+        hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
+        hint_org_terms = _normalize_hint_terms(org_filter_hints["org_terms"])
 
-            hint_people_terms: List[str] = []
-            hint_people_ids: List[Any] = []
-
-            for r in (qa_researchers or []):
-                name = None
-                rid = None
-
-                if isinstance(r, str):
-                    name = r.strip()
-                elif isinstance(r, Mapping):
-                    # dict hint 대응
-                    name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
-                    rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
-                else:
-                    name = _get_attr(r, "name", None)
-                    if isinstance(name, str):
-                        name = name.strip()
-                    rid = _get_attr(r, "researcher_id", None)
-
-                if name:
-                    hint_people_terms.append(name)
-                if rid not in (None, ""):
-                    hint_people_ids.append(rid)
-            hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
-            hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
-            if isinstance(hint_org_terms, str):
-                hint_org_terms = [hint_org_terms]
-            org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
-            if org_filter_hints["org_terms"]:
-                hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_filter_hints["org_terms"]])
-
-            it = normalize_intent(
-                raw_intent,
-                query=q,
-                keywords=kws,
-                hint_people_terms=hint_people_terms,
-                hint_org_terms=hint_org_terms,
-                hint_org_role=hint_org_role,
-                hint_lead_org_terms=org_filter_hints["lead_org_terms"],
-                hint_participant_org_terms=org_filter_hints["participant_org_terms"],
-                hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
-            )
-            intent_perf_types = list(getattr(it, "perf_types", []) or [])
-            if intent_perf_types:
-                perf_types_source = "intent"
-                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
-        else:
-            # intent (hint는 query_intent에서 흡수)
-            domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
-            raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=hint)
-            planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
-            qa_researchers = _get_attr(qa, "researchers", None) or []
-            if isinstance(qa_researchers, str):
-                qa_researchers = [qa_researchers]
-
-            hint_people_terms = []
-            hint_people_ids: List[Any] = []
-
-            for r in (qa_researchers or []):
-                name = None
-                rid = None
-
-                if isinstance(r, str):
-                    name = r.strip()
-                elif isinstance(r, Mapping):
-                    # dict hint 대응
-                    name = (r.get("name") or r.get("hm_nm") or r.get("person_name") or "").strip() or None
-                    rid = r.get("researcher_id") or r.get("person_no") or r.get("hm_id")
-                else:
-                    name = _get_attr(r, "name", None)
-                    if isinstance(name, str):
-                        name = name.strip()
-                    rid = _get_attr(r, "researcher_id", None)
-
-                if name:
-                    hint_people_terms.append(name)
-                if rid not in (None, ""):
-                    hint_people_ids.append(rid)
-            hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
-            hint_org_terms = _get_attr(qa, "organizations", None) or _get_attr(qa, "org_terms", None) or []
-            if isinstance(hint_org_terms, str):
-                hint_org_terms = [hint_org_terms]
-            org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
-            if org_filter_hints["org_terms"]:
-                hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_filter_hints["org_terms"]])
-
-            it = normalize_intent(
-                raw_intent,
-                query=q,
-                keywords=kws,
-                hint_people_terms=hint_people_terms,
-                hint_org_terms=hint_org_terms,
-                hint_org_role=hint_org_role,
-                hint_lead_org_terms=org_filter_hints["lead_org_terms"],
-                hint_participant_org_terms=org_filter_hints["participant_org_terms"],
-                hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
-            )
-            intent_perf_types = list(getattr(it, "perf_types", []) or [])
-            if intent_perf_types:
-                perf_types_source = "intent"
-                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
+        it = normalize_intent(
+            raw_intent,
+            query=q,
+            keywords=kws,
+            hint_org_terms=hint_org_terms,
+            hint_org_role=hint_org_role,
+            hint_lead_org_terms=org_filter_hints["lead_org_terms"],
+            hint_participant_org_terms=org_filter_hints["participant_org_terms"],
+            hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
+        )
+        intent_perf_types = list(getattr(it, "perf_types", []) or [])
+        if intent_perf_types:
+            perf_types_source = "intent"
+            log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
     planner_keywords = _normalize_hint_terms(ctx.keywords)
@@ -2228,63 +2196,17 @@ def _run_rag_with_vectors(
             keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
             if keywords_hint:
                 ctx.keywords = keywords_hint
-            title_hint = _normalize_hint_terms(
-                hint_filters.get("title_terms") or hint_filters.get("title") or hint_filters.get("name")
-            )
+            title_hint = _normalize_hint_terms(hint_filters.get("title_terms"))
             if title_hint:
                 ctx.title = title_hint
                 ctx.keywords = list(dict.fromkeys([*list(ctx.keywords or []), *title_hint]))
-
-    payload_relation = _normalize_relation_hint(_get_attr(intent_payload, "relation", None))
-    payload_org_terms = _normalize_hint_terms(_get_attr(intent_payload, "org_terms", None))
-    payload_people_terms = _normalize_hint_terms(_get_attr(intent_payload, "people_terms", None))
-    payload_project_terms = _normalize_hint_terms(_get_attr(intent_payload, "project_terms", None))
-    payload_perf_types = _normalize_hint_terms(_get_attr(intent_payload, "perf_types", None))
-    payload_keywords = _normalize_hint_terms(_get_attr(intent_payload, "keywords", None))
-    payload_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "tag_filters", None))
-    payload_perf_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "perf_tag_filters", None))
-    payload_project_tag_filters = _normalize_hint_terms(_get_attr(intent_payload, "project_tag_filters", None))
-    payload_title = _normalize_hint_terms(
-        _get_attr(intent_payload, "title", None) or _get_attr(intent_payload, "title", None)
-    )
-    payload_year_from = _get_attr(intent_payload, "year_from", None)
-    payload_year_to = _get_attr(intent_payload, "year_to", None)
-    payload_is_id_query = _get_attr(intent_payload, "is_id_query", None)
-
-    if (not strategy_enabled) and payload_relation:
-        ctx.relation = payload_relation
-    if payload_is_id_query is not None:
-        ctx.is_id_query = bool(payload_is_id_query)
-    if payload_org_terms:
-        ctx.org_terms = payload_org_terms
-    if payload_people_terms:
-        ctx.people_terms = payload_people_terms
-    if payload_perf_types:
-        ctx.perf_types = payload_perf_types
-        perf_types_source = "payload"
-        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=payload_perf_types)
-    if payload_keywords:
-        ctx.keywords = payload_keywords
-    if payload_tag_filters:
-        ctx.tag_filters = payload_tag_filters
-    if payload_perf_tag_filters:
-        ctx.perf_tag_filters = payload_perf_tag_filters
-    if payload_project_tag_filters:
-        ctx.project_tag_filters = payload_project_tag_filters
-    if payload_title:
-        ctx.title = payload_title
-        ctx.keywords = list(dict.fromkeys([*list(ctx.keywords or []), *payload_title]))
-    if payload_year_from is not None:
-        ctx.year_from = str(payload_year_from).strip() or None
-    if payload_year_to is not None:
-        ctx.year_to = str(payload_year_to).strip() or None
 
     planner_categories = normalize_categories(ctx.categories)
     planner_limit = ctx.planner_limit
     planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
     planner_meta_source = "qa" if hint_conf_ok else "intent"
-    planner_applied = int(_get_attr(intent_payload, "planner_applied", 0) or 0)
-    planner_failed = int(_get_attr(intent_payload, "planner_failed", 0) or 0)
+    planner_applied = int(bool(intent_from_payload))
+    planner_failed = 0
 
     if not hint_conf_ok:
         if planner_retrieval_query:
@@ -2314,9 +2236,7 @@ def _run_rag_with_vectors(
         except Exception:
             planner_confidence = None
 
-    qa_categories = normalize_categories(
-        _get_attr(qa, "category", None) or _get_attr(qa, "categories", None)
-    )
+    qa_categories = normalize_categories([_get_attr(qa, "head", None)] if _get_attr(qa, "head", None) else [])
     qa_limit = _get_attr(qa, "limit", None)
     qa_retrieval_query = str(_get_attr(qa, "retrieval_query", "") or "").strip() or None
 
@@ -2558,12 +2478,10 @@ def _run_rag_with_vectors(
 
     hint_people_filters = _extract_people_filter_hints(hint_filters) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_org_filters = _normalize_hint_terms(
-        hint_filters.get("org_name") or hint_filters.get("org")
+        hint_filters.get("org_name")
     ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_tag_filters = _normalize_hint_terms(
         hint_filters.get("tag_filters")
-        or hint_filters.get("project_tag_filters")
-        or hint_filters.get("perf_tag_filters")
     ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
 
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
