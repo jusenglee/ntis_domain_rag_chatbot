@@ -26,7 +26,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
-from schemas import ExecutionContext, QueryPlan, StrategySpec
+from schemas import ExecutionContext, QueryPlan, StrategySpec, StrategyViolation
 from settings import (
     DEFAULT_MODEL_NAME,
     logger,
@@ -90,7 +90,8 @@ from rag_parts.join import (
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_join_filter as build_join_filter,
-    build_perf_filter as build_perf_filter,
+    build_perf_filter_by_pjt_id,
+    build_perf_filter_by_pjt_no,
     build_year_range_filter,
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
@@ -98,13 +99,20 @@ from rag_parts.filters import (
     build_project_id_filter,
     build_title_filter,
     JoinFilterInput,
-    PerfFilterInput, PeopleFilterInput, OrgFilterInput,
+    PeopleFilterInput, OrgFilterInput,
 )
 
 try:
     from qdrant_client.http import models as qmodels
 except Exception:
     qmodels = None
+
+
+class StrategyViolation(ValueError):
+    def __init__(self, code: str, cause: str):
+        self.code = str(code).strip() or "STRATEGY_VIOLATION"
+        self.cause = str(cause).strip() or "unknown"
+        super().__init__(f"[{self.code}] {self.cause}")
 
 def _normalize_tag_value(tag: object) -> str:
     if tag is None:
@@ -423,6 +431,23 @@ def _ensure_join_keys_in_payload(
                 payload["tag"] = candidate
                 stats["forced_tag"] += 1
     return stats
+
+def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
+    pjt_nos: List[str] = []
+    seen: set[str] = set()
+    for p in points or []:
+        payload = getattr(p, "payload", None) or {}
+        if not isinstance(payload, dict):
+            continue
+        meta = _get_meta(payload)
+        pjt_no = _pick_first(payload.get("pjt_no"), meta.get("pjt_no"), payload.get("pjt_id"), meta.get("pjt_id"))
+        if not pjt_no or pjt_no in seen:
+            continue
+        seen.add(pjt_no)
+        pjt_nos.append(pjt_no)
+        if len(pjt_nos) >= max_ids:
+            break
+    return pjt_nos
 
 def _approx_token_len(text: str) -> int:
     """토크나이저 없이 예산 기반 컷오프용 근사치."""
@@ -1610,6 +1635,7 @@ def _build_plan(
         base_route=base_route,
         action=action,
         relation=rel,
+        join_key_mode=getattr(it, "join_key_mode", None),
         output_type=output_type,
         target_collections=tuple(target_cols),
         filters={},
@@ -1908,7 +1934,7 @@ def _run_rag_with_vectors(
             }
 
         allowed = {
-            "mode", "head", "action", "relation", "ids_map", "filters",
+            "mode", "head", "action", "relation", "join_key_mode", "ids_map", "filters",
             "target_cols", "limit", "retrieval_query", "confidence",
         }
         unknown = sorted(str(k) for k in source.keys() if str(k) not in allowed)
@@ -1934,6 +1960,7 @@ def _run_rag_with_vectors(
     strategy_head = None
     strategy_relation = None
     strategy_action = None
+    strategy_join_key_mode = None
     strategy_query_text = None
     strategy_filter_spec = {}
     strategy_topk_spec = {}
@@ -2151,6 +2178,9 @@ def _run_rag_with_vectors(
     planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
     hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
     hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
+    hint_join_key_mode = str(_get_attr(qa, "join_key_mode", "") or "").strip().lower() or None
+    if hint_join_key_mode in ("instance", "group"):
+        strategy_join_key_mode = hint_join_key_mode
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
@@ -2159,6 +2189,8 @@ def _run_rag_with_vectors(
             ctx.base_route = hint_head
         if hint_relation:
             ctx.relation = hint_relation
+        if hint_join_key_mode in ("instance", "group"):
+            ctx.join_key_mode = hint_join_key_mode
         if hint_ids_map:
             merged_ids = dict(ctx.ids_map or {})
             for key, values in hint_ids_map.items():
@@ -2587,6 +2619,32 @@ def _run_rag_with_vectors(
 
     pre_vecs = _get_pre_vecs(q)
 
+    def _validate_join_key_contract(mode_value: Optional[str], join_key_mode: Optional[str], ids_map_obj: Dict[str, List[str]]) -> None:
+        mode_norm = str(mode_value or "").strip().lower()
+        join_norm = str(join_key_mode or "").strip().lower() or None
+        has_pjt_id = bool(ids_map_obj.get("pjt_id"))
+        has_pjt_no = bool(ids_map_obj.get("pjt_no"))
+
+        if mode_norm != "join":
+            if join_norm is not None:
+                raise StrategyViolation("join_key_mode must be null when mode is not JOIN")
+            return
+
+        if join_norm not in ("instance", "group"):
+            raise StrategyViolation("join mode requires join_key_mode in {'instance','group'}")
+        if has_pjt_id and has_pjt_no:
+            raise StrategyViolation("ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
+        if join_norm == "instance":
+            if has_pjt_no:
+                raise StrategyViolation("join_key_mode=instance only allows ids_map.pjt_id")
+            if not has_pjt_id:
+                raise StrategyViolation("join_key_mode=instance requires ids_map.pjt_id")
+        if join_norm == "group":
+            if has_pjt_id:
+                raise StrategyViolation("join_key_mode=group only allows ids_map.pjt_no")
+            if not has_pjt_no:
+                raise StrategyViolation("join_key_mode=group requires ids_map.pjt_no")
+
     def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
         if not action_value:
             return None
@@ -2606,6 +2664,10 @@ def _run_rag_with_vectors(
             strategy_relation=strategy.relation,
             fallback_mode=strategy.mode,
         )
+        try:
+            _validate_join_key_contract(strategy.mode, strategy.join_key_mode, dict(ctx.ids_map or {}))
+        except StrategyViolation as exc:
+            errors.append(str(exc))
         return (len(errors) == 0), errors
 
     def _is_safe_search_fallback_enabled() -> bool:
@@ -2666,6 +2728,7 @@ def _run_rag_with_vectors(
         mode=planner_strategy_mode,
         action=planner_strategy_action,
         relation=planner_strategy_relation,
+        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
     )
     strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
     if not strategy_ok:
@@ -2687,13 +2750,7 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        if _is_safe_search_fallback_enabled():
-            log_kv(
-                "RAG.PLAN.SAFE_SEARCH_FALLBACK_FLAG_ON",
-                level="warning",
-                flag="RAG_ENABLE_SAFE_SEARCH_FALLBACK",
-                note="fallback_path_removed_keep_planner_mode",
-            )
+        raise StrategyViolation(f"invalid planner strategy: {planner_mode_error}")
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
@@ -2961,6 +3018,7 @@ def _run_rag_with_vectors(
         mode=plan.mode,
         action=action,
         relation=relation,
+        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
         people_terms=tuple(people_terms or []),
         target_collections=tuple(ctx.target_collections or []),
         search_filter_enabled=bool(search_filter_enabled),
@@ -2976,6 +3034,7 @@ def _run_rag_with_vectors(
     plan = replace(
         plan,
         relation=relation,
+        join_key_mode=(strategy.join_key_mode or plan.join_key_mode),
         target_collections=tuple(ctx.target_collections or []),
         filters=filter_spec,
     )
@@ -3279,11 +3338,12 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
+        join_key_mode = str((getattr(strategy, "join_key_mode", None) or "")).strip().lower() or None
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
-        seed_join_ids = list(dict.fromkeys(seed_join_pjt_ids + seed_join_pjt_nos))
+        seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
 
 
 
@@ -3319,23 +3379,26 @@ def _run_rag_with_vectors(
             hop1_q = q
             hop2_q = q
 
-            join_ids: List[str] = []
+            join_key_mode = "group" if hop2_col == COL_PERF else "instance"
             join_pjt_ids: List[str] = []
             join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
             hop1_filter = None
 
-            # 1) Hop1 (SEARCH) : 명시 PJT_ID 있으면 skip
-            if seed_join_ids:
-                join_pjt_ids = seed_join_pjt_ids[:]
+            # 1) Hop1 (SEARCH) : 명시 join key 있으면 skip
+            if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
-                join_ids = seed_join_ids[:]
                 log_kv(
                     "RAG.JOIN.HOP1.SKIP",
-                    reason="explicit_join_ids",
-                    join_ids=join_ids[:10],
-                    join_pjt_ids=join_pjt_ids[:10],
-                    join_pjt_nos=join_pjt_nos[:10],
+                    reason="explicit_join_pjt_nos",
+                    join_pjt_nos_preview=join_pjt_nos[:10],
+                )
+            elif join_key_mode == "instance" and seed_join_pjt_ids:
+                join_pjt_ids = seed_join_pjt_ids[:]
+                log_kv(
+                    "RAG.JOIN.HOP1.SKIP",
+                    reason="explicit_join_pjt_ids",
+                    join_pjt_ids_preview=join_pjt_ids[:10],
                 )
             else:
                 hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
@@ -3510,11 +3573,16 @@ def _run_rag_with_vectors(
                     if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                         log_kv("RAG.JOIN.HOP1.MISSING_KEYS", **missing)
 
-                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
-                join_ids = list(dict.fromkeys(join_pjt_ids))
+                if join_key_mode == "group":
+                    join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                else:
+                    join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
 
                 log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
-                log_section("RAG.JOIN.JOIN_IDS", join_ids[: min(len(join_ids), 30)])
+                if join_key_mode == "group":
+                    log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)])
+                else:
+                    log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)])
                 log_kv(
                     "RAG.JOIN.HOP1.TIMINGS",
                     **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
@@ -3532,16 +3600,18 @@ def _run_rag_with_vectors(
                     query_text=hop1_q,
                 )
 
-            # join_ids 없으면 종료
-            if not join_ids:
+            # join key 없으면 종료
+            has_join_keys = bool(join_pjt_nos) if join_key_mode == "group" else bool(join_pjt_ids)
+            if not has_join_keys:
                 if hop1_top:
                     missing = _count_missing_join_keys(hop1_top)
                     if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                         log_kv("RAG.JOIN.HOP1.DROP_KEYS", **missing)
+                join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
                 context = (
                     f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
-                    f"### [Hop2] {hop2_label}\n- 필터 PJT_ID 후보: (없음)\n\n"
-                    "(조인 키(PJT_ID)를 추출하지 못해 Hop2를 생략했습니다.)"
+                    f"### [Hop2] {hop2_label}\n- 필터 {join_key_label} 후보: (없음)\n\n"
+                    f"(조인 키({join_key_label})를 추출하지 못해 Hop2를 생략했습니다.)"
                 )
                 _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
                 _timing_put(timings, "phase.total", time.time() - t_all0)
@@ -3550,11 +3620,15 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                hop2_filter = build_perf_filter(PerfFilterInput(query=q, join_ids=join_ids))
+                join_key_mode = "group" if relation in (("project", "perf"), ("org", "perf")) else "instance"
+                if join_key_mode == "group" and join_pjt_nos:
+                    hop2_filter = build_perf_filter_by_pjt_no(join_pjt_nos, q)
+                else:
+                    hop2_filter = build_perf_filter_by_pjt_id(join_pjt_ids or join_ids, q)
             else:
                 hop2_filter = build_join_filter(
                     JoinFilterInput(
-                        join_ids=join_pjt_ids or join_ids,
+                        join_ids=join_pjt_ids,
                         pjt_nos=join_pjt_nos,
                         join_key_mode=join_key_mode,
                         tag_filters=hop2_tag_filters,
@@ -3580,7 +3654,8 @@ def _run_rag_with_vectors(
                 hop2_filter=str(hop2_filter) if hop2_filter is not None else None,
                 hop2_k_base=hop2_k_base,
                 hop2_keep=hop2_keep,
-                join_ids_preview=join_ids[:10],
+                join_pjt_ids_preview=join_pjt_ids[:10],
+                join_pjt_nos_preview=join_pjt_nos[:10],
             )
 
             vec_avail2 = _named_vectors_in_collection(qdr, hop2_col)
@@ -3669,10 +3744,12 @@ def _run_rag_with_vectors(
                 query_text=hop2_q,
             )
 
+            join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
+            join_key_preview = join_pjt_nos[:10] if join_key_mode == "group" else join_pjt_ids[:10]
             context = (
                 f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
                 f"### [Hop2] {hop2_label}\n"
-                f"- 필터 PJT_ID 후보: {', '.join(join_ids[:10])}\n\n"
+                f"- 필터 {join_key_label} 후보: {', '.join(join_key_preview)}\n\n"
                 f"{hop2_ctx or '(후보 없음)'}"
             )
             t0 = time.time()
@@ -3708,7 +3785,7 @@ def _run_rag_with_vectors(
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
-        build_perf_filter(PerfFilterInput(query=q, join_ids=perf_followup_join_ids))
+        build_perf_filter_by_pjt_id(perf_followup_join_ids, q)
         if perf_followup_join_ids
         else None
     )

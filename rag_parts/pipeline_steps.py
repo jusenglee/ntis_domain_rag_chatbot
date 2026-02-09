@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .constants import (
     COL_PROJECT,
@@ -74,6 +74,7 @@ class NormalizedIntent:
     relation: Optional[Tuple[str, str]]
     is_id_query: bool
     output_type: Optional[str] = None
+    join_key_mode: Optional[Literal["instance", "group"]] = None
     categories: List[str] = field(default_factory=list)
     planner_limit: Optional[int] = None
     retrieval_query: Optional[str] = None
@@ -212,6 +213,7 @@ def normalize_intent(
         action=action,
         base_route=base_route,
         relation=relation,
+        join_key_mode=getattr(intent, "join_key_mode", None),
         is_id_query=bool(getattr(intent, "is_id_query", False)),
         output_type=output_type,
         categories=normalize_categories(getattr(intent, "categories", None)),

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
+
+
+class StrategyViolation(ValueError):
+    """Planner-Execution 계약 위반."""
 
 
 @dataclass(frozen=True)
@@ -10,6 +14,7 @@ class StrategySpec:
     mode: str
     action: str
     relation: Optional[Tuple[str, str]]
+    join_key_mode: Optional[Literal["instance", "group"]] = None
     people_terms: Tuple[str, ...] = field(default_factory=tuple)
     target_collections: Tuple[str, ...] = field(default_factory=tuple)
     search_filter_enabled: bool = False
@@ -29,6 +34,7 @@ class QueryPlan:
     base_route: str
     action: str
     relation: Optional[Tuple[str, str]]
+    join_key_mode: Optional[Literal["instance", "group"]]
     output_type: Optional[str]
     target_collections: Tuple[str, ...]
     # server-side filters by collection (optional)
@@ -41,6 +47,7 @@ class ExecutionContext:
     base_route: str
     action: str
     relation: Optional[Tuple[str, str]]
+    join_key_mode: Optional[Literal["instance", "group"]]
     is_id_query: bool
     output_type: Optional[str]
     categories: list[str]
@@ -80,6 +87,7 @@ class ExecutionContext:
             base_route=intent.base_route,
             action=intent.action,
             relation=intent.relation,
+            join_key_mode=getattr(intent, "join_key_mode", None),
             is_id_query=intent.is_id_query,
             output_type=intent.output_type,
             categories=list(intent.categories),
@@ -118,6 +126,7 @@ class ExecutionContext:
             base_route=self.base_route,
             action=self.action,
             relation=self.relation,
+            join_key_mode=self.join_key_mode,
             is_id_query=self.is_id_query,
             output_type=self.output_type,
             categories=list(self.categories),
