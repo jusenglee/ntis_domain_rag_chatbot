@@ -202,41 +202,6 @@ class QuestionAnalysisV2(BaseModel):
 
 QuestionAnalysis = QuestionAnalysisV2
 
-class SearchHint(BaseModel):
-    """RAG 검색 힌트"""
-    coq: str = ""
-    mode: str | None = None
-    head: str | None = None
-    relation: str | None = None
-    action: str | None = None
-    ids_map: dict[str, list[str]] = Field(default_factory=dict)
-    filters: dict[str, Any] = Field(default_factory=dict)
-    target_cols: list[str] = Field(default_factory=list)
-    limit: int = Field(
-        MAX_TOP_K_SIZE,
-        description=f"반환 문서 개수 (최대 {MAX_TOP_K_SIZE})",
-        le=MAX_TOP_K_SIZE,
-    )
-    retrieval_query: str = ""
-    confidence: float = 0.0
-
-
-class PlannerStrategy(BaseModel):
-    """LLM planner가 결정한 실행 전략(불변 스냅샷)"""
-
-    mode: str | None = None
-    head: str | None = None
-    relation: str | None = None
-    action: str | None = None
-    query_text: str = ""
-    filter_spec: dict[str, Any] = Field(default_factory=dict)
-    topk_spec: dict[str, Any] = Field(default_factory=dict)
-    rerank_spec: dict[str, Any] = Field(default_factory=dict)
-
-    model_config = {
-        "frozen": True,
-    }
-
 class KnowledgeSufficiency(BaseModel):
     """지식 충분성 판단 결과"""
     requires_new_knowledge: Literal["low", "medium", "high"] = Field(
@@ -784,7 +749,7 @@ class CustomRAGRetriever(BaseModel):
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
-    hint: Optional[SearchHint] = None
+    hint: Optional[QuestionAnalysisV2] = None
     intent_payload: Optional[Dict[str, Any]] = None
 
     class Config:
@@ -858,22 +823,10 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         search_num = (qa.limit if qa else None) or MAX_TOP_K_SIZE
         search_num = min(int(search_num), MAX_TOP_K_SIZE)
 
-        hint = SearchHint(
-            coq=f"{state.conversation_id}{state.question}",
-            mode=(qa.mode if qa else None),
-            head=(qa.head if qa else None),
-            relation=(qa.relation if qa else None),
-            ids_map=dict(qa.ids_map or {}) if qa else {},
-            filters=dict(qa.filters or {}) if qa else {},
-            limit=search_num,
-            retrieval_query=hint_query,
-            confidence=confidence,
-        )
-
         retriever = CustomRAGRetriever(
             top_k=search_num,
             model_name="gemma_vllm_0",
-            hint=hint,
+            hint=qa,
             intent_payload=state.intent_payload,
         )
         # NOTE: hint.limit=search_num is used by rag_pipeline hydrate upper bound,
@@ -1181,19 +1134,6 @@ async def build_intent_payload(
     )
     normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
 
-    strategy = PlannerStrategy(
-        mode=(question_analysis.mode if question_analysis else None),
-        head=(question_analysis.head if question_analysis else None),
-        relation=(question_analysis.relation if question_analysis else None),
-        action=(question_analysis.action if question_analysis and question_analysis.action else getattr(normalized_intent, "action", None)),
-        query_text=((question_analysis.retrieval_query if question_analysis else None) or question),
-        filter_spec=(dict(question_analysis.filters or {}) if question_analysis else {}),
-        topk_spec={
-            "limit": int(question_analysis.limit) if question_analysis else MAX_TOP_K_SIZE,
-        },
-        rerank_spec={},
-    )
-
     # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
     # normalize_intent 이후 실행 레이어에서 intent를 재작성하지 않는다.
 
@@ -1202,7 +1142,6 @@ async def build_intent_payload(
         "query_intent": raw_intent,
         "normalized_intent": normalized_intent,
         "keywords": kws,
-        "strategy": strategy,
         "planner_applied": int(planner_applied),
         "planner_failed": int(planner_failed),
     }

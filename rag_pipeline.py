@@ -1863,17 +1863,15 @@ def _run_rag_with_vectors(
     hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
     hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
     hint_policy = "merge" if hint_conf_ok else "ignore"
-    planner_strategy = _get_attr(intent_payload, "strategy", None)
-    strategy_mode = str(_get_attr(planner_strategy, "mode", "") or "").strip().lower() or None
-    strategy_head = str(_get_attr(planner_strategy, "head", "") or "").strip().lower() or None
-    strategy_relation = _normalize_relation_hint(_get_attr(planner_strategy, "relation", None))
-    strategy_action = str(_get_attr(planner_strategy, "action", "") or "").strip().lower() or None
-    strategy_query_text = normalize_query(_get_attr(planner_strategy, "query_text", "") or "") or None
-    strategy_filter_spec = _get_attr(planner_strategy, "filter_spec", None) or {}
-    strategy_topk_spec = _get_attr(planner_strategy, "topk_spec", None) or {}
-    strategy_rerank_spec = _get_attr(planner_strategy, "rerank_spec", None) or {}
-    strategy_enabled = any((strategy_mode, strategy_head, strategy_relation, strategy_action, strategy_query_text))
-
+    strategy_mode = None
+    strategy_head = None
+    strategy_relation = None
+    strategy_action = None
+    strategy_query_text = None
+    strategy_filter_spec = {}
+    strategy_topk_spec = {}
+    strategy_rerank_spec = {}
+    strategy_enabled = False
 
     hinted_base = None
     hinted_limit = 0
@@ -1886,9 +1884,7 @@ def _run_rag_with_vectors(
     if payload_target_cols:
         hinted_cols = payload_target_cols
 
-    if strategy_query_text:
-        q_for_retrieval = strategy_query_text
-    elif hint_conf_ok:
+    if hint_conf_ok:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
         hinted_base = _category_to_base_route(_get_attr(qa, "category", []) or [])
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
@@ -4199,7 +4195,6 @@ def _run_rag_with_vectors(
             current_mode=mode,
             search_hits=merged_rrf[: max(1, min(len(merged_rrf), 30))],
             ids_map=getattr(it, "ids_map", None) or {},
-            planner_strategy=planner_strategy,
         )
         log_kv(
             "RAG.PROMOTION.CHECK",
