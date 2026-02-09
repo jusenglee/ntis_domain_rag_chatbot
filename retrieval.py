@@ -786,6 +786,8 @@ def dense_retrieve_hybrid_multi(
     query_filter: Optional[models.Filter] = None,
     timings: Optional[Dict[str, float]] = None,
     hybrid_once: Optional[bool] = None,
+    require_hybrid_both_sides: bool = False,
+    contract_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
@@ -802,14 +804,17 @@ def dense_retrieve_hybrid_multi(
     )
     top_k_lexical = _clamp_top_k(top_k_lexical, minimum=0, fallback=_DEFAULT_TOPK_LEX)
 
-    hybrid_once_eff = _HYBRID_QUERY_ONCE if hybrid_once is None else bool(hybrid_once)
+    force_hybrid_once = bool(require_hybrid_both_sides)
+    hybrid_once_eff = True if force_hybrid_once else (_HYBRID_QUERY_ONCE if hybrid_once is None else bool(hybrid_once))
     if hybrid_once_eff:
         if not sparse_vector_name or not emb_map:
-            logger.warning(
-                "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s",
-                bool(sparse_vector_name),
-                bool(emb_map),
+            msg = (
+                "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
+                % (bool(sparse_vector_name), bool(emb_map), contract_scope)
             )
+            if force_hybrid_once:
+                raise RuntimeError(msg)
+            logger.warning(msg)
             ret = {"dense": {}, "lexical": [], "hybrid": []}
             logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
             return ret
@@ -828,7 +833,10 @@ def dense_retrieve_hybrid_multi(
         )
         timings["hybrid_once_total"] = time.perf_counter() - t_hybrid0
         if hybrid_points is None:
-            logger.warning("[RETRIEVE.HYBRID] failed: empty result")
+            msg = f"[RETRIEVE.HYBRID] failed: empty result scope={contract_scope}"
+            if force_hybrid_once:
+                raise RuntimeError(msg)
+            logger.warning(msg)
             ret = {"dense": {}, "lexical": [], "hybrid": []}
             logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
             return ret
