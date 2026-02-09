@@ -258,8 +258,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 3) Exact ID lookup
     if action == "id_exact":
-        # 추측입니다: exact id는 dense보다 lex가 더 안정적일 때가 많음
-        prefer_lex_only = os.getenv("RAG_ID_EXACT_LEX_ONLY", "1") == "1"
         top_k_lex = _i("RAG_TOPK_LEX_ID_EXACT", 160)
         w_lex = _f("RAG_W_LEX_ID_EXACT", 0.78)
         preset = SearchPreset(
@@ -276,7 +274,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_ID_EXACT", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_ID_EXACT", 2),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_ID_EXACT", 3),
-            prefer_lex_only=prefer_lex_only,
+            # LOOKUP/JOIN에서는 dense+sparse 동시수행을 계약으로 강제한다.
+            prefer_lex_only=False,
             stop_if_top1_confident=True,
             tag_boost=_f("RAG_TAG_BOOST_ID_EXACT", _f("RAG_TAG_BOOST", 1.2)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID_EXACT", _f("RAG_TAG_MISMATCH_PENALTY", 0.3)),
@@ -312,8 +311,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # 5) List/filter
     if action in ("list", "download", "stats"):
-        # list/filter/stats/download는 구조 키워드 비중이 높아 lex가 유리한 경우가 많음
-        prefer_lex_only = os.getenv("RAG_LIST_LEX_ONLY", "0") == "1"
         top_k_lex = _i("RAG_TOPK_LEX_FILTER", 180)
         w_lex = _f("RAG_W_LEX_FILTER", 0.65)
         preset = SearchPreset(
@@ -330,7 +327,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_FILTER", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_FILTER", 4),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_FILTER", 10),
-            prefer_lex_only=prefer_lex_only,
+            # LOOKUP/JOIN에서는 dense+sparse 동시수행을 계약으로 강제한다.
+            prefer_lex_only=False,
             tag_boost=_f("RAG_TAG_BOOST_FILTER", _f("RAG_TAG_BOOST", 1.0)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_FILTER", _f("RAG_TAG_MISMATCH_PENALTY", 0.25)),
             strategy_key=strategy_key,

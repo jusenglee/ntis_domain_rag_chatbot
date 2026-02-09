@@ -683,6 +683,8 @@ def _call_dense_retrieve_hybrid_multi(
         top_k_lex: int,
         query_filter: Any,
         timings_out: Dict[str, float],
+        require_hybrid_both_sides: bool = False,
+        contract_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     params = set(_DENSE_MULTI_SIG.parameters.keys()) if _DENSE_MULTI_SIG else set()
     common_kwargs = {
@@ -696,6 +698,26 @@ def _call_dense_retrieve_hybrid_multi(
     }
     if "lexical_fields" in params:
         common_kwargs["lexical_fields"] = lexical_fields
+    if "require_hybrid_both_sides" in params:
+        common_kwargs["require_hybrid_both_sides"] = bool(require_hybrid_both_sides)
+    if "contract_scope" in params:
+        common_kwargs["contract_scope"] = contract_scope
+
+    sparse_vector_name_eff = str(sparse_vector_name or "").strip()
+    sparse_enabled = bool(sparse_topk and int(sparse_topk) > 0 and sparse_vector_name_eff)
+    dense_enabled = bool(int(top_k_dense) > 0 and bool(emb_map))
+
+    if require_hybrid_both_sides:
+        if not dense_enabled:
+            raise RuntimeError(
+                f"[RAG.CONTRACT] dense disabled for {contract_scope or collection}: "
+                f"top_k_dense={top_k_dense} emb_map={bool(emb_map)}"
+            )
+        if not sparse_enabled:
+            raise RuntimeError(
+                f"[RAG.CONTRACT] sparse disabled for {contract_scope or collection}: "
+                f"sparse_topk={sparse_topk} sparse_vector_name={sparse_vector_name!r}"
+            )
 
     if "client" in params and "collection_name" in params:
         return dense_retrieve_hybrid_multi(
@@ -3154,6 +3176,8 @@ def _run_rag_with_vectors(
             top_k_lex=min(hop1_k_base, 80),
             query_filter=hop1_filter,
             timings_out=local_timings_h1,
+            require_hybrid_both_sides=True,
+            contract_scope="join_hop1_followup",
         )
         _apply_dense_threshold(
             sr1,
@@ -3420,6 +3444,8 @@ def _run_rag_with_vectors(
                     top_k_lex=min(hop1_k_base, 80),
                     query_filter=hop1_filter,  # ✅ 실제 적용
                     timings_out=local_timings_h1,
+                    require_hybrid_both_sides=True,
+                    contract_scope="join_hop1",
                 )
                 _apply_dense_threshold(
                     sr1,
@@ -3499,6 +3525,9 @@ def _run_rag_with_vectors(
                 log_section("RAG.JOIN.JOIN_IDS", join_ids[: min(len(join_ids), 30)])
                 log_kv(
                     "RAG.JOIN.HOP1.TIMINGS",
+                    dense_queries=float(local_timings_h1.get("dense_queries", 0.0)),
+                    sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
+                    hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
                     **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
                 )
 
@@ -3590,6 +3619,8 @@ def _run_rag_with_vectors(
                 top_k_lex=min(hop2_k_base, 120),
                 query_filter=hop2_filter,  # ✅ JOIN 필터 강제 적용
                 timings_out=local_timings_h2,
+                require_hybrid_both_sides=True,
+                contract_scope="join_hop2",
             )
             _apply_dense_threshold(
                 sr2,
@@ -3639,6 +3670,9 @@ def _run_rag_with_vectors(
             log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")))
             log_kv(
                 "RAG.JOIN.HOP2.TIMINGS",
+                dense_queries=float(local_timings_h2.get("dense_queries", 0.0)),
+                sparse_hits=float(local_timings_h2.get("lexical_scored", 0.0)),
+                hybrid_once_hits=float(local_timings_h2.get("hybrid_once_hits", 0.0)),
                 **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
             )
 
@@ -3934,6 +3968,8 @@ def _run_rag_with_vectors(
             top_k_lex=topk_lex,
             query_filter=qfilter,  # ✅ plan 기반 적용
             timings_out=local_timings,
+            require_hybrid_both_sides=(plan.mode == "lookup"),
+            contract_scope=f"{plan.mode}:{col}",
         )
         _apply_dense_threshold(
             sr,
@@ -4033,6 +4069,9 @@ def _run_rag_with_vectors(
             per_col_stats[col] = {
                 "dense_hits": float(d_hit),
                 "lex_hits": float(l_hit),
+                "dense_queries": float(local_timings.get("dense_queries", 0.0)),
+                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "best_dense": float(best_dense) if best_dense is not None else -1.0,
                 "total": float(local_timings.get("total", 0.0)),
             }
@@ -4054,6 +4093,9 @@ def _run_rag_with_vectors(
         else:
             per_col_stats[col] = {
                 "hybrid_hits": float(len(hybrid_points)),
+                "dense_queries": float(local_timings.get("dense_queries", 0.0)),
+                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "total": float(local_timings.get("total", 0.0)),
             }
             log_kv(
