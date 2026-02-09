@@ -149,6 +149,7 @@ class RagMapper:
         try:
             tag = DataTag(tag_value)
         except ValueError:
+            print(f"{item}")
             raise MappingError(f"지원하지 않는 tag입니다: {tag_value}")
         
         registry = get_schema_registry()
