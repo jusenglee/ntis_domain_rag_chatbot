@@ -96,7 +96,6 @@ class SearchPreset:
     org_lex_boost: bool = False
 
     # pipeline-level early stop hints
-    prefer_lex_only: bool = False     # dense를 아예 끌지 여부
     stop_if_top1_confident: bool = False  # id 계열: top1이 충분히 높으면 context 최소화
 
     early_stop_dense_score: float = 0.0
@@ -126,7 +125,6 @@ class SearchPreset:
             "max_ctx_items": self.max_ctx_items,
             "use_org_filter": int(self.use_org_filter),
             "org_lex_boost": int(self.org_lex_boost),
-            "prefer_lex_only": int(self.prefer_lex_only),
             "stop_if_top1_confident": int(self.stop_if_top1_confident),
             "tag_boost": self.tag_boost,
             "tag_mismatch_penalty": self.tag_mismatch_penalty,
@@ -274,8 +272,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_ID_EXACT", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_ID_EXACT", 2),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_ID_EXACT", 3),
-            # LOOKUP/JOIN에서는 dense+sparse 동시수행을 계약으로 강제한다.
-            prefer_lex_only=False,
             stop_if_top1_confident=True,
             tag_boost=_f("RAG_TAG_BOOST_ID_EXACT", _f("RAG_TAG_BOOST", 1.2)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID_EXACT", _f("RAG_TAG_MISMATCH_PENALTY", 0.3)),
@@ -327,8 +323,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             min_dense_score=_f("RAG_MIN_DENSE_SCORE_FILTER", _f("RAG_MIN_DENSE_SCORE", 0.52)),
             min_reranked=_i("RAG_MIN_RERANKED_FILTER", 4),
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_FILTER", 10),
-            # LOOKUP/JOIN에서는 dense+sparse 동시수행을 계약으로 강제한다.
-            prefer_lex_only=False,
             tag_boost=_f("RAG_TAG_BOOST_FILTER", _f("RAG_TAG_BOOST", 1.0)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_FILTER", _f("RAG_TAG_MISMATCH_PENALTY", 0.25)),
             strategy_key=strategy_key,
