@@ -35,6 +35,7 @@ from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import normalize_intent
+from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
 from settings import (
     REDIS_URL,
@@ -242,23 +243,6 @@ QuestionAnalysis = QuestionAnalysisV2
 
 class PlannerV2ParseError(ValueError):
     """QuestionAnalysisV2 파싱/검증 실패."""
-
-
-def _build_question_analysis_fallback(question: str) -> QuestionAnalysis:
-    return QuestionAnalysis(
-        strategy_version=PLANNER_SCHEMA_VERSION,
-        mode="SEARCH",
-        head="support",
-        action="topic",
-        relation=None,
-        join_key_mode=None,
-        target_cols=[],
-        ids_map={},
-        filters={},
-        limit=20,
-        retrieval_query=question[:120],
-        confidence=0.0,
-    )
 
 
 def _validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
@@ -694,13 +678,16 @@ async def _run_question_analysis(
                 continue
 
     logger.error(
-        "[PLANNER.V2] event=fallback_applied conversation_id=%s retries=%s error_type=%s error=%s",
+        "[PLANNER.V2] event=parse_final_failed conversation_id=%s retries=%s error_type=%s error=%s",
         conversation_id,
         max_attempts - 1,
         type(last_error).__name__ if last_error else "unknown",
         last_error,
     )
-    return _build_question_analysis_fallback(question)
+    raise StrategyViolation(
+        error_code="PLANNER_PARSE_FINAL_FAILED",
+        reason=str(last_error or "planner parse failed"),
+    )
 
 
 # --- Node 4: Knowledge Sufficiency Judge ---
@@ -955,6 +942,8 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         return {"context": docs}
 
+    except StrategyViolation:
+        raise
     except Exception as e:
         logger.error(f"❌ RAG Error: {e}")
         return {"context": []}
@@ -1144,7 +1133,7 @@ async def build_intent_payload(
             chat_history=chat_history,
             prev_context=prev_context,
         )
-        planner_failed = int((question_analysis is None) or (float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0))
+        planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
 
     kws: List[str] = []
     hint_people_terms: List[str] = []
@@ -2152,7 +2141,9 @@ async def query_stream(payload: QueryRequest):
 
         except Exception as e:
             logger.error(f"Stream Error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_code = getattr(e, "error_code", "INTERNAL_ERROR")
+            reason = getattr(e, "reason", str(e))
+            yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -2207,7 +2198,12 @@ async def query_debug(payload: QueryRequest):
 
     except Exception as e:
         logger.error(f"Debug Error: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "error_code": getattr(e, "error_code", "INTERNAL_ERROR"),
+            "reason": getattr(e, "reason", str(e)),
+        }
 
 @app.get("/health")
 async def health_check():

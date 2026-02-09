@@ -72,7 +72,12 @@ from rag_parts.search_strategy import (
     build_strategy_key,
     build_rerank_spec as _build_rerank_spec,
 )
-from rag_parts.planner_contract import planner_contract_mode, normalize_lookup_filter_policy
+from rag_parts.planner_contract import (
+    planner_contract_mode,
+    normalize_lookup_filter_policy,
+    validate_planner_contract,
+    StrategyViolation,
+)
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
@@ -2747,6 +2752,30 @@ def _run_rag_with_vectors(
         )
         raise StrategyViolation(f"invalid planner strategy: {planner_mode_error}")
 
+    route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
+    relation_target_cols_for_contract = (
+        (route_for_contract.hop1_col, route_for_contract.hop2_col)
+        if route_for_contract is not None
+        else None
+    )
+    join_key_mode_for_contract = "group" if (relation_target_cols_for_contract and relation_target_cols_for_contract[1] == COL_PERF) else "instance"
+    planner_contract_violations = validate_planner_contract(
+        mode=planner_strategy_mode,
+        head=hint_head or base_route,
+        relation=planner_strategy_relation,
+        target_cols=list(ctx.target_collections or plan.target_collections or []),
+        ids_map=getattr(ctx, "ids_map", None),
+        relation_target_cols=relation_target_cols_for_contract,
+        join_key_mode=join_key_mode_for_contract,
+    )
+    if planner_contract_violations:
+        first = planner_contract_violations[0]
+        raise StrategyViolation(
+            error_code=first.error_code,
+            reason=first.reason,
+            violations=planner_contract_violations,
+        )
+
     planner_filter_spec = dict(plan.filters or {})
 
     preset_intent_view = ctx.intent_view()
@@ -3328,25 +3357,14 @@ def _run_rag_with_vectors(
         join_relation = relation
         route = get_relation_route(join_relation)
         if route is None:
-            # unknown relation -> fall back to base SEARCH
-            join_relation = None
-        else:
-            hop1_col, hop2_col = route.hop1_col, route.hop2_col
-            hop1_kind, hop2_kind = route.hop1_kind, route.hop2_kind
-            hop1_tag_filters, hop2_tag_filters = route.hop1_tag_filters, route.hop2_tag_filters
-            hop2_label = route.hop2_label
-
-        if join_relation:
-            allowed_cols = set(target_collections or [])
-            if allowed_cols and (hop1_col not in allowed_cols or hop2_col not in allowed_cols):
-                log_kv(
-                    "RAG.JOIN.SKIP",
-                    reason="target_collections",
-                    target_cols=list(target_collections or []),
-                    hop1_col=hop1_col,
-                    hop2_col=hop2_col,
-                )
-                join_relation = None
+            raise StrategyViolation(
+                error_code="PLANNER_JOIN_RELATION_UNRESOLVED",
+                reason=f"JOIN relation 해석 실패(relation={join_relation})",
+            )
+        hop1_col, hop2_col = route.hop1_col, route.hop2_col
+        hop1_kind, hop2_kind = route.hop1_kind, route.hop2_kind
+        hop1_tag_filters, hop2_tag_filters = route.hop1_tag_filters, route.hop2_tag_filters
+        hop2_label = route.hop2_label
 
         if join_relation:
             hop1_keep_env = int(os.getenv("RAG_HOP1_KEEP", "5"))
