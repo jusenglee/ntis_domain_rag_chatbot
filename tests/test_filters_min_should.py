@@ -166,6 +166,14 @@ class FilterMinShouldTests(unittest.TestCase):
         self.assertIn("apply_name_filters = mode != \"lookup\" or lookup_has_ids or lookup_has_name_filters", src)
         self.assertIn("FILTER_MISS_SUSPECTED", src)
 
+    def test_join_participant_researcher_name_uses_merged_people_terms(self) -> None:
+        with open("rag_pipeline.py", "r", encoding="utf-8") as fp:
+            src = fp.read()
+        self.assertIn('filters_obj.get("participant_researcher_name")', src)
+        self.assertIn("people_terms = _normalize_hint_terms([*participant_people_terms_hint, *people_terms])", src)
+        self.assertIn("final_people_terms = list(ctx.people_terms or people_terms or [])", src)
+        self.assertIn("people_terms=final_people_terms", src)
+
 
 if __name__ == "__main__":
     unittest.main()

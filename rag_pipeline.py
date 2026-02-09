@@ -2029,6 +2029,16 @@ def _run_rag_with_vectors(
             "org_terms": org_terms,
         }
 
+    def _extract_people_filter_hints(filters_obj: Any) -> List[str]:
+        if not isinstance(filters_obj, dict):
+            return []
+        return _normalize_hint_terms(
+            [
+                *(_normalize_hint_terms(filters_obj.get("researcher_name") or filters_obj.get("people_name"))),
+                *(_normalize_hint_terms(filters_obj.get("participant_researcher_name"))),
+            ]
+        )
+
     # keywords (payload/hint only)
     t0 = time.time()
     payload_kws = _get_attr(intent_payload, "keywords", None)
@@ -2189,9 +2199,7 @@ def _run_rag_with_vectors(
                 ctx.people_affiliation_org_terms = org_filter_hints["people_affiliation_org_terms"]
             if org_filter_hints["org_terms"]:
                 ctx.org_terms = org_filter_hints["org_terms"]
-            people_terms_hint = _normalize_hint_terms(
-                hint_filters.get("researcher_name") or hint_filters.get("people_name")
-            )
+            people_terms_hint = _extract_people_filter_hints(hint_filters)
             if people_terms_hint:
                 ctx.people_terms = people_terms_hint
             year_terms_hint = _normalize_hint_terms(
@@ -2421,6 +2429,16 @@ def _run_rag_with_vectors(
         researcher_id = _get_attr(researcher, "researcher_id", None)
         if researcher_id not in (None, ""):
             hint_people_ids.append(researcher_id)
+    participant_people_terms_hint = _normalize_hint_terms(
+        (people_filter_spec or {}).get("participant_researcher_name")
+    ) if isinstance(people_filter_spec, dict) else []
+    participant_people_terms_hint = _normalize_hint_terms(
+        [
+            *participant_people_terms_hint,
+            *_extract_people_filter_hints(hint_filters),
+        ]
+    )
+
     if hint_people_terms:
         if hint_policy == "merge":
             merged_people = hint_people_terms + people_terms
@@ -2432,6 +2450,8 @@ def _run_rag_with_vectors(
                 seen_people.add(term)
                 deduped_people.append(term)
             people_terms = deduped_people
+    if participant_people_terms_hint:
+        people_terms = _normalize_hint_terms([*participant_people_terms_hint, *people_terms])
     ctx.people_terms = people_terms
     people_ids = list((ctx.ids_map or {}).get("person_no") or [])
     if hint_people_ids:
@@ -2534,9 +2554,7 @@ def _run_rag_with_vectors(
         _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
     )
 
-    hint_people_filters = _normalize_hint_terms(
-        hint_filters.get("researcher_name") or hint_filters.get("people_name")
-    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
+    hint_people_filters = _extract_people_filter_hints(hint_filters) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
     hint_org_filters = _normalize_hint_terms(
         hint_filters.get("org_name") or hint_filters.get("org")
     ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
@@ -2852,14 +2870,7 @@ def _run_rag_with_vectors(
             else None
         )
 
-    force_people_terms = _normalize_hint_terms(
-        (people_filter_spec or {}).get("participant_researcher_name")
-    ) if isinstance(people_filter_spec, dict) else []
-    if isinstance(hint_filters, dict):
-        force_people_terms = _normalize_hint_terms([
-            *force_people_terms,
-            *(hint_filters.get("participant_researcher_name") or []),
-        ])
+    force_people_terms = list(participant_people_terms_hint)
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
@@ -3408,10 +3419,11 @@ def _run_rag_with_vectors(
                             and len(people_terms) == 1
                         )
                     )
-                    if join_people_filter is None and people_terms:
+                    final_people_terms = list(ctx.people_terms or people_terms or [])
+                    if join_people_filter is None and final_people_terms:
                         join_people_filter = build_people_filter(
                             PeopleFilterInput(
-                                people_terms=people_terms,
+                                people_terms=final_people_terms,
                                 person_ids=people_ids,
                                 gender_terms=gender_terms,
                                 org_terms=people_org_terms,
@@ -3424,7 +3436,7 @@ def _run_rag_with_vectors(
                                 "RAG.JOIN.HOP1.LOOKUP_FILTER.PEOPLE_MISSING",
                                 level="warning",
                                 reason="people_filter_unavailable",
-                                people_terms=people_terms[:4],
+                                people_terms=final_people_terms[:4],
                                 people_ids=people_ids[:4],
                                 match_mode=people_match_mode,
                                 min_should=people_min_should,
