@@ -495,6 +495,34 @@ def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
             break
     return pjt_nos
 
+
+def _ensure_join_mode_has_keys(
+    *,
+    has_join_keys: bool,
+    join_key_mode: str,
+    hop1_top: List[Any],
+    hop1_col: str,
+) -> None:
+    """
+    mode=join 계약:
+    - Hop1는 join key 추출 전용 단계이며, key가 없으면 Hop2를 생략한 성공 응답을 반환하지 않는다.
+    - 결과는 "Hop2 실행 성공" 또는 "명시적 실패(StrategyViolation)"만 허용한다.
+    """
+    if has_join_keys:
+        return
+
+    if hop1_top:
+        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys")
+
+    join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
+    raise StrategyViolation(
+        error_code="JOIN_KEYS_MISSING",
+        reason=(
+            "mode=join requires Hop2 execution, but join keys were not extracted "
+            f"from Hop1 ({join_key_label} missing)."
+        ),
+    )
+
 def _approx_token_len(text: str) -> int:
     """토크나이저 없이 예산 기반 컷오프용 근사치."""
     if not text:
@@ -3836,21 +3864,14 @@ def _run_rag_with_vectors(
                     query_text=hop1_q,
                 )
 
-            # join key 없으면 종료
+            # mode=join 계약: join key가 없으면 Hop1-only 성공 반환 없이 명시적 실패로 종료
             has_join_keys = bool(join_pjt_nos) if join_key_mode == "group" else bool(join_pjt_ids)
-            if not has_join_keys:
-                if hop1_top:
-                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys")
-                join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
-                context = (
-                    f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
-                    f"### [Hop2] {hop2_label}\n- 필터 {join_key_label} 후보: (없음)\n\n"
-                    f"(조인 키({join_key_label})를 추출하지 못해 Hop2를 생략했습니다.)"
-                )
-                _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
-                _timing_put(timings, "phase.total", time.time() - t_all0)
-                hits = hop1_top[: max(1, hop1_keep)]
-                return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=hop1_refs, timings=timings)
+            _ensure_join_mode_has_keys(
+                has_join_keys=has_join_keys,
+                join_key_mode=join_key_mode,
+                hop1_top=hop1_top,
+                hop1_col=hop1_col,
+            )
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             planner_join_key_mode = str(join_key_mode or "").strip().lower() or None
