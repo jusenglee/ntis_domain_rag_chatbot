@@ -145,6 +145,50 @@ def _split_tag_filters_by_family(tag_filters: Iterable[object]) -> tuple[list[st
             other_tags.append(tag_str)
     return project_tags, perf_tags, other_tags
 
+
+def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
+    """ids_map 입력을 {key: [str, ...]} 형태로 정규화한다."""
+    if not isinstance(ids_map, dict):
+        return {}
+
+    normalized: Dict[str, List[str]] = {}
+    for key, values in ids_map.items():
+        if isinstance(values, (list, tuple, set)):
+            seq = values
+        else:
+            seq = [values]
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for value in seq:
+            text = str(value).strip()
+            if not text or text.lower() == "none" or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+
+        if cleaned:
+            normalized[str(key)] = cleaned
+
+    return normalized
+
+
+def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[str, List[str]]:
+    """pjt_id/pjt_no 혼합 여부를 mode 정책으로 검증하고 정규화 ids_map을 반환한다."""
+    normalized_ids_map = _normalize_ids_map(ids_map)
+    mode_norm = str(mode or "").strip().lower()
+
+    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
+    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
+        error_code = "PLANNER_MIXED_PROJECT_KEYS" if mode_norm == "lookup" else "PLANNER_JOIN_MIXED_PROJECT_KEYS"
+        raise StrategyViolation(
+            error_code=error_code,
+            reason=f"ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})",
+        )
+
+    return normalized_ids_map
+
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -2344,14 +2388,7 @@ def _run_rag_with_vectors(
         return list(dict.fromkeys([*primary_terms, *secondary_terms]))
 
     def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
-        if not isinstance(raw, dict):
-            return {}
-        out: Dict[str, List[str]] = {}
-        for key, values in raw.items():
-            norm = _normalize_hint_terms(values)
-            if norm:
-                out[str(key)] = norm
-        return out
+        return _normalize_ids_map(raw)
 
     def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
         if isinstance(raw, NormalizedIntent):
@@ -2521,6 +2558,7 @@ def _run_rag_with_vectors(
             log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
+    ctx.ids_map = _normalize_ids_map(ctx.ids_map)
     planner_keywords = _normalize_hint_terms(ctx.keywords)
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
@@ -2544,7 +2582,7 @@ def _run_rag_with_vectors(
             merged_ids = dict(ctx.ids_map or {})
             for key, values in hint_ids_map.items():
                 merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
-            ctx.ids_map = merged_ids
+            ctx.ids_map = _normalize_ids_map(merged_ids)
         if isinstance(hint_filters, dict):
             org_filter_hints = _extract_org_filter_hints(hint_filters)
             if org_filter_hints["lead_org_terms"]:
@@ -3015,8 +3053,9 @@ def _run_rag_with_vectors(
         mode_norm = str(mode_value or "").strip().lower()
         join_norm = str(join_key_mode or "").strip().lower() or None
 
-        has_pjt_id = bool((ids_map_obj or {}).get("pjt_id"))
-        has_pjt_no = bool((ids_map_obj or {}).get("pjt_no"))
+        normalized_ids_map = _validate_project_key_exclusive(ids_map_obj, mode_norm)
+        has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+        has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
 
         if mode_norm != "join":
             if join_norm is not None:
@@ -3030,12 +3069,6 @@ def _run_rag_with_vectors(
             raise StrategyViolation(
                 error_code="PLANNER_JOIN_KEY_MODE_INVALID",
                 reason="join mode requires join_key_mode in {'instance','group'}",
-            )
-
-        if has_pjt_id and has_pjt_no:
-            raise StrategyViolation(
-                error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS",
-                reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN",
             )
 
         if join_norm == "instance":
@@ -3126,6 +3159,7 @@ def _run_rag_with_vectors(
         )
     if pending_strategy_filter_spec:
         plan = replace(plan, filters=pending_strategy_filter_spec)
+    ctx.ids_map = _validate_project_key_exclusive(ctx.ids_map, plan.mode)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
@@ -4408,19 +4442,10 @@ def _run_rag_with_vectors(
                 combined = _and_filter(combined, perf_followup_filter) if combined else perf_followup_filter
             return combined
 
-        ids_map = getattr(it, "ids_map", {}) or {}
-        raw_pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        raw_pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
-
-        # LOOKUP 서버 필터 단계에서는 project key 타입을 반드시 단일화한다.
-        if raw_pjt_ids and raw_pjt_nos:
-            raise StrategyViolation(
-                error_code="PLANNER_MIXED_PROJECT_KEYS",
-                reason="lookup ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음",
-            )
-        project_key_filter_type = "pjt_id" if raw_pjt_ids else ("pjt_no" if raw_pjt_nos else None)
-        pjt_ids = raw_pjt_ids if project_key_filter_type == "pjt_id" else []
-        pjt_nos = raw_pjt_nos if project_key_filter_type == "pjt_no" else []
+        ids_map = _validate_project_key_exclusive(getattr(it, "ids_map", {}) or {}, mode)
+        pjt_ids = list(ids_map.get("pjt_id") or [])
+        pjt_nos = list(ids_map.get("pjt_no") or [])
+        project_key_filter_type = "pjt_id" if pjt_ids else ("pjt_no" if pjt_nos else None)
 
         perf_id_keys = (
             "doi",
