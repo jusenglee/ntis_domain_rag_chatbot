@@ -604,10 +604,16 @@ async def _run_question_analysis(
         ====================
         [Mode 결정 규칙(우선순위)]
         ====================
-        A) ids_map에 값이 하나라도 있으면 => mode="LOOKUP"
-        B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이면 => mode="LOOKUP"
-        C) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf 관계가 명확하면 => mode="JOIN"
+        A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
+           - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
+        B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
+           단순 ID 조회/목록/통계 요청이면 => mode="LOOKUP"
+        C) ids_map에 값이 하나라도 있고, A에 해당하지 않으면 => mode="LOOKUP"
         D) 위에 해당하지 않는 토픽/키워드 탐색이면 => mode="SEARCH"
+
+        예시:
+        - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
+        - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
@@ -708,7 +714,8 @@ async def _run_question_analysis(
         ====================
         [JOIN(2-hop) 정책: 그룹 vs 인스턴스]
         ====================
-        - JOIN은 project↔perf가 명확할 때만 사용합니다.
+        - JOIN은 project↔perf relation이 명확할 때만 사용합니다.
+        - relation이 명확하면 mode="JOIN"을 우선 적용하고, 단순 ID 조회/목록/통계는 mode="LOOKUP"을 사용합니다.
         - mode="JOIN"이면 join_key_mode는 필수이며 "instance" | "group" 중 하나여야 합니다.
         - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
         - JOIN에서 ids_map 키는 XOR 규칙을 반드시 지킵니다(동시 존재 금지):
