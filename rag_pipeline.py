@@ -4988,7 +4988,6 @@ def _run_rag_with_vectors(
 def run_rag_once(
     query: str,
     model_name: str = DEFAULT_MODEL_NAME,
-    hint: Any = None,
     intent_payload: Any = None,
 ) -> RagResult:
     domain_hint: Optional[str] = None
@@ -5003,7 +5002,7 @@ def run_rag_once(
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
-        hint=hint,
+        hint=None,
         intent_payload=intent_payload,
         stack="M",
         vector_names=vector_names or ["e5i_qa", "e5_qa"],
@@ -5015,8 +5014,7 @@ def run_rag_once(
 def run_rag_ab_compare(
     query: str,
     model_name: str = DEFAULT_MODEL_NAME,
-    hint: Any = None,
     intent_payload: Any = None,
 ) -> Dict[str, RagResult]:
-    res_m = run_rag_once(query=query, model_name=model_name, hint=hint, intent_payload=intent_payload)
+    res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload)
     return {"M": res_m}

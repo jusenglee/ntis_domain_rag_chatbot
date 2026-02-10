@@ -45,7 +45,6 @@ class Server3RetrieverSourceTypeTests(unittest.TestCase):
         retriever = retriever_cls()
         retriever.model_name = "gemma_vllm_0"
         retriever.top_k = 3
-        retriever.hint = None
         retriever.intent_payload = None
 
         result = retriever.retrieve("질문")
@@ -75,7 +74,6 @@ class Server3RetrieverSourceTypeTests(unittest.TestCase):
         retriever = retriever_cls()
         retriever.model_name = "gemma_vllm_0"
         retriever.top_k = 3
-        retriever.hint = None
         retriever.intent_payload = None
 
         result = retriever.retrieve("질문")
