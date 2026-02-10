@@ -875,7 +875,8 @@ def _validate_lookup_join_hybrid_metrics(
     dense_queries = float(timings.get("dense_queries", 0.0) or 0.0)
     sparse_hits = float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
     hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
-    sparse_metric = max(sparse_hits, hybrid_once_hits)
+    hybrid_mode_used = hybrid_once_hits > 0
+
     log_kv(
         "RAG.LOOKUP_JOIN.HYBRID.METRICS",
         mode=mode,
@@ -883,16 +884,28 @@ def _validate_lookup_join_hybrid_metrics(
         dense_queries=dense_queries,
         sparse_hits=sparse_hits,
         hybrid_once_hits=hybrid_once_hits,
+        hybrid_mode_used=hybrid_mode_used,
     )
-    if dense_queries <= 0:
+
+    if hybrid_mode_used:
+        return
+
+    if dense_queries == 0:
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
-            reason=f"dense_queries must be >0 for {contract_scope}; got {dense_queries}",
+            reason=(
+                f"dense_queries == 0 and hybrid_once_hits == 0 for {contract_scope}; "
+                f"dense_queries={dense_queries}, hybrid_once_hits={hybrid_once_hits}"
+            ),
         )
-    if sparse_metric <= 0:
+
+    if sparse_hits == 0:
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
-            reason=f"sparse_hits/hybrid_once_hits must be >0 for {contract_scope}; got sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}",
+            reason=(
+                f"sparse_hits == 0 and hybrid_once_hits == 0 for {contract_scope}; "
+                f"sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}"
+            ),
         )
 
 def _attach_collection(p: Any, col: str) -> Any:
@@ -4645,6 +4658,7 @@ def _run_rag_with_vectors(
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
                 "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
+                "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "best_dense": float(best_dense) if best_dense is not None else -1.0,
                 "total": float(local_timings.get("total", 0.0)),
             }
@@ -4669,6 +4683,7 @@ def _run_rag_with_vectors(
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
                 "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
+                "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "total": float(local_timings.get("total", 0.0)),
             }
             log_kv(
