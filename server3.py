@@ -523,8 +523,6 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     """질문 분석: 카테고리, 후속 질문 유형, 이력 요약"""
     if state.question_analysis:
         return {"question_analysis": state.question_analysis}
-    if state.intent_payload and state.intent_payload.get("question_analysis"):
-        return {"question_analysis": state.intent_payload["question_analysis"]}
 
     result = await _run_question_analysis(
         question=state.messages[-1].content,
@@ -863,7 +861,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
     query_intent = None
     if state.intent_payload:
-        query_intent = state.intent_payload.get("query_intent")
+        query_intent = state.intent_payload.get("normalized_intent")
     action = None
     if query_intent:
         if isinstance(query_intent, dict):
@@ -1001,13 +999,25 @@ class CustomRAGRetriever(BaseModel):
     hint: Optional[QuestionAnalysisV2] = None
     intent_payload: Optional[Dict[str, Any]] = None
 
+    class Config:
+        arbitrary_types_allowed = True
+
+    @staticmethod
+    def _build_rag_intent_payload(intent_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """RAG intent_payload.v2 송신 계약: normalized_intent 단일 필드만 전달."""
+        if not isinstance(intent_payload, dict):
+            return None
+        if "normalized_intent" not in intent_payload:
+            return None
+        return {"normalized_intent": intent_payload.get("normalized_intent")}
+
     def retrieve(self, query: str) -> Dict[str, Any]:
         """동기 검색 함수"""
         res_map = run_rag_ab_compare(
             query=query,
             model_name=self.model_name,
             hint=self.hint,
-            intent_payload=self.intent_payload,
+            intent_payload=self._build_rag_intent_payload(self.intent_payload),
         )
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
@@ -1309,7 +1319,7 @@ async def build_intent_payload(
     conversation_id: str,
     chat_history: List[BaseMessage],
     prev_context: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
     question_analysis = None
     planner_failed = 0
@@ -1414,14 +1424,17 @@ async def build_intent_payload(
     # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
     # normalize_intent 이후 실행 레이어에서 intent를 재작성하지 않는다.
 
+    logger.info(
+        "[INTENT_PAYLOAD_V2] event=build conversation_id=%s planner_applied=%s planner_failed=%s schema_fields=%s",
+        conversation_id,
+        int(planner_applied),
+        int(planner_failed),
+        ["normalized_intent"],
+    )
+
     return {
-        "question_analysis": question_analysis,
-        "query_intent": raw_intent,
         "normalized_intent": normalized_intent,
-        "keywords": kws,
-        "planner_applied": int(planner_applied),
-        "planner_failed": int(planner_failed),
-    }
+    }, question_analysis
 
 
 
@@ -2265,7 +2278,7 @@ async def query_stream(payload: QueryRequest):
         loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
         user_message = HumanMessage(content=question)
         chat_history = loaded_history + [user_message]
-        intent_payload = await build_intent_payload(
+        intent_payload, question_analysis = await build_intent_payload(
             question,
             conversation_id,
             chat_history,
@@ -2275,7 +2288,7 @@ async def query_stream(payload: QueryRequest):
             "conversation_id": conversation_id,
             "messages": [user_message],
             "intent_payload": intent_payload,
-            "question_analysis": intent_payload.get("question_analysis"),
+            "question_analysis": question_analysis,
         }
 
         log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
@@ -2349,7 +2362,7 @@ async def query_debug(payload: QueryRequest):
 
     loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
     chat_history = loaded_history + [HumanMessage(content=question)]
-    intent_payload = await build_intent_payload(
+    intent_payload, question_analysis = await build_intent_payload(
         question,
         conversation_id,
         chat_history,
@@ -2360,7 +2373,7 @@ async def query_debug(payload: QueryRequest):
         "conversation_id": conversation_id,
         "messages": [HumanMessage(content=question)],
         "intent_payload": intent_payload,
-        "question_analysis": intent_payload.get("question_analysis"),
+        "question_analysis": question_analysis,
     }
 
     graph = app.state.graph
