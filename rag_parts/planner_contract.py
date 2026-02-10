@@ -71,7 +71,7 @@ def validate_planner_contract(
     """실행 직전 planner 계약 위반을 에러 코드로 수집한다."""
     violations: list[PlannerContractViolation] = []
     mode_norm = str(mode or "").strip().lower()
-    if mode_norm != "join":
+    if mode_norm not in ("lookup", "join"):
         return violations
 
     head_norm = str(head or "").strip().lower()
@@ -96,6 +96,17 @@ def validate_planner_contract(
 
     pjt_ids = _as_str_list(normalized_ids_map.get("pjt_id"))
     pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
+
+    if pjt_ids and pjt_nos:
+        violations.append(
+            PlannerContractViolation(
+                error_code="PLANNER_MIXED_PROJECT_KEYS",
+                reason=f"ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})",
+            )
+        )
+
+    if mode_norm != "join":
+        return violations
 
     if relation is None or relation_target_cols is None:
         violations.append(
@@ -123,14 +134,6 @@ def validate_planner_contract(
                     "relation/target_cols 불일치"
                     f"(relation_cols={relation_cols}, target_cols={normalized_target_cols})"
                 ),
-            )
-        )
-
-    if pjt_ids and pjt_nos:
-        violations.append(
-            PlannerContractViolation(
-                error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS",
-                reason="pjt_id/pjt_no 혼합 입력은 허용되지 않음",
             )
         )
 
