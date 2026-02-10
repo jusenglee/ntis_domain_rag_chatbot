@@ -159,5 +159,54 @@ class OrgFilterQueryFilterGateTests(unittest.TestCase):
         self.assertTrue(any("org_nm" in _collect_filter_keys(f) or "blng_org_nm" in _collect_filter_keys(f) for f in join_filters if f is not None))
 
 
+    def test_lookup_mixed_project_keys_fail_fast_without_correction(self):
+        hint = {
+            "mode": "LOOKUP",
+            "head": "project",
+            "action": "list",
+            "ids_map": {"pjt_id": ["12345678"], "pjt_no": ["PJT-2024-0001"]},
+            "confidence": 0.99,
+        }
+
+        with patch.object(rag_pipeline, "build_rag_objects", return_value=SimpleNamespace(qdrant_client=object(), embed_e5i=None, embed_e5=None)):
+            with self.assertRaises(rag_pipeline.StrategyViolation) as cm:
+                rag_pipeline._run_rag_with_vectors(
+                    query="테스트 질의",
+                    model_name="gpt-4o-mini",
+                    hint=hint,
+                    intent_payload=None,
+                    stack="test",
+                    vector_names=[],
+                    w_dense_map={},
+                )
+
+        self.assertEqual(cm.exception.error_code, "PLANNER_MIXED_PROJECT_KEYS")
+
+    def test_join_mixed_project_keys_fail_fast_without_correction(self):
+        hint = {
+            "mode": "JOIN",
+            "head": "project",
+            "action": "join",
+            "relation": "project_perf",
+            "join_key_mode": "instance",
+            "ids_map": {"pjt_id": ["12345678"], "pjt_no": ["PJT-2024-0001"]},
+            "confidence": 0.99,
+        }
+
+        with patch.object(rag_pipeline, "build_rag_objects", return_value=SimpleNamespace(qdrant_client=object(), embed_e5i=None, embed_e5=None)):
+            with self.assertRaises(rag_pipeline.StrategyViolation) as cm:
+                rag_pipeline._run_rag_with_vectors(
+                    query="테스트 질의",
+                    model_name="gpt-4o-mini",
+                    hint=hint,
+                    intent_payload=None,
+                    stack="test",
+                    vector_names=[],
+                    w_dense_map={},
+                )
+
+        self.assertEqual(cm.exception.error_code, "PLANNER_JOIN_MIXED_PROJECT_KEYS")
+
+
 if __name__ == "__main__":
     unittest.main()
