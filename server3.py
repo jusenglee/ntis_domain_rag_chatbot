@@ -34,9 +34,10 @@ from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
-from rag_parts.pipeline_steps import normalize_intent
+from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
+from schemas import IntentPayloadV2
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -439,7 +440,7 @@ class AgentState(BaseModel):
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
     knowledge_sufficiency: Optional[KnowledgeSufficiency] = None
-    intent_payload: Optional[Dict[str, Any]] = None
+    intent_payload: Optional[IntentPayloadV2] = None
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
         """병렬 노드에서 latencies가 동시에 업데이트될 때 병합"""
@@ -861,7 +862,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
     query_intent = None
     if state.intent_payload:
-        query_intent = state.intent_payload.get("normalized_intent")
+        query_intent = getattr(state.intent_payload, "normalized_intent", None)
     action = None
     if query_intent:
         if isinstance(query_intent, dict):
@@ -998,16 +999,17 @@ class CustomRAGRetriever(BaseModel):
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
-    intent_payload: Optional[Dict[str, Any]] = None
+    intent_payload: Optional[IntentPayloadV2] = None
 
     @staticmethod
-    def _build_rag_intent_payload(intent_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV2]) -> Optional[Dict[str, Any]]:
         """RAG intent_payload.v2 송신 계약: normalized_intent 단일 필드만 전달."""
-        if not isinstance(intent_payload, dict):
+        if intent_payload is None:
             return None
-        if "normalized_intent" not in intent_payload:
+        normalized_intent = getattr(intent_payload, "normalized_intent", None)
+        if not isinstance(normalized_intent, NormalizedIntent):
             return None
-        return {"normalized_intent": intent_payload.get("normalized_intent")}
+        return {"normalized_intent": normalized_intent}
 
     def retrieve(self, query: str) -> Dict[str, Any]:
         """동기 검색 함수"""
@@ -1318,7 +1320,7 @@ async def build_intent_payload(
     conversation_id: str,
     chat_history: List[BaseMessage],
     prev_context: List[Dict[str, Any]],
-) -> tuple[Dict[str, Any], Optional[QuestionAnalysis]]:
+) -> tuple[IntentPayloadV2, Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
     question_analysis = None
     planner_failed = 0
@@ -1431,9 +1433,7 @@ async def build_intent_payload(
         ["normalized_intent"],
     )
 
-    return {
-        "normalized_intent": normalized_intent,
-    }, question_analysis
+    return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
 
 
 

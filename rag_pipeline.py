@@ -2958,6 +2958,7 @@ def _run_rag_with_vectors(
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+    planner_mode_locked = str(plan.mode or "").strip().lower()
     planner_relation_locked = plan.relation
     planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
     _assert_allowlist_only(
@@ -3367,9 +3368,9 @@ def _run_rag_with_vectors(
     planner_target_cols_eq = int(planner_target_cols_exec == executed_target_cols)
     log_kv(
         "RAG.MODE.EXECUTION",
-        planner_mode=planner_mode,
+        planner_mode=planner_mode_locked,
         executed_mode=mode,
-        mode_equal=int(str(planner_mode or "").strip().lower() == str(mode or "").strip().lower()) if planner_mode else None,
+        mode_equal=int(planner_mode_locked == str(mode or "").strip().lower()) if planner_mode_locked else None,
         planner_relation=planner_relation_locked,
         executed_relation=relation,
         planner_relation_eq=planner_relation_eq,
@@ -3381,6 +3382,12 @@ def _run_rag_with_vectors(
             "planner_target_cols == executed_target_cols": planner_target_cols_eq,
         },
         strict_strategy_consistency=int(strict_strategy_consistency),
+    )
+    _strategy_must_match_or_violation(
+        mismatch_kind="mode",
+        planner_value=planner_mode_locked,
+        executed_value=mode,
+        context={"phase": "execution"},
     )
     _strategy_must_match_or_violation(
         mismatch_kind="relation",

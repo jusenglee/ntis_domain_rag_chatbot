@@ -78,6 +78,7 @@ class NormalizedIntent:
     base_route: str
     relation: Optional[Tuple[str, str]]
     is_id_query: bool
+    mode: Optional[str] = None
     output_type: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
     parsing_warnings: List[str] = field(default_factory=list)
@@ -108,6 +109,8 @@ class NormalizedIntent:
     people_terms_match_mode: Optional[str] = None
     people_terms_min_should: Optional[int] = None
     lookup_filter_policy: Optional[str] = None
+    lookup_filter_policy_hint: Optional[str] = None
+    target_cols: List[str] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class FilterBundle:
@@ -228,6 +231,7 @@ def normalize_intent(
     )
 
     return NormalizedIntent(
+        mode=str(getattr(intent, "mode", "") or "").strip().lower() or None,
         action=action,
         base_route=base_route,
         relation=relation,
@@ -258,6 +262,11 @@ def normalize_intent(
         ids_map=ids_map,
         ids_flat=ids_flat,
         remove_terms_for_head=_normalize_terms(getattr(intent, "remove_terms_for_head", None) or []),
+        people_terms_match_mode=str(getattr(intent, "people_terms_match_mode", "") or "").strip().lower() or None,
+        people_terms_min_should=getattr(intent, "people_terms_min_should", None),
+        lookup_filter_policy=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
+        lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
+        target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
     )
 
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:

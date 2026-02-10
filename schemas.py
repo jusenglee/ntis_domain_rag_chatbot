@@ -4,6 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 
+from rag_parts.pipeline_steps import NormalizedIntent
+
+
+@dataclass(frozen=True)
+class IntentPayloadV2:
+    """RAG intent_payload.v2 계약: normalized_intent 단일 필드."""
+
+    normalized_intent: NormalizedIntent
+
 
 @dataclass(frozen=True)
 class StrategySpec:
