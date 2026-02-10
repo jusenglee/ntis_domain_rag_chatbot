@@ -97,6 +97,7 @@ from rag_parts.filters import (
     make_match_any,
     build_project_id_filter,
     build_title_filter,
+    validate_join_mode_key_inputs,
     JoinFilterInput,
     PeopleFilterInput, OrgFilterInput,
 )
@@ -3808,6 +3809,12 @@ def _run_rag_with_vectors(
                         f"(planner={planner_join_key_mode}, executed={executed_join_key_mode}, relation={relation})"
                     ),
                 )
+
+            validate_join_mode_key_inputs(
+                mode=planner_join_key_mode,
+                join_ids=join_pjt_ids,
+                pjt_nos=join_pjt_nos,
+            )
 
             hop2_filter = _build_join_hop2_filter(
                 relation=relation,
