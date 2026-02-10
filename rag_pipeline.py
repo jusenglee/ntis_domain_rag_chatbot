@@ -1999,9 +1999,9 @@ def _run_rag_with_vectors(
 
         if norm == {"project"}:
             return "project"
-        if norm == {"performance"}:
+        if norm in ({"perf"}, {"performance"}):
             return "perf"
-        if norm == {"researcher"}:
+        if norm in ({"people"}, {"researcher"}):
             return "people"
         if norm in ({"org"}, {"organization"}, {"기관"}, {"institution"}):
             return "org"
@@ -2850,7 +2850,7 @@ def _run_rag_with_vectors(
         if not action_value:
             return None
         action_value = str(action_value).strip().lower()
-        if action_value in ("list", "stats", "download", "id_exact", "id_fuzzy"):
+        if action_value in ("list", "stats", "download", "id_exact", "id_fuzzy", "detail"):
             return "lookup"
         if action_value in ("topic", "search"):
             return "search"

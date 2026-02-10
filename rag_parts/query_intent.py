@@ -956,27 +956,54 @@ class QueryIntent:
 def normalize_categories(cat) -> list[str]:
     if cat is None:
         return []
+
+    canonical_map = {
+        "project": "project",
+        "과제": "project",
+        "performance": "perf",
+        "perf": "perf",
+        "성과": "perf",
+        "researcher": "people",
+        "people": "people",
+        "연구자": "people",
+        "organization": "org",
+        "org": "org",
+        "institution": "org",
+        "기관": "org",
+        "support": "support",
+        "문의": "support",
+        "지원": "support",
+        "qna": "qna",
+        "q&a": "qna",
+        "etc": "etc",
+    }
+
     xs = cat if isinstance(cat, (list, tuple, set)) else [cat]
     out = []
+    seen = set()
     for x in xs:
         if hasattr(x, "value"):  # Enum
             s = str(x.value)
         else:
             s = str(x)
         s = s.strip().lower()
-        if s:
-            out.append(s)
+        if not s:
+            continue
+        norm = canonical_map.get(s, s)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
     return out
 
 def pick_domain_hint_from_categories(cats: list[str]) -> str | None:
-    # 너 시스템 기준: researcher -> people
-    if any(c in ("researcher", "people") for c in cats):
+    if "people" in cats:
         return "people"
-    if any(c in ("org", "organization", "institution", "기관") for c in cats):
+    if "org" in cats:
         return "org"
     if "project" in cats:
         return "project"
-    if any(c in ("performance", "perf") for c in cats):
+    if "perf" in cats:
         return "perf"
     if "support" in cats:
         return "support"
@@ -987,11 +1014,11 @@ def _fallback_categories_for_route(base_route: str) -> List[str]:
     if base_route == "project":
         return ["project"]
     if base_route == "perf":
-        return ["performance"]
+        return ["perf"]
     if base_route == "people":
-        return ["researcher"]
+        return ["people"]
     if base_route == "org":
-        return ["organization"]
+        return ["org"]
     if base_route == "support":
         return ["qna"]
     return ["etc"]
@@ -1354,12 +1381,11 @@ def classify_query(
     categories = normalize_categories(plan.get("category") or plan.get("categories"))
     valid_categories = {
         "project",
-        "performance",
-        "researcher",
+        "perf",
+        "people",
         "qna",
         "etc",
         "org",
-        "organization",
         "support",
     }
     categories = [c for c in categories if c in valid_categories]
