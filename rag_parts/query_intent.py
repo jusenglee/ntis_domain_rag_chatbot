@@ -911,6 +911,8 @@ class QueryIntent:
     wants_detail: bool = False
     output_type: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
+    parsing_warnings: List[str] = field(default_factory=list)
+    contract_violations: List[str] = field(default_factory=list)
     # planner meta
     categories: List[str] = field(default_factory=list)
     planner_limit: Optional[int] = None
@@ -925,6 +927,8 @@ class QueryIntent:
             "base_route": self.base_route,
             "relation": self.relation,
             "join_key_mode": self.join_key_mode,
+            "parsing_warnings": self.parsing_warnings,
+            "contract_violations": self.contract_violations,
             "intent": self.intent,
             "action": self.action,
             "is_id": int(self.is_id_query),
@@ -952,6 +956,31 @@ class QueryIntent:
             "people_terms_min_should": self.people_terms_min_should,
             "lookup_filter_policy": self.lookup_filter_policy,
         }
+
+
+def normalize_join_key_mode(
+    join_key_mode: Optional[str],
+    ids_map: Optional[Dict[str, List[str]]],
+) -> tuple[Optional[Literal["instance", "group"]], list[str], list[str]]:
+    """JOIN key mode와 ids_map 정합성을 정규화한다."""
+    ids_map = ids_map if isinstance(ids_map, dict) else {}
+    mode = str(join_key_mode or "").strip().lower() or None
+    has_pjt_id = bool(ids_map.get("pjt_id"))
+    has_pjt_no = bool(ids_map.get("pjt_no"))
+
+    parsing_warnings: list[str] = []
+    contract_violations: list[str] = []
+
+    if mode == "group" and not has_pjt_no:
+        mode = "instance"
+        parsing_warnings.append("JOIN_KEY_MODE_GROUP_WITHOUT_PJT_NO_COERCED_TO_INSTANCE")
+
+    if mode == "instance" and has_pjt_no and not has_pjt_id:
+        contract_violations.append("JOIN_KEY_MODE_INSTANCE_WITH_PJT_NO_ONLY")
+
+    if mode in ("instance", "group"):
+        return mode, parsing_warnings, contract_violations
+    return None, parsing_warnings, contract_violations
 
 def normalize_categories(cat) -> list[str]:
     if cat is None:
@@ -1304,6 +1333,10 @@ def _classify_query_heuristic(
         people_terms_min_should = None
 
     requested_limit = _extract_requested_limit(q)
+    join_key_mode, parsing_warnings, contract_violations = normalize_join_key_mode(
+        "group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None,
+        ids_map,
+    )
 
     return QueryIntent(
         base_route=base_route,
@@ -1327,7 +1360,9 @@ def _classify_query_heuristic(
         wants_list=wants_list,
         wants_detail=wants_detail,
         planner_limit=requested_limit,
-        join_key_mode=("group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None),
+        join_key_mode=join_key_mode,
+        parsing_warnings=parsing_warnings,
+        contract_violations=contract_violations,
         people_terms_match_mode=people_terms_match_mode,
         people_terms_min_should=people_terms_min_should,
         lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
@@ -1350,6 +1385,10 @@ def classify_query(
 
     precheck = _cheap_precheck(q)
     if precheck:
+        precheck_join_key_mode, precheck_parsing_warnings, precheck_contract_violations = normalize_join_key_mode(
+            "group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None,
+            ids_map,
+        )
         return QueryIntent(
             base_route="support",
             relation=None,
@@ -1362,7 +1401,9 @@ def classify_query(
             ids_flat=ids_flat,
             categories=["qna"],
             planner_confidence=0.0,
-            join_key_mode=("group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None),
+            join_key_mode=precheck_join_key_mode,
+            parsing_warnings=precheck_parsing_warnings,
+            contract_violations=precheck_contract_violations,
         )
 
     plan = _plan_from_hint(hint)
@@ -1511,6 +1552,11 @@ def classify_query(
         people_terms_match_mode = "and"
         people_terms_min_should = None
 
+    join_key_mode, parsing_warnings, contract_violations = normalize_join_key_mode(
+        "group" if selected_project_key == "pjt_no" else "instance" if selected_project_key == "pjt_id" else None,
+        ids_map,
+    )
+
     return QueryIntent(
         base_route=base_route,
         relation=relation,
@@ -1540,5 +1586,7 @@ def classify_query(
         people_terms_match_mode=people_terms_match_mode,
         people_terms_min_should=people_terms_min_should,
         lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
-        join_key_mode=("group" if selected_project_key == "pjt_no" else "instance" if selected_project_key == "pjt_id" else None),
+        join_key_mode=join_key_mode,
+        parsing_warnings=parsing_warnings,
+        contract_violations=contract_violations,
     )

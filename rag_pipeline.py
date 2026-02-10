@@ -2521,6 +2521,12 @@ def _run_rag_with_vectors(
             log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
+    intent_contract_violations = list(getattr(it, "contract_violations", None) or [])
+    if intent_contract_violations:
+        raise StrategyViolation(
+            error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+            reason=f"intent normalization contract violation: {intent_contract_violations[0]}",
+        )
     planner_keywords = _normalize_hint_terms(ctx.keywords)
 
     hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None

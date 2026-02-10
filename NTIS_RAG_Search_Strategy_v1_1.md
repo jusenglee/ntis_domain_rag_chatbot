@@ -149,12 +149,16 @@ C) **사람/기관 기반 질문 (중요)**
 #### (A) 인스턴스 기반 (PJT_ID 있음)
 - 예: “1711015550 성과 목록”
 - Hop2(perf): `pjt_id == PJT_ID` **must**
+- `join_key_mode=instance`는 `ids_map.pjt_id`가 있거나 Hop1에서 pjt_id를 추출 가능한 경우만 허용
+- `join_key_mode=instance`인데 `ids_map.pjt_no`만 존재하면 **계약 위반으로 실행 전 차단**
 
 #### (B) 그룹 기반 (PJT_NO만 있음)
 - 예:
   - “PJT-2020-XXXX 동일과제 성과 전체”
   - “연도별 성과 이력”
 - Hop1(project): `pjt_no == X`로 인스턴스들 조회 → **PJT_ID 목록 확보**
+- `join_key_mode=group`은 `ids_map.pjt_no`가 있을 때만 허용
+- `join_key_mode=group`인데 `ids_map.pjt_no`가 비어 있으면 정규화 단계에서 `instance`로 보정하고 파싱 경고를 남김
 - Hop2(perf):
   - 최우선: `pjt_no == X` **must** (perf에 저장돼 있다면)
   - fallback(정상 설계 내 fallback): `pjt_id IN {Hop1에서 얻은 PJT_ID들}` **must**
@@ -204,6 +208,7 @@ C) **사람/기관 기반 질문 (중요)**
   "head": "project|perf|people|org|support",
   "relation": "project_perf|perf_project|null",
   "target_cols": ["project","perf"],
+  "join_key_mode": "instance|group|null",
   "ids_map": {},
   "filters": {},
   "limit": 20,
@@ -214,7 +219,11 @@ C) **사람/기관 기반 질문 (중요)**
 
 권장(선택, 운영 편의):
 - `action` 필드 명시(`list|detail|stats|topic`)
-- JOIN의 그룹/인스턴스 구분을 명확히 하는 필드(예: `join_key_mode=group|instance`) 추가
+
+필수 계약(코드 동기화):
+- `mode=JOIN`이면 `join_key_mode`는 `instance|group` 중 하나여야 함
+- `join_key_mode=group`이면 `ids_map.pjt_no`가 필요 (`pjt_id` only는 허용 불가)
+- `join_key_mode=instance`이면 `ids_map.pjt_id`를 사용해야 하며 `pjt_no` only는 계약 위반
 
 ---
 

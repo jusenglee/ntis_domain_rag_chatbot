@@ -11,7 +11,12 @@ from .constants import (
     TAG_PJT_INFO,
     normalize_perf_types,
 )
-from .query_intent import QueryIntent, classify_query as _classify_query, normalize_categories
+from .query_intent import (
+    QueryIntent,
+    classify_query as _classify_query,
+    normalize_categories,
+    normalize_join_key_mode,
+)
 
 
 def classify_query_compat(
@@ -75,6 +80,8 @@ class NormalizedIntent:
     is_id_query: bool
     output_type: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
+    parsing_warnings: List[str] = field(default_factory=list)
+    contract_violations: List[str] = field(default_factory=list)
     categories: List[str] = field(default_factory=list)
     planner_limit: Optional[int] = None
     retrieval_query: Optional[str] = None
@@ -209,11 +216,24 @@ def normalize_intent(
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
 
+    normalized_join_key_mode, join_parsing_warnings, join_contract_violations = normalize_join_key_mode(
+        getattr(intent, "join_key_mode", None),
+        ids_map,
+    )
+    join_parsing_warnings = _normalize_terms(
+        list(getattr(intent, "parsing_warnings", None) or []) + join_parsing_warnings
+    )
+    join_contract_violations = _normalize_terms(
+        list(getattr(intent, "contract_violations", None) or []) + join_contract_violations
+    )
+
     return NormalizedIntent(
         action=action,
         base_route=base_route,
         relation=relation,
-        join_key_mode=getattr(intent, "join_key_mode", None),
+        join_key_mode=normalized_join_key_mode,
+        parsing_warnings=join_parsing_warnings,
+        contract_violations=join_contract_violations,
         is_id_query=bool(getattr(intent, "is_id_query", False)),
         output_type=output_type,
         categories=normalize_categories(getattr(intent, "categories", None)),
