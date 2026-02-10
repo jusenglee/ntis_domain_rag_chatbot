@@ -83,7 +83,7 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
         if enc is None:
             enc = SparseTextEmbedding(
                 model_name=model_id,
-                cache_dir="/workspace/Models",
+                cache_dir="./Qdrant/ModelsCache",
             )
             _SPARSE_ENCODERS[model_id] = enc
         return enc
