@@ -3007,6 +3007,12 @@ def _run_rag_with_vectors(
         plan = replace(plan, filters=pending_strategy_filter_spec)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
+    planner_target_cols_from_hint = _normalize_strategy_target_cols(hinted_cols)
+    if planner_target_cols_from_hint:
+        # v1.1 계약: planner가 확정한 target_cols를 실행 레이어가 재결정하지 않는다.
+        ctx.target_collections = list(planner_target_cols_from_hint)
+        plan = replace(plan, target_collections=tuple(planner_target_cols_from_hint))
+        ctx.plan = plan
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_relation_locked = plan.relation
     planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
@@ -3031,14 +3037,7 @@ def _run_rag_with_vectors(
             branch="hinted_target_cols",
             planner_target_cols=planner_target_cols_locked,
             hinted_target_cols=hinted_cols_norm,
-            applied=0,
-        )
-        _strategy_consistency_or_violation(
-            strict=strict_strategy_consistency,
-            mismatch_kind="target_cols",
-            planner_value=planner_target_cols_locked,
-            executed_value=hinted_cols_norm,
-            context={"branch": "hinted_target_cols"},
+            applied=int(planner_target_cols_locked == hinted_cols_norm),
         )
     if people_relation_disabled:
         ctx.relation = None
