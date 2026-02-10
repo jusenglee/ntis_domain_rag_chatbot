@@ -1712,6 +1712,39 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
     return True
 
 
+def _build_join_hop2_filter(
+        *,
+        relation: Optional[Tuple[str, str]],
+        join_key_mode: str,
+        join_pjt_ids: List[str],
+        join_pjt_nos: List[str],
+        join_ids: List[str],
+        q: str,
+        hop2_tag_filters: Optional[List[str]],
+        people_terms: List[str],
+        org_terms: List[str],
+        planner_filter_spec: Dict[str, Any],
+):
+    """JOIN Hop2 필터 생성: join_key_mode 단일 소스(strategy/contract)만 사용."""
+    if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
+        if join_key_mode == "group":
+            return build_perf_filter_by_pjt_no(join_pjt_nos, q)
+        return build_perf_filter_by_pjt_id(join_pjt_ids or join_ids, q)
+
+    return build_join_filter(
+        JoinFilterInput(
+            join_ids=join_pjt_ids,
+            pjt_nos=join_pjt_nos,
+            join_key_mode=join_key_mode,
+            tag_filters=hop2_tag_filters,
+            people_terms=people_terms,
+            org_terms=org_terms,
+            relation=relation,
+            filter_spec=planner_filter_spec.get("join_filter"),
+        )
+    )
+
+
 # -------------------------
 # Main
 # -------------------------
@@ -3475,7 +3508,6 @@ def _run_rag_with_vectors(
             hop1_q = q
             hop2_q = q
 
-            join_key_mode = "group" if hop2_col == COL_PERF else "instance"
             join_pjt_ids: List[str] = []
             join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
@@ -3726,27 +3758,40 @@ def _run_rag_with_vectors(
                 return RagResult(stack=stack, keywords=kws, hits=hits, reranked_hits=hits, context=context, refs=hop1_refs, timings=timings)
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
-            if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-                join_key_mode = "group" if relation in (("project", "perf"), ("org", "perf")) else "instance"
-                if join_key_mode == "group" and join_pjt_nos:
-                    hop2_filter = build_perf_filter_by_pjt_no(join_pjt_nos, q)
-                else:
-                    hop2_filter = build_perf_filter_by_pjt_id(join_pjt_ids or join_ids, q)
-            else:
-                hop2_filter = build_join_filter(
-                    JoinFilterInput(
-                        join_ids=join_pjt_ids,
-                        pjt_nos=join_pjt_nos,
-                        join_key_mode=join_key_mode,
-                        tag_filters=hop2_tag_filters,
-                        people_terms=people_terms,
-                        org_terms=org_terms,
-                        relation=relation,
-                        filter_spec=planner_filter_spec.get("join_filter"),
-                    )
+            planner_join_key_mode = str(join_key_mode or "").strip().lower() or None
+            executed_join_key_mode = "group" if join_pjt_nos else "instance"
+            log_kv(
+                "RAG.JOIN.KEY_MODE.CHECK",
+                planner_join_key_mode=planner_join_key_mode,
+                executed_join_key_mode=executed_join_key_mode,
+                join_pjt_ids_count=len(join_pjt_ids),
+                join_pjt_nos_count=len(join_pjt_nos),
+                relation=relation,
+                hop2_col=hop2_col,
+            )
+            if planner_join_key_mode != executed_join_key_mode:
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH",
+                    reason=(
+                        "planner join_key_mode와 실행 join filter key가 불일치"
+                        f"(planner={planner_join_key_mode}, executed={executed_join_key_mode}, relation={relation})"
+                    ),
                 )
-                if hop2_kind in ("project", "org") and org_filter:
-                    hop2_filter = _and_filter(hop2_filter, org_filter)
+
+            hop2_filter = _build_join_hop2_filter(
+                relation=relation,
+                join_key_mode=planner_join_key_mode,
+                join_pjt_ids=join_pjt_ids,
+                join_pjt_nos=join_pjt_nos,
+                join_ids=join_ids,
+                q=q,
+                hop2_tag_filters=hop2_tag_filters,
+                people_terms=people_terms,
+                org_terms=org_terms,
+                planner_filter_spec=planner_filter_spec,
+            )
+            if relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and org_filter:
+                hop2_filter = _and_filter(hop2_filter, org_filter)
             if hop2_col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)
