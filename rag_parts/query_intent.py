@@ -103,8 +103,8 @@ _ORG_TERM_STOPWORDS = {
     "안내",
     "내용",
     "상세",
-    "참여"
-    "목록"
+    "참여",
+    "목록",
 }
 
 
@@ -396,8 +396,72 @@ def extract_gender_terms(q: str, kws: List[str]) -> List[str]:
 
 
 def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
-    """질의에서 기관명 후보 추출(LLM 없이 서버 분석 결과를 사용)."""
-    return []
+    """질의/키워드에서 기관명 N-gram 후보를 추출하고 heuristic으로 정제한다."""
+    text = " ".join([q or ""] + list(kws or []))
+    if not text.strip() or max_terms <= 0:
+        return []
+
+    cleaned = re.sub(r"[\[\]{}<>\"'`~!?@#$%^&*_+=|\\/:;,]", " ", text)
+    chunks: List[str] = []
+    chunks.extend((q or "").splitlines())
+    chunks.extend(re.split(r"[\n\r\t]+", cleaned))
+    chunks.extend(kws or [])
+
+    terms: List[str] = []
+    seen_norm: set[str] = set()
+
+    def _append_term(raw_term: str):
+        term = _normalize_org_term(raw_term)
+        if not term:
+            return
+
+        term = re.sub(r"^(?:기관명|기관|소속|주관|수행|참여)\s*[:：]?\s*", "", term)
+        term = term.strip(" .,-")
+        if len(term) < 2:
+            return
+
+        if _BIZ_NO_RE.fullmatch(term) or _ORG_CODE_RE.fullmatch(term):
+            return
+
+        norm = term.lower()
+        if norm in _ORG_TERM_STOPWORDS:
+            return
+        if any(sw in norm for sw in ("과제", "성과", "목록", "조회", "정보")) and not any(
+            sf.lower() in norm for sf in _ORG_SUFFIXES
+        ):
+            return
+        if not (
+            _ORG_ACRONYM_RE.fullmatch(term)
+            or any(sf in term for sf in _ORG_SUFFIXES)
+            or re.search(r"[가-힣]{2,}(?:대학|대학교|연구원|연구소|센터|공단|청)", term)
+        ):
+            return
+
+        if norm in seen_norm:
+            return
+        seen_norm.add(norm)
+        terms.append(term)
+
+    for m in _ORG_NEAR_LABEL_RE.finditer(text):
+        _append_term(m.group(1))
+    for m in _ORG_SUFFIX_RE.finditer(text):
+        _append_term(m.group(1))
+
+    for chunk in chunks:
+        toks = [t for t in re.split(r"\s+", chunk.strip()) if t]
+        if not toks:
+            continue
+        n = len(toks)
+        for size in (3, 2, 1):
+            if n < size:
+                continue
+            for i in range(n - size + 1):
+                cand = " ".join(toks[i : i + size])
+                _append_term(cand)
+                if len(terms) >= max_terms:
+                    return terms[:max_terms]
+
+    return terms[:max_terms]
 
 def extract_org_role(q: str) -> Optional[str]:
     t = (q or "").strip().lower()

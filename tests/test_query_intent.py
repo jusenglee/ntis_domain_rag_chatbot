@@ -1,6 +1,6 @@
 import unittest
 
-from rag_parts.query_intent import classify_query
+from rag_parts.query_intent import classify_query, extract_org_terms
 
 
 class QueryIntentRegressionTests(unittest.TestCase):
@@ -24,6 +24,16 @@ class QueryIntentRegressionTests(unittest.TestCase):
         self.assertEqual(intent.relation, ("project", "perf"))
         self.assertIn(intent.base_route, ("project", "perf"))
         self.assertEqual(intent.action, "list")
+
+    def test_extract_org_terms_with_etri(self):
+        q = "ETRI 수행 과제"
+        terms = extract_org_terms(q, q.split())
+        self.assertGreaterEqual(len(terms), 1)
+
+    def test_extract_org_terms_with_kaist(self):
+        q = "KAIST 참여 성과"
+        terms = extract_org_terms(q, q.split())
+        self.assertGreaterEqual(len(terms), 1)
 
 
 if __name__ == "__main__":
