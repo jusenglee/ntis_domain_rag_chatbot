@@ -24,7 +24,6 @@ import json
 from pprint import pformat
 from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from rag_parts.promotion import promote_mode_from_search_hits
 from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
@@ -3133,6 +3132,12 @@ def _run_rag_with_vectors(
         raise ValueError(f"invalid execution mode: {mode_raw!r}")
     mode = mode_raw
     relation = strategy.relation
+    log_kv(
+        "RAG.MODE.EXECUTION",
+        planner_mode=planner_mode,
+        executed_mode=mode,
+        mode_equal=int(str(planner_mode or "").strip().lower() == str(mode or "").strip().lower()) if planner_mode else None,
+    )
     people_terms = [t.strip() for t in strategy.people_terms if str(t).strip()]
     target_collections = list(strategy.target_collections or plan.target_collections or ())
     search_filter_enabled = bool(strategy.search_filter_enabled)
@@ -3228,6 +3233,7 @@ def _run_rag_with_vectors(
         planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
         planner_mode=planner_mode,
+        executed_mode=mode,
         planner_action=planner_action,
         mode_override_requested=int(mode_override_requested),
         mode_override_reason=mode_override_reason,
@@ -4317,62 +4323,20 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
-    # SEARCH 결과 후처리 승격(Planner 허용 정책 기반)
+    # promotion 비활성 기본값(disable): 명시적으로 켠 경우에만 동작 가능
     promotion_mode = mode
     promotion_intent = it
-    promotion_info: Dict[str, Any] = {
-        "mode": mode,
-        "kind": None,
-        "reason": None,
-        "ids_map": dict(getattr(it, "ids_map", {}) or {}),
-        "allowed": {},
-        "signals": {},
-    }
-    if mode == "search":
-        promotion_info = _promote_mode_from_search_hits(
-            current_mode=mode,
-            search_hits=merged_rrf[: max(1, min(len(merged_rrf), 30))],
-            ids_map=getattr(it, "ids_map", None) or {},
-        )
+    promotion_feature_mode = str(os.getenv("RAG_PROMOTION_MODE", "disable") or "disable").strip().lower()
+    promotion_enabled = promotion_feature_mode in ("enable", "enabled", "on", "1", "true", "yes", "y")
+    if promotion_enabled:
+        # 기본 정책은 비활성. 켜져도 현재는 passthrough 동작만 수행한다.
         log_kv(
-            "RAG.PROMOTION.CHECK",
-            policy=promotion_info.get("allowed", {}).get("policy"),
-            current_mode=mode,
-            promoted_mode=promotion_info.get("mode"),
-            promoted_kind=promotion_info.get("kind"),
-            reason=promotion_info.get("reason"),
-            allowed=promotion_info.get("allowed"),
-            signals=promotion_info.get("signals"),
+            "RAG.PROMOTION.DISABLED_POLICY",
+            promotion_feature_mode=promotion_feature_mode,
+            planner_mode=planner_mode,
+            executed_mode=promotion_mode,
+            reason="promotion_policy_passthrough",
         )
-        promoted_ids_map = promotion_info.get("ids_map") or {}
-        if isinstance(promoted_ids_map, dict) and promoted_ids_map != (getattr(it, "ids_map", None) or {}):
-            ids_flat_promoted: List[str] = []
-            ids_seen: set[str] = set()
-            for values in promoted_ids_map.values():
-                for value in values or []:
-                    sv = str(value).strip()
-                    if not sv or sv in ids_seen:
-                        continue
-                    ids_seen.add(sv)
-                    ids_flat_promoted.append(sv)
-            promotion_intent = replace(promotion_intent, ids_map=promoted_ids_map, ids_flat=ids_flat_promoted)
-        if promotion_info.get("mode") in ("lookup", "join"):
-            promotion_mode = str(promotion_info.get("mode"))
-            log_kv(
-                "RAG.PROMOTION.APPLIED",
-                policy=promotion_info.get("allowed", {}).get("policy"),
-                from_mode=mode,
-                to_mode=promotion_mode,
-                promotion_kind=promotion_info.get("kind"),
-                reason=promotion_info.get("reason"),
-            )
-        else:
-            log_kv(
-                "RAG.PROMOTION.SKIP",
-                policy=promotion_info.get("allowed", {}).get("policy"),
-                mode=mode,
-                reason=promotion_info.get("reason") or "no_signal_or_not_allowed",
-            )
 
     # final rerank
     t0 = time.time()
