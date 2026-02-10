@@ -431,7 +431,7 @@ def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
 def _ensure_join_keys_in_payload(
     points: Iterable[Any],
     *,
-    force_from_meta: bool = True,
+    force_from_meta: bool = False,
     force_tag_from_tags: bool = True,
 ) -> Dict[str, int]:
     stats = {
@@ -470,8 +470,12 @@ def _ensure_join_keys_in_payload(
                 stats["forced_tag"] += 1
     return stats
 
+# NOTE(test-only): 테스트에서만 True로 토글해 사용한다. 운영에서는 항상 False 유지.
+_TEST_ONLY_FORCE_JOIN_KEYS_FROM_META = False
+
+
 def _debug_force_join_keys_enabled() -> bool:
-    return str(os.getenv("RAG_DEBUG_FORCE_JOIN_KEYS", "0")).strip().lower() in ("1", "true", "yes", "y")
+    return bool(_TEST_ONLY_FORCE_JOIN_KEYS_FROM_META)
 
 def _raise_on_missing_join_keys(
     points: Iterable[Any],
@@ -529,8 +533,7 @@ def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
         payload = getattr(p, "payload", None) or {}
         if not isinstance(payload, dict):
             continue
-        meta = _get_meta(payload)
-        pjt_no = _pick_first(payload.get("pjt_no"), meta.get("pjt_no"))
+        pjt_no = _pick_first(payload.get("pjt_no"))
         if not pjt_no or pjt_no in seen:
             continue
         seen.add(pjt_no)
@@ -649,9 +652,6 @@ def build_context_list_light(
         return value
 
     def _pjt_id(pl):
-        meta_basic = pl.get("meta_basic")
-        if not isinstance(meta_basic, dict):
-            meta_basic = {}
         return _pick_first(pl.get("pjt_id"))
 
     for p in (points or [])[: max(0, int(max_items))]:
@@ -3913,8 +3913,10 @@ def _run_rag_with_vectors(
 
             if join_key_mode == "group":
                 join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_pjt_ids = []
             else:
                 join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_pjt_nos = []
 
             log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
             if join_key_mode == "group":
@@ -3969,6 +3971,7 @@ def _run_rag_with_vectors(
                 executed_join_key_mode=executed_join_key_mode,
                 join_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
+                opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)),
                 relation=relation,
                 hop2_col=hop2_col,
             )
@@ -4258,6 +4261,12 @@ def _run_rag_with_vectors(
             return combined
 
         ids_map = _validate_project_key_exclusive(getattr(it, "ids_map", {}) or {}, mode)
+        _validate_join_key_contract(
+            mode,
+            resolved_join_key_mode if mode == "join" else None,
+            ids_map,
+            allow_missing_instance_ids=True,
+        )
         pjt_ids = list(ids_map.get("pjt_id") or [])
         pjt_nos = list(ids_map.get("pjt_no") or [])
         project_key_filter_type = "pjt_id" if pjt_ids else ("pjt_no" if pjt_nos else None)
