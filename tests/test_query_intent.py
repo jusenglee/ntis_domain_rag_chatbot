@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from rag_parts.query_intent import classify_query
 
@@ -24,6 +25,27 @@ class QueryIntentRegressionTests(unittest.TestCase):
         self.assertEqual(intent.relation, ("project", "perf"))
         self.assertIn(intent.base_route, ("project", "perf"))
         self.assertEqual(intent.action, "list")
+
+
+class PlannerActionDetailLookupRegressionTests(unittest.TestCase):
+    def test_detail_action_maps_to_lookup_mode(self):
+        src = Path("rag_pipeline.py").read_text(encoding="utf-8")
+        lookup_line = 'if action_value in ("list", "stats", "download", "id_exact", "id_fuzzy", "detail"):'
+        self.assertIn(lookup_line, src)
+
+
+class KoreanCategoryCanonicalRouteTests(unittest.TestCase):
+    def test_korean_category_org_maps_to_org_route(self):
+        intent = classify_query("연관 도메인 질의 샘플", ["연관", "도메인", "질의", "샘플"], hint={"categories": ["기관"]})
+        self.assertEqual(intent.base_route, "org")
+
+    def test_korean_category_researcher_maps_to_people_route(self):
+        intent = classify_query("연관 도메인 질의 샘플", ["연관", "도메인", "질의", "샘플"], hint={"categories": ["연구자"]})
+        self.assertEqual(intent.base_route, "people")
+
+    def test_korean_category_performance_maps_to_perf_route(self):
+        intent = classify_query("연관 도메인 질의 샘플", ["연관", "도메인", "질의", "샘플"], hint={"categories": ["성과"]})
+        self.assertEqual(intent.base_route, "perf")
 
 
 if __name__ == "__main__":
