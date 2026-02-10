@@ -423,6 +423,7 @@ class AgentState(BaseModel):
 
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
+    fallback_context: Optional[str] = None
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -473,7 +474,7 @@ def measure_latency(node_name: str):
 async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     """Redis에서 대화 이력 및 이전 컨텍스트 로드"""
     cid = state.conversation_id
-    loaded_history, ctx_list = await load_conversation_memory(cid)
+    loaded_history, ctx_list, fallback_context = await load_conversation_memory(cid)
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
@@ -481,7 +482,8 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     return {
         "question": state.messages[-1].content,
         "chat_history": current_full_history,
-        "prev_context": ctx_list
+        "prev_context": ctx_list,
+        "fallback_context": fallback_context
     }
 
 # --- Node 2: Rule-based Precheck ---
@@ -1001,7 +1003,7 @@ class CustomRAGRetriever(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def retrieve(self, query: str) -> List[Dict]:
+    def retrieve(self, query: str) -> Dict[str, Any]:
         """동기 검색 함수"""
         res_map = run_rag_ab_compare(
             query=query,
@@ -1012,12 +1014,13 @@ class CustomRAGRetriever(BaseModel):
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
         hits = getattr(res_m, "reranked_hits", []) or []
+        fallback_context = getattr(res_m, "context", "")
 
         if not hits:
-            context_str = getattr(res_m, "context", "")
-            if context_str.strip():
-                return [{"title": context_str}]
-            return []
+            return {
+                "documents": [],
+                "fallback_context": fallback_context.strip() or None,
+            }
 
         documents = []
         for idx, hit in enumerate(hits[:self.top_k], start=1):
@@ -1031,6 +1034,7 @@ class CustomRAGRetriever(BaseModel):
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
                 "source_index" : idx,
+                "source_type": "hit",
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
@@ -1040,7 +1044,18 @@ class CustomRAGRetriever(BaseModel):
             if hit_data.get("tag") is not None:
                 documents.append(rag_data)
 
-        return documents
+        return {
+            "documents": documents,
+            "fallback_context": fallback_context.strip() or None,
+        }
+
+
+def _is_hit_source(doc: Dict[str, Any]) -> bool:
+    return doc.get("source_type", "hit") == "hit"
+
+
+def _filter_hit_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [doc for doc in docs if isinstance(doc, dict) and _is_hit_source(doc)]
 
 def _resolve_rag_queries(
     state: AgentState,
@@ -1084,7 +1099,9 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             func=retriever.retrieve
         )
 
-        docs = await asyncio.to_thread(rag_tool.func, search_query)
+        retrieve_result = await asyncio.to_thread(rag_tool.func, search_query)
+        docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
+        fallback_context = retrieve_result.get("fallback_context") if isinstance(retrieve_result, dict) else None
 
         doc_previews = []
         for i, doc in enumerate(docs, 1):
@@ -1098,7 +1115,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                     f"Found: {len(docs)} docs\n")
         log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
 
-        return {"context": docs}
+        return {"context": docs, "fallback_context": fallback_context}
 
     except StrategyViolation:
         raise
@@ -1136,24 +1153,26 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
 
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
-    docs_for_ctx = state.context or state.prev_context or []
+    docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
+    fallback_context = state.fallback_context if state.context else None
     is_detail = False
 
     # ✅ 2) JOIN이면 detail 우선
     if qa and qa.mode == "JOIN":
         is_detail = True
 
-    context_text = (
-        refine_documents_rule_based(
+    if docs_for_ctx:
+        context_text = refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
         )
-        if docs_for_ctx
-        else "없음"
-    )
+    elif fallback_context:
+        context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
+    else:
+        context_text = "없음"
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
@@ -1211,7 +1230,8 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "messages": [AIMessage(content=state.answer_gpt)],
         "answer_gemma": state.answer_gemma,
         "answer_gpt": state.answer_gpt,
-        "context" : state.context
+        "context" : state.context,
+        "fallback_context": state.fallback_context
     }
 
 # --- Node 10: Save History ---
@@ -1241,6 +1261,13 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
             ex=REDIS_TTL,
         )
 
+    if state.fallback_context:
+        await kv_store.set(
+            f"conversation:{cid}:last_fallback_context",
+            state.fallback_context,
+            ex=REDIS_TTL,
+        )
+
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
     log_section("PERFORMANCE REPORT",
@@ -1259,21 +1286,25 @@ def node_join_answers(state: AgentState):
     """Refined Answer 노드들 완료 대기"""
     return {}
 
-async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessage], List[Dict[str, Any]]]:
+async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessage], List[Dict[str, Any]], Optional[str]]:
     loaded_history: List[BaseMessage] = []
     ctx_list: List[Dict[str, Any]] = []
+    fallback_context: Optional[str] = None
 
-    if kv_store:
-        raw_hist = await kv_store.get(f"conversation:{conversation_id}:history")
+    raw_hist = await kv_store.get(f"conversation:{conversation_id}:history") if kv_store else None
     hist_list = _safe_json_loads(raw_hist)
     loaded_history = _deserialize_history(hist_list)
 
-    raw_ctx = await kv_store.get(f"conversation:{conversation_id}:last_context")
+    raw_ctx = await kv_store.get(f"conversation:{conversation_id}:last_context") if kv_store else None
     ctx_payload = _safe_json_loads(raw_ctx)
     if isinstance(ctx_payload, list):
         ctx_list = ctx_payload
 
-    return loaded_history, ctx_list
+    raw_fallback_ctx = await kv_store.get(f"conversation:{conversation_id}:last_fallback_context") if kv_store else None
+    if isinstance(raw_fallback_ctx, str) and raw_fallback_ctx.strip():
+        fallback_context = raw_fallback_ctx.strip()
+
+    return loaded_history, ctx_list, fallback_context
 
 async def build_intent_payload(
     question: str,
@@ -2233,7 +2264,7 @@ async def query_stream(payload: QueryRequest):
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
 
-        loaded_history, prev_context = await load_conversation_memory(conversation_id)
+        loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
         user_message = HumanMessage(content=question)
         chat_history = loaded_history + [user_message]
         intent_payload = await build_intent_payload(
@@ -2288,6 +2319,8 @@ async def query_stream(payload: QueryRequest):
             ref_docs = []
 
             for d in documents_used:
+                if not _is_hit_source(d):
+                    continue
                 ref_docs.append(RagMapper.get_references(d))
 
             # log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
@@ -2316,7 +2349,7 @@ async def query_debug(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
 
-    loaded_history, prev_context = await load_conversation_memory(conversation_id)
+    loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
     chat_history = loaded_history + [HumanMessage(content=question)]
     intent_payload = await build_intent_payload(
         question,
