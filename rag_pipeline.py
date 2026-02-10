@@ -1805,6 +1805,47 @@ def _build_plan(
         filters={},
     ), mode_reason
 
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _normalize_strategy_target_cols(cols: Any) -> List[str]:
+    out: List[str] = []
+    for c in (list(cols or [])):
+        v = str(c).strip()
+        if v:
+            out.append(v)
+    return out
+
+
+def _strategy_consistency_or_violation(
+    *,
+    strict: bool,
+    mismatch_kind: str,
+    planner_value: Any,
+    executed_value: Any,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    if planner_value == executed_value:
+        return
+    payload = {
+        "kind": mismatch_kind,
+        "planner": planner_value,
+        "executed": executed_value,
+    }
+    if context:
+        payload.update(context)
+    log_kv("RAG.STRATEGY.MISMATCH", level="error" if strict else "warning", **payload)
+    if strict:
+        raise StrategyViolation(
+            error_code="STRATEGY_MISMATCH",
+            reason=(
+                f"planner/executed mismatch({mismatch_kind}): "
+                f"planner={planner_value}, executed={executed_value}"
+            ),
+        )
+
 # -------------------------
 # 2-hop JOIN helpers
 # -------------------------
@@ -2969,13 +3010,39 @@ def _run_rag_with_vectors(
         plan = replace(plan, filters=pending_strategy_filter_spec)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
+    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+    planner_relation_locked = plan.relation
+    planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
+    log_kv(
+        "RAG.STRATEGY.POLICY",
+        strict_strategy_consistency=int(strict_strategy_consistency),
+        allowed_branches=["compile_validation_only"],
+        forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
+        planner_relation=planner_relation_locked,
+        planner_target_cols=planner_target_cols_locked,
+    )
     planner_first_applied = bool(planner_mode)
     mode_override_requested = False
     mode_override_reason = None
     mode_override_from = None
     mode_override_to = None
     if hinted_cols:
-        ctx.target_collections = hinted_cols
+        hinted_cols_norm = _normalize_strategy_target_cols(hinted_cols)
+        log_kv(
+            "RAG.STRATEGY.ALLOWLIST",
+            policy="compile_validation",
+            branch="hinted_target_cols",
+            planner_target_cols=planner_target_cols_locked,
+            hinted_target_cols=hinted_cols_norm,
+            applied=0,
+        )
+        _strategy_consistency_or_violation(
+            strict=strict_strategy_consistency,
+            mismatch_kind="target_cols",
+            planner_value=planner_target_cols_locked,
+            executed_value=hinted_cols_norm,
+            context={"branch": "hinted_target_cols"},
+        )
     if people_relation_disabled:
         ctx.relation = None
         if plan.mode == "join":
@@ -3250,7 +3317,22 @@ def _run_rag_with_vectors(
     # allow 적용 (force/allow)
     if effective_allow:
         filtered = _pick_collections((ctx.target_collections or []), effective_allow)
-        ctx.target_collections = filtered if filtered else list(effective_allow)
+        effective_allow_norm = _normalize_strategy_target_cols(filtered if filtered else list(effective_allow))
+        log_kv(
+            "RAG.STRATEGY.ALLOWLIST",
+            policy="compile_validation",
+            branch="effective_allow",
+            planner_target_cols=planner_target_cols_locked,
+            effective_allow_target_cols=effective_allow_norm,
+            applied=0,
+        )
+        _strategy_consistency_or_violation(
+            strict=strict_strategy_consistency,
+            mismatch_kind="target_cols",
+            planner_value=planner_target_cols_locked,
+            executed_value=effective_allow_norm,
+            context={"branch": "effective_allow"},
+        )
 
     title_filter_applied_to = None
     if title_filter and plan.mode == "lookup":
@@ -3310,14 +3392,43 @@ def _run_rag_with_vectors(
         raise ValueError(f"invalid execution mode: {mode_raw!r}")
     mode = mode_raw
     relation = strategy.relation
+    target_collections = list(strategy.target_collections or plan.target_collections or ())
+    planner_target_cols_exec = _normalize_strategy_target_cols(planner_target_cols_locked)
+    executed_target_cols = _normalize_strategy_target_cols(target_collections)
+    planner_relation_eq = int(planner_relation_locked == relation)
+    planner_target_cols_eq = int(planner_target_cols_exec == executed_target_cols)
     log_kv(
         "RAG.MODE.EXECUTION",
         planner_mode=planner_mode,
         executed_mode=mode,
         mode_equal=int(str(planner_mode or "").strip().lower() == str(mode or "").strip().lower()) if planner_mode else None,
+        planner_relation=planner_relation_locked,
+        executed_relation=relation,
+        planner_relation_eq=planner_relation_eq,
+        planner_target_cols=planner_target_cols_exec,
+        executed_target_cols=executed_target_cols,
+        planner_target_cols_eq=planner_target_cols_eq,
+        **{
+            "planner_relation == executed_relation": planner_relation_eq,
+            "planner_target_cols == executed_target_cols": planner_target_cols_eq,
+        },
+        strict_strategy_consistency=int(strict_strategy_consistency),
+    )
+    _strategy_consistency_or_violation(
+        strict=strict_strategy_consistency,
+        mismatch_kind="relation",
+        planner_value=planner_relation_locked,
+        executed_value=relation,
+        context={"phase": "execution"},
+    )
+    _strategy_consistency_or_violation(
+        strict=strict_strategy_consistency,
+        mismatch_kind="target_cols",
+        planner_value=planner_target_cols_exec,
+        executed_value=executed_target_cols,
+        context={"phase": "execution"},
     )
     people_terms = [t.strip() for t in strategy.people_terms if str(t).strip()]
-    target_collections = list(strategy.target_collections or plan.target_collections or ())
     search_filter_enabled = bool(strategy.search_filter_enabled)
     lookup_filter_enabled = bool(strategy.lookup_filter_enabled)
     relation_lookup_enforce = bool(strategy.relation_lookup_enforce)
