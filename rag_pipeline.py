@@ -24,7 +24,7 @@ import json
 from pprint import pformat
 from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from rag_parts.pipeline_steps import NormalizedIntent, classify_query_compat, normalize_intent
+from rag_parts.pipeline_steps import NormalizedIntent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
@@ -2108,7 +2108,6 @@ def _run_rag_with_vectors(
         *,
         query: str,
         model_name: str,
-        hint: Any = None,
         intent_payload: Any = None,
         stack: str,
         vector_names: List[str],
@@ -2244,50 +2243,7 @@ def _run_rag_with_vectors(
             _schema_fail_fast("intent_payload.v2", "query_intent/raw_intent is no longer supported")
         return normalized
 
-    def _normalize_hint_payload(raw: Any) -> Dict[str, Any]:
-        if raw is None:
-            return {}
-        if isinstance(raw, Mapping):
-            source = dict(raw)
-        else:
-            source = {
-                "mode": getattr(raw, "mode", None),
-                "head": getattr(raw, "head", None),
-                "action": getattr(raw, "action", None),
-                "relation": getattr(raw, "relation", None),
-                "ids_map": getattr(raw, "ids_map", None),
-                "filters": getattr(raw, "filters", None),
-                "target_cols": getattr(raw, "target_cols", None),
-                "limit": getattr(raw, "limit", None),
-                "retrieval_query": getattr(raw, "retrieval_query", None),
-                "confidence": getattr(raw, "confidence", None),
-            }
-
-        allowed = {
-            "mode", "head", "action", "relation", "join_key_mode", "ids_map", "filters",
-            "target_cols", "limit", "retrieval_query", "confidence",
-        }
-        unknown = sorted(str(k) for k in source.keys() if str(k) not in allowed)
-        if unknown:
-            _schema_fail_fast("hint.v2", f"unknown fields={unknown}")
-            return {}
-
-        normalized = {k: source.get(k) for k in allowed if source.get(k) is not None}
-        filters_obj = normalized.get("filters")
-        if filters_obj is not None and not isinstance(filters_obj, Mapping):
-            _schema_fail_fast("hint.v2", "filters must be an object")
-            return {}
-        return normalized
-
-    # --- hint 적용 (single-pass) ---
-    qa = _normalize_hint_payload(hint)
     payload_normalized_intent = _extract_payload_normalized_intent(intent_payload)
-    qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
-    hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
-    hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
-    strategy_source = "payload" if payload_normalized_intent is not None else "qa"
-    qa_strategy_active = bool(hint_conf_ok and strategy_source == "qa")
-    hint_policy = "merge" if qa_strategy_active else "ignore"
     strategy_mode = None
     strategy_head = None
     strategy_relation = None
@@ -2301,9 +2257,9 @@ def _run_rag_with_vectors(
 
     hinted_base = None
     hinted_limit = 0
-    hinted_cols: List[str] = _normalize_target_collections(_get_attr(qa, "target_cols", None))
+    hinted_cols: List[str] = []
     payload_target_cols = _normalize_target_collections(_get_attr(payload_normalized_intent, "target_cols", None))
-    if strategy_source == "payload" and payload_target_cols:
+    if payload_target_cols:
         hinted_cols = payload_target_cols
 
     def _strategy_mode_from_action(action_value: Any) -> Optional[str]:
@@ -2315,21 +2271,6 @@ def _run_rag_with_vectors(
         if value == "join":
             return "join"
         return None
-
-    def _strategy_view_from_qa(qa_obj: Any) -> Dict[str, Any]:
-        view = {
-            "mode": str(_get_attr(qa_obj, "mode", "") or "").strip().lower() or None,
-            "action": str(_get_attr(qa_obj, "action", "") or "").strip().lower() or None,
-            "head": str(_get_attr(qa_obj, "head", "") or "").strip().lower() or None,
-            "relation": _normalize_relation_hint(_get_attr(qa_obj, "relation", None)),
-            "join_key_mode": str(_get_attr(qa_obj, "join_key_mode", "") or "").strip().lower() or None,
-            "target_cols": _normalize_target_collections(_get_attr(qa_obj, "target_cols", None)),
-            "limit": _coerce_int(_get_attr(qa_obj, "limit", 0), 0),
-            "retrieval_query": normalize_query(_get_attr(qa_obj, "retrieval_query", "") or "") or None,
-        }
-        if not view["mode"] and view["action"]:
-            view["mode"] = _strategy_mode_from_action(view["action"])
-        return view
 
     def _strategy_view_from_payload(payload_obj: Any) -> Dict[str, Any]:
         view = {
@@ -2360,12 +2301,7 @@ def _run_rag_with_vectors(
             normalized[key] = value
         return normalized
 
-    if qa_strategy_active:
-        q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
-        hinted_base = str(_get_attr(qa, "head", "") or "").strip().lower() or None
-        hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
-    else:
-        q_for_retrieval = q
+    q_for_retrieval = q
 
     # ✅ 표준 q 확정
     q = q_for_retrieval
@@ -2517,58 +2453,27 @@ def _run_rag_with_vectors(
         kws = []
     _timing_put(timings, "phase.kw_det", time.time() - t0)
 
-    intent_from_payload = False
     perf_types_source: Optional[str] = None
-    planner_confidence: Optional[float] = None
     normalized_intent_raw = payload_normalized_intent
-    it = _normalize_payload_intent(normalized_intent_raw)
-    if normalized_intent_raw is not None and it is None:
-        _schema_fail_fast("intent_payload.v2", "normalized_intent is invalid or missing required fields")
-
-    qa_strategy_view = _normalize_strategy_view(_strategy_view_from_qa(qa))
-    payload_strategy_view = _normalize_strategy_view(_strategy_view_from_payload(it)) if it is not None else {}
-    if payload_strategy_view and qa_strategy_view:
-        conflicts = []
-        for key in sorted(set(qa_strategy_view.keys()) & set(payload_strategy_view.keys())):
-            if qa_strategy_view[key] != payload_strategy_view[key]:
-                conflicts.append(
-                    {
-                        "field": key,
-                        "qa": qa_strategy_view[key],
-                        "payload": payload_strategy_view[key],
-                    }
-                )
-        if conflicts:
-            raise StrategyViolation(
-                error_code="STRATEGY_SOURCE_CONFLICT",
-                reason=f"hint/payload strategy mismatch: {conflicts}",
-            )
-
-    if it is not None:
-        intent_from_payload = True
-        planner_confidence = _get_attr(it, "planner_confidence", None)
-    else:
-        domain_hint = hinted_base if hinted_base in ("project", "perf", "people", "support", "org") else None
-        raw_intent = classify_query_compat(q, kws, domain_hint=domain_hint, hint=qa)
-        planner_confidence = _get_attr(raw_intent, "planner_confidence", None)
-        org_filter_hints = _extract_org_filter_hints(_get_attr(qa, "filters", None) or {})
-        hint_org_role = str(_get_attr(qa, "org_role", "") or "").strip().lower() or None
-        hint_org_terms = _normalize_hint_terms(org_filter_hints["org_terms"])
-
-        it = normalize_intent(
-            raw_intent,
-            query=q,
-            keywords=kws,
-            hint_org_terms=hint_org_terms,
-            hint_org_role=hint_org_role,
-            hint_lead_org_terms=org_filter_hints["lead_org_terms"],
-            hint_participant_org_terms=org_filter_hints["participant_org_terms"],
-            hint_people_affiliation_org_terms=org_filter_hints["people_affiliation_org_terms"],
+    if normalized_intent_raw is None:
+        raise StrategyViolation(
+            error_code="PLANNER_INTENT_PAYLOAD_REQUIRED",
+            reason="intent_payload.normalized_intent is required",
         )
-        intent_perf_types = list(getattr(it, "perf_types", []) or [])
-        if intent_perf_types:
-            perf_types_source = "intent"
-            log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
+
+    it = _normalize_payload_intent(normalized_intent_raw)
+    if it is None:
+        raise StrategyViolation(
+            error_code="PLANNER_INTENT_PAYLOAD_INVALID",
+            reason="intent_payload.normalized_intent is invalid or missing required fields",
+        )
+
+    payload_strategy_view = _normalize_strategy_view(_strategy_view_from_payload(it))
+    planner_confidence = _get_attr(it, "planner_confidence", None)
+    intent_perf_types = list(getattr(it, "perf_types", []) or [])
+    if intent_perf_types:
+        perf_types_source = "intent"
+        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
     intent_contract_violations = list(getattr(it, "contract_violations", None) or [])
@@ -2579,84 +2484,28 @@ def _run_rag_with_vectors(
         )
     planner_keywords = _normalize_hint_terms(ctx.keywords)
 
-    hint_mode = str(_get_attr(qa, "mode", "") or "").strip().lower() or None
-    planner_action = str(_get_attr(qa, "action", "") or "").strip().lower() or None
-    hint_head = str(_get_attr(qa, "head", "") or "").strip().lower() or None
-    hint_relation = _normalize_relation_hint(_get_attr(qa, "relation", None))
-    hint_join_key_mode = str(_get_attr(qa, "join_key_mode", "") or "").strip().lower() or None
-    if hint_join_key_mode in ("instance", "group"):
-        strategy_join_key_mode = hint_join_key_mode
-    hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
-    hint_filters = _get_attr(qa, "filters", None) or {}
-
-    if (not strategy_enabled) and (not intent_from_payload and qa_strategy_active):
-        if hint_head in ("project", "perf", "people", "org", "support"):
-            ctx.base_route = hint_head
-        if hint_relation:
-            ctx.relation = hint_relation
-        if hint_join_key_mode in ("instance", "group"):
-            ctx.join_key_mode = hint_join_key_mode
-        if hint_ids_map:
-            merged_ids = dict(ctx.ids_map or {})
-            for key, values in hint_ids_map.items():
-                merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
-            ctx.ids_map = _normalize_ids_map(merged_ids)
-        if isinstance(hint_filters, dict):
-            org_filter_hints = _extract_org_filter_hints(hint_filters)
-            if org_filter_hints["lead_org_terms"]:
-                ctx.lead_org_terms = org_filter_hints["lead_org_terms"]
-            if org_filter_hints["participant_org_terms"]:
-                ctx.participant_org_terms = org_filter_hints["participant_org_terms"]
-            if org_filter_hints["people_affiliation_org_terms"]:
-                ctx.people_affiliation_org_terms = org_filter_hints["people_affiliation_org_terms"]
-            if org_filter_hints["org_terms"]:
-                ctx.org_terms = org_filter_hints["org_terms"]
-            people_terms_hint = _extract_people_filter_hints(hint_filters)
-            if people_terms_hint:
-                ctx.people_terms = people_terms_hint
-            year_terms_hint = _normalize_hint_terms(
-                [hint_filters.get("year_from"), hint_filters.get("year_to")]
-            )
-            if year_terms_hint:
-                ctx.years = year_terms_hint
-                ctx.year_from = year_terms_hint[0]
-                ctx.year_to = year_terms_hint[-1]
-            year_from = hint_filters.get("year_from")
-            year_to = hint_filters.get("year_to")
-            if year_from is not None:
-                ctx.year_from = str(year_from).strip() or None
-            if year_to is not None:
-                ctx.year_to = str(year_to).strip() or None
-            tag_filters_hint = _normalize_hint_terms(hint_filters.get("tag_filters"))
-            if tag_filters_hint:
-                ctx.tag_filters = tag_filters_hint
-            perf_types_hint = _normalize_hint_terms(hint_filters.get("perf_types"))
-            if perf_types_hint:
-                ctx.perf_types = perf_types_hint
-                perf_types_source = "hint"
-                log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=perf_types_hint)
-            keywords_hint = _normalize_hint_terms(hint_filters.get("keywords"))
-            if keywords_hint:
-                ctx.keywords = keywords_hint
-            title_hint = _normalize_hint_terms(hint_filters.get("title_terms"))
-            if title_hint:
-                ctx.title = title_hint
-                ctx.keywords = list(dict.fromkeys([*list(ctx.keywords or []), *title_hint]))
+    planner_mode = str(getattr(ctx, "mode", "") or "").strip().lower() or None
+    planner_action = str(getattr(ctx, "action", "") or "").strip().lower() or None
+    planner_head = str(getattr(ctx, "base_route", "") or "").strip().lower() or None
+    planner_relation = _normalize_relation_hint(getattr(ctx, "relation", None))
+    planner_join_key_mode = str(getattr(ctx, "join_key_mode", "") or "").strip().lower() or None
+    if planner_join_key_mode in ("instance", "group"):
+        strategy_join_key_mode = planner_join_key_mode
+    planner_filter_spec = dict(getattr(ctx, "lookup_filter_spec", None) or {})
 
     planner_categories = normalize_categories(ctx.categories)
     planner_limit = ctx.planner_limit
     planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
-    planner_meta_source = strategy_source
-    planner_applied = int(bool(intent_from_payload))
+    planner_meta_source = "payload"
+    planner_applied = 1
     planner_failed = 0
 
-    if not qa_strategy_active:
-        if planner_retrieval_query:
-            q = normalize_query(planner_retrieval_query) or q
-        if planner_limit is not None:
-            hinted_limit = _coerce_int(planner_limit, hinted_limit)
-            if hinted_limit < 0:
-                hinted_limit = 0
+    if planner_retrieval_query:
+        q = normalize_query(planner_retrieval_query) or q
+    if planner_limit is not None:
+        hinted_limit = _coerce_int(planner_limit, hinted_limit)
+        if hinted_limit < 0:
+            hinted_limit = 0
 
     pending_strategy_filter_spec: Optional[Dict[str, Any]] = None
     if strategy_enabled:
@@ -2668,6 +2517,8 @@ def _run_rag_with_vectors(
             ctx.action = strategy_action
         if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
             pending_strategy_filter_spec = dict(strategy_filter_spec)
+    elif isinstance(planner_filter_spec, dict) and planner_filter_spec:
+        pending_strategy_filter_spec = dict(planner_filter_spec)
 
     action = ctx.action
     base_route = ctx.base_route
@@ -2678,17 +2529,10 @@ def _run_rag_with_vectors(
         except Exception:
             planner_confidence = None
 
-    qa_categories = normalize_categories([_get_attr(qa, "head", None)] if _get_attr(qa, "head", None) else [])
-    qa_limit = _get_attr(qa, "limit", None)
-    qa_retrieval_query = str(_get_attr(qa, "retrieval_query", "") or "").strip() or None
-
     log_kv(
         "RAG.INPUT",
         raw_query=query,
         normalized=q,
-        hint_conf=qa_conf,
-        qa_conf=qa_conf,
-        hint_applied=int(hint_conf_ok),
         planner_applied=planner_applied,
         planner_failed=planner_failed,
         hinted_base=hinted_base,
@@ -2696,15 +2540,12 @@ def _run_rag_with_vectors(
         hinted_cols=hinted_cols,
         payload_target_cols=payload_target_cols,
         allow_cols=allow_cols,
-        qa_categories=qa_categories,
-        qa_limit=qa_limit,
-        qa_retrieval_query=qa_retrieval_query,
         planner_categories=planner_categories,
         planner_limit=planner_limit,
         planner_retrieval_query=planner_retrieval_query,
         planner_confidence=planner_confidence,
         planner_meta_source=planner_meta_source,
-        strategy_source=strategy_source,
+        strategy_source=planner_meta_source,
         model_name=model_name,
         stack=stack,
         vector_names=vector_names,
@@ -2742,7 +2583,7 @@ def _run_rag_with_vectors(
     ctx.participant_org_terms = participant_org_terms
     ctx.people_affiliation_org_terms = people_affiliation_org_terms
 
-    org_role = _get_attr(qa, "org_role", None) or ctx.org_role
+    org_role = ctx.org_role
     org_role = str(org_role or "").strip().lower() or None
 
     effective_lead_org_terms = list(lead_org_terms)
@@ -2787,61 +2628,13 @@ def _run_rag_with_vectors(
     people_org_terms: List[str] = []
     if org_role == "affiliation" and org_terms:
         people_org_terms = list(org_terms)
-    qa_researchers = _get_attr(qa, "researchers", None) or []
-    if isinstance(qa_researchers, str):
-        qa_researchers = [qa_researchers]
-    hint_people_terms = []
-    hint_people_ids: List[Any] = []
-    for researcher in (qa_researchers or []):
-        if isinstance(researcher, str):
-            name = researcher.strip()
-            if name:
-                hint_people_terms.append(name)
-            continue
-        name = _get_attr(researcher, "name", None)
-        if isinstance(name, str):
-            name = name.strip()
-        if name:
-            hint_people_terms.append(name)
-        researcher_id = _get_attr(researcher, "researcher_id", None)
-        if researcher_id not in (None, ""):
-            hint_people_ids.append(researcher_id)
-    participant_people_terms_hint = _normalize_hint_terms(
+    participant_people_terms = _normalize_hint_terms(
         (people_filter_spec or {}).get("participant_researcher_name")
     ) if isinstance(people_filter_spec, dict) else []
-    participant_people_terms_hint = _normalize_hint_terms(
-        [
-            *participant_people_terms_hint,
-            *_extract_people_filter_hints(hint_filters),
-        ]
-    )
-
-    if hint_people_terms:
-        if hint_policy == "merge":
-            merged_people = hint_people_terms + people_terms
-            deduped_people: List[str] = []
-            seen_people: set[str] = set()
-            for term in merged_people:
-                if term in seen_people:
-                    continue
-                seen_people.add(term)
-                deduped_people.append(term)
-            people_terms = deduped_people
-    if participant_people_terms_hint:
-        people_terms = _normalize_hint_terms([*participant_people_terms_hint, *people_terms])
+    if participant_people_terms:
+        people_terms = _normalize_hint_terms([*participant_people_terms, *people_terms])
     ctx.people_terms = people_terms
     people_ids = list((ctx.ids_map or {}).get("person_no") or [])
-    if hint_people_ids:
-        if hint_policy == "merge":
-            merged_ids = hint_people_ids + people_ids
-            deduped_ids: List[Any] = []
-            seen_ids: set[Any] = set()
-            for pid in merged_ids:
-                if pid in seen_ids:
-                    continue
-                seen_ids.add(pid)
-                deduped_ids.append(pid)
-            people_ids = deduped_ids
     people_org_terms = list(effective_people_affiliation_org_terms)
     people_match_mode = str(getattr(ctx, "people_terms_match_mode", "") or "").strip().lower() or None
     # 분기 순서와 무관하게 참조 가능하도록 초기값 고정
@@ -2959,20 +2752,9 @@ def _run_rag_with_vectors(
         _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
     )
 
-    hint_people_filters = _extract_people_filter_hints(hint_filters) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
-    hint_org_filters = _normalize_hint_terms(
-        hint_filters.get("org_name")
-    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
-    hint_tag_filters = _normalize_hint_terms(
-        hint_filters.get("tag_filters")
-    ) if isinstance(hint_filters, dict) and hint_policy == "merge" else []
-
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
     search_filter_signal = bool(
-        hint_people_filters
-        or hint_org_filters
-        or hint_tag_filters
-        or title_terms
+        title_terms
         or people_terms
         or org_terms
         or ctx.tag_filters
@@ -2981,7 +2763,6 @@ def _run_rag_with_vectors(
     )
     search_filter_conf_ok = bool(
         (planner_confidence is not None and planner_confidence >= search_filter_min_conf)
-        or (qa_conf >= search_filter_min_conf)
     )
 
     people_relation_disabled = False
@@ -3137,11 +2918,11 @@ def _run_rag_with_vectors(
         return (len(errors) == 0), errors
 
     # plan
-    planner_mode = strategy_mode or hint_mode
-    planner_mode_source = "strategy.mode" if strategy_mode else ("qa.mode" if planner_mode else None)
+    planner_mode = strategy_mode or planner_mode
+    planner_mode_source = "strategy.mode" if strategy_mode else ("payload.mode" if planner_mode else None)
     if not planner_mode:
         planner_mode = _planner_action_to_mode(planner_action)
-        planner_mode_source = "qa.action" if planner_mode else None
+        planner_mode_source = "payload.action" if planner_mode else None
     if planner_mode not in ("search", "lookup", "join"):
         if planner_mode:
             log_kv(
@@ -3228,7 +3009,7 @@ def _run_rag_with_vectors(
         mode=planner_strategy_mode,
         action=planner_strategy_action,
         relation=planner_strategy_relation,
-        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
+        join_key_mode=(strategy_join_key_mode or getattr(ctx, "join_key_mode", None)),
     )
     strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
     if not strategy_ok:
@@ -3271,7 +3052,7 @@ def _run_rag_with_vectors(
     )
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
-        head=hint_head or base_route,
+        head=base_route,
         relation=planner_strategy_relation,
         target_cols=list(ctx.target_collections or plan.target_collections or []),
         ids_map=getattr(ctx, "ids_map", None),
@@ -3390,17 +3171,17 @@ def _run_rag_with_vectors(
 
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
-            "[RAG] relation-mode conflict detected (mode=%s, relation=%s, hint_mode=%s)",
+            "[RAG] relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
             plan.mode,
             relation,
-            hint_mode,
+            planner_mode,
         )
         log_kv(
             "RAG.PLAN.MODE_CONFLICT",
             level="warning",
             mode=plan.mode,
             relation=relation,
-            hint_mode=hint_mode,
+            payload_mode=planner_mode,
             base_route=base_route,
             action=action,
         )
@@ -3701,8 +3482,6 @@ def _run_rag_with_vectors(
         relation=relation,
         output_type=getattr(plan, "output_type", None),
         target_cols=list(target_collections or []),
-        qa_conf=qa_conf,
-        hint_applied=int(hint_conf_ok),
         planner_applied=planner_applied,
         planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
@@ -5002,7 +4781,6 @@ def run_rag_once(
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
-        hint=None,
         intent_payload=intent_payload,
         stack="M",
         vector_names=vector_names or ["e5i_qa", "e5_qa"],
