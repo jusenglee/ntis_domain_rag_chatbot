@@ -2510,6 +2510,18 @@ def _run_rag_with_vectors(
     effective_lead_org_terms = list(lead_org_terms)
     effective_participant_org_terms = list(participant_org_terms)
     effective_people_affiliation_org_terms = list(people_affiliation_org_terms)
+    planner_org_filter_present = bool(
+        effective_lead_org_terms
+        or effective_participant_org_terms
+        or effective_people_affiliation_org_terms
+    )
+    org_filter_keys: List[str] = []
+    if effective_lead_org_terms:
+        org_filter_keys.append("lead")
+    if effective_participant_org_terms:
+        org_filter_keys.append("participant")
+    if effective_people_affiliation_org_terms:
+        org_filter_keys.append("affiliation")
 
     # 명시 키가 없을 때만 org_role을 보조 신호로 사용한다.
     if not effective_lead_org_terms and not effective_participant_org_terms and org_terms:
@@ -2623,6 +2635,34 @@ def _run_rag_with_vectors(
         if (people_terms or people_ids or gender_terms or people_org_terms)
         else None
     )
+
+    def _build_org_must_gate() -> Any:
+        if not planner_org_filter_present:
+            return None
+        gate_filters = [f for f in (participant_org_filter, org_filter, people_filter) if f is not None]
+        if not gate_filters:
+            return None
+        if qmodels is not None and hasattr(qmodels, "Filter"):
+            return qmodels.Filter(must=list(gate_filters))
+        org_gate = None
+        for gate_filter in gate_filters:
+            org_gate = _and_filter(org_gate, gate_filter)
+        return org_gate
+
+    def _with_org_must_gate(base_filter: Any, *, col: Optional[str] = None, mode_override: Optional[str] = None) -> Any:
+        mode_for_gate = mode_override or mode
+        should_apply_org_gate = mode_for_gate in ("lookup", "join") and planner_org_filter_present
+        org_gate = _build_org_must_gate() if should_apply_org_gate else None
+        combined = _and_filter(base_filter, org_gate) if org_gate is not None else base_filter
+        log_kv(
+            "RAG.SERVER_FILTER.ORG_GATE",
+            col=col,
+            mode=mode_for_gate,
+            planner_org_filter_present=planner_org_filter_present,
+            server_org_filter_applied=bool(org_gate is not None),
+            org_filter_keys=org_filter_keys,
+        )
+        return combined
 
     year_from = str(ctx.year_from or "").strip() or None
     year_to = str(ctx.year_to or "").strip() or None
@@ -3597,6 +3637,7 @@ def _run_rag_with_vectors(
                 hop1_filter = _and_filter(hop1_filter, people_filter)
             if  org_filter:
                 hop1_filter = _and_filter(hop1_filter, org_filter)
+            hop1_filter = _with_org_must_gate(hop1_filter, col=hop1_col, mode_override="join")
             if join_hop1_lookup_filter_enabled and hop1_col in (COL_PROJECT, COL_PERF):
                 join_people_filter = people_filter
                 join_promote_one_must = bool(
@@ -3852,6 +3893,7 @@ def _run_rag_with_vectors(
             )
             if relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and org_filter:
                 hop2_filter = _and_filter(hop2_filter, org_filter)
+            hop2_filter = _with_org_must_gate(hop2_filter, col=hop2_col, mode_override="join")
             if hop2_col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)
@@ -4141,7 +4183,7 @@ def _run_rag_with_vectors(
 
         if mode != "lookup":
             if mode == "search" and search_filter_server_policy == "must_not_only":
-                return _safe_exclusion_only(_apply_extra_filters(None))
+                return _safe_exclusion_only(_with_org_must_gate(_apply_extra_filters(None), col=col))
             return None
 
         base_filter_lookup = _build_soft_filter_for_col(col, apply_name_filters) if lookup_filter_enabled else None
@@ -4167,61 +4209,61 @@ def _run_rag_with_vectors(
             )
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
             combined = _and_filter(pjt_filter, base_filter_lookup) if base_filter_lookup else pjt_filter
-            return _apply_extra_filters(combined)
+            return _apply_extra_filters(_with_org_must_gate(combined, col=col))
 
         # (선택) perf_tag_filters가 있으면 perf 컬렉션에서만 tag_filter
         if col == COL_PERF and perf_tag_filter:
             combined = _and_filter(perf_tag_filter, base_filter_lookup) if base_filter_lookup else perf_tag_filter
-            return _apply_extra_filters(combined)
+            return _apply_extra_filters(_with_org_must_gate(combined, col=col))
 
         # (선택) org_filter는 project 컬렉션에서만
         if col == COL_PROJECT and relation == ("people", "project") and people_filter and lookup_has_ids:
             tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
             combined = _and_filter(_and_filter(tag_filter_local, people_filter), base_filter_lookup) if base_filter_lookup else _and_filter(tag_filter_local, people_filter)
-            return _apply_extra_filters(combined)
+            return _apply_extra_filters(_with_org_must_gate(combined, col=col))
 
         if col == COL_PROJECT and org_terms and base_route not in ("project", "org", "people") and lookup_has_ids:
             if org_role == "participant":
                 combined = _and_filter(participant_org_filter or org_filter, base_filter_lookup) if base_filter_lookup else (participant_org_filter or org_filter)
-                return _apply_extra_filters(combined)
+                return _apply_extra_filters(_with_org_must_gate(combined, col=col))
             if org_filter:
                 combined = _and_filter(org_filter, base_filter_lookup) if base_filter_lookup else org_filter
-                return _apply_extra_filters(combined)
+                return _apply_extra_filters(_with_org_must_gate(combined, col=col))
 
         # base_route가 명확하면 tag로 1차 후보 노이즈를 줄임 (lookup에서만)
         if col == COL_PROJECT:
             if base_route == "people":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 base_filter = _and_filter(tag_filter_local, people_filter) if (people_filter and lookup_has_ids) else tag_filter_local
-                return _apply_extra_filters(base_filter)
+                return _apply_extra_filters(_with_org_must_gate(base_filter, col=col))
             if base_route == "org":
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 base_filter = (
                     _and_filter(tag_filter_local, participant_org_filter or org_filter)
-                    if (participant_org_filter or org_filter) and lookup_has_ids
+                    if (participant_org_filter or org_filter)
                     else tag_filter_local
                 )
-                return _apply_extra_filters(base_filter)
+                return _apply_extra_filters(_with_org_must_gate(base_filter, col=col))
             if base_route == "project":
                 # 프로젝트 목록/상세 조회면 INFO로 제한
                 tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
                 combined_filter = tag_filter_local
-                if people_filter and lookup_has_ids:
+                if people_filter and (lookup_has_ids or planner_org_filter_present):
                     combined_filter = _and_filter(combined_filter, people_filter)
-                if (participant_org_filter or org_filter) and lookup_has_ids:
+                if (participant_org_filter or org_filter):
                     combined_filter = _and_filter(combined_filter, participant_org_filter or org_filter)
                 combined_filter = _and_filter(combined_filter, base_filter_lookup) if base_filter_lookup else combined_filter
-                return _apply_extra_filters(combined_filter)
+                return _apply_extra_filters(_with_org_must_gate(combined_filter, col=col))
 
         if col == COL_PERF and base_route == "perf":
             combined_filter = base_filter_lookup
-            if people_filter and lookup_has_ids:
+            if people_filter and (lookup_has_ids or planner_org_filter_present):
                 combined_filter = _and_filter(combined_filter, people_filter) if combined_filter else people_filter
             if perf_tag_filter:
                 combined_filter = _and_filter(combined_filter, perf_tag_filter) if combined_filter else perf_tag_filter
             if combined_filter is not None:
-                return _apply_extra_filters(combined_filter)
-        return _apply_extra_filters(base_filter_lookup)
+                return _apply_extra_filters(_with_org_must_gate(combined_filter, col=col))
+        return _apply_extra_filters(_with_org_must_gate(base_filter_lookup, col=col))
 
 
     # retrieve each collection
