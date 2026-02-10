@@ -1832,6 +1832,23 @@ def _strategy_consistency_or_violation(
         )
 
 
+def _strategy_must_match_or_violation(
+    *,
+    mismatch_kind: str,
+    planner_value: Any,
+    executed_value: Any,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """planner 계약 불일치 시 즉시 중단한다(환경 strict 토글 무시)."""
+    _strategy_consistency_or_violation(
+        strict=True,
+        mismatch_kind=mismatch_kind,
+        planner_value=planner_value,
+        executed_value=executed_value,
+        context=context,
+    )
+
+
 def _diff_filter_spec(
     *,
     planner_filter_spec: Dict[str, Any],
@@ -3128,11 +3145,16 @@ def _run_rag_with_vectors(
             applied=int(planner_target_cols_locked == hinted_cols_norm),
         )
     if people_relation_disabled and plan.mode == "join":
-        logger.warning(
-            "[RAG] people_relation_disabled while join mode (action=%s, base_route=%s)",
-            action,
-            base_route,
+        msg = (
+            "people relation join is forbidden by planner policy "
+            f"(action={action}, base_route={base_route}, relation={relation})"
         )
+        if strict_strategy_consistency:
+            raise StrategyViolation(
+                error_code="PLANNER_PEOPLE_RELATION_FORBIDDEN",
+                reason=msg,
+            )
+        logger.warning("[RAG] %s", msg)
 
     planner_mode_error = None
     planner_recalled = False
@@ -3506,15 +3528,13 @@ def _run_rag_with_vectors(
         },
         strict_strategy_consistency=int(strict_strategy_consistency),
     )
-    _strategy_consistency_or_violation(
-        strict=strict_strategy_consistency,
+    _strategy_must_match_or_violation(
         mismatch_kind="relation",
         planner_value=planner_relation_locked,
         executed_value=relation,
         context={"phase": "execution"},
     )
-    _strategy_consistency_or_violation(
-        strict=strict_strategy_consistency,
+    _strategy_must_match_or_violation(
         mismatch_kind="target_cols",
         planner_value=planner_target_cols_exec,
         executed_value=executed_target_cols,
