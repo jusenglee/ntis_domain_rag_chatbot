@@ -2192,7 +2192,9 @@ def _run_rag_with_vectors(
     qa_conf = float(_get_attr(qa, "confidence", 0.0) or 0.0)
     hint_min_conf = float(os.getenv("RAG_HINT_MIN_CONF", "0.55"))
     hint_conf_ok = bool(qa and qa_conf >= hint_min_conf)
-    hint_policy = "merge" if hint_conf_ok else "ignore"
+    strategy_source = "payload" if payload_normalized_intent is not None else "qa"
+    qa_strategy_active = bool(hint_conf_ok and strategy_source == "qa")
+    hint_policy = "merge" if qa_strategy_active else "ignore"
     strategy_mode = None
     strategy_head = None
     strategy_relation = None
@@ -2208,10 +2210,64 @@ def _run_rag_with_vectors(
     hinted_limit = 0
     hinted_cols: List[str] = _normalize_target_collections(_get_attr(qa, "target_cols", None))
     payload_target_cols = _normalize_target_collections(_get_attr(payload_normalized_intent, "target_cols", None))
-    if payload_target_cols:
+    if strategy_source == "payload" and payload_target_cols:
         hinted_cols = payload_target_cols
 
-    if hint_conf_ok:
+    def _strategy_mode_from_action(action_value: Any) -> Optional[str]:
+        value = str(action_value or "").strip().lower()
+        if value in ("list", "stats", "download", "id_exact", "id_fuzzy", "detail"):
+            return "lookup"
+        if value in ("topic", "search"):
+            return "search"
+        if value == "join":
+            return "join"
+        return None
+
+    def _strategy_view_from_qa(qa_obj: Any) -> Dict[str, Any]:
+        view = {
+            "mode": str(_get_attr(qa_obj, "mode", "") or "").strip().lower() or None,
+            "action": str(_get_attr(qa_obj, "action", "") or "").strip().lower() or None,
+            "head": str(_get_attr(qa_obj, "head", "") or "").strip().lower() or None,
+            "relation": _normalize_relation_hint(_get_attr(qa_obj, "relation", None)),
+            "join_key_mode": str(_get_attr(qa_obj, "join_key_mode", "") or "").strip().lower() or None,
+            "target_cols": _normalize_target_collections(_get_attr(qa_obj, "target_cols", None)),
+            "limit": _coerce_int(_get_attr(qa_obj, "limit", 0), 0),
+            "retrieval_query": normalize_query(_get_attr(qa_obj, "retrieval_query", "") or "") or None,
+        }
+        if not view["mode"] and view["action"]:
+            view["mode"] = _strategy_mode_from_action(view["action"])
+        return view
+
+    def _strategy_view_from_payload(payload_obj: Any) -> Dict[str, Any]:
+        view = {
+            "mode": str(_get_attr(payload_obj, "mode", "") or "").strip().lower() or None,
+            "action": str(_get_attr(payload_obj, "action", "") or "").strip().lower() or None,
+            "head": str(_get_attr(payload_obj, "base_route", "") or "").strip().lower() or None,
+            "relation": _normalize_relation_hint(_get_attr(payload_obj, "relation", None)),
+            "join_key_mode": str(_get_attr(payload_obj, "join_key_mode", "") or "").strip().lower() or None,
+            "target_cols": _normalize_target_collections(_get_attr(payload_obj, "target_cols", None)),
+            "limit": _coerce_int(_get_attr(payload_obj, "planner_limit", 0), 0),
+            "retrieval_query": normalize_query(_get_attr(payload_obj, "retrieval_query", "") or "") or None,
+        }
+        if not view["mode"] and view["action"]:
+            view["mode"] = _strategy_mode_from_action(view["action"])
+        return view
+
+    def _normalize_strategy_view(view: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in view.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, list) and not value:
+                continue
+            if key == "limit" and int(value) <= 0:
+                continue
+            normalized[key] = value
+        return normalized
+
+    if qa_strategy_active:
         q_for_retrieval = normalize_query(_get_attr(qa, "retrieval_query", "") or "") or q
         hinted_base = str(_get_attr(qa, "head", "") or "").strip().lower() or None
         hinted_limit = _coerce_int(_get_attr(qa, "limit", 0), 0)
@@ -2382,6 +2438,26 @@ def _run_rag_with_vectors(
     it = _normalize_payload_intent(normalized_intent_raw)
     if normalized_intent_raw is not None and it is None:
         _schema_fail_fast("intent_payload.v2", "normalized_intent is invalid or missing required fields")
+
+    qa_strategy_view = _normalize_strategy_view(_strategy_view_from_qa(qa))
+    payload_strategy_view = _normalize_strategy_view(_strategy_view_from_payload(it)) if it is not None else {}
+    if payload_strategy_view and qa_strategy_view:
+        conflicts = []
+        for key in sorted(set(qa_strategy_view.keys()) & set(payload_strategy_view.keys())):
+            if qa_strategy_view[key] != payload_strategy_view[key]:
+                conflicts.append(
+                    {
+                        "field": key,
+                        "qa": qa_strategy_view[key],
+                        "payload": payload_strategy_view[key],
+                    }
+                )
+        if conflicts:
+            raise StrategyViolation(
+                error_code="STRATEGY_SOURCE_CONFLICT",
+                reason=f"hint/payload strategy mismatch: {conflicts}",
+            )
+
     if it is not None:
         intent_from_payload = True
         planner_confidence = _get_attr(it, "planner_confidence", None)
@@ -2421,7 +2497,7 @@ def _run_rag_with_vectors(
     hint_ids_map = _normalize_hint_ids_map(_get_attr(qa, "ids_map", None) or {})
     hint_filters = _get_attr(qa, "filters", None) or {}
 
-    if (not strategy_enabled) and (not intent_from_payload and hint_conf_ok):
+    if (not strategy_enabled) and (not intent_from_payload and qa_strategy_active):
         if hint_head in ("project", "perf", "people", "org", "support"):
             ctx.base_route = hint_head
         if hint_relation:
@@ -2478,11 +2554,11 @@ def _run_rag_with_vectors(
     planner_categories = normalize_categories(ctx.categories)
     planner_limit = ctx.planner_limit
     planner_retrieval_query = str(ctx.retrieval_query or "").strip() or None
-    planner_meta_source = "qa" if hint_conf_ok else "intent"
+    planner_meta_source = strategy_source
     planner_applied = int(bool(intent_from_payload))
     planner_failed = 0
 
-    if not hint_conf_ok:
+    if not qa_strategy_active:
         if planner_retrieval_query:
             q = normalize_query(planner_retrieval_query) or q
         if planner_limit is not None:
@@ -2536,6 +2612,7 @@ def _run_rag_with_vectors(
         planner_retrieval_query=planner_retrieval_query,
         planner_confidence=planner_confidence,
         planner_meta_source=planner_meta_source,
+        strategy_source=strategy_source,
         model_name=model_name,
         stack=stack,
         vector_names=vector_names,
