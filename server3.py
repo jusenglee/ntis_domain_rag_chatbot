@@ -991,15 +991,14 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 # --- Node 6: RAG Search (Parallel) ---
 class CustomRAGRetriever(BaseModel):
     """RAG Pipeline을 Tool로 래핑"""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+    )
 
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
     intent_payload: Optional[Dict[str, Any]] = None
-
-    class Config:
-        arbitrary_types_allowed = True
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
