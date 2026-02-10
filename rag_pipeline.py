@@ -82,6 +82,7 @@ from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
     tag_match_bonus as _tag_match_bonus,
 )
+from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
     normalize_relation_hint as _normalize_relation_hint,
@@ -278,7 +279,7 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
 # - col.<collection>.phase.*: 컬렉션별 검색 단계 소요 시간(초)
 # - metric.*: 품질 측정 지표(점수 등)
 # - flag.*: bool/indicator (0.0/1.0)
-# - info.*: 메타 정보(예: fallback_reason, ctx_budget)
+# - info.*: 메타 정보(예: contract_fail_reason, ctx_budget)
 # - event.*: 오류/예외 표시(0.0/1.0)
 # =====================================================================
 
@@ -293,11 +294,9 @@ _TIMING_DEFAULTS: Dict[str, Any] = {
     "phase.hop_total": 0.0,
     "phase.total": 0.0,
     "info.ctx_budget": 0.0,
-    "info.fallback_reason": "",
+    "info.contract_fail_reason": "",
     "metric.final_score_avg": 0.0,
     "metric.final_score_max": 0.0,
-    "flag.fallback_chat": 0.0,
-    "flag.fallback_summary_context": 0.0,
     "event.embed_precompute_error": 0.0,
 }
 
@@ -1935,8 +1934,7 @@ def _run_rag_with_vectors(
     q = normalize_query(query)
     if not q:
         _timing_put(timings, "phase.total", 0.0)
-        _timing_put(timings, "flag.fallback_chat", 1.0)
-        _timing_put(timings, "info.fallback_reason", "empty_query")
+        _timing_put(timings, "info.contract_fail_reason", "empty_query")
         return RagResult(
             stack=stack, keywords=[], hits=[], reranked_hits=[], context="", refs=[],
             timings=timings,
@@ -4460,47 +4458,24 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
-    # fallback policy
+    # contract policy (no fallback chat by default)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
-    fallback_chat = False
-    fallback_reason = None
+    min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
+    min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
+    min_final_max = float(os.getenv("RAG_FALLBACK_MIN_FINAL_MAX", "0"))
+    score_topn = max(1, int(os.getenv("RAG_FALLBACK_SCORE_TOPN", "5")))
 
-    if not reranked:
-        fallback_chat = True
-        fallback_reason = "no_reranked"
-    else:
-        min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
-        if min_reranked and len(reranked) < min_reranked:
-            fallback_chat = True
-            fallback_reason = "insufficient_hits"
-
-        min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
-        min_final_max = float(os.getenv("RAG_FALLBACK_MIN_FINAL_MAX", "0"))
-        score_topn = max(1, int(os.getenv("RAG_FALLBACK_SCORE_TOPN", "5")))
-        if (min_final_avg > 0 or min_final_max > 0) and not fallback_chat:
-            score_vals: List[float] = []
-            for p in reranked[:score_topn]:
-                pl = getattr(p, "payload", None) or {}
-                try:
-                    score_vals.append(float(pl.get("_final_total")))
-                except Exception:
-                    continue
-            if score_vals:
-                score_avg = sum(score_vals) / max(1, len(score_vals))
-                score_max = max(score_vals)
-                _timing_put(timings, "metric.final_score_avg", float(score_avg))
-                _timing_put(timings, "metric.final_score_max", float(score_max))
-                if (min_final_avg > 0 and score_avg < min_final_avg) or (min_final_max > 0 and score_max < min_final_max):
-                    fallback_chat = True
-                    fallback_reason = "low_score"
-
-    if fallback_chat and fallback_reason:
-        _timing_put(timings, "info.fallback_reason", fallback_reason)
-
-    _timing_put(timings, "flag.fallback_chat", 1.0 if fallback_chat else 0.0)
+    contract_fail_reason = _enforce_reranked_contract(
+        reranked=reranked,
+        min_reranked=min_reranked,
+        min_final_avg=min_final_avg,
+        min_final_max=min_final_max,
+        score_topn=score_topn,
+        timing_put=lambda key, value: _timing_put(timings, key, value),
+    )
 
     # ✅ 최종 컨텍스트에 들어갈 애들만 payload를 두껍게 채움
-    if not fallback_chat:
+    if reranked:
 
         max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
         requested_limit = max(
@@ -4556,36 +4531,8 @@ def _run_rag_with_vectors(
 
     # build context
     t0 = time.time()
-    if fallback_chat:
-        allow_fallback_summary = str(os.getenv("RAG_FALLBACK_SUMMARY_CONTEXT", "0")).strip().lower() in ("1", "true", "yes", "y")
-        fallback_summary_max_items = max(1, int(os.getenv("RAG_FALLBACK_SUMMARY_MAX_ITEMS", "3")))
-        if reranked:
-            if allow_fallback_summary:
-                max_items = min(ctx_hard_limit, max(min_ctx_items, fallback_summary_max_items))
-            else:
-                max_items = min(ctx_hard_limit, min_ctx_items)
-            reranked_for_ctx = reranked[: max(1, max_items)]
-            context, refs, ctx_fieldset = _build_context_with_output_type(
-                reranked_for_ctx,
-                action=action,
-                base_route=base_route,
-                output_type=plan.output_type,
-                max_items=max_items,
-                query_text=q,
-            )
-            if allow_fallback_summary:
-                _timing_put(timings, "flag.fallback_summary_context", 1.0)
-            else:
-                _timing_put(timings, "flag.fallback_min_context", 1.0)
-        else:
-            if base_route == "perf":
-                context = "성과 없음. 다른 키워드로 재시도해 주세요."
-            else:
-                context = ""
-            refs = []
-            ctx_fieldset = _resolve_output_fieldset(plan.output_type)
-    else:
-        max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
+    max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
+    if reranked:
         reranked_for_ctx = reranked[: max(1, max_items)]
         context, refs, ctx_fieldset = _build_context_with_output_type(
             reranked_for_ctx,
@@ -4595,6 +4542,10 @@ def _run_rag_with_vectors(
             max_items=max_items,
             query_text=q,
         )
+    else:
+        context = ""
+        refs = []
+        ctx_fieldset = _resolve_output_fieldset(plan.output_type)
 
     _timing_put(timings, "phase.build_context", time.time() - t0)
     _timing_put(timings, "phase.total", time.time() - t_all0)
@@ -4609,8 +4560,7 @@ def _run_rag_with_vectors(
         min_ctx_items=min_ctx_items,
         kept_ctx=kept_ctx,
         discarded_ctx=discarded_ctx,
-        fallback_chat=fallback_chat,
-        fallback_reason=timings.get("info.fallback_reason"),
+        contract_fail_reason=timings.get("info.contract_fail_reason"),
     )
 
     log_kv(
@@ -4618,8 +4568,7 @@ def _run_rag_with_vectors(
         ctx_len=len(context or ""),
         refs=len(refs or []),
         max_items=int(ctx_max_items),
-        fallback_chat=fallback_chat,
-        fallback_reason=timings.get("info.fallback_reason"),
+        contract_fail_reason=timings.get("info.contract_fail_reason"),
         output_type=plan.output_type,
         fieldset_keys=list(ctx_fieldset or []),
     )
