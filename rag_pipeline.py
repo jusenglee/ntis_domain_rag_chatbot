@@ -3248,8 +3248,6 @@ def _run_rag_with_vectors(
             else None
         )
 
-    force_people_terms = list(participant_people_terms_hint)
-
     if relation and plan.mode in ("search", "lookup"):
         logger.warning(
             "[RAG] relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
@@ -4078,7 +4076,6 @@ def _run_rag_with_vectors(
                 join_key_mode=planner_join_key_mode,
                 join_pjt_ids=join_pjt_ids,
                 join_pjt_nos=join_pjt_nos,
-                join_ids=join_ids,
                 q=q,
                 hop2_tag_filters=hop2_tag_filters,
                 people_terms=people_terms,
@@ -4761,7 +4758,6 @@ def _run_rag_with_vectors(
         max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
         requested_limit = max(
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
-            _coerce_int(_get_attr(hint, "limit", 0), 0),
         )
         hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
         reranked_for_hydrate = reranked[:hydrate_upper]
@@ -4783,7 +4779,7 @@ def _run_rag_with_vectors(
         )
 
         # 공통 필터 적용 검증(관측용): LOOKUP/JOIN에서 인명 하드 필터가 걸렸는데 topN에 0건이면 경고
-        probe_terms = [str(t).strip() for t in (force_people_terms or []) if str(t).strip()]
+        probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
         if not probe_terms and mode in ("lookup", "join"):
             if bool(people_terms) and not bool(people_ids):
                 probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()][:1]
