@@ -3083,10 +3083,6 @@ def _run_rag_with_vectors(
             strategy_relation=strategy.relation,
             fallback_mode=strategy.mode,
         )
-        try:
-            _validate_join_key_contract(strategy.mode, strategy.join_key_mode, dict(ctx.ids_map or {}))
-        except StrategyViolation as exc:
-            errors.append(str(exc))
         return (len(errors) == 0), errors
 
     # plan
@@ -3204,13 +3200,23 @@ def _run_rag_with_vectors(
         )
         raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
+    planner_raw_join_key_mode = strategy_snapshot.join_key_mode
+    resolved_join_key_mode = str(planner_raw_join_key_mode or "").strip().lower() or None
+    if planner_strategy_mode == "join" and resolved_join_key_mode is None:
+        resolved_join_key_mode = "instance"
+    strategy_snapshot = replace(strategy_snapshot, join_key_mode=resolved_join_key_mode)
+    _validate_join_key_contract(
+        strategy_snapshot.mode,
+        resolved_join_key_mode,
+        dict(ctx.ids_map or {}),
+    )
+
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
         (route_for_contract.hop1_col, route_for_contract.hop2_col)
         if route_for_contract is not None
         else None
     )
-    join_key_mode_for_contract = str(strategy_snapshot.join_key_mode or "").strip().lower() or "instance"
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
         head=hint_head or base_route,
@@ -3218,7 +3224,7 @@ def _run_rag_with_vectors(
         target_cols=list(ctx.target_collections or plan.target_collections or []),
         ids_map=getattr(ctx, "ids_map", None),
         relation_target_cols=relation_target_cols_for_contract,
-        join_key_mode=join_key_mode_for_contract,
+        join_key_mode=resolved_join_key_mode,
     )
     if planner_contract_violations:
         first = planner_contract_violations[0]
@@ -3493,7 +3499,7 @@ def _run_rag_with_vectors(
         mode=plan.mode,
         action=action,
         relation=relation,
-        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
+        join_key_mode=resolved_join_key_mode,
         people_terms=tuple(people_terms or []),
         target_collections=tuple(ctx.target_collections or []),
         search_filter_enabled=bool(search_filter_enabled),
@@ -3509,7 +3515,7 @@ def _run_rag_with_vectors(
     plan = replace(
         plan,
         relation=relation,
-        join_key_mode=(strategy.join_key_mode or plan.join_key_mode),
+        join_key_mode=resolved_join_key_mode,
         target_collections=tuple(ctx.target_collections or []),
         filters=filter_spec,
     )
@@ -3838,7 +3844,7 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
-        join_key_mode = str((getattr(strategy, "join_key_mode", None) or "")).strip().lower() or None
+        join_key_mode = resolved_join_key_mode
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
@@ -4112,10 +4118,12 @@ def _run_rag_with_vectors(
             )
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
-            planner_join_key_mode = str(join_key_mode or "").strip().lower() or None
+            planner_join_key_mode = resolved_join_key_mode
             executed_join_key_mode = "group" if join_pjt_nos else "instance"
             log_kv(
                 "RAG.JOIN.KEY_MODE.CHECK",
+                resolved_join_key_mode=resolved_join_key_mode,
+                planner_raw_join_key_mode=planner_raw_join_key_mode,
                 planner_join_key_mode=planner_join_key_mode,
                 executed_join_key_mode=executed_join_key_mode,
                 join_pjt_ids_count=len(join_pjt_ids),
