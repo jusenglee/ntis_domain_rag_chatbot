@@ -499,6 +499,47 @@ def flatten_ids(ids_map: Dict[str, List[str]]) -> List[str]:
     return out
 
 
+def _choose_project_key_type(q: str, ids_map: Dict[str, List[str]], *, prefer: Optional[str] = None) -> Optional[str]:
+    """후보 추출 결과에서 서버단 단일 프로젝트 키 타입을 확정한다."""
+    has_pjt_id = bool((ids_map or {}).get("pjt_id"))
+    has_pjt_no = bool((ids_map or {}).get("pjt_no"))
+    if not (has_pjt_id or has_pjt_no):
+        return None
+
+    prefer_norm = str(prefer or "").strip().lower()
+    if prefer_norm in ("pjt_id", "pjt_no"):
+        return prefer_norm
+
+    if has_pjt_id and not has_pjt_no:
+        return "pjt_id"
+    if has_pjt_no and not has_pjt_id:
+        return "pjt_no"
+
+    tl = (q or "").lower()
+    pjt_no_cues = ("pjt_no", "pjt no", "project no", "과제번호", "과제 번호")
+    if any(c in tl for c in pjt_no_cues):
+        return "pjt_no"
+    return "pjt_id"
+
+
+def normalize_ids_map_for_strategy(
+    q: str,
+    ids_map: Dict[str, List[str]],
+    *,
+    prefer_project_key: Optional[str] = None,
+) -> tuple[Dict[str, List[str]], Optional[str]]:
+    """extract 단계 후보 ids_map을 normalize/plan 단계용으로 정규화한다."""
+    normalized = {k: _normalize_str_list(v) for k, v in (ids_map or {}).items()}
+    project_key_type = _choose_project_key_type(q, normalized, prefer=prefer_project_key)
+
+    if project_key_type == "pjt_id":
+        normalized["pjt_no"] = []
+    elif project_key_type == "pjt_no":
+        normalized["pjt_id"] = []
+
+    return normalized, project_key_type
+
+
 def is_support_query(q: str, *, has_project: bool, has_perf: bool, has_people: bool, has_org: bool) -> bool:
     t = (q or "").strip().lower()
     if not t:
@@ -1070,7 +1111,11 @@ def _classify_query_heuristic(
     q = (q or "").strip()
     tl = q.lower()
 
-    ids_map = ids_map or extract_id_candidates(q, kws)
+    if ids_map is None:
+        extracted_ids_map = extract_id_candidates(q, kws)
+        ids_map, _ = normalize_ids_map_for_strategy(q, extracted_ids_map)
+    else:
+        ids_map, _ = normalize_ids_map_for_strategy(q, ids_map)
 
     # S1: rare/id/long
     rare_kws = [kw for kw in (kws or []) if _is_rare_token(kw)]
@@ -1191,6 +1236,7 @@ def _classify_query_heuristic(
         wants_list=wants_list,
         wants_detail=wants_detail,
         planner_limit=requested_limit,
+        join_key_mode=("group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None),
         people_terms_match_mode=people_terms_match_mode,
         people_terms_min_should=people_terms_min_should,
         lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
@@ -1207,7 +1253,8 @@ def classify_query(
     q = (q or "").strip()
     tl = q.lower()
 
-    ids_map = extract_id_candidates(q, kws)
+    extracted_ids_map = extract_id_candidates(q, kws)
+    ids_map, selected_project_key = normalize_ids_map_for_strategy(q, extracted_ids_map)
     ids_flat = flatten_ids(ids_map)
 
     precheck = _cheap_precheck(q)
@@ -1224,9 +1271,18 @@ def classify_query(
             ids_flat=ids_flat,
             categories=["qna"],
             planner_confidence=0.0,
+            join_key_mode=("group" if ids_map.get("pjt_no") else "instance" if ids_map.get("pjt_id") else None),
         )
 
     plan = _plan_from_hint(hint)
+    if selected_project_key is None and plan:
+        prefer_project_key = str(plan.get("project_key_type") or "").strip().lower() or None
+        ids_map, selected_project_key = normalize_ids_map_for_strategy(
+            q,
+            extracted_ids_map,
+            prefer_project_key=prefer_project_key,
+        )
+        ids_flat = flatten_ids(ids_map)
 
     if not plan:
         return _classify_query_heuristic(q, kws, domain_hint=domain_hint, ids_map=ids_map)
@@ -1394,4 +1450,5 @@ def classify_query(
         people_terms_match_mode=people_terms_match_mode,
         people_terms_min_should=people_terms_min_should,
         lookup_filter_policy="must_one_then_should" if people_terms_match_mode == "or" and len(people_terms) == 1 else None,
+        join_key_mode=("group" if selected_project_key == "pjt_no" else "instance" if selected_project_key == "pjt_id" else None),
     )

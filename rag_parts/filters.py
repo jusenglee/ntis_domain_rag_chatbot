@@ -668,7 +668,10 @@ def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
 # Project id filters
 # -----------------------------
 def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[Any]:
-    """PJT_ID/PJT_NO 기반 서버단 필터."""
+    """PJT_ID/PJT_NO 기반 서버단 필터.
+
+    pjt_id/pjt_no 혼합은 정책 위반으로 즉시 실패한다.
+    """
     if qmodels is None:
         return None
 
@@ -686,6 +689,9 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
 
     if not pjt_id_values and not pjt_no_values:
         return None
+
+    if pjt_id_values and pjt_no_values:
+        raise ValueError("build_project_id_filter는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
 
     primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")

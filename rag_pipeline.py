@@ -4079,8 +4079,19 @@ def _run_rag_with_vectors(
             return combined
 
         ids_map = getattr(it, "ids_map", {}) or {}
-        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        raw_pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
+        raw_pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+
+        # LOOKUP 서버 필터 단계에서는 project key 타입을 반드시 단일화한다.
+        if raw_pjt_ids and raw_pjt_nos:
+            raise StrategyViolation(
+                error_code="PLANNER_MIXED_PROJECT_KEYS",
+                reason="lookup ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음",
+            )
+        project_key_filter_type = "pjt_id" if raw_pjt_ids else ("pjt_no" if raw_pjt_nos else None)
+        pjt_ids = raw_pjt_ids if project_key_filter_type == "pjt_id" else []
+        pjt_nos = raw_pjt_nos if project_key_filter_type == "pjt_no" else []
+
         perf_id_keys = (
             "doi",
             "issn",
@@ -4115,9 +4126,16 @@ def _run_rag_with_vectors(
                 pjt_no=pjt_nos,
                 relation=relation,
                 perf_ids=has_perf_ids,
+                project_key_filter_type=project_key_filter_type,
             )
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
+            log_kv(
+                "RAG.LOOKUP.PROJECT_KEY_FILTER",
+                project_key_filter_type=project_key_filter_type,
+                pjt_id_count=len(pjt_ids),
+                pjt_no_count=len(pjt_nos),
+            )
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
             combined = _and_filter(pjt_filter, base_filter_lookup) if base_filter_lookup else pjt_filter
             return _apply_extra_filters(combined)
