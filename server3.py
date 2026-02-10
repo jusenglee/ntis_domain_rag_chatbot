@@ -210,6 +210,152 @@ class QuestionAnalysisV2(BaseModel):
     retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_planner_payload(cls, data: Any) -> Any:
+        """파싱 단계에서 planner 출력 형식을 최대한 수용/정규화한다.
+
+        - 대소문자/공백/타입 흔들림(예: ids_map의 str->list[str])을 흡수
+        - JOIN 계약 위반 여부는 여기서 실패시키지 않고, 실행 직전 계약(validate_planner_contract)에서 수집한다.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        d = dict(data)
+
+        # --- mode/head/action/relation/join_key_mode: case/whitespace normalize ---
+        mode = d.get("mode")
+        if isinstance(mode, str):
+            d["mode"] = mode.strip().upper()
+
+        head = d.get("head")
+        if isinstance(head, str):
+            head_norm = head.strip().lower()
+            # 흔한 동의어를 canonical head로 정규화
+            head_alias = {
+                "performance": "perf",
+                "perf": "perf",
+                "result": "perf",
+                "results": "perf",
+                "paper": "perf",
+                "patent": "perf",
+                "researcher": "people",
+                "person": "people",
+                "people": "people",
+                "research": "people",
+                "organization": "org",
+                "org": "org",
+                "institution": "org",
+                "company": "org",
+                "qna": "support",
+                "manual": "support",
+                "support": "support",
+                "project": "project",
+            }
+            d["head"] = head_alias.get(head_norm, head_norm)
+
+        action = d.get("action")
+        if isinstance(action, str):
+            act_norm = action.strip().lower()
+            action_alias = {
+                "details": "detail",
+                "detail": "detail",
+                "info": "detail",
+                "view": "detail",
+                "show": "detail",
+                "stat": "stats",
+                "stats": "stats",
+                "statistics": "stats",
+                "export": "download",
+                "download": "download",
+                "list": "list",
+                "topic": "topic",
+            }
+            d["action"] = action_alias.get(act_norm, act_norm)
+
+        relation = d.get("relation")
+        if isinstance(relation, str):
+            rel = relation.strip().lower()
+            d["relation"] = rel or None
+
+        jkm = d.get("join_key_mode")
+        if isinstance(jkm, str):
+            jkm_norm = jkm.strip().lower()
+            d["join_key_mode"] = jkm_norm or None
+
+        # --- ids_map: dict[str, list[str]]로 강제 ---
+        def _coerce_str_list(value: Any) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple, set)):
+                seq = list(value)
+            else:
+                seq = [value]
+            out: list[str] = []
+            for x in seq:
+                s = str(x).strip()
+                if not s or s.lower() == "none":
+                    continue
+                out.append(s)
+            return out
+
+        raw_ids_map = d.get("ids_map")
+        if not isinstance(raw_ids_map, dict):
+            raw_ids_map = {}
+
+        normalized_ids_map: dict[str, list[str]] = {}
+        for raw_key, raw_value in raw_ids_map.items():
+            if raw_key is None:
+                continue
+            key = str(raw_key).strip()
+            if not key:
+                continue
+
+            key_low = key.lower().replace("-", "_").replace(" ", "")
+            # 자주 흔들리는 키는 canonical 형태로 보정
+            if key_low in {"pjt_id", "pjtid", "project_id", "projectid", "pjtId".lower()}:
+                key_low = "pjt_id"
+            elif key_low in {"pjt_no", "pjtno", "project_no", "projectno", "pjtNo".lower()}:
+                key_low = "pjt_no"
+
+            values = _coerce_str_list(raw_value)
+            if values:
+                normalized_ids_map[key_low] = values
+
+        d["ids_map"] = normalized_ids_map
+
+        # --- filters: dict 보장 ---
+        if not isinstance(d.get("filters"), dict):
+            d["filters"] = {}
+
+        # --- target_cols: list[str] 보장 ---
+        tc = d.get("target_cols")
+        if isinstance(tc, str):
+            d["target_cols"] = [tc]
+        elif isinstance(tc, (tuple, set)):
+            d["target_cols"] = [str(x) for x in tc]
+        elif not isinstance(tc, list):
+            d["target_cols"] = []
+
+        # --- limit/confidence coercion (파싱 실패 방지) ---
+        if "limit" in d and not isinstance(d.get("limit"), int):
+            try:
+                d["limit"] = int(float(str(d.get("limit"))))
+            except Exception:
+                pass
+
+        if "confidence" in d and not isinstance(d.get("confidence"), (int, float)):
+            try:
+                d["confidence"] = float(str(d.get("confidence")))
+            except Exception:
+                pass
+
+        rq = d.get("retrieval_query")
+        if rq is not None and not isinstance(rq, str):
+            d["retrieval_query"] = str(rq)
+
+        return d
+
     @field_validator("strategy_version")
     @classmethod
     def validate_strategy_version(cls, value: str) -> str:
@@ -219,23 +365,20 @@ class QuestionAnalysisV2(BaseModel):
 
     @model_validator(mode="after")
     def validate_join_contract(self) -> "QuestionAnalysisV2":
-        has_pjt_id = bool((self.ids_map or {}).get("pjt_id"))
-        has_pjt_no = bool((self.ids_map or {}).get("pjt_no"))
-        if self.mode != "JOIN":
-            if self.join_key_mode is not None:
-                raise ValueError("join_key_mode must be null when mode is not JOIN")
-            return self
+        """파싱 단계 JOIN validator 완화.
 
-        if self.join_key_mode not in ("instance", "group"):
-            raise ValueError("join_key_mode is required for JOIN mode")
-        if has_pjt_id and has_pjt_no:
-            raise ValueError("ids_map.pjt_id and ids_map.pjt_no cannot coexist in JOIN mode")
-        if self.join_key_mode == "instance":
-            if has_pjt_no or not has_pjt_id:
-                raise ValueError("join_key_mode=instance requires ids_map.pjt_id only")
-        if self.join_key_mode == "group":
-            if has_pjt_id or not has_pjt_no:
-                raise ValueError("join_key_mode=group requires ids_map.pjt_no only")
+        JOIN 계약 위반은 여기서 파싱 실패로 만들지 않는다.
+        (실행 직전 validate_planner_contract에서 수집/차단)
+
+        단, 모드가 JOIN이 아닐 때 join_key_mode가 들어오면 실행 혼선을 막기 위해 null로 정규화한다.
+        """
+        if self.mode != "JOIN":
+            # 파싱 단계에서는 실패시키지 않고 정규화만 한다.
+            try:
+                object.__setattr__(self, "join_key_mode", None)
+            except Exception:
+                # Pydantic config가 frozen인 경우 등
+                pass
         return self
 
 

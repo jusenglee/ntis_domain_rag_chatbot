@@ -203,7 +203,7 @@ def _qdrant_sparse_search(
         return []
     logger.info(
         "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
-        model_name,
+        model_id,
         len(query_text or ""),
         len(getattr(sv, "indices", []) or []),
         (query_text or "")[:80],

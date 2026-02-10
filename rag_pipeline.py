@@ -143,6 +143,7 @@ def _split_tag_filters_by_family(tag_filters: Iterable[object]) -> tuple[list[st
         else:
             other_tags.append(tag_str)
     return project_tags, perf_tags, other_tags
+
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -404,12 +405,12 @@ def _ensure_join_keys_in_payload(
         meta = _get_meta(payload)
         if force_from_meta:
             if not payload.get("pjt_id"):
-                candidate = _pick_first(meta.get("pjt_id"), meta.get("pjt_no"))
+                candidate = _pick_first(payload.get("pjt_id"), meta.get("pjt_id"))
                 if candidate:
                     payload["pjt_id"] = candidate
                     stats["forced_pjt_id"] += 1
             if not payload.get("pjt_no"):
-                candidate = _pick_first(meta.get("pjt_no"), meta.get("pjt_id"))
+                candidate = _pick_first(payload.get("pjt_no"), meta.get("pjt_no"))
                 if candidate:
                     payload["pjt_no"] = candidate
                     stats["forced_pjt_no"] += 1
@@ -434,7 +435,7 @@ def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
         if not isinstance(payload, dict):
             continue
         meta = _get_meta(payload)
-        pjt_no = _pick_first(payload.get("pjt_no"), meta.get("pjt_no"), payload.get("pjt_id"), meta.get("pjt_id"))
+        pjt_no = _pick_first(payload.get("pjt_no"), meta.get("pjt_no"))
         if not pjt_no or pjt_no in seen:
             continue
         seen.add(pjt_no)
@@ -515,7 +516,7 @@ def build_context_list_light(
         meta_basic = pl.get("meta_basic")
         if not isinstance(meta_basic, dict):
             meta_basic = {}
-        return _pick_first(meta_basic.get("pjt_id"))
+        return _pick_first(pl.get("pjt_id"))
 
     for p in (points or [])[: max(0, int(max_items))]:
         pl = getattr(p, "payload", None) or {}
@@ -2677,31 +2678,64 @@ def _run_rag_with_vectors(
 
     pre_vecs = _get_pre_vecs(q)
 
-    def _validate_join_key_contract(mode_value: Optional[str], join_key_mode: Optional[str], ids_map_obj: Dict[str, List[str]]) -> None:
+    def _validate_join_key_contract(
+            mode_value: Optional[str],
+            join_key_mode: Optional[str],
+            ids_map_obj: Dict[str, List[str]],
+            *,
+            allow_missing_instance_ids: bool = True,
+    ) -> None:
         mode_norm = str(mode_value or "").strip().lower()
         join_norm = str(join_key_mode or "").strip().lower() or None
-        has_pjt_id = bool(ids_map_obj.get("pjt_id"))
-        has_pjt_no = bool(ids_map_obj.get("pjt_no"))
+
+        has_pjt_id = bool((ids_map_obj or {}).get("pjt_id"))
+        has_pjt_no = bool((ids_map_obj or {}).get("pjt_no"))
 
         if mode_norm != "join":
             if join_norm is not None:
-                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join_key_mode must be null when mode is not JOIN")
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_INVALID",
+                    reason="join_key_mode must be null when mode is not JOIN",
+                )
             return
 
         if join_norm not in ("instance", "group"):
-            raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_INVALID", reason="join mode requires join_key_mode in {'instance','group'}")
+            raise StrategyViolation(
+                error_code="PLANNER_JOIN_KEY_MODE_INVALID",
+                reason="join mode requires join_key_mode in {'instance','group'}",
+            )
+
         if has_pjt_id and has_pjt_no:
-            raise StrategyViolation(error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS", reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN")
+            raise StrategyViolation(
+                error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS",
+                reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN",
+            )
+
         if join_norm == "instance":
             if has_pjt_no:
-                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance only allows ids_map.pjt_id")
-            if not has_pjt_id:
-                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=instance requires ids_map.pjt_id")
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+                    reason="join_key_mode=instance only allows ids_map.pjt_id",
+                )
+            # ✅ instance는 ids_map.pjt_id가 없어도 허용 (Hop1에서 pjt_id를 payload 최상위에서 뽑는다)
+            if (not has_pjt_id) and (not allow_missing_instance_ids):
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+                    reason="join_key_mode=instance requires ids_map.pjt_id (or allow hop1 extraction)",
+                )
+
         if join_norm == "group":
             if has_pjt_id:
-                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group only allows ids_map.pjt_no")
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+                    reason="join_key_mode=group only allows ids_map.pjt_no",
+                )
+            # ✅ group은 반드시 ids_map.pjt_no 필요 (pjt_no는 전략 자체가 다르므로 플래너가 명시해야 함)
             if not has_pjt_no:
-                raise StrategyViolation(error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH", reason="join_key_mode=group requires ids_map.pjt_no")
+                raise StrategyViolation(
+                    error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+                    reason="join_key_mode=group requires ids_map.pjt_no",
+                )
 
     def _planner_action_to_mode(action_value: Optional[str]) -> Optional[str]:
         if not action_value:
@@ -2816,7 +2850,7 @@ def _run_rag_with_vectors(
         if route_for_contract is not None
         else None
     )
-    join_key_mode_for_contract = "group" if (relation_target_cols_for_contract and relation_target_cols_for_contract[1] == COL_PERF) else "instance"
+    join_key_mode_for_contract = str(strategy_snapshot.join_key_mode or "").strip().lower() or "instance"
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
         head=hint_head or base_route,

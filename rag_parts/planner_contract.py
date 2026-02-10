@@ -77,8 +77,25 @@ def validate_planner_contract(
     head_norm = str(head or "").strip().lower()
     normalized_target_cols = [str(col).strip() for col in (target_cols or []) if str(col).strip()]
     normalized_ids_map = ids_map if isinstance(ids_map, dict) else {}
-    pjt_ids = [str(x).strip() for x in (normalized_ids_map.get("pjt_id") or []) if str(x).strip()]
-    pjt_nos = [str(x).strip() for x in (normalized_ids_map.get("pjt_no") or []) if str(x).strip()]
+
+    def _as_str_list(value: Any) -> list[str]:
+        """ids_map 값이 str/int/list 등으로 흔들리는 경우를 흡수."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            seq = list(value)
+        else:
+            seq = [value]
+        out: list[str] = []
+        for x in seq:
+            s = str(x).strip()
+            if not s or s.lower() == "none":
+                continue
+            out.append(s)
+        return out
+
+    pjt_ids = _as_str_list(normalized_ids_map.get("pjt_id"))
+    pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
 
     if relation is None or relation_target_cols is None:
         violations.append(

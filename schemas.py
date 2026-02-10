@@ -10,7 +10,8 @@ class StrategySpec:
     mode: str
     action: str
     relation: Optional[Tuple[str, str]]
-    join_key_mode: Optional[Literal["instance", "group"]] = None
+    # planner 출력/정규화 단계에서 값이 흔들릴 수 있으므로 Optional[str]로 완화
+    join_key_mode: Optional[str] = None
     people_terms: Tuple[str, ...] = field(default_factory=tuple)
     target_collections: Tuple[str, ...] = field(default_factory=tuple)
     search_filter_enabled: bool = False
@@ -30,7 +31,7 @@ class QueryPlan:
     base_route: str
     action: str
     relation: Optional[Tuple[str, str]]
-    join_key_mode: Optional[Literal["instance", "group"]]
+    join_key_mode: Optional[str]
     output_type: Optional[str]
     target_collections: Tuple[str, ...]
     # server-side filters by collection (optional)
@@ -43,7 +44,7 @@ class ExecutionContext:
     base_route: str
     action: str
     relation: Optional[Tuple[str, str]]
-    join_key_mode: Optional[Literal["instance", "group"]]
+    join_key_mode: Optional[str]
     is_id_query: bool
     output_type: Optional[str]
     categories: list[str]
