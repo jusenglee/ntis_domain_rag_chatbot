@@ -1017,19 +1017,14 @@ def _to_text(v: object) -> str:
 
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
-    meta_title = _to_text(
-        meta.get("kor_pjt_nm")
-        or meta.get("eng_pjt_nm")
-        or ""
-    )
+    meta_title = _to_text(meta.get("kor_pjt_nm") or meta.get("eng_pjt_nm") or "")
     if not title:
         return meta_title
-    pjt_id = _to_text(pl.get("pjt_id") or meta.get("pjt_id") or meta.get("pjt_no") or "")
-    if meta_title and (
-            title.isdigit()
-            or title.lower().startswith("ntis:")
-            or (pjt_id and title == pjt_id)
-    ):
+
+    # ✅ pjt_no를 pjt_id 대용으로 쓰지 않는다.
+    pjt_id = _to_text(pl.get("pjt_id") or meta.get("pjt_id") or "")
+
+    if meta_title and (title.isdigit() or title.lower().startswith("ntis:") or (pjt_id and title == pjt_id)):
         return meta_title
     return title or meta_title
 
