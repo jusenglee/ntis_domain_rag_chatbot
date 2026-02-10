@@ -2816,21 +2816,17 @@ def _run_rag_with_vectors(
     )
 
     people_relation_disabled = False
-    forced_target_cols: Optional[List[str]] = None
     if people_terms and base_route in ("project", "perf") and relation and "people" in set(relation):
         people_relation_disabled = True
-        forced_target_cols = [COL_PROJECT if base_route == "project" else COL_PERF]
         log_kv(
             "RAG.PLAN.RELATION_DISABLED",
             level="warning",
             reason="people_terms_base_route",
             base_route=base_route,
             relation=relation,
-            forced_target_cols=forced_target_cols,
+            planner_only_adjustment=1,
             people_terms=people_terms[:4],
         )
-        ctx.relation = None
-        relation = None
 
     intent_view = ctx.intent_view()
     it = intent_view
@@ -3039,17 +3035,12 @@ def _run_rag_with_vectors(
             hinted_target_cols=hinted_cols_norm,
             applied=int(planner_target_cols_locked == hinted_cols_norm),
         )
-    if people_relation_disabled:
-        ctx.relation = None
-        if plan.mode == "join":
-            logger.warning(
-                "[RAG] people_relation_disabled while join mode (action=%s, base_route=%s)",
-                action,
-                base_route,
-            )
-        if forced_target_cols:
-            ctx.target_collections = forced_target_cols
-        relation = ctx.relation
+    if people_relation_disabled and plan.mode == "join":
+        logger.warning(
+            "[RAG] people_relation_disabled while join mode (action=%s, base_route=%s)",
+            action,
+            base_route,
+        )
 
     planner_mode_error = None
     planner_recalled = False
