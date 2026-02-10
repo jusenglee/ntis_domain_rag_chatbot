@@ -33,10 +33,12 @@ def planner_contract_mode(
     action_value = str(strategy_action or "").strip().lower()
 
     action_mode_map = {
+        "list": "lookup",
         "stats": "lookup",
         "download": "lookup",
         "id_exact": "lookup",
         "id_fuzzy": "lookup",
+        "detail": "lookup",
         "topic": "search",
         "search": "search",
         "join": "join",
@@ -46,8 +48,6 @@ def planner_contract_mode(
         errors.append(f"invalid_mode:{mode or 'empty'}")
 
     expected_mode = action_mode_map.get(action_value)
-    if mode == "join" and action_value == "list":
-        expected_mode = "join"
     if expected_mode and mode != expected_mode:
         errors.append(f"action_mode_mismatch:{action_value}->{mode}")
 
