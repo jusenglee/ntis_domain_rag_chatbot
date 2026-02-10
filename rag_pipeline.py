@@ -1738,13 +1738,13 @@ def _build_plan(
 ) -> Tuple[QueryPlan, str]:
     # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
     # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
-    # 2) 교집합이 비면 allowlist를 우선(fallback) 적용한다.
+    # 2) 교집합이 비면 allowlist를 우선 적용한다.
     # 3) allowlist가 없으면 relation target을 그대로 사용한다.
     def _resolve_relation_target_cols(rel: Tuple[str, str], *, reason: str) -> List[str]:
         relation_cols = list(relation_target_collections(rel) or [])
         allowlist = list(RAG_COLLECTION_ALLOWLIST)
         policy = "relation_only"
-        fallback_reason = None
+        collection_policy_reason = None
 
         if allowlist:
             if relation_cols:
@@ -1755,16 +1755,16 @@ def _build_plan(
                 else:
                     selected = allowlist
                     policy = "allowlist_fallback"
-                    fallback_reason = "relation_allowlist_disjoint"
+                    collection_policy_reason = "relation_allowlist_disjoint"
             else:
                 selected = allowlist
                 policy = "allowlist_only"
-                fallback_reason = "relation_empty"
+                collection_policy_reason = "relation_empty"
         else:
             selected = relation_cols or _default_target_collections()
             policy = "relation_only" if relation_cols else "default_only"
             if not relation_cols:
-                fallback_reason = "relation_empty"
+                collection_policy_reason = "relation_empty"
 
         log_kv(
             "RAG.PLAN.COLLECTION_POLICY",
@@ -1774,7 +1774,7 @@ def _build_plan(
             relation_target_cols=relation_cols,
             selected_cols=selected,
             policy=policy,
-            fallback_reason=fallback_reason,
+            collection_policy_reason=collection_policy_reason,
         )
         return selected
 
@@ -2979,9 +2979,6 @@ def _run_rag_with_vectors(
         except StrategyViolation as exc:
             errors.append(str(exc))
         return (len(errors) == 0), errors
-
-    def _is_safe_search_fallback_enabled() -> bool:
-        return str(os.getenv("RAG_ENABLE_SAFE_SEARCH_FALLBACK", "0")).strip().lower() in ("1", "true", "yes", "y")
 
     # plan
     planner_mode = strategy_mode or hint_mode
@@ -4656,7 +4653,7 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
-    # contract policy (no fallback chat by default)
+    # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
     min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
     min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
