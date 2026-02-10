@@ -1169,10 +1169,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     if qa and qa.mode == "JOIN":
         is_detail = True
 
+    researcher_hints = _build_researcher_hints_from_question_analysis(qa)
+
     if docs_for_ctx:
         context_text = refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
+            researchers=researcher_hints,
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
@@ -1500,6 +1503,45 @@ def _normalize_hint_terms(values: Any) -> list[str]:
     return out
 
 
+def _build_researcher_hints_from_question_analysis(qa: Optional["QuestionAnalysis"]) -> list[dict[str, str]]:
+    """최종 프롬프트 직전 researcher 객체 매칭에 사용할 힌트를 구성한다."""
+    if not qa:
+        return []
+
+    filters = dict(getattr(qa, "filters", {}) or {})
+    ids_map = dict(getattr(qa, "ids_map", {}) or {})
+
+    names = _normalize_hint_terms([
+        *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
+        *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
+    ])
+    affiliations = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
+    ids = _normalize_hint_terms(ids_map.get("person_no") or ids_map.get("hm_id"))
+
+    if not names and not ids:
+        return []
+
+    default_affiliation = affiliations[0] if len(affiliations) == 1 else ""
+    hints: list[dict[str, str]] = []
+
+    for idx, name in enumerate(names):
+        affiliation = affiliations[idx] if idx < len(affiliations) else default_affiliation
+        researcher_id = ids[idx] if idx < len(ids) else ""
+        hints.append(
+            {
+                "name": str(name).strip(),
+                "affiliation": str(affiliation).strip(),
+                "researcher_id": str(researcher_id).strip(),
+            }
+        )
+
+    if not hints and ids:
+        for researcher_id in ids:
+            hints.append({"name": "", "affiliation": default_affiliation, "researcher_id": str(researcher_id).strip()})
+
+    return hints
+
+
 # --- Graph Construction ---
 def build_advanced_workflow():
     workflow = StateGraph(AgentState)
@@ -1775,20 +1817,35 @@ def _match_prtcp_members(
             org_nm = str(member.get("blng_org_nm") or "").strip()
 
             score = 0.0
+            match_type = ""
             if researcher_id and hm_id and researcher_id == hm_id:
                 score = 3.0
+                match_type = "id_exact"
             else:
                 hm_nm_norm = _normalize_researcher_token(hm_nm)
                 if name_norm and hm_nm_norm and name_norm == hm_nm_norm:
                     score = 2.0
+                    match_type = "name_exact"
                     if affiliation_norm:
                         org_norm = _normalize_researcher_token(org_nm)
                         if org_norm and org_norm == affiliation_norm:
                             score = 2.5
+                            match_type = "name_affiliation_exact"
+                elif name_norm and hm_nm_norm and (name_norm in hm_nm_norm or hm_nm_norm in name_norm):
+                    score = 1.2
+                    match_type = "name_partial"
+                    if affiliation_norm:
+                        org_norm = _normalize_researcher_token(org_nm)
+                        if org_norm and (affiliation_norm in org_norm or org_norm in affiliation_norm):
+                            score = 1.6
+                            match_type = "name_affiliation_partial"
 
             if score > best_score:
                 best_score = score
-                best_member = member
+                best_member = dict(member)
+                if match_type:
+                    best_member["match_type"] = match_type
+                best_member["match_score"] = score
 
         if best_member and best_score > 0:
             dedup_key = (
@@ -1815,7 +1872,11 @@ def _format_researcher_line(
         for member in matched_members[:max_matches]:
             name = str(member.get("hm_nm") or "이름미상").strip()
             org = str(member.get("blng_org_nm") or "소속미상").strip()
-            names.append(f"{name}({org})")
+            match_type = str(member.get("match_type") or "").strip()
+            if match_type:
+                names.append(f"{name}({org}, {match_type})")
+            else:
+                names.append(f"{name}({org})")
         return f"- 연구자(매칭): {', '.join(names)}"
 
     fallback_names = []

@@ -145,6 +145,50 @@ def _split_tag_filters_by_family(tag_filters: Iterable[object]) -> tuple[list[st
             other_tags.append(tag_str)
     return project_tags, perf_tags, other_tags
 
+
+def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
+    """ids_map 입력을 {key: [str, ...]} 형태로 정규화한다."""
+    if not isinstance(ids_map, dict):
+        return {}
+
+    normalized: Dict[str, List[str]] = {}
+    for key, values in ids_map.items():
+        if isinstance(values, (list, tuple, set)):
+            seq = values
+        else:
+            seq = [values]
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for value in seq:
+            text = str(value).strip()
+            if not text or text.lower() == "none" or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+
+        if cleaned:
+            normalized[str(key)] = cleaned
+
+    return normalized
+
+
+def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[str, List[str]]:
+    """pjt_id/pjt_no 혼합 여부를 mode 정책으로 검증하고 정규화 ids_map을 반환한다."""
+    normalized_ids_map = _normalize_ids_map(ids_map)
+    mode_norm = str(mode or "").strip().lower()
+
+    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
+    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
+        error_code = "PLANNER_MIXED_PROJECT_KEYS" if mode_norm == "lookup" else "PLANNER_JOIN_MIXED_PROJECT_KEYS"
+        raise StrategyViolation(
+            error_code=error_code,
+            reason=f"ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})",
+        )
+
+    return normalized_ids_map
+
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
@@ -502,12 +546,22 @@ def _ensure_join_mode_has_keys(
     join_key_mode: str,
     hop1_top: List[Any],
     hop1_col: str,
+    join_pjt_ids_count: int = 0,
+    join_pjt_nos_count: int = 0,
 ) -> None:
     """
     mode=join 계약:
     - Hop1는 join key 추출 전용 단계이며, key가 없으면 Hop2를 생략한 성공 응답을 반환하지 않는다.
     - 결과는 "Hop2 실행 성공" 또는 "명시적 실패(StrategyViolation)"만 허용한다.
     """
+    log_kv(
+        "RAG.JOIN.HOP2.ENTRY_GUARD",
+        join_key_mode=join_key_mode,
+        hop1_col=hop1_col,
+        join_pjt_ids_count=int(join_pjt_ids_count or 0),
+        join_pjt_nos_count=int(join_pjt_nos_count or 0),
+        has_join_keys=int(bool(has_join_keys)),
+    )
     if has_join_keys:
         return
 
@@ -519,7 +573,10 @@ def _ensure_join_mode_has_keys(
         error_code="JOIN_KEYS_MISSING",
         reason=(
             "mode=join requires Hop2 execution, but join keys were not extracted "
-            f"from Hop1 ({join_key_label} missing)."
+            f"from Hop1 ({join_key_label} missing; "
+            f"join_key_mode={join_key_mode}, hop1_col={hop1_col}, "
+            f"join_pjt_ids_count={int(join_pjt_ids_count or 0)}, "
+            f"join_pjt_nos_count={int(join_pjt_nos_count or 0)})."
         ),
     )
 
@@ -2344,14 +2401,7 @@ def _run_rag_with_vectors(
         return list(dict.fromkeys([*primary_terms, *secondary_terms]))
 
     def _normalize_hint_ids_map(raw: Any) -> Dict[str, List[str]]:
-        if not isinstance(raw, dict):
-            return {}
-        out: Dict[str, List[str]] = {}
-        for key, values in raw.items():
-            norm = _normalize_hint_terms(values)
-            if norm:
-                out[str(key)] = norm
-        return out
+        return _normalize_ids_map(raw)
 
     def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
         if isinstance(raw, NormalizedIntent):
@@ -2550,7 +2600,7 @@ def _run_rag_with_vectors(
             merged_ids = dict(ctx.ids_map or {})
             for key, values in hint_ids_map.items():
                 merged_ids[key] = list(dict.fromkeys(list(merged_ids.get(key, [])) + values))
-            ctx.ids_map = merged_ids
+            ctx.ids_map = _normalize_ids_map(merged_ids)
         if isinstance(hint_filters, dict):
             org_filter_hints = _extract_org_filter_hints(hint_filters)
             if org_filter_hints["lead_org_terms"]:
@@ -3021,8 +3071,9 @@ def _run_rag_with_vectors(
         mode_norm = str(mode_value or "").strip().lower()
         join_norm = str(join_key_mode or "").strip().lower() or None
 
-        has_pjt_id = bool((ids_map_obj or {}).get("pjt_id"))
-        has_pjt_no = bool((ids_map_obj or {}).get("pjt_no"))
+        normalized_ids_map = _validate_project_key_exclusive(ids_map_obj, mode_norm)
+        has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+        has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
 
         if mode_norm != "join":
             if join_norm is not None:
@@ -3036,12 +3087,6 @@ def _run_rag_with_vectors(
             raise StrategyViolation(
                 error_code="PLANNER_JOIN_KEY_MODE_INVALID",
                 reason="join mode requires join_key_mode in {'instance','group'}",
-            )
-
-        if has_pjt_id and has_pjt_no:
-            raise StrategyViolation(
-                error_code="PLANNER_JOIN_MIXED_PROJECT_KEYS",
-                reason="ids_map.pjt_id and ids_map.pjt_no are mutually exclusive in JOIN",
             )
 
         if join_norm == "instance":
@@ -3089,10 +3134,6 @@ def _run_rag_with_vectors(
             strategy_relation=strategy.relation,
             fallback_mode=strategy.mode,
         )
-        try:
-            _validate_join_key_contract(strategy.mode, strategy.join_key_mode, dict(ctx.ids_map or {}))
-        except StrategyViolation as exc:
-            errors.append(str(exc))
         return (len(errors) == 0), errors
 
     # plan
@@ -3132,6 +3173,7 @@ def _run_rag_with_vectors(
         )
     if pending_strategy_filter_spec:
         plan = replace(plan, filters=pending_strategy_filter_spec)
+    ctx.ids_map = _validate_project_key_exclusive(ctx.ids_map, plan.mode)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
@@ -3210,13 +3252,23 @@ def _run_rag_with_vectors(
         )
         raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
+    planner_raw_join_key_mode = strategy_snapshot.join_key_mode
+    resolved_join_key_mode = str(planner_raw_join_key_mode or "").strip().lower() or None
+    if planner_strategy_mode == "join" and resolved_join_key_mode is None:
+        resolved_join_key_mode = "instance"
+    strategy_snapshot = replace(strategy_snapshot, join_key_mode=resolved_join_key_mode)
+    _validate_join_key_contract(
+        strategy_snapshot.mode,
+        resolved_join_key_mode,
+        dict(ctx.ids_map or {}),
+    )
+
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
         (route_for_contract.hop1_col, route_for_contract.hop2_col)
         if route_for_contract is not None
         else None
     )
-    join_key_mode_for_contract = str(strategy_snapshot.join_key_mode or "").strip().lower() or "instance"
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
         head=hint_head or base_route,
@@ -3224,7 +3276,7 @@ def _run_rag_with_vectors(
         target_cols=list(ctx.target_collections or plan.target_collections or []),
         ids_map=getattr(ctx, "ids_map", None),
         relation_target_cols=relation_target_cols_for_contract,
-        join_key_mode=join_key_mode_for_contract,
+        join_key_mode=resolved_join_key_mode,
     )
     if planner_contract_violations:
         first = planner_contract_violations[0]
@@ -3499,7 +3551,7 @@ def _run_rag_with_vectors(
         mode=plan.mode,
         action=action,
         relation=relation,
-        join_key_mode=(strategy_join_key_mode or hint_join_key_mode or getattr(ctx, "join_key_mode", None)),
+        join_key_mode=resolved_join_key_mode,
         people_terms=tuple(people_terms or []),
         target_collections=tuple(ctx.target_collections or []),
         search_filter_enabled=bool(search_filter_enabled),
@@ -3515,7 +3567,7 @@ def _run_rag_with_vectors(
     plan = replace(
         plan,
         relation=relation,
-        join_key_mode=(strategy.join_key_mode or plan.join_key_mode),
+        join_key_mode=resolved_join_key_mode,
         target_collections=tuple(ctx.target_collections or []),
         filters=filter_spec,
     )
@@ -3844,7 +3896,7 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
-        join_key_mode = str((getattr(strategy, "join_key_mode", None) or "")).strip().lower() or None
+        join_key_mode = resolved_join_key_mode
         pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
@@ -4108,20 +4160,25 @@ def _run_rag_with_vectors(
                     query_text=hop1_q,
                 )
 
-            # mode=join 계약: join key가 없으면 Hop1-only 성공 반환 없이 명시적 실패로 종료
+            # mode=join 불변성: Hop1에서 JOIN key를 확보하지 못하면 Hop2를 절대 호출하지 않는다.
+            # (허용 상태: Hop2 실행 성공 / 비허용 상태: JOIN_KEYS_MISSING 명시 실패)
             has_join_keys = bool(join_pjt_nos) if join_key_mode == "group" else bool(join_pjt_ids)
             _ensure_join_mode_has_keys(
                 has_join_keys=has_join_keys,
                 join_key_mode=join_key_mode,
                 hop1_top=hop1_top,
                 hop1_col=hop1_col,
+                join_pjt_ids_count=len(join_pjt_ids),
+                join_pjt_nos_count=len(join_pjt_nos),
             )
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
-            planner_join_key_mode = str(join_key_mode or "").strip().lower() or None
+            planner_join_key_mode = resolved_join_key_mode
             executed_join_key_mode = "group" if join_pjt_nos else "instance"
             log_kv(
                 "RAG.JOIN.KEY_MODE.CHECK",
+                resolved_join_key_mode=resolved_join_key_mode,
+                planner_raw_join_key_mode=planner_raw_join_key_mode,
                 planner_join_key_mode=planner_join_key_mode,
                 executed_join_key_mode=executed_join_key_mode,
                 join_pjt_ids_count=len(join_pjt_ids),
@@ -4414,19 +4471,10 @@ def _run_rag_with_vectors(
                 combined = _and_filter(combined, perf_followup_filter) if combined else perf_followup_filter
             return combined
 
-        ids_map = getattr(it, "ids_map", {}) or {}
-        raw_pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        raw_pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
-
-        # LOOKUP 서버 필터 단계에서는 project key 타입을 반드시 단일화한다.
-        if raw_pjt_ids and raw_pjt_nos:
-            raise StrategyViolation(
-                error_code="PLANNER_MIXED_PROJECT_KEYS",
-                reason="lookup ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음",
-            )
-        project_key_filter_type = "pjt_id" if raw_pjt_ids else ("pjt_no" if raw_pjt_nos else None)
-        pjt_ids = raw_pjt_ids if project_key_filter_type == "pjt_id" else []
-        pjt_nos = raw_pjt_nos if project_key_filter_type == "pjt_no" else []
+        ids_map = _validate_project_key_exclusive(getattr(it, "ids_map", {}) or {}, mode)
+        pjt_ids = list(ids_map.get("pjt_id") or [])
+        pjt_nos = list(ids_map.get("pjt_no") or [])
+        project_key_filter_type = "pjt_id" if pjt_ids else ("pjt_no" if pjt_nos else None)
 
         perf_id_keys = (
             "doi",
