@@ -1846,6 +1846,25 @@ def _strategy_consistency_or_violation(
             ),
         )
 
+
+def _diff_filter_spec(
+    *,
+    planner_filter_spec: Dict[str, Any],
+    executed_filter_spec: Dict[str, Any],
+) -> Dict[str, Any]:
+    """planner가 명시한 filter 계약 키 기준으로 실행 스펙 diff를 계산한다."""
+    planner_keys = sorted(str(k) for k in (planner_filter_spec or {}).keys())
+    changed: Dict[str, Dict[str, Any]] = {}
+    for key in planner_keys:
+        planner_val = planner_filter_spec.get(key)
+        exec_val = executed_filter_spec.get(key)
+        if planner_val != exec_val:
+            changed[key] = {"planner": planner_val, "executed": exec_val}
+    return {
+        "planner_keys": planner_keys,
+        "changed": changed,
+    }
+
 # -------------------------
 # 2-hop JOIN helpers
 # -------------------------
@@ -3319,7 +3338,6 @@ def _run_rag_with_vectors(
                 relation_lookup_policy,
                 relation,
             )
-        relation_lookup_enforce = bool(relation_lookup_enforce or has_relation_join_ids)
         if relation_lookup_enforce:
             logger.warning(
                 "[RAG] relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
@@ -3333,6 +3351,7 @@ def _run_rag_with_vectors(
             mode=plan.mode,
             relation=relation,
             enforced=int(relation_lookup_enforce),
+            source="planner_filter_contract",
         )
 
     join_hop1_lookup_filter_enabled = bool(
@@ -3424,6 +3443,27 @@ def _run_rag_with_vectors(
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
     }
+    planner_filter_diff = _diff_filter_spec(
+        planner_filter_spec=planner_filter_spec,
+        executed_filter_spec=filter_spec,
+    )
+    planner_filter_diff_changed = planner_filter_diff.get("changed", {})
+    log_kv(
+        "RAG.STRATEGY.FILTER_SPEC.DIFF",
+        level="error" if (strict_strategy_consistency and planner_filter_diff_changed) else "info",
+        planner_filter_keys=planner_filter_diff.get("planner_keys", []),
+        changed=planner_filter_diff_changed,
+        changed_count=len(planner_filter_diff_changed),
+        strict_strategy_consistency=int(strict_strategy_consistency),
+    )
+    if planner_filter_diff_changed:
+        _strategy_consistency_or_violation(
+            strict=strict_strategy_consistency,
+            mismatch_kind="filter_spec",
+            planner_value={k: planner_filter_spec.get(k) for k in planner_filter_diff.get("planner_keys", [])},
+            executed_value={k: filter_spec.get(k) for k in planner_filter_diff.get("planner_keys", [])},
+            context={"phase": "compile"},
+        )
     strategy = StrategySpec(
         mode=plan.mode,
         action=action,
