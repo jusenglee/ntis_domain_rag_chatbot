@@ -1736,48 +1736,6 @@ def _build_plan(
     preferred_mode: Optional[str] = None,
     preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
-    # relation_target_collections vs RAG_COLLECTION_ALLOWLIST 정책:
-    # 1) allowlist가 있으면 relation target과 교집합을 우선 사용한다.
-    # 2) 교집합이 비면 allowlist를 우선 적용한다.
-    # 3) allowlist가 없으면 relation target을 그대로 사용한다.
-    def _resolve_relation_target_cols(rel: Tuple[str, str], *, reason: str) -> List[str]:
-        relation_cols = list(relation_target_collections(rel) or [])
-        allowlist = list(RAG_COLLECTION_ALLOWLIST)
-        policy = "relation_only"
-        collection_policy_reason = None
-
-        if allowlist:
-            if relation_cols:
-                intersection = [c for c in relation_cols if c in allowlist]
-                if intersection:
-                    selected = intersection
-                    policy = "relation_intersect_allowlist"
-                else:
-                    selected = allowlist
-                    policy = "allowlist_fallback"
-                    collection_policy_reason = "relation_allowlist_disjoint"
-            else:
-                selected = allowlist
-                policy = "allowlist_only"
-                collection_policy_reason = "relation_empty"
-        else:
-            selected = relation_cols or _default_target_collections()
-            policy = "relation_only" if relation_cols else "default_only"
-            if not relation_cols:
-                collection_policy_reason = "relation_empty"
-
-        log_kv(
-            "RAG.PLAN.COLLECTION_POLICY",
-            reason=reason,
-            relation=rel,
-            allowlist=allowlist,
-            relation_target_cols=relation_cols,
-            selected_cols=selected,
-            policy=policy,
-            collection_policy_reason=collection_policy_reason,
-        )
-        return selected
-
     action = it.action
     base_route = it.base_route
     rel = it.relation
@@ -1790,7 +1748,7 @@ def _build_plan(
         mode, mode_reason = _select_mode_policy(it)
 
     if rel:
-        target_cols = _resolve_relation_target_cols(rel, reason="relation_target")
+        target_cols = list(relation_target_collections(rel) or _default_target_collections())
     else:
         target_cols = _default_target_collections_for_route(base_route)
 
@@ -1804,6 +1762,33 @@ def _build_plan(
         target_collections=tuple(target_cols),
         filters={},
     ), mode_reason
+
+
+def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], source: str) -> None:
+    """allowlist는 target_cols 재결정이 아니라 검증 전용으로 사용한다."""
+    normalized_targets = _normalize_strategy_target_cols(target_cols)
+    normalized_allow = _normalize_strategy_target_cols(allow_cols)
+    if not normalized_allow:
+        return
+    disallowed = [col for col in normalized_targets if col not in set(normalized_allow)]
+    if not disallowed:
+        return
+
+    log_kv(
+        "RAG.STRATEGY.ALLOWLIST",
+        policy="validation_only",
+        source=source,
+        target_cols=normalized_targets,
+        allow_cols=normalized_allow,
+        disallowed_cols=disallowed,
+    )
+    raise StrategyViolation(
+        error_code="PLANNER_TARGET_COLS_ALLOWLIST_VIOLATION",
+        reason=(
+            "planner target_cols contains disallowed collections"
+            f"(target_cols={normalized_targets}, allowlist={normalized_allow}, disallowed={disallowed})"
+        ),
+    )
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -3090,24 +3075,35 @@ def _run_rag_with_vectors(
         planner_mode = None
         planner_mode_source = None
 
-    plan, policy_reason = _build_plan(
-        intent_view,
-        preferred_mode=planner_mode,
-        preferred_mode_source=planner_mode_source,
-    )
+    planner_target_cols_from_hint = _normalize_strategy_target_cols(hinted_cols)
+    if planner_target_cols_from_hint:
+        # planner target_cols가 있으면 _build_plan 산출값을 사용하지 않고 planner 값을 고정한다.
+        plan, policy_reason = _build_plan(
+            intent_view,
+            preferred_mode=planner_mode,
+            preferred_mode_source=planner_mode_source,
+        )
+        plan = replace(plan, target_collections=tuple(planner_target_cols_from_hint))
+        policy_reason = f"planner:target_cols_locked:{planner_mode_source or 'hint'}"
+    else:
+        # planner target_cols가 없을 때만 _build_plan의 fallback 계산을 사용한다.
+        plan, policy_reason = _build_plan(
+            intent_view,
+            preferred_mode=planner_mode,
+            preferred_mode_source=planner_mode_source,
+        )
     if pending_strategy_filter_spec:
         plan = replace(plan, filters=pending_strategy_filter_spec)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
-    planner_target_cols_from_hint = _normalize_strategy_target_cols(hinted_cols)
-    if planner_target_cols_from_hint:
-        # v1.1 계약: planner가 확정한 target_cols를 실행 레이어가 재결정하지 않는다.
-        ctx.target_collections = list(planner_target_cols_from_hint)
-        plan = replace(plan, target_collections=tuple(planner_target_cols_from_hint))
-        ctx.plan = plan
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_relation_locked = plan.relation
     planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
+    _assert_allowlist_only(
+        target_cols=planner_target_cols_locked,
+        allow_cols=effective_allow,
+        source="planner_target_cols_locked",
+    )
     log_kv(
         "RAG.STRATEGY.POLICY",
         strict_strategy_consistency=int(strict_strategy_consistency),
@@ -3397,24 +3393,16 @@ def _run_rag_with_vectors(
             reason=join_execution_policy["reason"],
         )
 
-    # allow 적용 (force/allow)
+    # allowlist는 검증 전용: 실행 target_cols를 재결정하지 않는다.
     if effective_allow:
-        filtered = _pick_collections((ctx.target_collections or []), effective_allow)
-        effective_allow_norm = _normalize_strategy_target_cols(filtered if filtered else list(effective_allow))
+        effective_allow_norm = _normalize_strategy_target_cols(effective_allow)
         log_kv(
             "RAG.STRATEGY.ALLOWLIST",
-            policy="compile_validation",
+            policy="validation_only",
             branch="effective_allow",
             planner_target_cols=planner_target_cols_locked,
             effective_allow_target_cols=effective_allow_norm,
             applied=0,
-        )
-        _strategy_consistency_or_violation(
-            strict=strict_strategy_consistency,
-            mismatch_kind="target_cols",
-            planner_value=planner_target_cols_locked,
-            executed_value=effective_allow_norm,
-            context={"branch": "effective_allow"},
         )
 
     title_filter_applied_to = None
