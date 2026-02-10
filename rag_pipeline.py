@@ -616,6 +616,51 @@ def _pick_nested_first(pl: Dict[str, Any], list_key: str, field_key: str) -> str
                 return str(v).strip()
     return ""
 
+
+def _normalize_terms(values: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    for v in values or []:
+        s = str(v).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _pick_matching_prtcp_mp(
+    pl: Dict[str, Any],
+    *,
+    people_terms: Optional[List[str]] = None,
+    person_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    members = pl.get("prtcp_mp")
+    if not isinstance(members, list):
+        return {}
+
+    norm_terms = _normalize_terms(people_terms)
+    norm_ids = set(_normalize_terms(person_ids))
+    if not norm_terms and not norm_ids:
+        for member in members:
+            if isinstance(member, dict):
+                return member
+        return {}
+
+    id_fields = ("hm_id", "person_no", "prtcp_mp_id", "mp_id", "id")
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        hm_nm = str(member.get("hm_nm") or "").strip()
+        if hm_nm and any(t in hm_nm for t in norm_terms):
+            return member
+        for key in id_fields:
+            sid = str(member.get(key) or "").strip()
+            if sid and sid in norm_ids:
+                return member
+
+    for member in members:
+        if isinstance(member, dict):
+            return member
+    return {}
+
 def _payload_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     return _pick_first(
         pl.get("title_text"),
@@ -631,6 +676,9 @@ def build_context_list_light(
         kind: str,
         max_items: int,
         query_text: str = "",
+        people_terms: Optional[List[str]] = None,
+        person_ids: Optional[List[str]] = None,
+        org_role: Optional[str] = None,
         token_budget: Optional[int] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """목록/통계형 질의용 경량 컨텍스트."""
@@ -682,9 +730,10 @@ def build_context_list_light(
             continue
 
         if kind == "people":
-            name = _pick_nested_first(pl, "prtcp_mp", "hm_nm")
-            role = _pick_nested_first(pl, "prtcp_mp", "role_slct_nm")
-            org = _pick_nested_first(pl, "prtcp_mp", "blng_org_nm")
+            member = _pick_matching_prtcp_mp(pl, people_terms=people_terms, person_ids=person_ids)
+            name = _pick_first(member.get("hm_nm")) if member else _pick_nested_first(pl, "prtcp_mp", "hm_nm")
+            role = _pick_first(member.get("role_slct_nm")) if member else _pick_nested_first(pl, "prtcp_mp", "role_slct_nm")
+            org = _pick_first(member.get("blng_org_nm")) if member else _pick_nested_first(pl, "prtcp_mp", "blng_org_nm")
             pjt_id = _pjt_id(pl)
             line = f"- {_clean_one_line(name or '(이름없음)', 80)}"
             extra: List[str] = []
@@ -700,11 +749,24 @@ def build_context_list_light(
             continue
 
         if kind == "org":
-            org = _pick_first(
-                pl.get("org_nm"),
-                _pick_nested_first(pl, "prtcp_org", "org_nm"),
-            )
-            role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
+            org_role_norm = str(org_role or "").strip().lower()
+            if org_role_norm in ("lead", "performer", "performing"):
+                org = _pick_first(pl.get("org_nm"), _pick_nested_first(pl, "prtcp_org", "org_nm"))
+                role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
+            elif org_role_norm == "participant":
+                org = _pick_first(_pick_nested_first(pl, "prtcp_org", "org_nm"), pl.get("org_nm"))
+                role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
+            elif org_role_norm == "affiliation":
+                org = _pick_first(
+                    _pick_matching_prtcp_mp(pl, people_terms=people_terms, person_ids=person_ids).get("blng_org_nm"),
+                    _pick_nested_first(pl, "prtcp_mp", "blng_org_nm"),
+                    pl.get("org_nm"),
+                    _pick_nested_first(pl, "prtcp_org", "org_nm"),
+                )
+                role = _pick_nested_first(pl, "prtcp_mp", "role_slct_nm")
+            else:
+                org = _pick_first(pl.get("org_nm"), _pick_nested_first(pl, "prtcp_org", "org_nm"))
+                role = _pick_nested_first(pl, "prtcp_org", "org_slct_nm")
             pjt_id = _pjt_id(pl)
             line = f"- {_clean_one_line(org or '(기관없음)', 100)}"
             extra: List[str] = []
@@ -791,10 +853,21 @@ def _build_context_with_output_type(
     output_type: Optional[str],
     max_items: int,
     query_text: str,
+    people_terms: Optional[List[str]] = None,
+    person_ids: Optional[List[str]] = None,
+    org_role: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
     fieldset = _resolve_output_fieldset(output_type)
     if _should_use_list_context(action=action, base_route=base_route, output_type=output_type):
-        context, refs = build_context_list_light(points, kind=base_route, max_items=max_items, query_text=query_text)
+        context, refs = build_context_list_light(
+            points,
+            kind=base_route,
+            max_items=max_items,
+            query_text=query_text,
+            people_terms=people_terms,
+            person_ids=person_ids,
+            org_role=org_role,
+        )
         return context, refs, fieldset
     meta_source = "detail_only" if _normalize_output_type(output_type) == "detail" else None
     include_meta_long = _normalize_output_type(output_type) == "detail"
@@ -4006,6 +4079,9 @@ def _run_rag_with_vectors(
                     output_type=plan.output_type,
                     max_items=max(1, hop1_keep),
                     query_text=hop1_q,
+                    people_terms=people_terms,
+                    person_ids=people_ids,
+                    org_role=org_role,
                 )
 
             # mode=join 불변성: Hop1에서 JOIN key를 확보하지 못하면 Hop2를 절대 호출하지 않는다.
@@ -4202,6 +4278,9 @@ def _run_rag_with_vectors(
                 output_type=plan.output_type,
                 max_items=max(1, hop2_keep),
                 query_text=hop2_q,
+                people_terms=people_terms,
+                person_ids=people_ids,
+                org_role=org_role,
             )
 
             join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
@@ -4796,6 +4875,9 @@ def _run_rag_with_vectors(
             output_type=plan.output_type,
             max_items=max_items,
             query_text=q,
+            people_terms=people_terms,
+            person_ids=people_ids,
+            org_role=org_role,
         )
     else:
         context = ""
