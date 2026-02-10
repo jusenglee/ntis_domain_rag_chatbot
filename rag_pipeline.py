@@ -502,12 +502,22 @@ def _ensure_join_mode_has_keys(
     join_key_mode: str,
     hop1_top: List[Any],
     hop1_col: str,
+    join_pjt_ids_count: int = 0,
+    join_pjt_nos_count: int = 0,
 ) -> None:
     """
     mode=join 계약:
     - Hop1는 join key 추출 전용 단계이며, key가 없으면 Hop2를 생략한 성공 응답을 반환하지 않는다.
     - 결과는 "Hop2 실행 성공" 또는 "명시적 실패(StrategyViolation)"만 허용한다.
     """
+    log_kv(
+        "RAG.JOIN.HOP2.ENTRY_GUARD",
+        join_key_mode=join_key_mode,
+        hop1_col=hop1_col,
+        join_pjt_ids_count=int(join_pjt_ids_count or 0),
+        join_pjt_nos_count=int(join_pjt_nos_count or 0),
+        has_join_keys=int(bool(has_join_keys)),
+    )
     if has_join_keys:
         return
 
@@ -519,7 +529,10 @@ def _ensure_join_mode_has_keys(
         error_code="JOIN_KEYS_MISSING",
         reason=(
             "mode=join requires Hop2 execution, but join keys were not extracted "
-            f"from Hop1 ({join_key_label} missing)."
+            f"from Hop1 ({join_key_label} missing; "
+            f"join_key_mode={join_key_mode}, hop1_col={hop1_col}, "
+            f"join_pjt_ids_count={int(join_pjt_ids_count or 0)}, "
+            f"join_pjt_nos_count={int(join_pjt_nos_count or 0)})."
         ),
     )
 
@@ -4108,13 +4121,16 @@ def _run_rag_with_vectors(
                     query_text=hop1_q,
                 )
 
-            # mode=join 계약: join key가 없으면 Hop1-only 성공 반환 없이 명시적 실패로 종료
+            # mode=join 불변성: Hop1에서 JOIN key를 확보하지 못하면 Hop2를 절대 호출하지 않는다.
+            # (허용 상태: Hop2 실행 성공 / 비허용 상태: JOIN_KEYS_MISSING 명시 실패)
             has_join_keys = bool(join_pjt_nos) if join_key_mode == "group" else bool(join_pjt_ids)
             _ensure_join_mode_has_keys(
                 has_join_keys=has_join_keys,
                 join_key_mode=join_key_mode,
                 hop1_top=hop1_top,
                 hop1_col=hop1_col,
+                join_pjt_ids_count=len(join_pjt_ids),
+                join_pjt_nos_count=len(join_pjt_nos),
             )
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
