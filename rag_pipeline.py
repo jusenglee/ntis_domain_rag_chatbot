@@ -89,9 +89,8 @@ from rag_parts.join import (
 )
 from rag_parts.filters import (
     build_tag_only_filter as _build_tag_only_filter,
-    build_join_filter as build_join_filter,
+    build_collection_join_filter,
     build_perf_filter_by_pjt_id,
-    build_perf_filter_by_pjt_no,
     build_year_range_filter,
     build_perf_type_filter,
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
@@ -1958,6 +1957,7 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
 def _build_join_hop2_filter(
         *,
         relation: Optional[Tuple[str, str]],
+        hop2_col: str,
         join_key_mode: str,
         join_pjt_ids: List[str],
         join_pjt_nos: List[str],
@@ -1967,15 +1967,22 @@ def _build_join_hop2_filter(
         people_terms: List[str],
         org_terms: List[str],
         planner_filter_spec: Dict[str, Any],
-):
+) -> Tuple[Any, Dict[str, Any]]:
     """JOIN Hop2 필터 생성: join_key_mode 단일 소스(strategy/contract)만 사용."""
-    if relation in (("project", "perf"), ("people", "perf"), ("org", "perf")):
-        if join_key_mode == "group":
-            return build_perf_filter_by_pjt_no(join_pjt_nos, q)
-        return build_perf_filter_by_pjt_id(join_pjt_ids or join_ids, q)
+    relation_matrix = {
+        "relation": relation,
+        "hop2_col": hop2_col,
+        "join_key_mode": join_key_mode,
+    }
+    log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix)
 
-    return build_join_filter(
-        JoinFilterInput(
+    hop2_filter = build_collection_join_filter(
+        hop2_col=hop2_col,
+        join_key_mode=join_key_mode,
+        join_ids=(join_pjt_ids or join_ids),
+        pjt_nos=join_pjt_nos,
+        query=q,
+        fallback_spec=JoinFilterInput(
             join_ids=join_pjt_ids,
             pjt_nos=join_pjt_nos,
             join_key_mode=join_key_mode,
@@ -1984,8 +1991,15 @@ def _build_join_hop2_filter(
             org_terms=org_terms,
             relation=relation,
             filter_spec=planner_filter_spec.get("join_filter"),
-        )
+        ),
     )
+    executed_join_filter_spec = {
+        "hop2_col": hop2_col,
+        "join_key_mode": join_key_mode,
+        "join_ids_count": len(join_pjt_ids or join_ids),
+        "pjt_nos_count": len(join_pjt_nos),
+    }
+    return hop2_filter, executed_join_filter_spec
 
 
 # -------------------------
@@ -2891,6 +2905,19 @@ def _run_rag_with_vectors(
                 )
             # ✅ group은 반드시 ids_map.pjt_no 필요 (pjt_no는 전략 자체가 다르므로 플래너가 명시해야 함)
             if not has_pjt_no:
+                planner_snapshot = {
+                    "mode": mode_norm,
+                    "join_key_mode": join_norm,
+                    "ids_map": normalized_ids_map,
+                    "has_pjt_id": int(has_pjt_id),
+                    "has_pjt_no": int(has_pjt_no),
+                }
+                log_kv(
+                    "RAG.PLANNER.JOIN_KEY_MODE_IDS_MISMATCH",
+                    level="error",
+                    error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
+                    planner_snapshot=planner_snapshot,
+                )
                 raise StrategyViolation(
                     error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
                     reason="join_key_mode=group requires ids_map.pjt_no",
@@ -3950,7 +3977,7 @@ def _run_rag_with_vectors(
 
             # mode=join 불변성: Hop1에서 JOIN key를 확보하지 못하면 Hop2를 절대 호출하지 않는다.
             # (허용 상태: Hop2 실행 성공 / 비허용 상태: JOIN_KEYS_MISSING 명시 실패)
-            has_join_keys = bool(join_pjt_nos) if join_key_mode == "group" else bool(join_pjt_ids)
+            has_join_keys = (len(join_pjt_ids) > 0 or len(join_pjt_nos) > 0)
             _ensure_join_mode_has_keys(
                 has_join_keys=has_join_keys,
                 join_key_mode=join_key_mode,
@@ -3990,8 +4017,9 @@ def _run_rag_with_vectors(
                 pjt_nos=join_pjt_nos,
             )
 
-            hop2_filter = _build_join_hop2_filter(
+            hop2_filter, executed_join_filter_spec = _build_join_hop2_filter(
                 relation=relation,
+                hop2_col=hop2_col,
                 join_key_mode=planner_join_key_mode,
                 join_pjt_ids=join_pjt_ids,
                 join_pjt_nos=join_pjt_nos,
@@ -4004,6 +4032,30 @@ def _run_rag_with_vectors(
             )
             if relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and org_filter:
                 hop2_filter = _and_filter(hop2_filter, org_filter)
+            planner_join_filter_spec = dict((planner_filter_spec or {}).get("join_filter") or {})
+            join_filter_diff = _diff_filter_spec(
+                planner_filter_spec=planner_join_filter_spec,
+                executed_filter_spec=executed_join_filter_spec,
+            )
+            join_filter_diff_changed = join_filter_diff.get("changed", {})
+            log_kv(
+                "RAG.JOIN.HOP2.FILTER_SPEC.DIFF",
+                level="error" if join_filter_diff_changed else "info",
+                planner_filter_keys=join_filter_diff.get("planner_keys", []),
+                changed=join_filter_diff_changed,
+                changed_count=len(join_filter_diff_changed),
+                planner_join_filter_spec=planner_join_filter_spec,
+                executed_join_filter_spec=executed_join_filter_spec,
+            )
+            if join_filter_diff_changed:
+                raise StrategyViolation(
+                    error_code="STRATEGY_MISMATCH",
+                    reason=(
+                        "join Hop2 filter_spec mismatch between planner and executed "
+                        f"(changed_keys={list(join_filter_diff_changed.keys())})"
+                    ),
+                )
+
             hop2_filter = _with_org_must_gate(hop2_filter, col=hop2_col, mode_override="join")
             if hop2_col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:

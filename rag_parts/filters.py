@@ -750,6 +750,46 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     return qmodels.Filter(must=must)
 
 
+def build_collection_join_filter(
+    *,
+    hop2_col: str,
+    join_key_mode: str,
+    join_ids: List[str],
+    pjt_nos: List[str],
+    query: str = "",
+    fallback_spec: Optional[JoinFilterInput] = None,
+) -> "qmodels.Filter":
+    """Hop2 컬렉션 기준으로 JOIN 필터를 생성한다.
+
+    - hop2_col=perf: perf 전용 필터를 사용
+    - hop2_col=project: project 전용 필터를 사용
+    - 그 외: build_join_filter 로 폴백
+    """
+    mode = str(join_key_mode or "instance").strip().lower()
+    if mode not in ("instance", "group"):
+        raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
+
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+
+    col_norm = str(hop2_col or "").strip().lower()
+    if col_norm == "ntis_perf":
+        if mode == "group":
+            return build_perf_filter_by_pjt_no(pjt_nos, query)
+        return build_perf_filter_by_pjt_id(join_ids, query)
+
+    if col_norm == "ntis_project":
+        pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
+        return pjt_filter or qmodels.Filter(must=[])
+
+    if fallback_spec is None:
+        fallback_spec = JoinFilterInput(
+            join_ids=join_ids,
+            pjt_nos=pjt_nos,
+            join_key_mode=mode,
+        )
+    return build_join_filter(fallback_spec)
+
+
 def _is_pjt_id_key(key: str) -> bool:
     k = str(key or "").strip().lower()
     return bool(k) and (k == "pjt_id" or k.endswith(".pjt_id"))
