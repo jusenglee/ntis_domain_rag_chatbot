@@ -1643,6 +1643,37 @@ def _has_relation_join_ids(it: NormalizedIntent) -> bool:
     )
     return any(ids_map.get(key) for key in perf_id_keys)
 
+
+def _resolve_join_execution_policy(
+    *,
+    relation: Optional[Tuple[str, str]],
+    mode: str,
+    action: Optional[str],
+    has_relation_join_ids: bool,
+) -> Dict[str, Any]:
+    """JOIN 경로 실행 정책을 단일화한다.
+
+    정책:
+    - relation && mode=join 이면 ids 유무와 무관하게 Hop1→Hop2 경로를 강제한다.
+    - "skip" 개념을 제거하고 required/executed 신호만 남긴다.
+    """
+    is_required = bool(relation and mode == "join")
+    if not is_required:
+        return {
+            "required": False,
+            "reason": None,
+            "action": action,
+            "has_relation_join_ids": bool(has_relation_join_ids),
+        }
+
+    reason = "seed_ids_present" if has_relation_join_ids else "hop1_key_extraction_required"
+    return {
+        "required": True,
+        "reason": reason,
+        "action": action,
+        "has_relation_join_ids": bool(has_relation_join_ids),
+    }
+
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
@@ -3125,33 +3156,28 @@ def _run_rag_with_vectors(
             people_terms=people_terms[:4],
             relation_lookup_enforce=int(relation_lookup_enforce),
         )
-    if relation and plan.mode == "join" and not has_relation_join_ids:
-        if relation_action:
-            logger.warning(
-                "[RAG] relation action without join ids: using Hop1→Hop2 flow (relation=%s)",
-                relation,
-            )
-            log_kv(
-                "RAG.PLAN.JOIN_HOP1_REQUIRED",
-                level="warning",
-                reason="relation_action_missing_ids",
-                relation=relation,
-            )
-        else:
-            logger.warning(
-                "[RAG] join skipped due to missing relation ids (relation=%s)",
-                relation,
-            )
-            log_kv(
-                "RAG.PLAN.JOIN_SKIPPED",
-                level="warning",
-                reason="missing_relation_ids",
-                relation=relation,
-            )
-            logger.warning(
-                "[RAG] join without relation ids; continuing without override (relation=%s)",
-                relation,
-            )
+    join_execution_policy = _resolve_join_execution_policy(
+        relation=relation,
+        mode=plan.mode,
+        action=action,
+        has_relation_join_ids=has_relation_join_ids,
+    )
+    if join_execution_policy["required"]:
+        logger.warning(
+            "[RAG] join required: relation=%s action=%s has_relation_join_ids=%s reason=%s",
+            relation,
+            action,
+            has_relation_join_ids,
+            join_execution_policy["reason"],
+        )
+        log_kv(
+            "RAG.PLAN.JOIN_REQUIRED",
+            level="warning",
+            relation=relation,
+            action=action,
+            has_relation_join_ids=int(has_relation_join_ids),
+            reason=join_execution_policy["reason"],
+        )
 
     # allow 적용 (force/allow)
     if effective_allow:
@@ -3552,212 +3578,210 @@ def _run_rag_with_vectors(
             hop1_top: List[Any] = []
             hop1_filter = None
 
-            # 1) Hop1 (SEARCH) : 명시 join key 있으면 skip
+            # 1) Hop1 (SEARCH): mode=join이면 ids 유무와 무관하게 항상 수행
+            has_seed_join_keys = bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids)
+            log_kv(
+                "RAG.PLAN.JOIN_EXECUTED",
+                relation=relation,
+                action=action,
+                join_key_mode=join_key_mode,
+                has_seed_join_keys=int(has_seed_join_keys),
+            )
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
-                log_kv(
-                    "RAG.JOIN.HOP1.SKIP",
-                    reason="explicit_join_pjt_nos",
-                    join_pjt_nos_preview=join_pjt_nos[:10],
-                )
             elif join_key_mode == "instance" and seed_join_pjt_ids:
                 join_pjt_ids = seed_join_pjt_ids[:]
-                log_kv(
-                    "RAG.JOIN.HOP1.SKIP",
-                    reason="explicit_join_pjt_ids",
-                    join_pjt_ids_preview=join_pjt_ids[:10],
+
+            hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
+            if  people_filter:
+                hop1_filter = _and_filter(hop1_filter, people_filter)
+            if  org_filter:
+                hop1_filter = _and_filter(hop1_filter, org_filter)
+            if join_hop1_lookup_filter_enabled and hop1_col in (COL_PROJECT, COL_PERF):
+                join_people_filter = people_filter
+                join_promote_one_must = bool(
+                    people_promote_one_must
+                    or (
+                        join_hop1_lookup_filter_enabled
+                        and lookup_filter_policy == "must_one_then_should"
+                        and not people_ids
+                        and len(people_terms) == 1
+                    )
                 )
-            else:
-                hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
-                if  people_filter:
-                    hop1_filter = _and_filter(hop1_filter, people_filter)
-                if  org_filter:
-                    hop1_filter = _and_filter(hop1_filter, org_filter)
-                if join_hop1_lookup_filter_enabled and hop1_col in (COL_PROJECT, COL_PERF):
-                    join_people_filter = people_filter
-                    join_promote_one_must = bool(
-                        people_promote_one_must
-                        or (
-                            join_hop1_lookup_filter_enabled
-                            and lookup_filter_policy == "must_one_then_should"
-                            and not people_ids
-                            and len(people_terms) == 1
+                final_people_terms = list(ctx.people_terms or people_terms or [])
+                if join_people_filter is None and final_people_terms:
+                    join_people_filter = build_people_filter(
+                        PeopleFilterInput(
+                            people_terms=final_people_terms,
+                            person_ids=people_ids,
+                            gender_terms=gender_terms,
+                            org_terms=people_org_terms,
+                            min_should=people_min_should,
+                            promote_one_must=join_promote_one_must,
                         )
                     )
-                    final_people_terms = list(ctx.people_terms or people_terms or [])
-                    if join_people_filter is None and final_people_terms:
-                        join_people_filter = build_people_filter(
-                            PeopleFilterInput(
-                                people_terms=final_people_terms,
-                                person_ids=people_ids,
-                                gender_terms=gender_terms,
-                                org_terms=people_org_terms,
-                                min_should=people_min_should,
-                                promote_one_must=join_promote_one_must,
-                            )
+                    if join_people_filter is None:
+                        log_kv(
+                            "RAG.JOIN.HOP1.LOOKUP_FILTER.PEOPLE_MISSING",
+                            level="warning",
+                            reason="people_filter_unavailable",
+                            people_terms=final_people_terms[:4],
+                            people_ids=people_ids[:4],
+                            match_mode=people_match_mode,
+                            min_should=people_min_should,
                         )
-                        if join_people_filter is None:
-                            log_kv(
-                                "RAG.JOIN.HOP1.LOOKUP_FILTER.PEOPLE_MISSING",
-                                level="warning",
-                                reason="people_filter_unavailable",
-                                people_terms=final_people_terms[:4],
-                                people_ids=people_ids[:4],
-                                match_mode=people_match_mode,
-                                min_should=people_min_should,
-                            )
-                    hop1_lookup_filter = None
-                    if hop1_col == COL_PROJECT:
-                        if join_people_filter or participant_org_filter or org_filter:
-                            hop1_lookup_filter = _and_filter(
-                                hop1_lookup_filter,
-                                _build_tag_only_filter([TAG_PJT_INFO]),
-                            )
-                        if join_people_filter:
-                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
-                        if participant_org_filter or org_filter:
-                            hop1_lookup_filter = _and_filter(
-                                hop1_lookup_filter,
-                                participant_org_filter or org_filter,
-                            )
-                        if project_tag_filter:
-                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, project_tag_filter)
-                    elif hop1_col == COL_PERF:
-                        if base_route == "perf" and join_people_filter:
-                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
-                        if perf_tag_filter:
-                            hop1_lookup_filter = _and_filter(hop1_lookup_filter, perf_tag_filter)
-                    if hop1_lookup_filter is not None:
-                        hop1_filter = _and_filter(hop1_filter, hop1_lookup_filter)
-                if hop1_col in (COL_PROJECT, COL_PERF):
-                    if year_range_filter:
-                        hop1_filter = _and_filter(hop1_filter, year_range_filter)
-                if hop1_col == COL_PERF and perf_type_filter:
-                    hop1_filter = _and_filter(hop1_filter, perf_type_filter)
+                hop1_lookup_filter = None
+                if hop1_col == COL_PROJECT:
+                    if join_people_filter or participant_org_filter or org_filter:
+                        hop1_lookup_filter = _and_filter(
+                            hop1_lookup_filter,
+                            _build_tag_only_filter([TAG_PJT_INFO]),
+                        )
+                    if join_people_filter:
+                        hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
+                    if participant_org_filter or org_filter:
+                        hop1_lookup_filter = _and_filter(
+                            hop1_lookup_filter,
+                            participant_org_filter or org_filter,
+                        )
+                    if project_tag_filter:
+                        hop1_lookup_filter = _and_filter(hop1_lookup_filter, project_tag_filter)
+                elif hop1_col == COL_PERF:
+                    if base_route == "perf" and join_people_filter:
+                        hop1_lookup_filter = _and_filter(hop1_lookup_filter, join_people_filter)
+                    if perf_tag_filter:
+                        hop1_lookup_filter = _and_filter(hop1_lookup_filter, perf_tag_filter)
+                if hop1_lookup_filter is not None:
+                    hop1_filter = _and_filter(hop1_filter, hop1_lookup_filter)
+            if hop1_col in (COL_PROJECT, COL_PERF):
+                if year_range_filter:
+                    hop1_filter = _and_filter(hop1_filter, year_range_filter)
+            if hop1_col == COL_PERF and perf_type_filter:
+                hop1_filter = _and_filter(hop1_filter, perf_type_filter)
 
+            log_kv(
+                "RAG.JOIN.HOP1",
+                hop1_col=hop1_col, hop1_kind=hop1_kind, hop1_q=hop1_q,
+                hop1_tag_filters=hop1_tag_filters,
+                hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                hop1_k_base=hop1_k_base,
+                hop1_keep=hop1_keep,
+            )
+
+            vec_avail = _named_vectors_in_collection(qdr, hop1_col)
+            use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+            pre_vecs_h1 = _get_pre_vecs(hop1_q)
+            emb_map_h1: Dict[str, Any] = {}
+            for vname in use_vecs_h1:
+                pe = pre_vecs_h1.get(vname)
+                emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
+            emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
+
+            local_timings_h1: Dict[str, float] = {}
+            sr1 = _call_dense_retrieve_hybrid_multi(
+                qdr=qdr,
+                emb_map=emb_map_h1,
+                qtext=hop1_q,
+                kws=kws,
+                collection=hop1_col,
+                lexical_fields=preset.lexical_fields,
+                sparse_vector_name=sparse_vector_name_eff,
+                sparse_topk=min(hop1_k_base, 80),
+                top_k_dense=topk_dense,
+                top_k_lex_cand=hop1_k_base,
+                top_k_lex=min(hop1_k_base, 80),
+                query_filter=hop1_filter,  # ✅ 실제 적용
+                timings_out=local_timings_h1,
+                require_hybrid_both_sides=True,
+                contract_scope="join_hop1",
+                violation_on_contract=True,
+            )
+            _apply_dense_threshold(
+                sr1,
+                use_dense_threshold=use_dense_threshold_policy,
+                min_dense_score=min_dense_score_policy,
+                log_prefix="RAG.DENSE.THRESHOLD.HOP1",
+                col=hop1_col,
+                action=action,
+                base_route=base_route,
+                relation=relation,
+            )
+            hybrid_points = sr1.get("hybrid") or []
+            if hybrid_points:
+                _ensure_collection_mark(hybrid_points, hop1_col)
+                h1_rrf = _dedup_by_doc_id(hybrid_points)
+            else:
+                _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
+                for _, lst in (sr1.get("dense") or {}).items():
+                    _ensure_collection_mark(lst or [], hop1_col)
+
+                # Hop1 RRF merge
+                sources_h1: List[_RankSource] = []
+                for vname, lst in (sr1.get("dense") or {}).items():
+                    base_weight = float(w_dense_map.get(vname, 1.0))
+                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
+                h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
+                h1_rrf = _dedup_by_doc_id(h1_rrf)
+            hop1_reranked = _final_rerank(
+                h1_rrf,
+                it=it,
+                kws=kws,
+                lex_w=lex_w_eff,
+                base_route=("perf" if hop1_kind == "perf" else base_route),
+                mode="search",
+                keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
+                tag_boost=float(getattr(preset, "tag_boost", 0.2)),
+                tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+            )
+
+            if len(hop1_reranked) > ctx_hard_limit:
+                hop1_reranked = hop1_reranked[:ctx_hard_limit]
+
+            hop1_top = hop1_reranked[: max(1, hop1_keep)]
+            if not hop1_top:
                 log_kv(
-                    "RAG.JOIN.HOP1",
-                    hop1_col=hop1_col, hop1_kind=hop1_kind, hop1_q=hop1_q,
+                    "RAG.JOIN.HOP1.EMPTY",
+                    hop1_kind=hop1_kind,
                     hop1_tag_filters=hop1_tag_filters,
                     hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
-                    hop1_k_base=hop1_k_base,
-                    hop1_keep=hop1_keep,
                 )
-
-                vec_avail = _named_vectors_in_collection(qdr, hop1_col)
-                use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
-                pre_vecs_h1 = _get_pre_vecs(hop1_q)
-                emb_map_h1: Dict[str, Any] = {}
-                for vname in use_vecs_h1:
-                    pe = pre_vecs_h1.get(vname)
-                    emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
-                emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
-
-                local_timings_h1: Dict[str, float] = {}
-                sr1 = _call_dense_retrieve_hybrid_multi(
-                    qdr=qdr,
-                    emb_map=emb_map_h1,
-                    qtext=hop1_q,
-                    kws=kws,
-                    collection=hop1_col,
-                    lexical_fields=preset.lexical_fields,
-                    sparse_vector_name=sparse_vector_name_eff,
-                    sparse_topk=min(hop1_k_base, 80),
-                    top_k_dense=topk_dense,
-                    top_k_lex_cand=hop1_k_base,
-                    top_k_lex=min(hop1_k_base, 80),
-                    query_filter=hop1_filter,  # ✅ 실제 적용
-                    timings_out=local_timings_h1,
-                    require_hybrid_both_sides=True,
-                    contract_scope="join_hop1",
-                    violation_on_contract=True,
+            else:
+                # ✅ hop1 결과에 meta_basic 포함 payload 보강
+                hydrate_keep = min(
+                    max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
+                    ctx_hard_limit,
                 )
-                _apply_dense_threshold(
-                    sr1,
-                    use_dense_threshold=use_dense_threshold_policy,
-                    min_dense_score=min_dense_score_policy,
-                    log_prefix="RAG.DENSE.THRESHOLD.HOP1",
-                    col=hop1_col,
-                    action=action,
-                    base_route=base_route,
-                    relation=relation,
-                )
-                hybrid_points = sr1.get("hybrid") or []
-                if hybrid_points:
-                    _ensure_collection_mark(hybrid_points, hop1_col)
-                    h1_rrf = _dedup_by_doc_id(hybrid_points)
-                else:
-                    _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
-                    for _, lst in (sr1.get("dense") or {}).items():
-                        _ensure_collection_mark(lst or [], hop1_col)
+                _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
+                missing = _count_missing_join_keys(hop1_top)
+                if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                    if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                        _hydrate_points_payload(qdr, hop1_top)
+                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}")
 
-                    # Hop1 RRF merge
-                    sources_h1: List[_RankSource] = []
-                    for vname, lst in (sr1.get("dense") or {}).items():
-                        base_weight = float(w_dense_map.get(vname, 1.0))
-                        score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
-                        sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-                    sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
-                    h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
-                    h1_rrf = _dedup_by_doc_id(h1_rrf)
-                hop1_reranked = _final_rerank(
-                    h1_rrf,
-                    it=it,
-                    kws=kws,
-                    lex_w=lex_w_eff,
-                    base_route=("perf" if hop1_kind == "perf" else base_route),
-                    mode="search",
-                    keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
-                    tag_boost=float(getattr(preset, "tag_boost", 0.2)),
-                    tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
-                )
+            if join_key_mode == "group":
+                join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
+            else:
+                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
 
-                if len(hop1_reranked) > ctx_hard_limit:
-                    hop1_reranked = hop1_reranked[:ctx_hard_limit]
-
-                hop1_top = hop1_reranked[: max(1, hop1_keep)]
-                if not hop1_top:
-                    log_kv(
-                        "RAG.JOIN.HOP1.EMPTY",
-                        hop1_kind=hop1_kind,
-                        hop1_tag_filters=hop1_tag_filters,
-                        hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
-                    )
-                else:
-                    # ✅ hop1 결과에 meta_basic 포함 payload 보강
-                    hydrate_keep = min(
-                        max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
-                        ctx_hard_limit,
-                    )
-                    _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-                    missing = _count_missing_join_keys(hop1_top)
-                    if missing.get("missing_pjt_any") or missing.get("missing_tag"):
-                        if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
-                            _hydrate_points_payload(qdr, hop1_top)
-                        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}")
-
-                if join_key_mode == "group":
-                    join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
-                else:
-                    join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
-
-                log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
-                if join_key_mode == "group":
-                    log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)])
-                else:
-                    log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)])
-                log_kv(
-                    "RAG.JOIN.HOP1.TIMINGS",
-                    dense_queries=float(local_timings_h1.get("dense_queries", 0.0)),
-                    sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
-                    hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
-                    **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
-                )
-                _validate_lookup_join_hybrid_metrics(
-                    mode="join",
-                    contract_scope=f"join_hop1:{hop1_col}",
-                    timings=local_timings_h1,
-                )
+            log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
+            if join_key_mode == "group":
+                log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)])
+            else:
+                log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)])
+            log_kv(
+                "RAG.JOIN.HOP1.TIMINGS",
+                dense_queries=float(local_timings_h1.get("dense_queries", 0.0)),
+                sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
+                hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
+                **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
+            )
+            _validate_lookup_join_hybrid_metrics(
+                mode="join",
+                contract_scope=f"join_hop1:{hop1_col}",
+                timings=local_timings_h1,
+            )
 
             # Hop1 context
             hop1_ctx, hop1_refs = ("", [])
