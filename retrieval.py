@@ -799,6 +799,12 @@ def dense_retrieve_hybrid_multi(
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
+    timings.setdefault("dense_queries", 0.0)
+    timings.setdefault("dense_points", 0.0)
+    timings.setdefault("lexical_candidates", 0.0)
+    timings.setdefault("lexical_scored", 0.0)
+    timings.setdefault("sparse_hits", 0.0)
+    timings.setdefault("hybrid_once_hits", 0.0)
     with_payload_dense_sparse = _with_payload_selector(_PAYLOAD_MODE_DENSE, _PAYLOAD_MIN_FIELDS)
     q = normalize_query(expanded_text)
     if not q:
@@ -849,6 +855,8 @@ def dense_retrieve_hybrid_multi(
             logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
             return ret
         timings["hybrid_once_hits"] = float(len(hybrid_points))
+        timings["dense_queries"] = float(max(int(timings.get("dense_queries", 0.0)), len(emb_map or {})))
+        timings["sparse_hits"] = float(max(int(timings.get("sparse_hits", 0.0)), len(hybrid_points)))
         ret = {"dense": {}, "lexical": [], "hybrid": hybrid_points}
         logger.info("[RETRIEVE.RET] keys=%s", list(ret.keys()))
         return ret
@@ -995,6 +1003,7 @@ def dense_retrieve_hybrid_multi(
     timings["lexical_sparse"] = time.perf_counter() - t_sparse0
     timings["lexical_candidates"] = float(lex_cand)
     timings["lexical_scored"] = float(len(lex_points))
+    timings["sparse_hits"] = float(len(lex_points))
     timings["lexical_total"] = time.perf_counter() - t_lex0
 
     ret = {"dense": dense, "lexical": lex_points}

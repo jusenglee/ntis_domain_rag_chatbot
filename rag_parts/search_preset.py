@@ -131,6 +131,34 @@ class SearchPreset:
             "strategy_key": self.strategy_key,
         }
 
+def resolve_sparse_vector_name(
+    *,
+    runtime_sparse_vector_name: Optional[str],
+    preset_sparse_vector_name: Optional[str],
+) -> tuple[str, str]:
+    """Resolve sparse vector name with explicit priority.
+
+    Priority:
+    1) runtime arg (pipeline input)
+    2) preset value
+    3) env RAG_SPARSE_VECTOR_NAME
+    4) hard default "bm25"
+    """
+    runtime_val = str(runtime_sparse_vector_name or "").strip()
+    if runtime_val:
+        return runtime_val, "runtime_arg"
+
+    preset_val = str(preset_sparse_vector_name or "").strip()
+    if preset_val:
+        return preset_val, "preset"
+
+    env_val = str(os.getenv("RAG_SPARSE_VECTOR_NAME", "")).strip()
+    if env_val:
+        return env_val, "env"
+
+    return "bm25", "default"
+
+
 def build_topk_spec(
     preset: SearchPreset,
     *,

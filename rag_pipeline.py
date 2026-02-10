@@ -65,6 +65,7 @@ from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
     build_search_preset as _build_search_preset,
     build_topk_spec as _build_topk_spec,
+    resolve_sparse_vector_name as _resolve_sparse_vector_name,
 )
 from rag_parts.search_strategy import (
     SEARCH_POLICY_VERSION,
@@ -3115,8 +3116,12 @@ def _run_rag_with_vectors(
         preset.sparse_topk = min(int(preset.sparse_topk or preset.top_k_lex), max(10, hinted_limit * 2))
         preset.max_ctx_items = min(int(preset.max_ctx_items), hinted_limit)
 
-    sparse_vector_name_eff = (sparse_vector_name or preset.sparse_vector_name or "bm25").strip()
+    sparse_vector_name_eff, sparse_vector_name_source = _resolve_sparse_vector_name(
+        runtime_sparse_vector_name=sparse_vector_name,
+        preset_sparse_vector_name=preset.sparse_vector_name,
+    )
     sparse_topk_eff = int(sparse_topk or preset.sparse_topk or preset.top_k_lex)
+    sparse_topk_source = "runtime_arg" if sparse_topk is not None else ("preset" if preset.sparse_topk else "preset_top_k_lex")
     # sparse_weight는 RRF에서 lexical 소스 가중치로만 사용 (retrieval API에는 전달하지 않음).
     sparse_weight_eff = float(sparse_weight or preset.sparse_weight or preset.w_lex)
     topk_spec = _build_topk_spec(
@@ -3134,6 +3139,15 @@ def _run_rag_with_vectors(
         preset_key=getattr(preset, "strategy_key", None),
         topk_spec=topk_spec,
         ctx_budget=int(ctx_budget),
+    )
+    log_kv(
+        "RAG.SPARSE.CONFIG.FINAL",
+        sparse_vector_name=sparse_vector_name_eff,
+        sparse_vector_name_source=sparse_vector_name_source,
+        sparse_topk=int(sparse_topk_eff),
+        sparse_topk_source=sparse_topk_source,
+        sparse_vector_priority=("runtime_arg>preset>env>bm25"),
+        sparse_topk_priority=("runtime_arg>preset.sparse_topk>preset.top_k_lex"),
     )
 
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
@@ -3874,6 +3888,11 @@ def _run_rag_with_vectors(
                 contract_scope="join_hop1",
                 violation_on_contract=True,
             )
+            _validate_lookup_join_hybrid_metrics(
+                mode="join",
+                contract_scope=f"join_hop1:{hop1_col}",
+                timings=local_timings_h1,
+            )
             _apply_dense_threshold(
                 sr1,
                 use_dense_threshold=use_dense_threshold_policy,
@@ -3957,12 +3976,6 @@ def _run_rag_with_vectors(
                 hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
                 **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
             )
-            _validate_lookup_join_hybrid_metrics(
-                mode="join",
-                contract_scope=f"join_hop1:{hop1_col}",
-                timings=local_timings_h1,
-            )
-
             # Hop1 context
             hop1_ctx, hop1_refs = ("", [])
             if hop1_top:
@@ -4103,6 +4116,11 @@ def _run_rag_with_vectors(
                 contract_scope="join_hop2",
                 violation_on_contract=True,
             )
+            _validate_lookup_join_hybrid_metrics(
+                mode="join",
+                contract_scope=f"join_hop2:{hop2_col}",
+                timings=local_timings_h2,
+            )
             _apply_dense_threshold(
                 sr2,
                 use_dense_threshold=use_dense_threshold_policy,
@@ -4156,12 +4174,6 @@ def _run_rag_with_vectors(
                 hybrid_once_hits=float(local_timings_h2.get("hybrid_once_hits", 0.0)),
                 **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
             )
-            _validate_lookup_join_hybrid_metrics(
-                mode="join",
-                contract_scope=f"join_hop2:{hop2_col}",
-                timings=local_timings_h2,
-            )
-
             # Hop2 context
             hop2_ctx, hop2_refs, _ = _build_context_with_output_type(
                 hop2_top,
@@ -4469,9 +4481,9 @@ def _run_rag_with_vectors(
             top_k_lex=topk_lex,
             query_filter=qfilter,  # ✅ plan 기반 적용
             timings_out=local_timings,
-            require_hybrid_both_sides=(plan.mode == "lookup"),
+            require_hybrid_both_sides=(plan.mode in ("lookup", "join")),
             contract_scope=f"{plan.mode}:{col}",
-            violation_on_contract=(plan.mode == "lookup"),
+            violation_on_contract=(plan.mode in ("lookup", "join")),
         )
         if plan.mode in ("lookup", "join"):
             _validate_lookup_join_hybrid_metrics(
