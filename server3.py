@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from dataclasses import replace
 
 # Redis
@@ -415,6 +415,8 @@ class RuleDecision(BaseModel):
 
 # --- Agent State ---
 class AgentState(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     messages: Annotated[List[BaseMessage], add_messages]
 
     # Redis 데이터
@@ -446,9 +448,6 @@ class AgentState(BaseModel):
         return result
 
     latencies: Annotated[Dict[str, float], merge_latencies] = Field(default_factory=dict)
-
-    class Config:
-        arbitrary_types_allowed = True
 
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
@@ -992,6 +991,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 # --- Node 6: RAG Search (Parallel) ---
 class CustomRAGRetriever(BaseModel):
     """RAG Pipeline을 Tool로 래핑"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
