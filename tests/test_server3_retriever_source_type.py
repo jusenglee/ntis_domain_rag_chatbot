@@ -83,6 +83,26 @@ class Server3RetrieverSourceTypeTests(unittest.TestCase):
         self.assertEqual(len(result["documents"]), 1)
         self.assertEqual(result["documents"][0]["source_type"], "hit")
 
+    def test_retrieve_passes_intent_payload_v2_normalized_only(self):
+        retriever_cls = self.namespace["CustomRAGRetriever"]
+        captured = {}
+
+        def fake_compare(**kwargs):
+            captured["intent_payload"] = kwargs.get("intent_payload")
+            return {"M": SimpleNamespace(reranked_hits=[], context="")}
+
+        self.namespace["run_rag_ab_compare"] = fake_compare
+        retriever = retriever_cls()
+        retriever.intent_payload = {
+            "normalized_intent": {"action": "topic"},
+            "query_intent": {"action": "legacy"},
+            "planner_failed": 1,
+        }
+
+        retriever.retrieve("질문")
+
+        self.assertEqual(captured["intent_payload"], {"normalized_intent": {"action": "topic"}})
+
     def test_filter_hit_documents_excludes_synthetic_docs(self):
         filter_fn = self.namespace["_filter_hit_documents"]
 

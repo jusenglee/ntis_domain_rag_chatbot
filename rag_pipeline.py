@@ -2138,6 +2138,8 @@ def _run_rag_with_vectors(
         logger.warning(log_msg)
 
     def _extract_payload_normalized_intent(payload: Any) -> Any:
+        # intent_payload.v2 계약 문서: docs/intent_payload_v2_schema.md
+        # 허용 스키마는 {"normalized_intent": ...} 단일 필드만 인정한다.
         if payload is None:
             return None
         if isinstance(payload, Mapping):
