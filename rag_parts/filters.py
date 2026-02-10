@@ -730,29 +730,70 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     join_ids = list(dict.fromkeys(str(x).strip() for x in (spec.join_ids or []) if str(x).strip()))
     pjt_nos = list(dict.fromkeys(str(x).strip() for x in (spec.pjt_nos or []) if str(x).strip()))
 
-    if not join_ids and not pjt_nos:
-        return qmodels.Filter(must=[])
-
     mode = str(spec.join_key_mode or "instance").strip().lower()
     if mode not in ("instance", "group"):
-        mode = "instance"
+        raise ValueError(f"지원하지 않는 join_key_mode 입니다: {spec.join_key_mode}")
+
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
 
     primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
     primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
 
     must: List[Any] = []
     if mode == "group":
-        if pjt_nos:
-            must.append(qmodels.FieldCondition(key=primary_no, match=make_match_any(pjt_nos)))
-        elif join_ids:
-            must.append(qmodels.FieldCondition(key=primary_id, match=make_match_any(join_ids)))
+        must.append(qmodels.FieldCondition(key=primary_no, match=make_match_any(pjt_nos)))
     else:
-        if join_ids:
-            must.append(qmodels.FieldCondition(key=primary_id, match=make_match_any(join_ids)))
-        elif pjt_nos:
-            must.append(qmodels.FieldCondition(key=primary_no, match=make_match_any(pjt_nos)))
+        must.append(qmodels.FieldCondition(key=primary_id, match=make_match_any(join_ids)))
+
+    validate_join_filter_must_keys(mode=mode, must_conditions=must)
 
     return qmodels.Filter(must=must)
+
+
+def _is_pjt_id_key(key: str) -> bool:
+    k = str(key or "").strip().lower()
+    return bool(k) and (k == "pjt_id" or k.endswith(".pjt_id"))
+
+
+def _is_pjt_no_key(key: str) -> bool:
+    k = str(key or "").strip().lower()
+    return bool(k) and (k == "pjt_no" or k.endswith(".pjt_no"))
+
+
+def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
+    """join_key_mode와 실제 join key 입력의 정합성을 검증한다."""
+    mode_norm = str(mode or "").strip().lower()
+    join_ids_norm = _dedupe_non_empty(join_ids)
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+
+    if mode_norm == "group":
+        if not pjt_nos_norm:
+            raise ValueError("join_key_mode=group 에서는 pjt_nos 가 반드시 필요합니다.")
+        if join_ids_norm:
+            raise ValueError("join_key_mode=group 에서는 pjt_no 계열 key만 허용합니다.")
+        return
+
+    if mode_norm == "instance":
+        if not join_ids_norm:
+            raise ValueError("join_key_mode=instance 에서는 join_ids(pjt_id) 가 반드시 필요합니다.")
+        if pjt_nos_norm:
+            raise ValueError("join_key_mode=instance 에서는 pjt_id 계열 key만 허용합니다.")
+        return
+
+    raise ValueError(f"지원하지 않는 join_key_mode 입니다: {mode}")
+
+
+def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> None:
+    """생성된 must 조건의 key가 join_key_mode와 일치하는지 검증한다."""
+    mode_norm = str(mode or "").strip().lower()
+    for cond in (must_conditions or []):
+        key = getattr(cond, "key", None)
+        if not key:
+            continue
+        if mode_norm == "group" and not _is_pjt_no_key(key):
+            raise ValueError(f"group 모드에서는 pjt_no 계열 key만 허용합니다: {key}")
+        if mode_norm == "instance" and not _is_pjt_id_key(key):
+            raise ValueError(f"instance 모드에서는 pjt_id 계열 key만 허용합니다: {key}")
 
 
 def _dedupe_non_empty(values: List[str]) -> List[str]:
