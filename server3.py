@@ -996,7 +996,6 @@ class CustomRAGRetriever(BaseModel):
     model_name: str = "gemma_vllm_0"
     top_k: int = 5
 
-    hint: Optional[QuestionAnalysisV2] = None
     intent_payload: Optional[Dict[str, Any]] = None
 
     class Config:
@@ -1016,7 +1015,6 @@ class CustomRAGRetriever(BaseModel):
         res_map = run_rag_ab_compare(
             query=query,
             model_name=self.model_name,
-            hint=self.hint,
             intent_payload=self._build_rag_intent_payload(self.intent_payload),
         )
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
@@ -1095,11 +1093,10 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
         retriever = CustomRAGRetriever(
             top_k=search_num,
             model_name="gemma_vllm_0",
-            hint=qa,
             intent_payload=state.intent_payload,
         )
-        # NOTE: hint.limit=search_num is used by rag_pipeline hydrate upper bound,
-        # so top_k > preset.max_ctx_items still gets fully hydrated payload.
+        # NOTE: search_num(top_k)은 intent_payload.normalized_intent.planner_limit으로
+        # rag_pipeline에서 반영되므로, top_k > preset.max_ctx_items여도 hydrate 상한은 유지된다.
 
         rag_tool = Tool(
             name="RAG_Search",

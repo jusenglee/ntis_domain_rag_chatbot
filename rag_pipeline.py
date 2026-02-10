@@ -2791,6 +2791,7 @@ def _run_rag_with_vectors(
     if isinstance(qa_researchers, str):
         qa_researchers = [qa_researchers]
     hint_people_terms = []
+    participant_people_terms_hint: List[str] = []
     hint_people_ids: List[Any] = []
     for researcher in (qa_researchers or []):
         if isinstance(researcher, str):
@@ -2806,9 +2807,10 @@ def _run_rag_with_vectors(
         researcher_id = _get_attr(researcher, "researcher_id", None)
         if researcher_id not in (None, ""):
             hint_people_ids.append(researcher_id)
-    participant_people_terms_hint = _normalize_hint_terms(
-        (people_filter_spec or {}).get("participant_researcher_name")
-    ) if isinstance(people_filter_spec, dict) else []
+    if isinstance(people_filter_spec, dict):
+        participant_people_terms_hint = _normalize_hint_terms(
+            (people_filter_spec or {}).get("participant_researcher_name")
+        )
     participant_people_terms_hint = _normalize_hint_terms(
         [
             *participant_people_terms_hint,
@@ -4988,7 +4990,6 @@ def _run_rag_with_vectors(
 def run_rag_once(
     query: str,
     model_name: str = DEFAULT_MODEL_NAME,
-    hint: Any = None,
     intent_payload: Any = None,
 ) -> RagResult:
     domain_hint: Optional[str] = None
@@ -5003,7 +5004,7 @@ def run_rag_once(
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
-        hint=hint,
+        hint=None,
         intent_payload=intent_payload,
         stack="M",
         vector_names=vector_names or ["e5i_qa", "e5_qa"],
@@ -5015,8 +5016,7 @@ def run_rag_once(
 def run_rag_ab_compare(
     query: str,
     model_name: str = DEFAULT_MODEL_NAME,
-    hint: Any = None,
     intent_payload: Any = None,
 ) -> Dict[str, RagResult]:
-    res_m = run_rag_once(query=query, model_name=model_name, hint=hint, intent_payload=intent_payload)
+    res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload)
     return {"M": res_m}
