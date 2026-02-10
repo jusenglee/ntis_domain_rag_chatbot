@@ -1106,7 +1106,7 @@ def _hit_key(p: Any) -> Tuple[str, str]:
     if not isinstance(pl, dict):
         pl = {}
     col = _resolve_collection(p, pl)
-    pid = str(getattr(p, "id", "") or pl.get("doc_id") or "")
+    pid = str(pl.get("doc_id") or getattr(p, "id", "") or "")
     return (col, pid)
 
 def _rrf_merge(sources: List[_RankSource], *, rrf_k: int = 60, keep: int = 2000) -> List[Any]:
@@ -1557,13 +1557,13 @@ def _final_rerank(
 
     # mode별 가중치 (정규화 스코어 기준)
     if mode == "lookup":
-        w_rrf, w_kw, w_f = 0.30, 0.25, 0.45
+        w_rrf, w_kw, w_f, w_fam, w_tag = 0.30, 0.25, 0.35, 0.05, 0.05
         strict_ids = True
     elif mode == "join":
-        w_rrf, w_kw, w_f = 0.25, 0.25, 0.50
+        w_rrf, w_kw, w_f, w_fam, w_tag = 0.25, 0.25, 0.40, 0.05, 0.05
         strict_ids = True
     else:  # search
-        w_rrf, w_kw, w_f = 0.45, 0.35, 0.20
+        w_rrf, w_kw, w_f, w_fam, w_tag = 0.45, 0.35, 0.15, 0.025, 0.025
         strict_ids = False
 
     raw_rrf = []
@@ -1651,6 +1651,8 @@ def _final_rerank(
             "_filter_score": _score_stats(norm_f[sample_slice]),
             "_family_bonus": _score_stats(norm_fam[sample_slice]),
             "_tag_match_bonus": _score_stats(norm_tag[sample_slice]),
+            "_family_bonus_weighted": _score_stats([(w_fam * v) for v in norm_fam[sample_slice]]),
+            "_tag_match_bonus_weighted": _score_stats([(w_tag * v) for v in norm_tag[sample_slice]]),
         },
     )
 
@@ -1669,8 +1671,8 @@ def _final_rerank(
             (w_rrf * norm_rrf[i])
             + (w_kw * norm_kw[i])
             + (w_f * norm_f[i])
-            + norm_fam[i]
-            + norm_tag[i]
+            + (w_fam * norm_fam[i])
+            + (w_tag * norm_tag[i])
         )
         legacy_tot = (legacy_w_rrf * rrf_sc) + (legacy_w_kw * kw_sc) + (legacy_w_f * f_sc) + fam + tag_sc
 
