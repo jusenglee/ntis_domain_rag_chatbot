@@ -157,6 +157,7 @@ def validate_planner_contract(
 
 
 LOOKUP_FILTER_POLICIES = {"hard", "off", "must_one_then_should"}
+LOOKUP_TITLE_FILTER_POLICIES = {"soft", "hard"}
 
 
 def normalize_lookup_filter_policy(policy: Optional[str]) -> Optional[str]:
@@ -164,5 +165,20 @@ def normalize_lookup_filter_policy(policy: Optional[str]) -> Optional[str]:
     if not value:
         return None
     if value not in LOOKUP_FILTER_POLICIES:
+        return None
+    return value
+
+
+def normalize_lookup_title_filter_policy(policy: Optional[str]) -> Optional[str]:
+    """lookup title 필터 정책 정규화.
+
+    정책 계약:
+    - soft: title_terms를 should로 적용.
+    - hard: title_terms를 must로 적용(단, detail lookup에서만 허용).
+    """
+    value = str(policy or "").strip().lower()
+    if not value:
+        return None
+    if value not in LOOKUP_TITLE_FILTER_POLICIES:
         return None
     return value

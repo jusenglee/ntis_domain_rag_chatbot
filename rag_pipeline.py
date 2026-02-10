@@ -75,6 +75,7 @@ from rag_parts.search_strategy import (
 from rag_parts.planner_contract import (
     planner_contract_mode,
     normalize_lookup_filter_policy,
+    normalize_lookup_title_filter_policy,
     validate_planner_contract,
     StrategyViolation,
 )
@@ -117,6 +118,29 @@ def _normalize_tag_value(tag: object) -> str:
 
 PROJECT_TAGS_NORM = {_normalize_tag_value(t) for t in PROJECT_TAGS}
 PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
+
+
+def _serialize_filter_for_log(filter_obj: Any) -> Any:
+    """Qdrant Filter 객체를 운영 로그용 표준 JSON 직렬화 가능 형태로 변환."""
+    if filter_obj is None:
+        return None
+    if isinstance(filter_obj, (str, int, float, bool)):
+        return filter_obj
+    if isinstance(filter_obj, dict):
+        return {str(k): _serialize_filter_for_log(v) for k, v in filter_obj.items()}
+    if isinstance(filter_obj, (list, tuple, set)):
+        return [_serialize_filter_for_log(v) for v in filter_obj]
+
+    for method_name in ("model_dump", "dict"):
+        method = getattr(filter_obj, method_name, None)
+        if callable(method):
+            try:
+                dumped = method(exclude_none=True)
+            except TypeError:
+                dumped = method()
+            return _serialize_filter_for_log(dumped)
+
+    return str(filter_obj)
 
 def _classify_tag_family(tag: object) -> str:
     norm = _normalize_tag_value(tag)
@@ -2778,7 +2802,22 @@ def _run_rag_with_vectors(
     def _build_org_must_gate() -> Any:
         if not planner_org_filter_present:
             return None
-        gate_filters = [f for f in (participant_org_filter, org_filter, people_filter) if f is not None]
+
+        gate_filters: List[Any] = []
+        include_people_filter_in_gate = bool(
+            people_filter is not None
+            and (
+                bool(effective_people_affiliation_org_terms)
+                or (org_role == "affiliation")
+            )
+        )
+        if participant_org_filter is not None:
+            gate_filters.append(participant_org_filter)
+        if org_filter is not None:
+            gate_filters.append(org_filter)
+        if include_people_filter_in_gate:
+            gate_filters.append(people_filter)
+
         if not gate_filters:
             return None
         if qmodels is not None and hasattr(qmodels, "Filter"):
@@ -2800,6 +2839,13 @@ def _run_rag_with_vectors(
             planner_org_filter_present=planner_org_filter_present,
             server_org_filter_applied=bool(org_gate is not None),
             org_filter_keys=org_filter_keys,
+            include_people_filter_in_gate=bool(
+                people_filter is not None
+                and (
+                    bool(effective_people_affiliation_org_terms)
+                    or (org_role == "affiliation")
+                )
+            ),
         )
         return combined
 
@@ -3257,17 +3303,37 @@ def _run_rag_with_vectors(
         )
         lookup_filter_policy = "hard"
 
-    lookup_title_filter_policy = str(os.getenv("RAG_LOOKUP_TITLE_FILTER_POLICY", "soft")).strip().lower()
-    if lookup_title_filter_policy != "soft":
+    lookup_title_filter_policy_raw = str(os.getenv("RAG_LOOKUP_TITLE_FILTER_POLICY", "soft")).strip().lower()
+    lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_raw)
+    if lookup_title_filter_policy is None:
         logger.warning(
-            "[RAG] invalid RAG_LOOKUP_TITLE_FILTER_POLICY=%s, forcing 'soft'",
-            lookup_title_filter_policy,
+            "[RAG] invalid RAG_LOOKUP_TITLE_FILTER_POLICY=%s, falling back to 'soft'",
+            lookup_title_filter_policy_raw,
+        )
+        lookup_title_filter_policy = "soft"
+
+    detail_lookup_request = bool(
+        plan.mode == "lookup"
+        and (
+            str(action or "").strip().lower() == "detail"
+            or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
+        )
+    )
+    if lookup_title_filter_policy == "hard" and not detail_lookup_request:
+        logger.warning(
+            "[RAG] RAG_LOOKUP_TITLE_FILTER_POLICY=hard is only allowed for detail lookup; forcing 'soft' (mode=%s, action=%s, output_type=%s)",
+            plan.mode,
+            action,
+            getattr(plan, "output_type", None),
         )
         lookup_title_filter_policy = "soft"
     log_kv(
         "RAG.LOOKUP.TITLE_FILTER_POLICY",
         policy=lookup_title_filter_policy,
         mode=plan.mode,
+        action=action,
+        output_type=getattr(plan, "output_type", None),
+        detail_lookup_request=detail_lookup_request,
         title_terms=title_terms[:4],
     )
 
@@ -4556,6 +4622,7 @@ def _run_rag_with_vectors(
             sparse_topk=int(sparse_topk_eff),
             sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
+            executed_filter_spec_json=_serialize_filter_for_log(qfilter),
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
         )
