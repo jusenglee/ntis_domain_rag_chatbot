@@ -1329,7 +1329,14 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
                 out.append(s)
     return out
 
-def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: bool) -> float:
+def _filter_score(
+    p: Any,
+    it: NormalizedIntent,
+    base_route: str,
+    *,
+    strict_ids: bool,
+    mode: str = "search",
+) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title_text"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
 
@@ -1349,11 +1356,22 @@ def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: 
         if y.lower() in hay:
             sc += 35.0
 
+    mode_norm = str(mode or "").strip().lower()
+    is_search_mode = mode_norm == "search"
+
+    # title (SEARCH에서 soft 보정 강화)
+    title_terms = [t.strip() for t in (getattr(it, "title", None) or []) if t.strip()]
+    for tt in title_terms[:6]:
+        if tt.lower() in hay:
+            sc += 50.0 if is_search_mode else 32.0
+        elif strict_ids:
+            sc -= 4.0
+
     # org
     org_terms = [t.strip() for t in (it.org_terms or []) if t.strip()]
     for ot in org_terms[:4]:
         if ot.lower() in hay:
-            sc += 60.0
+            sc += 72.0 if is_search_mode else 60.0
         elif strict_ids:
             sc -= 10.0
 
@@ -1361,7 +1379,7 @@ def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: 
     people_terms = [t.strip() for t in (it.people_terms or []) if t.strip()]
     for pt in people_terms[:4]:
         if pt.lower() in hay:
-            sc += 70.0
+            sc += 82.0 if is_search_mode else 70.0
         elif strict_ids:
             sc -= 15.0
 
@@ -1375,14 +1393,14 @@ def _filter_score(p: Any, it: NormalizedIntent, base_route: str, *, strict_ids: 
     if it.perf_tag_filters and col == COL_PERF:
         for t in list(it.perf_tag_filters)[:8]:
             if str(t) == tag:
-                sc += 90.0
+                sc += 108.0 if is_search_mode else 90.0
                 break
 
     # project tag filters (exact) - project 컬렉션에만 적용
     if it.project_tag_filters and col == COL_PROJECT:
         for t in list(it.project_tag_filters)[:8]:
             if str(t) == tag:
-                sc += 80.0
+                sc += 96.0 if is_search_mode else 80.0
                 break
 
     return float(sc)
@@ -1560,7 +1578,7 @@ def _final_rerank(
         rrf_sc = float(pl.get("_rrf", 0.0)) if isinstance(pl, dict) else 0.0
         kw_sc = _keyword_score(p, kws, lex_w)
         exact_hits = _keyword_exact_match_hits(p, kws)
-        f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids)
+        f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids, mode=mode)
         fam = _family_bonus(p, base_route)
         tag_sc = _tag_match_bonus(
             p,
@@ -3335,7 +3353,7 @@ def _run_rag_with_vectors(
             tag_targets.append("perf")
         tag_filter_applied_to = "/".join(tag_targets) if tag_targets else None
 
-    search_filter_server_policy = "must_not_only" if plan.mode == "search" else "lookup_only"
+    search_filter_server_policy = "disabled" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
     filter_spec = {
         **planner_filter_spec,
@@ -4261,13 +4279,6 @@ def _run_rag_with_vectors(
 
     # server-side filter policy (LOOKUP에서만 적극 적용)
     def _server_filter_for_col(col: str) -> Any:
-        def _safe_exclusion_only(filter_obj: Any) -> Any:
-            if qmodels is None or filter_obj is None:
-                return None
-            must_not = list(getattr(filter_obj, "must_not", None) or [])
-            if not must_not:
-                return None
-            return qmodels.Filter(must_not=must_not)
 
         def _relation_lookup_filter_for_col(apply_name_filters: bool) -> Any:
             if not relation_lookup_enforce or not relation:
@@ -4354,8 +4365,8 @@ def _run_rag_with_vectors(
         relation_filter = _relation_lookup_filter_for_col(apply_name_filters)
 
         if mode != "lookup":
-            if mode == "search" and search_filter_server_policy == "must_not_only":
-                return _safe_exclusion_only(_with_org_must_gate(_apply_extra_filters(None), col=col))
+            # SEARCH/JOIN에서는 server-side must filter를 금지한다.
+            # (SEARCH는 query_filter=None 강제)
             return None
 
         base_filter_lookup = _build_soft_filter_for_col(col, apply_name_filters) if lookup_filter_enabled else None
@@ -4447,6 +4458,8 @@ def _run_rag_with_vectors(
         use_dense_k = topk_dense if emb_map_col else 0
 
         qfilter = _server_filter_for_col(col)
+        if mode == "search":
+            qfilter = None
 
         log_kv(
             "RAG.COL.RETRIEVE",
