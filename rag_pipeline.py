@@ -22,7 +22,7 @@ import time
 import inspect
 import json
 from pprint import pformat
-from dataclasses import dataclass, fields, replace
+from dataclasses import fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from rag_parts.pipeline_steps import NormalizedIntent
 from schemas import ExecutionContext, QueryPlan, StrategySpec
@@ -83,6 +83,12 @@ from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_c
 from rag_parts.post_policy import (
     dedup_by_doc_id as _dedup_by_doc_id,
     tag_match_bonus as _tag_match_bonus,
+)
+from rag_parts.rank_merge import (
+    RankSource as _RankSource,
+    hit_key as _hit_key,
+    resolve_collection as _resolve_collection,
+    rrf_merge as _rrf_merge,
 )
 from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
 from rag_parts.join import (
@@ -1170,65 +1176,6 @@ def _apply_dense_threshold(
                 p99=float(_percentile(score_values, 99.0)),
                 top3_avg=float(topn_avg),
             )
-
-def _resolve_collection(p: Any, payload: Optional[dict] = None) -> str:
-    if payload is not None:
-        pl = payload
-    elif isinstance(p, dict):
-        pl = p.get("payload", None)
-    else:
-        pl = getattr(p, "payload", None)
-    pl = pl or {}
-    if not isinstance(pl, dict):
-        pl = {}
-    col = pl.get("_collection")
-    if not col:
-        if isinstance(p, dict):
-            col = p.get("_collection")
-        else:
-            col = getattr(p, "_collection", None)
-    return str(col) if col else ""
-
-# -------------------------
-# RRF (independent / stable)
-# -------------------------
-@dataclass
-class _RankSource:
-    name: str
-    weight: float
-    points: List[Any]
-
-def _hit_key(p: Any) -> Tuple[str, str]:
-    pl = getattr(p, "payload", None) or {}
-    if not isinstance(pl, dict):
-        pl = {}
-    col = _resolve_collection(p, pl)
-    pid = str(pl.get("doc_id") or getattr(p, "id", "") or "")
-    return (col, pid)
-
-def _rrf_merge(sources: List[_RankSource], *, rrf_k: int = 60, keep: int = 2000) -> List[Any]:
-    """sources 내의 랭킹을 RRF로 합친다(가중치 지원)."""
-    score: Dict[Tuple[str, str], float] = {}
-    best_obj: Dict[Tuple[str, str], Any] = {}
-    for src in sources:
-        w = float(src.weight)
-        for r, p in enumerate(src.points or []):
-            k = _hit_key(p)
-            if k not in best_obj:
-                best_obj[k] = p
-            score[k] = score.get(k, 0.0) + (w / float(rrf_k + r + 1))
-
-    ranked = sorted(score.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
-    out: List[Any] = []
-    for k, sc in ranked[: max(1, int(keep))]:
-        p = best_obj.get(k)
-        if p is None:
-            continue
-        pl = getattr(p, "payload", None)
-        if isinstance(pl, dict):
-            pl["_rrf"] = float(sc)
-        out.append(p)
-    return out
 
 def _use_dense_score_weight() -> bool:
     return str(os.getenv("RAG_USE_DENSE_SCORE_WEIGHT", "0")).strip().lower() in ("1", "true", "yes", "y")
@@ -2376,62 +2323,12 @@ def _run_rag_with_vectors(
         return normalized
 
     payload_normalized_intent = _extract_payload_normalized_intent(intent_payload)
-    strategy_mode = None
-    strategy_head = None
-    strategy_relation = None
-    strategy_action = None
-    strategy_join_key_mode = None
-    strategy_query_text = None
-    strategy_filter_spec = {}
-    strategy_topk_spec = {}
-    strategy_rerank_spec = {}
-    strategy_enabled = False
-
     hinted_base = None
     hinted_limit = 0
     hinted_cols: List[str] = []
     payload_target_cols = _normalize_target_collections(_get_attr(payload_normalized_intent, "target_cols", None))
     if payload_target_cols:
         hinted_cols = payload_target_cols
-
-    def _strategy_mode_from_action(action_value: Any) -> Optional[str]:
-        value = str(action_value or "").strip().lower()
-        if value in ("list", "stats", "download", "id_exact", "id_fuzzy", "detail"):
-            return "lookup"
-        if value in ("topic", "search"):
-            return "search"
-        if value == "join":
-            return "join"
-        return None
-
-    def _strategy_view_from_payload(payload_obj: Any) -> Dict[str, Any]:
-        view = {
-            "mode": str(_get_attr(payload_obj, "mode", "") or "").strip().lower() or None,
-            "action": str(_get_attr(payload_obj, "action", "") or "").strip().lower() or None,
-            "head": str(_get_attr(payload_obj, "base_route", "") or "").strip().lower() or None,
-            "relation": _normalize_relation_hint(_get_attr(payload_obj, "relation", None)),
-            "join_key_mode": str(_get_attr(payload_obj, "join_key_mode", "") or "").strip().lower() or None,
-            "target_cols": _normalize_target_collections(_get_attr(payload_obj, "target_cols", None)),
-            "limit": _coerce_int(_get_attr(payload_obj, "planner_limit", 0), 0),
-            "retrieval_query": normalize_query(_get_attr(payload_obj, "retrieval_query", "") or "") or None,
-        }
-        if not view["mode"] and view["action"]:
-            view["mode"] = _strategy_mode_from_action(view["action"])
-        return view
-
-    def _normalize_strategy_view(view: Dict[str, Any]) -> Dict[str, Any]:
-        normalized: Dict[str, Any] = {}
-        for key, value in view.items():
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            if isinstance(value, list) and not value:
-                continue
-            if key == "limit" and int(value) <= 0:
-                continue
-            normalized[key] = value
-        return normalized
 
     q_for_retrieval = q
 
@@ -2600,7 +2497,6 @@ def _run_rag_with_vectors(
             reason="intent_payload.normalized_intent is invalid or missing required fields",
         )
 
-    payload_strategy_view = _normalize_strategy_view(_strategy_view_from_payload(it))
     planner_confidence = _get_attr(it, "planner_confidence", None)
     intent_perf_types = list(getattr(it, "perf_types", []) or [])
     if intent_perf_types:
@@ -2621,8 +2517,6 @@ def _run_rag_with_vectors(
     planner_head = str(getattr(ctx, "base_route", "") or "").strip().lower() or None
     planner_relation = _normalize_relation_hint(getattr(ctx, "relation", None))
     planner_join_key_mode = str(getattr(ctx, "join_key_mode", "") or "").strip().lower() or None
-    if planner_join_key_mode in ("instance", "group"):
-        strategy_join_key_mode = planner_join_key_mode
     planner_filter_spec = dict(getattr(ctx, "lookup_filter_spec", None) or {})
 
     planner_categories = normalize_categories(ctx.categories)
@@ -2640,16 +2534,7 @@ def _run_rag_with_vectors(
             hinted_limit = 0
 
     pending_strategy_filter_spec: Optional[Dict[str, Any]] = None
-    if strategy_enabled:
-        if strategy_head in ("project", "perf", "people", "org", "support"):
-            ctx.base_route = strategy_head
-        if strategy_relation:
-            ctx.relation = strategy_relation
-        if strategy_action:
-            ctx.action = strategy_action
-        if isinstance(strategy_filter_spec, dict) and strategy_filter_spec:
-            pending_strategy_filter_spec = dict(strategy_filter_spec)
-    elif isinstance(planner_filter_spec, dict) and planner_filter_spec:
+    if isinstance(planner_filter_spec, dict) and planner_filter_spec:
         pending_strategy_filter_spec = dict(planner_filter_spec)
 
     action = ctx.action
@@ -3085,8 +2970,7 @@ def _run_rag_with_vectors(
         return (len(errors) == 0), errors
 
     # plan
-    planner_mode = strategy_mode or planner_mode
-    planner_mode_source = "strategy.mode" if strategy_mode else ("payload.mode" if planner_mode else None)
+    planner_mode_source = "payload.mode" if planner_mode else None
     if not planner_mode:
         planner_mode = _planner_action_to_mode(planner_action)
         planner_mode_source = "payload.action" if planner_mode else None
@@ -3170,14 +3054,14 @@ def _run_rag_with_vectors(
 
     planner_mode_error = None
     planner_recalled = False
-    planner_strategy_mode = strategy_mode or plan.mode
-    planner_strategy_action = strategy_action or action
-    planner_strategy_relation = strategy_relation if strategy_relation is not None else relation
+    planner_strategy_mode = plan.mode
+    planner_strategy_action = action
+    planner_strategy_relation = relation
     strategy_snapshot = StrategySpec(
         mode=planner_strategy_mode,
         action=planner_strategy_action,
         relation=planner_strategy_relation,
-        join_key_mode=(strategy_join_key_mode or getattr(ctx, "join_key_mode", None)),
+        join_key_mode=getattr(ctx, "join_key_mode", None),
     )
     strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
     if not strategy_ok:
@@ -3245,10 +3129,6 @@ def _run_rag_with_vectors(
     # Compile Stage: planner 정책(filter/topk/rerank)을 실행 스펙으로 컴파일한다.
     # 이 단계는 실행 mode를 바꾸지 않으며, mode 결정 이후에만 동작한다.
     # -----------------------------------------------------------------
-    strategy_limit = _coerce_int(_get_attr(strategy_topk_spec, "limit", 0), 0) if strategy_enabled else 0
-    if strategy_limit > 0:
-        hinted_limit = strategy_limit
-
     if hinted_limit > 0:
         preset.top_k_lex_cand = min(int(preset.top_k_lex_cand), hinted_limit * 20)
         preset.top_k_lex = min(int(preset.top_k_lex), max(10, hinted_limit * 2))
@@ -3269,7 +3149,7 @@ def _run_rag_with_vectors(
         sparse_topk=sparse_topk_eff,
         sparse_weight=sparse_weight_eff,
     )
-    rerank_spec = dict(strategy_rerank_spec) if (strategy_enabled and isinstance(strategy_rerank_spec, dict) and strategy_rerank_spec) else _build_rerank_spec(plan.mode)
+    rerank_spec = _build_rerank_spec(plan.mode)
     rerank_spec.setdefault("final_keep", 80)
 
     log_kv(
