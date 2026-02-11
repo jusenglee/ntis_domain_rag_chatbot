@@ -563,6 +563,7 @@ def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
         payload = getattr(p, "payload", None) or {}
         if not isinstance(payload, dict):
             continue
+        # pjt_no 추출은 group join 전용이며 pjt_id를 대체키로 사용하지 않는다.
         pjt_no = _pick_first(payload.get("pjt_no"))
         if not pjt_no or pjt_no in seen:
             continue
@@ -3088,7 +3089,9 @@ def _run_rag_with_vectors(
     planner_raw_join_key_mode = strategy_snapshot.join_key_mode
     resolved_join_key_mode = str(planner_raw_join_key_mode or "").strip().lower() or None
     if planner_strategy_mode == "join" and resolved_join_key_mode is None:
+        # planner 미지정 시 기본값은 instance이며, relation(perf 여부)로 강제 전환하지 않는다.
         resolved_join_key_mode = "instance"
+    join_key_mode_for_contract = resolved_join_key_mode
     strategy_snapshot = replace(strategy_snapshot, join_key_mode=resolved_join_key_mode)
     _validate_join_key_contract(
         strategy_snapshot.mode,
@@ -3109,7 +3112,7 @@ def _run_rag_with_vectors(
         target_cols=list(ctx.target_collections or plan.target_collections or []),
         ids_map=getattr(ctx, "ids_map", None),
         relation_target_cols=relation_target_cols_for_contract,
-        join_key_mode=resolved_join_key_mode,
+        join_key_mode=join_key_mode_for_contract,
     )
     if planner_contract_violations:
         first = planner_contract_violations[0]
@@ -4070,10 +4073,12 @@ def _run_rag_with_vectors(
                 pjt_nos=join_pjt_nos,
             )
 
+            # Hop2는 relation/project|org->perf 여부와 무관하게 planner 계약 키를 그대로 사용한다.
+            hop2_join_key_mode = planner_join_key_mode
             hop2_filter, executed_join_filter_spec = _build_join_hop2_filter(
                 relation=relation,
                 hop2_col=hop2_col,
-                join_key_mode=planner_join_key_mode,
+                join_key_mode=hop2_join_key_mode,
                 join_pjt_ids=join_pjt_ids,
                 join_pjt_nos=join_pjt_nos,
                 q=q,
