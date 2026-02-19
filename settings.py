@@ -36,10 +36,9 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 
 # Triton
 TRITON_URL         = os.getenv("TRITON_URL", "203.250.234.159:8001")
-DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "gpt_oss_0")
+DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "solar_vllm_0")
 TOKENIZER_MAP = {
-    "gpt_oss_0": "./Models/gpt-oss-120b",
-    "gemma_vllm_0": "./Models/gemma-3-27b-it",
+    "gemma_triton_0": "./Models/gemma-3-27b-it",
 }
 
 # 하이퍼파라미터
@@ -86,12 +85,12 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
     return max(int(CTX_MIN_BUDGET), budget)
 
 MODEL_MAX_CONTEXT = {
-    "gpt_oss_0": int(os.getenv("GPT_OSS_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
-    "gemma_vllm_0": int(os.getenv("GEMMA_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
+    "solar_vllm_0": int(os.getenv("SOLAR_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
+    "gemma_triton_0": int(os.getenv("GEMMA_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
 }
 MAX_TOKENS = {
-    "gpt_oss_0": int(os.getenv("GPT_OSS_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
-    "gemma_vllm_0": int(os.getenv("GEMMA_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+    "solar_vllm_0": int(os.getenv("SOLAR_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+    "gemma_triton_0": int(os.getenv("GEMMA_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
 }
 
 
@@ -126,11 +125,7 @@ GEMMA_SYNC_TIMEOUT_IDLE = _get_timeout_env(
 )
 
 TRITON_TIMEOUTS = {
-    "gpt_oss_0": {
-        "stream": (GPT_OSS_STREAM_TIMEOUT_FIRST, GPT_OSS_STREAM_TIMEOUT_IDLE),
-        "sync": (GPT_OSS_SYNC_TIMEOUT_FIRST, GPT_OSS_SYNC_TIMEOUT_IDLE),
-    },
-    "gemma_vllm_0": {
+    "gemma_triton_0": {
         "stream": (GEMMA_STREAM_TIMEOUT_FIRST, GEMMA_STREAM_TIMEOUT_IDLE),
         "sync": (GEMMA_SYNC_TIMEOUT_FIRST, GEMMA_SYNC_TIMEOUT_IDLE),
     },
