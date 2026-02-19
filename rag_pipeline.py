@@ -657,6 +657,19 @@ def _normalize_terms(values: Optional[List[str]]) -> List[str]:
     return out
 
 
+def _ensure_iterable_list(value: Any) -> List[Any]:
+    """스칼라/None을 안전하게 리스트로 정규화한다."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [value]
+
+
 def _pick_matching_prtcp_mp(
     pl: Dict[str, Any],
     *,
@@ -3764,8 +3777,8 @@ def _run_rag_with_vectors(
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
         join_key_mode = resolved_join_key_mode
-        pjt_ids = [str(x).strip() for x in (ids_map.get("pjt_id") or []) if str(x).strip()]
-        pjt_nos = [str(x).strip() for x in (ids_map.get("pjt_no") or []) if str(x).strip()]
+        pjt_ids = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_id")) if str(x).strip()]
+        pjt_nos = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_no")) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
         seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
@@ -4371,8 +4384,8 @@ def _run_rag_with_vectors(
             ids_map,
             allow_missing_instance_ids=True,
         )
-        pjt_ids = list(ids_map.get("pjt_id") or [])
-        pjt_nos = list(ids_map.get("pjt_no") or [])
+        pjt_ids = _ensure_iterable_list(ids_map.get("pjt_id"))
+        pjt_nos = _ensure_iterable_list(ids_map.get("pjt_no"))
         project_key_filter_type = "pjt_id" if pjt_ids else ("pjt_no" if pjt_nos else None)
 
         perf_id_keys = (
