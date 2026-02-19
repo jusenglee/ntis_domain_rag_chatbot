@@ -431,7 +431,7 @@ class AgentState(BaseModel):
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
-    answer_gpt: Optional[str] = None
+    answer_solar: Optional[str] = None
 
     # 메타데이터
     conversation_id: str = ""
@@ -1137,11 +1137,11 @@ async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - Gemma"""
     return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
-# --- Node 7-2: Refine Answer - GPT ---
-@measure_latency("generate_answer_gpt")
-async def node_generate_answer_gpt(state: AgentState) -> Dict[str, Any]:
-    """RAG 결과로 Fast Answer 보강 - GPT"""
-    return await _generate_answer(state, "solar_vllm_0", "answer_gpt")
+# --- Node 7-2: Refine Answer - solar ---
+@measure_latency("generate_answer_solar")
+async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
+    """RAG 결과로 Fast Answer 보강 - solar"""
+    return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
 
 import aiofiles
@@ -1227,7 +1227,7 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
     response_text = state.rule_decision.direct_response
     return {
         "answer_gemma": response_text,
-        "answer_gpt": response_text,
+        "answer_solar": response_text,
         "messages": [AIMessage(content=response_text)]
     }
 
@@ -1238,19 +1238,19 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     ks = state.knowledge_sufficiency
     strategy = ks.requires_new_knowledge if ks else "unknown"
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
-    gpt_preview = _truncate_text(state.answer_gpt, HISTORY_PREVIEW_LIMIT)
+    solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
                 f"coq: {state.conversation_id}{state.question}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"GPT: {gpt_preview}")
+                f"solar: {solar_preview}")
 
     return {
-        "messages": [AIMessage(content=state.answer_gpt)],
+        "messages": [AIMessage(content=state.answer_solar)],
         "answer_gemma": state.answer_gemma,
-        "answer_gpt": state.answer_gpt,
+        "answer_solar": state.answer_solar,
         "context" : state.context,
         "fallback_context": state.fallback_context
     }
@@ -1567,7 +1567,7 @@ def build_advanced_workflow():
 
     # 두 모델 각각의 Refined Answer 노드
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
-    workflow.add_node("generate_answer_gpt", node_generate_answer_gpt)
+    workflow.add_node("generate_answer_solar", node_generate_answer_solar)
     workflow.add_node("join_answers", node_join_answers)
 
     workflow.add_node("direct_answer", node_direct_answer)
@@ -1600,7 +1600,7 @@ def build_advanced_workflow():
         ks = state.knowledge_sufficiency
 
         if ks.requires_new_knowledge == "low" and state.prev_context:
-            return ["generate_answer_gpt", "generate_answer_gemma"]
+            return ["generate_answer_solar", "generate_answer_gemma"]
 
         return "rag_search"
 
@@ -1608,7 +1608,7 @@ def build_advanced_workflow():
         "join_analysis",
         route_after_join_analysis,
         {
-            "generate_answer_gpt": "generate_answer_gpt",
+            "generate_answer_solar": "generate_answer_solar",
             "generate_answer_gemma": "generate_answer_gemma",
             "rag_search": "rag_search"
         }
@@ -1617,11 +1617,11 @@ def build_advanced_workflow():
 
     # RAG 검색 완료 후 두 모델로 Refine
     workflow.add_edge("rag_search", "generate_answer_gemma")
-    workflow.add_edge("rag_search", "generate_answer_gpt")
+    workflow.add_edge("rag_search", "generate_answer_solar")
 
     # Refined Answer 완료 후 join
     workflow.add_edge("generate_answer_gemma", "join_answers")
-    workflow.add_edge("generate_answer_gpt", "join_answers")
+    workflow.add_edge("generate_answer_solar", "join_answers")
 
     # Refined answers join도 merge로
     workflow.add_edge("join_answers", "merge_answers")
@@ -2369,8 +2369,8 @@ async def query_stream(payload: QueryRequest):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-                # Answer 스트리밍 - GPT
-                if kind == "on_chat_model_stream" and node == "generate_answer_gpt":
+                # Answer 스트리밍 - solar
+                if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
                         yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
@@ -2457,7 +2457,7 @@ async def query_debug(payload: QueryRequest):
             "success": True,
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
-            "answer_gpt": final_state.get("answer_gpt"),
+            "answer_solar": final_state.get("answer_solar"),
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
