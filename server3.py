@@ -2373,7 +2373,7 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'model_legacy_key': 'gpt', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
@@ -2386,7 +2386,7 @@ async def query_stream(payload: QueryRequest):
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'model_legacy_key': 'gpt', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'content': answer}, ensure_ascii=False)}\n\n"
                         yield f"data: {json.dumps({'model': 'GEMMA', 'model_key': 'gemma', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
