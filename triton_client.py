@@ -5,7 +5,6 @@ Triton Inference Server gRPC 클라이언트 래퍼 모듈.
 주요 기능:
 - 모델별 토크나이저 캐싱 및 프롬프트 토큰 길이 계산
 - max_new_tokens를 시퀀스 길이에 맞게 동적으로 계산
-- gpt-oss 계열 모델의 assistantfinal 포맷 파싱/스트리밍 처리
 - 스트리밍/비스트리밍 공용 엔트리 포인트 triton_infer()
 
 주의 사항:
@@ -17,7 +16,6 @@ Triton Inference Server gRPC 클라이언트 래퍼 모듈.
 
 import hashlib
 import json
-import os
 import threading
 import time
 from collections import OrderedDict
@@ -53,42 +51,9 @@ _PROMPT_TOKEN_CACHE_MAX = 1024
 _SHORT_PROMPT_CHAR_THRESHOLD = 2000
 _SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
 
-# Legacy gpt-oss compatibility: assistantfinal 포맷 마커
-ASSISTANT_FINAL_MARKER = "assistantfinal"
-ENABLE_GPT_OSS_COMPAT = os.getenv("ENABLE_GPT_OSS_COMPAT", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-
-
 # ---------------------------------------------------------------------------
-# 0. gpt-oss 판별 / 토크나이저 관련 유틸
+# 0. 토크나이저 관련 유틸
 # ---------------------------------------------------------------------------
-def _is_gpt_oss_model(model_name: str) -> bool:
-    """
-    gpt-oss 계열 모델 판별용 헬퍼.
-
-    - 현재는 이름에 "gpt" 와 "oss" 둘 다 들어가면 gpt-oss 로 간주.
-    - 모델 이름 규칙이 바뀌면 이 함수를 수정하면 된다.
-    """
-    name = model_name.lower()
-    return ("gpt" in name) and ("oss" in name)
-
-
-def _use_legacy_gpt_oss_compat(model_name: str) -> bool:
-    """
-    Legacy gpt-oss assistantfinal 후처리 적용 여부.
-
-    기본값은 비활성화이며, 환경변수 ENABLE_GPT_OSS_COMPAT=1 일 때만
-    gpt-oss 모델명에 한해 호환 로직을 활성화한다.
-    """
-    if not ENABLE_GPT_OSS_COMPAT:
-        return False
-    return _is_gpt_oss_model(model_name)
-
-
 def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
     """
     모델 이름에 대응하는 토크나이저를 캐시해서 반환.
@@ -224,80 +189,6 @@ def _compute_max_new_tokens(
 
     max_new = min(cap, available)
     return max(MIN_NEW_TOKENS, max_new)
-
-
-# ---------------------------------------------------------------------------
-# 2. Legacy gpt-oss assistantfinal 포맷 처리
-# ---------------------------------------------------------------------------
-def extract_final_answer(raw: str) -> str:
-    """
-    gpt-oss가 analysis/.../assistantfinal 포맷으로 뱉을 때,
-    마지막 assistantfinal 이후 텍스트만 추출.
-
-    - 마커가 없으면 raw 전체를 그대로 반환 (타 모델에 대한 안전장치)
-    """
-    if not raw:
-        return ""
-
-    text = str(raw).strip()
-    idx = text.rfind(ASSISTANT_FINAL_MARKER)
-    if idx == -1:
-        # 마커 없으면 그냥 원본 반환
-        return text
-
-    final = text[idx + len(ASSISTANT_FINAL_MARKER):]
-    # 콜론/공백 정리
-    final = final.lstrip(" :\n\t")
-    logger.info(final)
-    return final.strip()
-
-
-def stream_after_assistantfinal(chunks):
-    """
-    gpt-oss 스트리밍 결과(chunks)를 받아서
-    'assistantfinal' 이후 텍스트만 yield하는 제너레이터.
-    """
-    marker = ASSISTANT_FINAL_MARKER.lower()
-    seen = False
-    buf = ""
-
-    for chunk in chunks:
-        if not chunk:
-            continue
-
-        buf += chunk
-
-        if not seen:
-            pos = buf.lower().find(marker)
-            if pos == -1:
-                # 아직 마커 안 나왔으면 계속 버퍼에만 쌓음
-                continue
-
-            # 처음으로 마커를 발견한 시점
-            seen = True
-            start = pos + len(ASSISTANT_FINAL_MARKER)
-            # 마커 앞부분은 버리고, 마커 뒤부터 사용
-            buf = buf[start:]
-            buf = buf.lstrip(" :\n\t")
-
-            if not buf:
-                continue
-
-        # 여기부터는 전부 '최종 답변'에 해당
-        yield buf
-        buf = ""
-
-    # 스트림 종료 후 마무리 처리
-    if seen and buf:
-        # assistantfinal 이후 남은 찌꺼기
-        yield buf
-    elif not seen and buf:
-        # assistantfinal이 한 번도 안 나온 경우 fallback:
-        # 전체 버퍼를 그냥 보내거나, 정책에 따라 버릴 수도 있음.
-        logger.warning(
-            "[legacy compatibility] assistantfinal 마커를 찾지 못했습니다. 전체 버퍼를 그대로 전송합니다."
-        )
-        yield buf
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +425,6 @@ def _triton_infer_sync(
 
     accumulated_text = accumulated_text.strip()
 
-    # 3) Legacy gpt-oss compat가 켜진 경우에만 assistantfinal 이후를 추출
-    if _use_legacy_gpt_oss_compat(model_name):
-        logger.info("[TRITON] legacy compatibility 활성화: sync 응답에서 assistantfinal 이후만 사용")
-        return extract_final_answer(accumulated_text)
-
     return accumulated_text
 
 
@@ -620,12 +506,7 @@ def triton_infer(
             request_type="stream",
         )
 
-        # Legacy gpt-oss compat가 켜진 경우에만 assistantfinal 이후를 스트리밍
-        if _use_legacy_gpt_oss_compat(model_name):
-            logger.info("[TRITON] legacy compatibility 활성화: assistantfinal 이후만 스트리밍")
-            return stream_after_assistantfinal(base_gen)
-
-        # 그 외 모델은 raw 스트림 그대로
+        # raw 스트림 그대로 반환
         return base_gen
 
     # Sync Path: 스트리밍을 내부적으로 사용하여 최종 문자열 반환
