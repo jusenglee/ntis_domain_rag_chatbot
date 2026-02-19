@@ -2270,7 +2270,7 @@ async def lifespan(app: FastAPI):
 
     build_rag_objects()
 
-    backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
+    backend = os.getenv("MEMORY_BACKEND", "redis").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
 
     if backend == "redis":
