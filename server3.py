@@ -33,6 +33,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
+from openai_compat_llm import OpenAICompatChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -542,7 +543,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = TritonChatModel(model_name=DEFAULT_MODEL_NAME)  # GPT
+    llm = OpenAICompatChatModel(model_name="/model", base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8001/v1"), api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"))  # Solar(vLLM)
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -911,7 +912,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                     f"Confidence: {result.confidence:.2f}")
         return {"knowledge_sufficiency": result}
 
-    llm = TritonChatModel(model_name="gemma_vllm_0")
+    llm = TritonChatModel(model_name="gemma_triton_0")
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
 
     prev_context_str = None
@@ -996,7 +997,7 @@ class CustomRAGRetriever(BaseModel):
         arbitrary_types_allowed=True,
     )
 
-    model_name: str = "gemma_vllm_0"
+    model_name: str = "gemma_triton_0"
     top_k: int = 5
 
     intent_payload: Optional[IntentPayloadV2] = None
@@ -1093,7 +1094,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 
         retriever = CustomRAGRetriever(
             top_k=search_num,
-            model_name="gemma_vllm_0",
+            model_name="gemma_triton_0",
             intent_payload=state.intent_payload,
         )
         # NOTE: search_num(top_k)은 intent_payload.normalized_intent.planner_limit으로
@@ -1134,23 +1135,34 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
 @measure_latency("generate_answer_gemma")
 async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - Gemma"""
-    return await _generate_answer(state, "gemma_vllm_0", "answer_gemma")
+    return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
 # --- Node 7-2: Refine Answer - GPT ---
 @measure_latency("generate_answer_gpt")
 async def node_generate_answer_gpt(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - GPT"""
-    return await _generate_answer(state, "gpt_oss_0", "answer_gpt")
+    return await _generate_answer(state, "solar_vllm_0", "answer_gpt")
 
 
 import aiofiles
+
+
+
+def _build_llm(model_name: str):
+    if model_name == "solar_vllm_0":
+        return OpenAICompatChatModel(
+            model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
+            base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8001/v1"),
+            api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
+        )
+    return TritonChatModel(model_name=model_name)
 
 async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    llm = TritonChatModel(model_name=model_name)
+    llm = _build_llm(model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
@@ -2361,7 +2373,7 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_gpt":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model' : 'GPT', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
@@ -2374,7 +2386,7 @@ async def query_stream(payload: QueryRequest):
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model' : 'GPT', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
                         yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":

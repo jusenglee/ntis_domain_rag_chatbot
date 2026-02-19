@@ -318,12 +318,12 @@
 
     <div class="controls">
       <select id="modelA" title="모델 A">
-        <option value="gpt">GPT-OSS (gpt_oss_0)</option>
-        <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
+        <option value="gpt">Solar-102B vLLM (solar_vllm_0)</option>
+        <option value="gemma">Gemma Triton (gemma_triton_0)</option>
       </select>
       <select id="modelB" title="모델 B">
-        <option value="gemma">Gemma vLLM (gemma_vllm_0)</option>
-        <option value="gpt">GPT-OSS (gpt_oss_0)</option>
+        <option value="gemma">Gemma Triton (gemma_triton_0)</option>
+        <option value="gpt">Solar-102B vLLM (solar_vllm_0)</option>
       </select>
 
       <span id="convChip" class="chip" title="conversation_id">conv: (none)</span>
@@ -645,7 +645,7 @@
         }
 
         // MODEL_A / MODEL_B 처리
-        if(json.model === "GPT") {
+        if(json.model === "SOLAR") {
           rawA += json.content;
           bubbles.bodyA.textContent = rawA;
         } else if (json.model === "GEMMA") {
