@@ -2460,7 +2460,6 @@ async def query_debug(payload: QueryRequest):
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
             "answer_solar": answer_solar,
-            "answer_gpt": answer_solar,  # TODO: 하위호환 종료 시 제거
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
