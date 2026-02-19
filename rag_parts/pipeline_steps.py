@@ -33,10 +33,19 @@ def classify_query_compat(
     return _classify_query(q, kws, domain_hint=domain_hint)
 
 
-def _normalize_terms(values: Optional[List[Any]]) -> List[str]:
+def _normalize_terms(values: Any) -> List[str]:
+    if values is None:
+        iterable: List[Any] = []
+    elif isinstance(values, str):
+        iterable = [values]
+    elif isinstance(values, (list, tuple, set)):
+        iterable = list(values)
+    else:
+        iterable = [values]
+
     out: List[str] = []
     seen: set[str] = set()
-    for v in values or []:
+    for v in iterable:
         s = str(v).strip()
         if not s or s in seen:
             continue
