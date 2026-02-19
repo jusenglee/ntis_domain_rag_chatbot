@@ -102,32 +102,63 @@ def _get_timeout_env(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
 
 
-GPT_OSS_STREAM_TIMEOUT_FIRST = _get_timeout_env("GPT_OSS_STREAM_TIMEOUT_FIRST", 8)
-GPT_OSS_STREAM_TIMEOUT_IDLE = _get_timeout_env("GPT_OSS_STREAM_TIMEOUT_IDLE", 60)
-GEMMA_STREAM_TIMEOUT_FIRST = _get_timeout_env("GEMMA_STREAM_TIMEOUT_FIRST", 4)
-GEMMA_STREAM_TIMEOUT_IDLE = _get_timeout_env("GEMMA_STREAM_TIMEOUT_IDLE", 20)
+def _get_model_timeout_pair(
+    *,
+    model_env_prefix: str,
+    request_type: str,
+    default_first: int,
+    default_idle: int,
+    deprecated_env_prefix: str | None = None,
+) -> tuple[int, int]:
+    request_env_prefix = f"TRITON_{model_env_prefix}_{request_type}"
 
-GPT_OSS_SYNC_TIMEOUT_FIRST = _get_timeout_env(
-    "GPT_OSS_SYNC_TIMEOUT_FIRST",
-    GPT_OSS_STREAM_TIMEOUT_FIRST,
+    first = _get_timeout_env(f"{request_env_prefix}_TIMEOUT_FIRST", default_first)
+    idle = _get_timeout_env(f"{request_env_prefix}_TIMEOUT_IDLE", default_idle)
+
+    if deprecated_env_prefix:
+        deprecated_first = os.getenv(f"{deprecated_env_prefix}_{request_type}_TIMEOUT_FIRST")
+        deprecated_idle = os.getenv(f"{deprecated_env_prefix}_{request_type}_TIMEOUT_IDLE")
+        if deprecated_first is not None:
+            logger.warning(
+                "[DEPRECATED] %s_%s_TIMEOUT_FIRST is deprecated and will be removed in v0.5.0. "
+                "Use %s_TIMEOUT_FIRST instead.",
+                deprecated_env_prefix,
+                request_type,
+                request_env_prefix,
+            )
+            first = int(deprecated_first)
+        if deprecated_idle is not None:
+            logger.warning(
+                "[DEPRECATED] %s_%s_TIMEOUT_IDLE is deprecated and will be removed in v0.5.0. "
+                "Use %s_TIMEOUT_IDLE instead.",
+                deprecated_env_prefix,
+                request_type,
+                request_env_prefix,
+            )
+            idle = int(deprecated_idle)
+
+    return first, idle
+
+
+GEMMA_STREAM_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GEMMA_TRITON_0",
+    request_type="STREAM",
+    default_first=4,
+    default_idle=20,
+    deprecated_env_prefix="GEMMA",
 )
-GPT_OSS_SYNC_TIMEOUT_IDLE = _get_timeout_env(
-    "GPT_OSS_SYNC_TIMEOUT_IDLE",
-    GPT_OSS_STREAM_TIMEOUT_IDLE,
-)
-GEMMA_SYNC_TIMEOUT_FIRST = _get_timeout_env(
-    "GEMMA_SYNC_TIMEOUT_FIRST",
-    GEMMA_STREAM_TIMEOUT_FIRST,
-)
-GEMMA_SYNC_TIMEOUT_IDLE = _get_timeout_env(
-    "GEMMA_SYNC_TIMEOUT_IDLE",
-    GEMMA_STREAM_TIMEOUT_IDLE,
+GEMMA_SYNC_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GEMMA_TRITON_0",
+    request_type="SYNC",
+    default_first=GEMMA_STREAM_TIMEOUTS[0],
+    default_idle=GEMMA_STREAM_TIMEOUTS[1],
+    deprecated_env_prefix="GEMMA",
 )
 
 TRITON_TIMEOUTS = {
     "gemma_triton_0": {
-        "stream": (GEMMA_STREAM_TIMEOUT_FIRST, GEMMA_STREAM_TIMEOUT_IDLE),
-        "sync": (GEMMA_SYNC_TIMEOUT_FIRST, GEMMA_SYNC_TIMEOUT_IDLE),
+        "stream": GEMMA_STREAM_TIMEOUTS,
+        "sync": GEMMA_SYNC_TIMEOUTS,
     },
 }
 
