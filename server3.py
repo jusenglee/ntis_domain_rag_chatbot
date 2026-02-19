@@ -1127,7 +1127,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
     except StrategyViolation:
         raise
     except Exception as e:
-        logger.error(f"❌ RAG Error: {e}")
+        logger.exception(f"❌ RAG Error: {e}")
         return {"context": []}
 
 
