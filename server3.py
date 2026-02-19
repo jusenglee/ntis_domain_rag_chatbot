@@ -2373,21 +2373,21 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'model_legacy_key': 'gpt', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'model_key': 'gemma', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'model_legacy_key': 'gpt', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'model_key': 'gemma', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
                     yield f"data: {json.dumps({'status': 'retrieve'}, ensure_ascii=False)}\n\n"
@@ -2453,11 +2453,14 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
+        answer_solar = final_state.get("answer_solar")
+
         return {
             "success": True,
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
-            "answer_solar": final_state.get("answer_solar"),
+            "answer_solar": answer_solar,
+            "answer_gpt": answer_solar,  # TODO: 하위호환 종료 시 제거
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
