@@ -6,6 +6,7 @@ import time
 import os
 import re
 import hashlib
+from functools import lru_cache
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -432,6 +433,7 @@ class AgentState(BaseModel):
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
+    prepared_context_text: Optional[str] = None
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -1148,10 +1150,6 @@ async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
     return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
 
-import aiofiles
-
-
-
 def _build_llm(model_name: str):
     if model_name == "solar_vllm_0":
         return OpenAICompatChatModel(
@@ -1162,9 +1160,40 @@ def _build_llm(model_name: str):
         )
     return TritonChatModel(model_name=model_name)
 
+@lru_cache(maxsize=1)
+def _read_system_prompt_cached(path_str: str) -> str:
+    return Path(path_str).read_text(encoding="utf-8")
+
+
 async def load_system_prompt(path: Path) -> str:
-    async with aiofiles.open(path, encoding="utf-8") as f:
-        return await f.read()
+    return await asyncio.to_thread(_read_system_prompt_cached, str(path.resolve()))
+
+
+@measure_latency("prepare_answer_context")
+async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
+    """모델 공통 답변 컨텍스트를 1회 생성해 병렬 노드에서 재사용"""
+    qa = state.question_analysis
+
+    docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
+    fallback_context = state.fallback_context if state.context else None
+    is_detail = bool(qa and qa.mode == "JOIN")
+    researcher_hints = _build_researcher_hints_from_question_analysis(qa)
+
+    if docs_for_ctx:
+        context_text = refine_documents_rule_based(
+            docs_for_ctx,
+            is_detail,
+            researchers=researcher_hints,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+            relax_limits=True,
+        )
+    elif fallback_context:
+        context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
+    else:
+        context_text = "없음"
+
+    return {"prepared_context_text": context_text}
 
 
 def _build_answer_prompt_inputs(state: AgentState, context_text: str) -> Dict[str, str]:
@@ -1196,30 +1225,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
 
 
-    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
-    docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
-    fallback_context = state.fallback_context if state.context else None
-    is_detail = False
-
-    # ✅ 2) JOIN이면 detail 우선
-    if qa and qa.mode == "JOIN":
-        is_detail = True
-
-    researcher_hints = _build_researcher_hints_from_question_analysis(qa)
-
-    if docs_for_ctx:
-        context_text = refine_documents_rule_based(
-            docs_for_ctx,
-            is_detail,
-            researchers=researcher_hints,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-            relax_limits=True,
-        )
-    elif fallback_context:
-        context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
-    else:
-        context_text = "없음"
+    context_text = state.prepared_context_text or "없음"
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
@@ -1732,6 +1738,7 @@ def build_advanced_workflow():
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
     workflow.add_node("generate_answer_solar", node_generate_answer_solar)
     workflow.add_node("join_answers", node_join_answers)
+    workflow.add_node("prepare_answer_context", node_prepare_answer_context)
 
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
@@ -1763,7 +1770,7 @@ def build_advanced_workflow():
         ks = state.knowledge_sufficiency
 
         if ks.requires_new_knowledge == "low" and state.prev_context:
-            return ["generate_answer_solar", "generate_answer_gemma"]
+            return "prepare_answer_context"
 
         return "rag_search"
 
@@ -1771,16 +1778,17 @@ def build_advanced_workflow():
         "join_analysis",
         route_after_join_analysis,
         {
-            "generate_answer_solar": "generate_answer_solar",
-            "generate_answer_gemma": "generate_answer_gemma",
+            "prepare_answer_context": "prepare_answer_context",
             "rag_search": "rag_search"
         }
     )
 
 
-    # RAG 검색 완료 후 두 모델로 Refine
-    workflow.add_edge("rag_search", "generate_answer_gemma")
-    workflow.add_edge("rag_search", "generate_answer_solar")
+    # RAG 검색 완료 후 컨텍스트 1회 준비 뒤 두 모델로 Refine
+    workflow.add_edge("rag_search", "prepare_answer_context")
+
+    workflow.add_edge("prepare_answer_context", "generate_answer_gemma")
+    workflow.add_edge("prepare_answer_context", "generate_answer_solar")
 
     # Refined Answer 완료 후 join
     workflow.add_edge("generate_answer_gemma", "join_answers")
