@@ -98,6 +98,7 @@ MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
+SOLAR_RESPONSE_MAX_TOKENS_HINT = int(os.getenv("SOLAR_RESPONSE_MAX_TOKENS_HINT", "1024"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 RAG_RENDER_TEXT_FIELDS = tuple(
@@ -1362,6 +1363,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     )
 
     max_tokens_hint = _select_max_tokens_hint(qa)
+    effective_max_tokens = max_tokens_hint
+    if model_name == "solar_vllm_0" and effective_max_tokens is None:
+        effective_max_tokens = SOLAR_RESPONSE_MAX_TOKENS_HINT
     llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
     t0 = time.monotonic()
     fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
@@ -1373,7 +1377,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             chunks: List[str] = []
             async for chunk in chain.astream(
                 prompt_inputs,
-                max_tokens_hint=max_tokens_hint,
+                max_tokens_hint=effective_max_tokens,
                 request_id=llm_request_id,
             ):
                 chunk_text = str(getattr(chunk, "content", "") or "")
@@ -1384,14 +1388,14 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             if not response_content:
                 response = await chain.ainvoke(
                     prompt_inputs,
-                    max_tokens_hint=max_tokens_hint,
+                    max_tokens_hint=effective_max_tokens,
                     request_id=llm_request_id,
                 )
                 response_content = str(getattr(response, "content", "") or "").strip()
             resp_chars = len(response_content)
             final_answer = response_content.replace("<eos>", "").strip()
         else:
-            response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+            response = await chain.ainvoke(prompt_inputs, max_tokens_hint=effective_max_tokens)
             final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
     except EmptyStreamContentError as e:
         log_section(
@@ -1400,6 +1404,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             f"conversation_id={state.conversation_id}\n"
             f"model_name={model_name}\n"
             f"max_tokens_hint={max_tokens_hint}\n"
+            f"effective_max_tokens={effective_max_tokens}\n"
             f"prompt_fingerprint={prompt_fingerprint}\n"
             f"error_type={type(e).__name__}\n"
             f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
@@ -1408,7 +1413,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         try:
             fallback_response = await chain.ainvoke(
                 prompt_inputs,
-                max_tokens_hint=max_tokens_hint,
+                max_tokens_hint=effective_max_tokens,
                 request_id=llm_request_id,
             )
 
@@ -1417,13 +1422,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 if hasattr(llm, "ainvoke_non_stream"):
                     fallback_response = await llm.ainvoke_non_stream(
                         formatted_messages,
-                        max_tokens_hint=max_tokens_hint,
+                        max_tokens_hint=effective_max_tokens,
                         request_id=llm_request_id,
                     )
                 else:
                     fallback_response = await llm.ainvoke(
                         formatted_messages,
-                        max_tokens_hint=max_tokens_hint,
+                        max_tokens_hint=effective_max_tokens,
                         request_id=llm_request_id,
                     )
 
@@ -1444,6 +1449,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             f"conversation_id={state.conversation_id}\n"
             f"model_name={model_name}\n"
             f"max_tokens_hint={max_tokens_hint}\n"
+            f"effective_max_tokens={effective_max_tokens}\n"
             f"prompt_fingerprint={prompt_fingerprint}\n"
             f"error_type={type(e).__name__}\n"
             f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
@@ -1452,7 +1458,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         try:
             fallback_response = await chain.ainvoke(
                 prompt_inputs,
-                max_tokens_hint=max_tokens_hint,
+                max_tokens_hint=effective_max_tokens,
                 request_id=llm_request_id,
             )
 
@@ -1461,13 +1467,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 if hasattr(llm, "ainvoke_non_stream"):
                     fallback_response = await llm.ainvoke_non_stream(
                         formatted_messages,
-                        max_tokens_hint=max_tokens_hint,
+                        max_tokens_hint=effective_max_tokens,
                         request_id=llm_request_id,
                     )
                 else:
                     fallback_response = await llm.ainvoke(
                         formatted_messages,
-                        max_tokens_hint=max_tokens_hint,
+                        max_tokens_hint=effective_max_tokens,
                         request_id=llm_request_id,
                     )
 
@@ -1489,6 +1495,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"dt_ms={dt_ms}\n"
         f"chunks={chunk_count}\n"
         f"resp_chars={resp_chars}\n"
+        f"effective_max_tokens={effective_max_tokens}\n"
         f"prompt_fingerprint={prompt_fingerprint}",
     )
 
