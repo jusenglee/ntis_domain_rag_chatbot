@@ -99,6 +99,7 @@ HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
+SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
@@ -1416,6 +1417,15 @@ def _format_prompt_for_logging(prompt: ChatPromptTemplate, prompt_inputs: Dict[s
         lines.append(f"[{role}]\n{msg.content}")
     return "\n\n".join(lines)
 
+
+def _apply_response_char_limit(text: str, max_chars: int) -> tuple[str, bool]:
+    cleaned = (text or "").replace("<eos>", "").strip()
+    if max_chars <= 0:
+        return cleaned, False
+    if len(cleaned) <= max_chars:
+        return cleaned, False
+    return cleaned[:max_chars].rstrip() + "…", True
+
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = _build_llm(model_name)
 
@@ -1457,10 +1467,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     fallback_message = DUAL_MODEL_FALLBACK_MESSAGE
     chunk_count = 0
     resp_chars = 0
+    truncated = False
+    stream_char_limit = SOLAR_STREAM_MAX_CHARS
 
     try:
         if model_name == "solar_vllm_0":
             chunks: List[str] = []
+            stream_chars = 0
             async for chunk in chain.astream(
                 prompt_inputs,
                 max_tokens_hint=effective_max_tokens,
@@ -1468,7 +1481,16 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             ):
                 chunk_text = str(getattr(chunk, "content", "") or "")
                 if chunk_text:
+                    chunk_len = len(chunk_text)
+                    if stream_char_limit > 0 and stream_chars + chunk_len > stream_char_limit:
+                        remaining = max(stream_char_limit - stream_chars, 0)
+                        if remaining > 0:
+                            chunks.append(chunk_text[:remaining])
+                            stream_chars += remaining
+                        truncated = True
+                        break
                     chunks.append(chunk_text)
+                    stream_chars += chunk_len
             chunk_count = len(chunks)
             response_content = "".join(chunks).strip()
             if not response_content:
@@ -1477,12 +1499,21 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                     max_tokens_hint=effective_max_tokens,
                     request_id=llm_request_id,
                 )
-                response_content = str(getattr(response, "content", "") or "").strip()
+                response_content, truncated = _apply_response_char_limit(
+                    str(getattr(response, "content", "") or ""),
+                    stream_char_limit,
+                )
+            else:
+                response_content, post_truncated = _apply_response_char_limit(response_content, stream_char_limit)
+                truncated = truncated or post_truncated
             resp_chars = len(response_content)
-            final_answer = response_content.replace("<eos>", "").strip()
+            final_answer = response_content
         else:
             response = await chain.ainvoke(prompt_inputs, max_tokens_hint=effective_max_tokens)
-            final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
+            final_answer, truncated = _apply_response_char_limit(
+                str(getattr(response, "content", "") or ""),
+                stream_char_limit,
+            )
     except EmptyStreamContentError as e:
         log_section(
             "GENERATE ANSWER FALLBACK",
@@ -1518,7 +1549,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                         request_id=llm_request_id,
                     )
 
-            final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            final_answer, truncated = _apply_response_char_limit(
+                str(getattr(fallback_response, "content", "") or ""),
+                stream_char_limit,
+            )
             resp_chars = len(final_answer)
             if not final_answer:
                 final_answer = fallback_message
@@ -1563,7 +1597,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                         request_id=llm_request_id,
                     )
 
-            final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            final_answer, truncated = _apply_response_char_limit(
+                str(getattr(fallback_response, "content", "") or ""),
+                stream_char_limit,
+            )
             resp_chars = len(final_answer)
             if not final_answer:
                 final_answer = fallback_message
@@ -1581,6 +1618,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"dt_ms={dt_ms}\n"
         f"chunks={chunk_count}\n"
         f"resp_chars={resp_chars}\n"
+        f"truncated={str(truncated).lower()}\n"
+        f"stream_char_limit={stream_char_limit}\n"
+        f"chunk_count={chunk_count}\n"
         f"effective_max_tokens={effective_max_tokens}\n"
         f"prompt_fingerprint={prompt_fingerprint}",
     )
