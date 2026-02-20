@@ -2375,6 +2375,22 @@ class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
 
+
+def _extract_stream_text(chunk) -> str:
+    if chunk is None:
+        return ""
+
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str) and content:
+        return content
+
+    message = getattr(chunk, "message", None)
+    message_content = getattr(message, "content", None)
+    if isinstance(message_content, str) and message_content:
+        return message_content
+
+    return ""
+
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
     """스트리밍 응답 엔드포인트 (두 모델 비교)"""
@@ -2415,14 +2431,16 @@ async def query_stream(payload: QueryRequest):
                 # Answer 스트리밍 - solar
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    text = _extract_stream_text(chunk)
+                    if text:
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': text}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    text = _extract_stream_text(chunk)
+                    if text:
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': text}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
