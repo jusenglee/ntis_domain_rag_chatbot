@@ -544,7 +544,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = OpenAICompatChatModel(model_name="/model", base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"), api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"))  # Solar(vLLM)
+    llm = _build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -1155,6 +1155,7 @@ def _build_llm(model_name: str):
             model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
             base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"),
             api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
+            timeout=float(os.getenv("SOLAR_VLLM_TIMEOUT", "120")),
         )
     return TritonChatModel(model_name=model_name)
 
