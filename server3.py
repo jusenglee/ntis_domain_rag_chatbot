@@ -84,6 +84,9 @@ def setup_file_logging(log_path="logs/server3.log"):
     root.addHandler(fh)
     root.addHandler(sh)
 
+    vllm_client_level = os.getenv("VLLM_CLIENT_LOG_LEVEL", "INFO").upper()
+    logging.getLogger("openai_compat_llm").setLevel(getattr(logging, vllm_client_level, logging.INFO))
+
 setup_file_logging()
 
 templates = Jinja2Templates(directory="templates")
