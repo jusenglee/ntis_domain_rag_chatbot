@@ -2387,6 +2387,9 @@ async def query_stream(payload: QueryRequest):
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
 
+        sent_token_solar = False
+        sent_token_gemma = False
+
         loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
         user_message = HumanMessage(content=question)
         chat_history = loaded_history + [user_message]
@@ -2416,13 +2419,30 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
+                        sent_token_solar = True
                         yield f"data: {json.dumps({'model': 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
+                        sent_token_gemma = True
                         yield f"data: {json.dumps({'model': 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+                elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
+                    output = data.get("output", {})
+
+                    if node == "generate_answer_solar" and not sent_token_solar:
+                        answer = output.get("answer_solar")
+                        if answer:
+                            sent_token_solar = True
+                            yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+
+                    elif node == "generate_answer_gemma" and not sent_token_gemma:
+                        answer = output.get("answer_gemma")
+                        if answer:
+                            sent_token_gemma = True
+                            yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
