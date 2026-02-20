@@ -1240,19 +1240,33 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     )
 
     max_tokens_hint = _select_max_tokens_hint(qa)
+    llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
+    t0 = time.monotonic()
     fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
+    chunk_count = 0
+    resp_chars = 0
 
     try:
         if model_name == "solar_vllm_0":
             chunks: List[str] = []
-            async for chunk in chain.astream(prompt_inputs, max_tokens_hint=max_tokens_hint):
+            async for chunk in chain.astream(
+                prompt_inputs,
+                max_tokens_hint=max_tokens_hint,
+                request_id=llm_request_id,
+            ):
                 chunk_text = str(getattr(chunk, "content", "") or "")
                 if chunk_text:
                     chunks.append(chunk_text)
+            chunk_count = len(chunks)
             response_content = "".join(chunks).strip()
             if not response_content:
-                response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+                response = await chain.ainvoke(
+                    prompt_inputs,
+                    max_tokens_hint=max_tokens_hint,
+                    request_id=llm_request_id,
+                )
                 response_content = str(getattr(response, "content", "") or "").strip()
+            resp_chars = len(response_content)
             final_answer = response_content.replace("<eos>", "").strip()
         else:
             response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
@@ -1270,16 +1284,29 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         )
 
         try:
-            fallback_response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+            fallback_response = await chain.ainvoke(
+                prompt_inputs,
+                max_tokens_hint=max_tokens_hint,
+                request_id=llm_request_id,
+            )
 
             if not str(getattr(fallback_response, "content", "") or "").strip():
                 formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
                 if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(formatted_messages, max_tokens_hint=max_tokens_hint)
+                    fallback_response = await llm.ainvoke_non_stream(
+                        formatted_messages,
+                        max_tokens_hint=max_tokens_hint,
+                        request_id=llm_request_id,
+                    )
                 else:
-                    fallback_response = await llm.ainvoke(formatted_messages, max_tokens_hint=max_tokens_hint)
+                    fallback_response = await llm.ainvoke(
+                        formatted_messages,
+                        max_tokens_hint=max_tokens_hint,
+                        request_id=llm_request_id,
+                    )
 
             final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            resp_chars = len(final_answer)
             if not final_answer:
                 final_answer = fallback_message
         except Exception as fallback_error:
@@ -1301,21 +1328,47 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         )
 
         try:
-            fallback_response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+            fallback_response = await chain.ainvoke(
+                prompt_inputs,
+                max_tokens_hint=max_tokens_hint,
+                request_id=llm_request_id,
+            )
 
             if not str(getattr(fallback_response, "content", "") or "").strip():
                 formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
                 if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(formatted_messages, max_tokens_hint=max_tokens_hint)
+                    fallback_response = await llm.ainvoke_non_stream(
+                        formatted_messages,
+                        max_tokens_hint=max_tokens_hint,
+                        request_id=llm_request_id,
+                    )
                 else:
-                    fallback_response = await llm.ainvoke(formatted_messages, max_tokens_hint=max_tokens_hint)
+                    fallback_response = await llm.ainvoke(
+                        formatted_messages,
+                        max_tokens_hint=max_tokens_hint,
+                        request_id=llm_request_id,
+                    )
 
             final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            resp_chars = len(final_answer)
             if not final_answer:
                 final_answer = fallback_message
         except Exception as fallback_error:
             logger.exception("LLM non-stream fallback failed: %s", fallback_error)
             final_answer = fallback_message
+
+    if resp_chars == 0 and final_answer:
+        resp_chars = len(final_answer)
+
+    dt_ms = int((time.monotonic() - t0) * 1000)
+    log_section(
+        "VLLM CALL SUMMARY",
+        f"request_id={llm_request_id}\n"
+        f"dt_ms={dt_ms}\n"
+        f"chunks={chunk_count}\n"
+        f"resp_chars={resp_chars}\n"
+        f"prompt_fingerprint={prompt_fingerprint}",
+    )
 
     if not final_answer:
         final_answer = fallback_message
