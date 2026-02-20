@@ -2392,6 +2392,22 @@ class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
 
+
+def _extract_stream_text(chunk) -> str:
+    if chunk is None:
+        return ""
+
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str) and content:
+        return content
+
+    message = getattr(chunk, "message", None)
+    message_content = getattr(message, "content", None)
+    if isinstance(message_content, str) and message_content:
+        return message_content
+
+    return ""
+
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
     """스트리밍 응답 엔드포인트 (두 모델 비교)"""
