@@ -60,6 +60,7 @@ class OpenAICompatChatModel(BaseChatModel):
         if result.generations:
             return result.generations[0].message
         return AIMessage(content="")
+
     async def _astream(
         self,
         messages: List[BaseMessage],

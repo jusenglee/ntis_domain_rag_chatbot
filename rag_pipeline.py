@@ -4775,6 +4775,7 @@ def _run_rag_with_vectors(
 
         max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset.max_ctx_items)))
         requested_limit = max(
+            0,
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
         )
         hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))

@@ -543,7 +543,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = OpenAICompatChatModel(model_name="/model", base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8001/v1"), api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"))  # Solar(vLLM)
+    llm = OpenAICompatChatModel(model_name="/model", base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"), api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"))  # Solar(vLLM)
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -1152,7 +1152,7 @@ def _build_llm(model_name: str):
     if model_name == "solar_vllm_0":
         return OpenAICompatChatModel(
             model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
-            base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8001/v1"),
+            base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"),
             api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
         )
     return TritonChatModel(model_name=model_name)
@@ -1214,7 +1214,19 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
 
     try:
-        response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human",
+             "[대화 이력]\n{history}\n\n"
+             "[참고 문서]\n{prev_context}\n\n"
+             "[현재 질문]\n{question}")
+        ])
+        chain = prompt | llm
+        if model_name == "solar_vllm_0":
+            chain = prompt | llm
+            response = await chain.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+        else:
+            response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
         final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
     except ValueError as e:
         if "No generations found in stream" not in str(e):
@@ -2404,21 +2416,21 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'model_key': 'gemma', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'model_key': 'solar', 'content': answer}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'model_key': 'gemma', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
                     yield f"data: {json.dumps({'status': 'retrieve'}, ensure_ascii=False)}\n\n"
