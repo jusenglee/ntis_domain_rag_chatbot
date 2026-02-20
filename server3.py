@@ -2414,14 +2414,36 @@ def _extract_stream_text(chunk) -> str:
     if chunk is None:
         return ""
 
+    def _normalize_content(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            normalized_parts: List[str] = []
+            for item in value:
+                normalized_item = _normalize_content(item)
+                if normalized_item:
+                    normalized_parts.append(normalized_item)
+            return "".join(normalized_parts)
+        if isinstance(value, dict):
+            if isinstance(value.get("text"), str):
+                return value["text"]
+            if isinstance(value.get("content"), str):
+                return value["content"]
+            return ""
+        return str(value)
+
     content = getattr(chunk, "content", None)
-    if isinstance(content, str) and content:
-        return content
+    normalized_content = _normalize_content(content)
+    if normalized_content:
+        return normalized_content
 
     message = getattr(chunk, "message", None)
     message_content = getattr(message, "content", None)
-    if isinstance(message_content, str) and message_content:
-        return message_content
+    normalized_message_content = _normalize_content(message_content)
+    if normalized_message_content:
+        return normalized_message_content
 
     return ""
 
@@ -2457,38 +2479,37 @@ async def query_stream(payload: QueryRequest):
 
         documents_used = []
         stream_emitted = {"SOLAR": False, "GEMMA": False}
+        stream_model_by_node = {
+            "generate_answer_solar": "SOLAR",
+            "generate_answer_gemma": "GEMMA",
+        }
+        answer_key_by_model = {
+            "SOLAR": "answer_solar",
+            "GEMMA": "answer_gemma",
+        }
 
         try:
             async for event in graph.astream_events(inputs, version="v2"):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-                # Answer 스트리밍 - solar
-                if kind == "on_chat_model_stream" and node == "generate_answer_solar":
-                    chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        stream_emitted["SOLAR"] = True
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
-                # Answer 스트리밍 - Gemma
-                elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
+                model = stream_model_by_node.get(node)
+
+                if kind == "on_chat_model_stream" and model:
                     chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        stream_emitted["GEMMA"] = True
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    chunk_text = _extract_stream_text(chunk)
+                    if chunk_text:
+                        stream_emitted[model] = True
+                        yield f"data: {json.dumps({'model': model, 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 # 스트림 청크가 없더라도 최종 답변은 반드시 전달
-                elif kind == "on_chain_end" and node == "generate_answer_solar":
+                elif kind == "on_chain_end" and model:
                     output = data.get("output", {})
-                    answer = output.get("answer_solar")
-                    if answer and not stream_emitted["SOLAR"]:
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
-
-                elif kind == "on_chain_end" and node == "generate_answer_gemma":
-                    output = data.get("output", {})
-                    answer = output.get("answer_gemma")
-                    if answer and not stream_emitted["GEMMA"]:
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
+                    answer_key = answer_key_by_model.get(model)
+                    answer = output.get(answer_key) if answer_key else None
+                    if answer and not stream_emitted[model]:
+                        yield f"data: {json.dumps({'model': model, 'content': answer}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
