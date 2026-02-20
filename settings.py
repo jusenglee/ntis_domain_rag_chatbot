@@ -36,8 +36,9 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 
 # Triton
 TRITON_URL         = os.getenv("TRITON_URL", "203.250.234.159:8001")
-DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "solar_vllm_0")
+DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "gpt_oss_triton_0")
 TOKENIZER_MAP = {
+    "gpt_oss_triton_0": os.getenv("GPT_OSS_TOKENIZER", "./Models/gpt-oss-20b"),
     "gemma_triton_0": "./Models/gemma-3-27b-it",
 }
 
@@ -85,11 +86,11 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
     return max(int(CTX_MIN_BUDGET), budget)
 
 MODEL_MAX_CONTEXT = {
-    "solar_vllm_0": int(os.getenv("SOLAR_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
+    "gpt_oss_triton_0": int(os.getenv("GPT_OSS_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
     "gemma_triton_0": int(os.getenv("GEMMA_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
 }
 MAX_TOKENS = {
-    "solar_vllm_0": int(os.getenv("SOLAR_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+    "gpt_oss_triton_0": int(os.getenv("GPT_OSS_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
     "gemma_triton_0": int(os.getenv("GEMMA_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
 }
 
@@ -140,6 +141,22 @@ def _get_model_timeout_pair(
     return first, idle
 
 
+
+GPT_OSS_STREAM_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GPT_OSS_TRITON_0",
+    request_type="STREAM",
+    default_first=4,
+    default_idle=20,
+    deprecated_env_prefix="GPT_OSS",
+)
+GPT_OSS_SYNC_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GPT_OSS_TRITON_0",
+    request_type="SYNC",
+    default_first=GPT_OSS_STREAM_TIMEOUTS[0],
+    default_idle=GPT_OSS_STREAM_TIMEOUTS[1],
+    deprecated_env_prefix="GPT_OSS",
+)
+
 GEMMA_STREAM_TIMEOUTS = _get_model_timeout_pair(
     model_env_prefix="GEMMA_TRITON_0",
     request_type="STREAM",
@@ -156,6 +173,10 @@ GEMMA_SYNC_TIMEOUTS = _get_model_timeout_pair(
 )
 
 TRITON_TIMEOUTS = {
+    "gpt_oss_triton_0": {
+        "stream": GPT_OSS_STREAM_TIMEOUTS,
+        "sync": GPT_OSS_SYNC_TIMEOUTS,
+    },
     "gemma_triton_0": {
         "stream": GEMMA_STREAM_TIMEOUTS,
         "sync": GEMMA_SYNC_TIMEOUTS,

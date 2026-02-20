@@ -35,7 +35,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
-from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
+from openai_compat_llm import EmptyStreamContentError
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -98,9 +98,10 @@ MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
-SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
-SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
-DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
+GPT_OSS_RESPONSE_MAX_TOKENS_HINT = int(os.getenv("GPT_OSS_RESPONSE_MAX_TOKENS_HINT", "4096"))
+GPT_OSS_DEADLINE_MS = int(os.getenv("GPT_OSS_DEADLINE_MS", "4500"))
+GPT_OSS_STREAM_MAX_CHARS = int(os.getenv("GPT_OSS_STREAM_MAX_CHARS", "8000"))
+DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "gpt_oss_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
@@ -181,22 +182,22 @@ def _select_final_answer(
     state: "AgentState",
     *,
     policy: Optional[str] = None,
-    solar_deadline_ms: Optional[int] = None,
+    gpt_oss_deadline_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "solar_first").strip().lower()
-    if resolved_policy not in {"solar_first", "gemma_first"}:
-        logger.warning("Unknown DUAL_MODEL_MERGE_POLICY=%s, fallback to solar_first", resolved_policy)
-        resolved_policy = "solar_first"
+    resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "gpt_oss_first").strip().lower()
+    if resolved_policy not in {"gpt_oss_first", "gemma_first"}:
+        logger.warning("Unknown DUAL_MODEL_MERGE_POLICY=%s, fallback to gpt_oss_first", resolved_policy)
+        resolved_policy = "gpt_oss_first"
 
-    deadline_ms = SOLAR_DEADLINE_MS if solar_deadline_ms is None else solar_deadline_ms
+    deadline_ms = GPT_OSS_DEADLINE_MS if gpt_oss_deadline_ms is None else gpt_oss_deadline_ms
 
-    solar_text = _as_nonempty_text(state.answer_solar)
+    gpt_oss_text = _as_nonempty_text(state.answer_gpt_oss)
     gemma_text = _as_nonempty_text(state.answer_gemma)
-    solar_dt_ms = _latency_ms(state.latencies, "generate_answer_solar")
+    gpt_oss_dt_ms = _latency_ms(state.latencies, "generate_answer_gpt_oss")
     gemma_dt_ms = _latency_ms(state.latencies, "generate_answer_gemma")
 
-    solar_within_deadline = solar_text is not None and (solar_dt_ms is None or solar_dt_ms <= deadline_ms)
-    solar_abnormal = (solar_text is None) or (solar_dt_ms is not None and solar_dt_ms > deadline_ms)
+    gpt_oss_within_deadline = gpt_oss_text is not None and (gpt_oss_dt_ms is None or gpt_oss_dt_ms <= deadline_ms)
+    gpt_oss_abnormal = (gpt_oss_text is None) or (gpt_oss_dt_ms is not None and gpt_oss_dt_ms > deadline_ms)
     gemma_normal = gemma_text is not None
 
     if resolved_policy == "gemma_first":
@@ -205,32 +206,32 @@ def _select_final_answer(
                 "answer": gemma_text,
                 "chosen_model": "gemma",
                 "reason": "policy_gemma_first",
-                "solar_dt_ms": solar_dt_ms,
+                "gpt_oss_dt_ms": gpt_oss_dt_ms,
                 "gemma_dt_ms": gemma_dt_ms,
             }
-        if solar_within_deadline:
+        if gpt_oss_within_deadline:
             return {
-                "answer": solar_text,
-                "chosen_model": "solar",
-                "reason": "policy_gemma_first_fallback_to_solar",
-                "solar_dt_ms": solar_dt_ms,
+                "answer": gpt_oss_text,
+                "chosen_model": "gpt_oss",
+                "reason": "policy_gemma_first_fallback_to_gpt_oss",
+                "gpt_oss_dt_ms": gpt_oss_dt_ms,
                 "gemma_dt_ms": gemma_dt_ms,
             }
     else:
-        if solar_within_deadline:
+        if gpt_oss_within_deadline:
             return {
-                "answer": solar_text,
-                "chosen_model": "solar",
-                "reason": "solar_ok_within_deadline",
-                "solar_dt_ms": solar_dt_ms,
+                "answer": gpt_oss_text,
+                "chosen_model": "gpt_oss",
+                "reason": "gpt_oss_ok_within_deadline",
+                "gpt_oss_dt_ms": gpt_oss_dt_ms,
                 "gemma_dt_ms": gemma_dt_ms,
             }
-        if solar_abnormal and gemma_normal:
+        if gpt_oss_abnormal and gemma_normal:
             return {
                 "answer": gemma_text,
                 "chosen_model": "gemma",
-                "reason": "solar_timeout_or_empty_use_gemma",
-                "solar_dt_ms": solar_dt_ms,
+                "reason": "gpt_oss_timeout_or_empty_use_gemma",
+                "gpt_oss_dt_ms": gpt_oss_dt_ms,
                 "gemma_dt_ms": gemma_dt_ms,
             }
 
@@ -238,7 +239,7 @@ def _select_final_answer(
         "answer": DUAL_MODEL_FALLBACK_MESSAGE,
         "chosen_model": "fallback",
         "reason": "both_models_abnormal",
-        "solar_dt_ms": solar_dt_ms,
+        "gpt_oss_dt_ms": gpt_oss_dt_ms,
         "gemma_dt_ms": gemma_dt_ms,
     }
 
@@ -623,7 +624,7 @@ class AgentState(BaseModel):
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
-    answer_solar: Optional[str] = None
+    answer_gpt_oss: Optional[str] = None
 
     # 메타데이터
     conversation_id: str = ""
@@ -735,7 +736,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = _build_llm("solar_vllm_0")
+    llm = _build_llm("gpt_oss_triton_0")
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -1336,21 +1337,14 @@ async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - Gemma"""
     return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
-# --- Node 7-2: Refine Answer - solar ---
-@measure_latency("generate_answer_solar")
-async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
-    """RAG 결과로 Fast Answer 보강 - solar"""
-    return await _generate_answer(state, "solar_vllm_0", "answer_solar")
+# --- Node 7-2: Refine Answer - gpt-oss ---
+@measure_latency("generate_answer_gpt_oss")
+async def node_generate_answer_gpt_oss(state: AgentState) -> Dict[str, Any]:
+    """RAG 결과로 Fast Answer 보강 - gpt-oss"""
+    return await _generate_answer(state, "gpt_oss_triton_0", "answer_gpt_oss")
 
 
 def _build_llm(model_name: str):
-    if model_name == "solar_vllm_0":
-        return OpenAICompatChatModel(
-            model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
-            base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"),
-            api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
-            timeout=float(os.getenv("SOLAR_VLLM_TIMEOUT", "120")),
-        )
     return TritonChatModel(model_name=model_name)
 
 @lru_cache(maxsize=1)
@@ -1460,18 +1454,18 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     max_tokens_hint = _select_max_tokens_hint(qa)
     effective_max_tokens = max_tokens_hint
-    if model_name == "solar_vllm_0" and effective_max_tokens is None:
-        effective_max_tokens = SOLAR_RESPONSE_MAX_TOKENS_HINT
+    if model_name == "gpt_oss_triton_0" and effective_max_tokens is None:
+        effective_max_tokens = GPT_OSS_RESPONSE_MAX_TOKENS_HINT
     llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
     t0 = time.monotonic()
     fallback_message = DUAL_MODEL_FALLBACK_MESSAGE
     chunk_count = 0
     resp_chars = 0
     truncated = False
-    stream_char_limit = SOLAR_STREAM_MAX_CHARS
+    stream_char_limit = GPT_OSS_STREAM_MAX_CHARS
 
     try:
-        if model_name == "solar_vllm_0":
+        if model_name == "gpt_oss_triton_0":
             chunks: List[str] = []
             stream_chars = 0
             async for chunk in chain.astream(
@@ -1642,7 +1636,7 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
     response_text = state.rule_decision.direct_response
     return {
         "answer_gemma": response_text,
-        "answer_solar": response_text,
+        "answer_gpt_oss": response_text,
         "messages": [AIMessage(content=response_text)]
     }
 
@@ -1653,23 +1647,23 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     ks = state.knowledge_sufficiency
     strategy = ks.requires_new_knowledge if ks else "unknown"
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
-    solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
+    gpt_oss_preview = _truncate_text(state.answer_gpt_oss, HISTORY_PREVIEW_LIMIT)
     decision = _select_final_answer(state)
 
     log_section("MERGE ANSWERS",
                 f"coq: {state.conversation_id}{state.question}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"solar: {solar_preview}\n"
+                f"gpt_oss: {gpt_oss_preview}\n"
                 f"chosen_model: {decision['chosen_model']}\n"
                 f"reason: {decision['reason']}\n"
-                f"solar_dt_ms: {decision['solar_dt_ms']}\n"
+                f"gpt_oss_dt_ms: {decision['gpt_oss_dt_ms']}\n"
                 f"gemma_dt_ms: {decision['gemma_dt_ms']}")
 
     return {
         "messages": [AIMessage(content=decision["answer"])],
         "answer_gemma": state.answer_gemma,
-        "answer_solar": state.answer_solar,
+        "answer_gpt_oss": state.answer_gpt_oss,
         "context": state.context,
         "fallback_context": state.fallback_context,
     }
@@ -1986,7 +1980,7 @@ def build_advanced_workflow():
 
     # 두 모델 각각의 Refined Answer 노드
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
-    workflow.add_node("generate_answer_solar", node_generate_answer_solar)
+    workflow.add_node("generate_answer_gpt_oss", node_generate_answer_gpt_oss)
     workflow.add_node("join_answers", node_join_answers)
     workflow.add_node("prepare_answer_context", node_prepare_answer_context)
 
@@ -2038,11 +2032,11 @@ def build_advanced_workflow():
     workflow.add_edge("rag_search", "prepare_answer_context")
 
     workflow.add_edge("prepare_answer_context", "generate_answer_gemma")
-    workflow.add_edge("prepare_answer_context", "generate_answer_solar")
+    workflow.add_edge("prepare_answer_context", "generate_answer_gpt_oss")
 
     # Refined Answer 완료 후 join
     workflow.add_edge("generate_answer_gemma", "join_answers")
-    workflow.add_edge("generate_answer_solar", "join_answers")
+    workflow.add_edge("generate_answer_gpt_oss", "join_answers")
 
     # Refined answers join도 merge로
     workflow.add_edge("join_answers", "merge_answers")
@@ -2863,13 +2857,13 @@ async def query_stream(payload: QueryRequest):
         log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
 
         documents_used = []
-        stream_emitted = {"SOLAR": False, "GEMMA": False}
+        stream_emitted = {"GPT_OSS": False, "GEMMA": False}
         stream_model_by_node = {
-            "generate_answer_solar": "SOLAR",
+            "generate_answer_gpt_oss": "GPT_OSS",
             "generate_answer_gemma": "GEMMA",
         }
         answer_key_by_model = {
-            "SOLAR": "answer_solar",
+            "GPT_OSS": "answer_gpt_oss",
             "GEMMA": "answer_gemma",
         }
 
@@ -2901,7 +2895,7 @@ async def query_stream(payload: QueryRequest):
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model': 'GPT_OSS', 'content': answer}, ensure_ascii=False)}\n\n"
                         yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
@@ -2989,13 +2983,13 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
-        answer_solar = final_state.get("answer_solar")
+        answer_gpt_oss = final_state.get("answer_gpt_oss")
 
         return {
             "success": True,
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
-            "answer_solar": answer_solar,
+            "answer_gpt_oss": answer_gpt_oss,
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,

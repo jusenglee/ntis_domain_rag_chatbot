@@ -16,7 +16,7 @@ def _load_merge_symbols() -> Dict[str, Any]:
     tree = ast.parse(source, filename="server3.py")
 
     wanted_assigns = {
-        "SOLAR_DEADLINE_MS",
+        "GPT_OSS_DEADLINE_MS",
         "DUAL_MODEL_MERGE_POLICY",
         "DUAL_MODEL_FALLBACK_MESSAGE",
     }
@@ -46,57 +46,57 @@ def _load_merge_symbols() -> Dict[str, Any]:
     return namespace
 
 
-def test_select_final_answer_prefers_solar_within_deadline() -> None:
+def test_select_final_answer_prefers_gpt_oss_within_deadline() -> None:
     symbols = _load_merge_symbols()
     select_final_answer = symbols["_select_final_answer"]
 
     state = SimpleNamespace(
-        answer_solar="solar 응답",
+        answer_gpt_oss="gpt-oss 응답",
         answer_gemma="gemma 응답",
-        latencies={"generate_answer_solar": 1.2, "generate_answer_gemma": 0.9},
+        latencies={"generate_answer_gpt_oss": 1.2, "generate_answer_gemma": 0.9},
     )
 
-    selected = select_final_answer(state, solar_deadline_ms=2000)
+    selected = select_final_answer(state, gpt_oss_deadline_ms=2000)
 
-    assert selected["chosen_model"] == "solar"
-    assert selected["reason"] == "solar_ok_within_deadline"
-    assert selected["answer"] == "solar 응답"
-    assert selected["solar_dt_ms"] == 1200
+    assert selected["chosen_model"] == "gpt_oss"
+    assert selected["reason"] == "gpt_oss_ok_within_deadline"
+    assert selected["answer"] == "gpt-oss 응답"
+    assert selected["gpt_oss_dt_ms"] == 1200
     assert selected["gemma_dt_ms"] == 900
 
 
-def test_select_final_answer_uses_gemma_when_solar_timeout() -> None:
+def test_select_final_answer_uses_gemma_when_gpt_oss_timeout() -> None:
     symbols = _load_merge_symbols()
     select_final_answer = symbols["_select_final_answer"]
 
     state = SimpleNamespace(
-        answer_solar="solar 느림",
+        answer_gpt_oss="gpt-oss 느림",
         answer_gemma="gemma 정상",
-        latencies={"generate_answer_solar": 5.5, "generate_answer_gemma": 1.0},
+        latencies={"generate_answer_gpt_oss": 5.5, "generate_answer_gemma": 1.0},
     )
 
-    selected = select_final_answer(state, solar_deadline_ms=3000)
+    selected = select_final_answer(state, gpt_oss_deadline_ms=3000)
 
     assert selected["chosen_model"] == "gemma"
-    assert selected["reason"] == "solar_timeout_or_empty_use_gemma"
+    assert selected["reason"] == "gpt_oss_timeout_or_empty_use_gemma"
     assert selected["answer"] == "gemma 정상"
-    assert selected["solar_dt_ms"] == 5500
+    assert selected["gpt_oss_dt_ms"] == 5500
 
 
-def test_select_final_answer_uses_gemma_when_solar_empty() -> None:
+def test_select_final_answer_uses_gemma_when_gpt_oss_empty() -> None:
     symbols = _load_merge_symbols()
     select_final_answer = symbols["_select_final_answer"]
 
     state = SimpleNamespace(
-        answer_solar="   ",
+        answer_gpt_oss="   ",
         answer_gemma="gemma 정상",
-        latencies={"generate_answer_solar": 0.5, "generate_answer_gemma": 0.6},
+        latencies={"generate_answer_gpt_oss": 0.5, "generate_answer_gemma": 0.6},
     )
 
-    selected = select_final_answer(state, solar_deadline_ms=3000)
+    selected = select_final_answer(state, gpt_oss_deadline_ms=3000)
 
     assert selected["chosen_model"] == "gemma"
-    assert selected["reason"] == "solar_timeout_or_empty_use_gemma"
+    assert selected["reason"] == "gpt_oss_timeout_or_empty_use_gemma"
     assert selected["answer"] == "gemma 정상"
 
 
@@ -106,12 +106,12 @@ def test_select_final_answer_uses_fallback_when_both_abnormal() -> None:
     fallback_message = symbols["DUAL_MODEL_FALLBACK_MESSAGE"]
 
     state = SimpleNamespace(
-        answer_solar="",
+        answer_gpt_oss="",
         answer_gemma=None,
-        latencies={"generate_answer_solar": 6.0, "generate_answer_gemma": 1.0},
+        latencies={"generate_answer_gpt_oss": 6.0, "generate_answer_gemma": 1.0},
     )
 
-    selected = select_final_answer(state, solar_deadline_ms=3000)
+    selected = select_final_answer(state, gpt_oss_deadline_ms=3000)
 
     assert selected["chosen_model"] == "fallback"
     assert selected["reason"] == "both_models_abnormal"
@@ -123,12 +123,12 @@ def test_select_final_answer_supports_gemma_first_policy() -> None:
     select_final_answer = symbols["_select_final_answer"]
 
     state = SimpleNamespace(
-        answer_solar="solar 정상",
+        answer_gpt_oss="gpt-oss 정상",
         answer_gemma="gemma 우선",
-        latencies={"generate_answer_solar": 0.8, "generate_answer_gemma": 1.1},
+        latencies={"generate_answer_gpt_oss": 0.8, "generate_answer_gemma": 1.1},
     )
 
-    selected = select_final_answer(state, policy="gemma_first", solar_deadline_ms=2000)
+    selected = select_final_answer(state, policy="gemma_first", gpt_oss_deadline_ms=2000)
 
     assert selected["chosen_model"] == "gemma"
     assert selected["reason"] == "policy_gemma_first"
