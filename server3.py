@@ -2414,7 +2414,28 @@ async def query_stream(payload: QueryRequest):
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
-            yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
+            category = "internal_error"
+            retryable = False
+            user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
+            if "No generations found in stream" in str(e):
+                category = "llm_empty_stream"
+                retryable = True
+                user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."
+            elif "retriev" in str(error_code).lower() or "retriev" in str(reason).lower() or "retriev" in str(e).lower():
+                category = "retrieval_error"
+                retryable = True
+                user_message = "자료 검색 중 문제가 발생했습니다. 다시 시도해 주세요."
+
+            error_payload = {
+                "error": str(e),
+                "error_code": error_code,
+                "reason": reason,
+                "retryable": retryable,
+                "category": category,
+                "user_message": user_message,
+            }
+            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
