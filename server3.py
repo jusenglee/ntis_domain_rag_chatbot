@@ -1047,6 +1047,9 @@ class CustomRAGRetriever(BaseModel):
 
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
+                "title_text": hit_data.get("title_text"),
+                "title1": hit_data.get("title1"),
+                "title2": hit_data.get("title2"),
                 "source_index" : idx,
                 "source_type": "hit",
                 "tag" : hit_data.get("tag"),
