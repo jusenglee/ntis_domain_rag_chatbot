@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any, List, Optional, AsyncIterator
 
 from langchain_core.language_models import BaseChatModel
@@ -45,6 +46,9 @@ class OpenAICompatChatModel(BaseChatModel):
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        request_id = kwargs.get("request_id")
+        extra_headers = {"x-request-id": request_id} if request_id else None
+        t0 = time.monotonic()
         response = await client.chat.completions.create(
             model=self.model_name,
             messages=self._to_openai_messages(messages),
@@ -52,8 +56,21 @@ class OpenAICompatChatModel(BaseChatModel):
             top_p=kwargs.get("top_p", 0.8),
             max_tokens=max_tokens_hint,
             stream=False,
+            extra_headers=extra_headers,
         )
         content = (response.choices[0].message.content if response.choices else "") or ""
+        dt_ms = (time.monotonic() - t0) * 1000
+        usage = response.usage.model_dump() if getattr(response, "usage", None) else None
+        logger.info(
+            "[openai_compat_llm] non-stream summary: request_id=%s model=%s dt_ms=%.1f message_n=%d char_n=%d usage=%s base_url=%s",
+            request_id,
+            self.model_name,
+            dt_ms,
+            len(messages),
+            len(content),
+            usage,
+            self.base_url,
+        )
         await client.close()
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
@@ -73,6 +90,9 @@ class OpenAICompatChatModel(BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        request_id = kwargs.get("request_id")
+        extra_headers = {"x-request-id": request_id} if request_id else None
+        t0 = time.monotonic()
         request_params: dict[str, Any] = {
             "temperature": kwargs.get("temperature", 0.2),
             "top_p": kwargs.get("top_p", 0.8),
@@ -88,18 +108,25 @@ class OpenAICompatChatModel(BaseChatModel):
             max_tokens=request_params["max_tokens"],
             stop=request_params["stop"],
             stream=True,
+            extra_headers=extra_headers,
         )
 
         emitted = False
+        chunk_n = 0
+        char_n = 0
+        last_finish_reason = None
         try:
             async for chunk in stream:
+                chunk_n += 1
                 if not chunk.choices:
                     logger.debug("[openai_compat_llm] Empty choices chunk received: model=%s", self.model_name)
                     continue
+                last_finish_reason = getattr(chunk.choices[0], "finish_reason", None) or last_finish_reason
                 delta = chunk.choices[0].delta
                 text = getattr(delta, "content", None)
                 if text:
                     emitted = True
+                    char_n += len(text)
                     yield ChatGenerationChunk(message=AIMessageChunk(content=text))
                 else:
                     logger.debug(
@@ -111,8 +138,9 @@ class OpenAICompatChatModel(BaseChatModel):
                     )
 
             if not emitted:
-                logger.debug(
-                    "[openai_compat_llm] Stream ended without text chunks; fallback to non-stream: model=%s base_url=%s",
+                logger.warning(
+                    "[openai_compat_llm] Stream ended without text chunks; fallback to non-stream: request_id=%s model=%s base_url=%s",
+                    request_id,
                     self.model_name,
                     self.base_url,
                 )
@@ -124,9 +152,11 @@ class OpenAICompatChatModel(BaseChatModel):
                     max_tokens=request_params["max_tokens"],
                     stop=request_params["stop"],
                     stream=False,
+                    extra_headers=extra_headers,
                 )
                 fallback_content = (response.choices[0].message.content if response.choices else "") or ""
                 if fallback_content:
+                    char_n += len(fallback_content)
                     yield ChatGenerationChunk(message=AIMessageChunk(content=fallback_content))
                 else:
                     raise EmptyStreamContentError(
@@ -134,6 +164,17 @@ class OpenAICompatChatModel(BaseChatModel):
                         f"model={self.model_name}, base_url={self.base_url}, request_params={request_params}"
                     )
         finally:
+            dt_ms = (time.monotonic() - t0) * 1000
+            logger.info(
+                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f chunk_n=%d char_n=%d finish_reason=%s model=%s base_url=%s",
+                request_id,
+                dt_ms,
+                chunk_n,
+                char_n,
+                last_finish_reason,
+                self.model_name,
+                self.base_url,
+            )
             await client.close()
 
     @property
