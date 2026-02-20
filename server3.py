@@ -98,6 +98,9 @@ MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
+SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
+DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
+DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 RAG_RENDER_TEXT_FIELDS = tuple(
@@ -154,6 +157,90 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
+
+
+def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _latency_ms(latencies: Dict[str, float], key: str) -> Optional[int]:
+    value = latencies.get(key)
+    if value is None:
+        return None
+    try:
+        return int(float(value) * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _select_final_answer(
+    state: "AgentState",
+    *,
+    policy: Optional[str] = None,
+    solar_deadline_ms: Optional[int] = None,
+) -> Dict[str, Any]:
+    resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "solar_first").strip().lower()
+    if resolved_policy not in {"solar_first", "gemma_first"}:
+        logger.warning("Unknown DUAL_MODEL_MERGE_POLICY=%s, fallback to solar_first", resolved_policy)
+        resolved_policy = "solar_first"
+
+    deadline_ms = SOLAR_DEADLINE_MS if solar_deadline_ms is None else solar_deadline_ms
+
+    solar_text = _as_nonempty_text(state.answer_solar)
+    gemma_text = _as_nonempty_text(state.answer_gemma)
+    solar_dt_ms = _latency_ms(state.latencies, "generate_answer_solar")
+    gemma_dt_ms = _latency_ms(state.latencies, "generate_answer_gemma")
+
+    solar_within_deadline = solar_text is not None and (solar_dt_ms is None or solar_dt_ms <= deadline_ms)
+    solar_abnormal = (solar_text is None) or (solar_dt_ms is not None and solar_dt_ms > deadline_ms)
+    gemma_normal = gemma_text is not None
+
+    if resolved_policy == "gemma_first":
+        if gemma_normal:
+            return {
+                "answer": gemma_text,
+                "chosen_model": "gemma",
+                "reason": "policy_gemma_first",
+                "solar_dt_ms": solar_dt_ms,
+                "gemma_dt_ms": gemma_dt_ms,
+            }
+        if solar_within_deadline:
+            return {
+                "answer": solar_text,
+                "chosen_model": "solar",
+                "reason": "policy_gemma_first_fallback_to_solar",
+                "solar_dt_ms": solar_dt_ms,
+                "gemma_dt_ms": gemma_dt_ms,
+            }
+    else:
+        if solar_within_deadline:
+            return {
+                "answer": solar_text,
+                "chosen_model": "solar",
+                "reason": "solar_ok_within_deadline",
+                "solar_dt_ms": solar_dt_ms,
+                "gemma_dt_ms": gemma_dt_ms,
+            }
+        if solar_abnormal and gemma_normal:
+            return {
+                "answer": gemma_text,
+                "chosen_model": "gemma",
+                "reason": "solar_timeout_or_empty_use_gemma",
+                "solar_dt_ms": solar_dt_ms,
+                "gemma_dt_ms": gemma_dt_ms,
+            }
+
+    return {
+        "answer": DUAL_MODEL_FALLBACK_MESSAGE,
+        "chosen_model": "fallback",
+        "reason": "both_models_abnormal",
+        "solar_dt_ms": solar_dt_ms,
+        "gemma_dt_ms": gemma_dt_ms,
+    }
+
 
 def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
@@ -1364,7 +1451,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     max_tokens_hint = _select_max_tokens_hint(qa)
     llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
     t0 = time.monotonic()
-    fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
+    fallback_message = DUAL_MODEL_FALLBACK_MESSAGE
     chunk_count = 0
     resp_chars = 0
 
@@ -1521,20 +1608,24 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     strategy = ks.requires_new_knowledge if ks else "unknown"
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
     solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
+    decision = _select_final_answer(state)
 
-    # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
                 f"coq: {state.conversation_id}{state.question}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"solar: {solar_preview}")
+                f"solar: {solar_preview}\n"
+                f"chosen_model: {decision['chosen_model']}\n"
+                f"reason: {decision['reason']}\n"
+                f"solar_dt_ms: {decision['solar_dt_ms']}\n"
+                f"gemma_dt_ms: {decision['gemma_dt_ms']}")
 
     return {
-        "messages": [AIMessage(content=state.answer_solar)],
+        "messages": [AIMessage(content=decision["answer"])],
         "answer_gemma": state.answer_gemma,
         "answer_solar": state.answer_solar,
-        "context" : state.context,
-        "fallback_context": state.fallback_context
+        "context": state.context,
+        "fallback_context": state.fallback_context,
     }
 
 # --- Node 10: Save History ---

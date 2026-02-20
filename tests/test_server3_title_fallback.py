@@ -47,6 +47,7 @@ def _load_server3_symbols(run_rag_impl):
         "IntentPayloadV2": _IntentPayloadV2,
         "NormalizedIntent": _NormalizedIntent,
         "run_rag_ab_compare": run_rag_impl,
+        "_extract_allowed_render_fields": lambda payload: {},
     }
     exec(compile(module, filename="server3.py", mode="exec"), namespace)
     return namespace
