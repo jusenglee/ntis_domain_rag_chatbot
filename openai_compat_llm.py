@@ -45,6 +45,13 @@ class OpenAICompatChatModel(BaseChatModel):
         await client.close()
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
+
+    async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
+        """스트림 경로 예외 시 강제 non-stream 호출용 API."""
+        result = await self._agenerate(messages, **kwargs)
+        if result.generations:
+            return result.generations[0].message
+        return AIMessage(content="")
     async def _astream(
         self,
         messages: List[BaseMessage],

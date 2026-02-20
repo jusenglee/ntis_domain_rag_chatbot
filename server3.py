@@ -1211,14 +1211,45 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
-    final_answer = response.content.replace("<eos>", "").strip()
+    fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
+
+    try:
+        response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+        final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
+    except ValueError as e:
+        if "No generations found in stream" not in str(e):
+            raise
+
+        log_section(
+            "GENERATE ANSWER FALLBACK",
+            f"reason=stream_empty\n"
+            f"conversation_id={state.conversation_id}\n"
+            f"model_name={model_name}\n"
+            f"max_tokens_hint={max_tokens_hint}",
+        )
+
+        try:
+            if hasattr(llm, "ainvoke_non_stream"):
+                fallback_response = await llm.ainvoke_non_stream(messages, max_tokens_hint=max_tokens_hint)
+            else:
+                fallback_response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+
+            final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            if not final_answer:
+                final_answer = fallback_message
+        except Exception as fallback_error:
+            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
+            final_answer = fallback_message
+
+    if not final_answer:
+        final_answer = fallback_message
 
     log_section(f"GENERATE ANSWER ({model_name})",
                 f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
                 f"ctx_chars={len(context_text)}\n"
                 f"{final_answer[:100]}")
-    return {final_field: final_answer}
+    return {final_field: str(final_answer)}
+
 
 
 # --- Node 8: Direct Answer (Rule-based) ---
