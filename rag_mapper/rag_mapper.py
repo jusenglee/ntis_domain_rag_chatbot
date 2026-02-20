@@ -47,14 +47,32 @@ class RagMapper:
         schema = cls._get_schema(item)
         result = deepcopy(item)
         result["tag"] = item["tag"]
+
+        has_valid_existing_title = cls._has_valid_title(result.get("title"))
         
         # title 추출 및 처리
-        cls._process_title(result, schema)
+        if not has_valid_existing_title:
+            cls._process_title(result, schema)
         
         # 데이터 필드 매핑
         cls._map_data_fields(result, schema)
         
         return result
+
+    @staticmethod
+    def _has_valid_title(title: Any) -> bool:
+        """기존 title 값의 유효성 검증."""
+        if title is None:
+            return False
+
+        if not isinstance(title, str):
+            return True
+
+        normalized = title.strip()
+        if not normalized:
+            return False
+
+        return normalized.lower() != "none"
         
     @classmethod
     def get_researcher_info(cls, item: dict) -> List[str]:
