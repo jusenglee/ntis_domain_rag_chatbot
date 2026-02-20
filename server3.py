@@ -2440,42 +2440,74 @@ class QueryRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
+def _normalize_message_content(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        normalized_parts: List[str] = []
+        for item in value:
+            normalized_item = _normalize_message_content(item)
+            if normalized_item:
+                normalized_parts.append(normalized_item)
+        return "".join(normalized_parts)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if isinstance(value.get("content"), str):
+            return value["content"]
+        return ""
+    return str(value)
+
+
 def _extract_stream_text(chunk) -> str:
     if chunk is None:
         return ""
 
-    def _normalize_content(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            normalized_parts: List[str] = []
-            for item in value:
-                normalized_item = _normalize_content(item)
-                if normalized_item:
-                    normalized_parts.append(normalized_item)
-            return "".join(normalized_parts)
-        if isinstance(value, dict):
-            if isinstance(value.get("text"), str):
-                return value["text"]
-            if isinstance(value.get("content"), str):
-                return value["content"]
-            return ""
-        return str(value)
-
     content = getattr(chunk, "content", None)
-    normalized_content = _normalize_content(content)
+    normalized_content = _normalize_message_content(content)
     if normalized_content:
         return normalized_content
 
     message = getattr(chunk, "message", None)
     message_content = getattr(message, "content", None)
-    normalized_message_content = _normalize_content(message_content)
+    normalized_message_content = _normalize_message_content(message_content)
     if normalized_message_content:
         return normalized_message_content
 
     return ""
+
+
+def _extract_final_answer(output: Any, answer_key: Optional[str]) -> Optional[str]:
+    if output is None:
+        return None
+
+    if isinstance(output, dict):
+        if answer_key:
+            candidate = output.get(answer_key)
+            normalized_candidate = _normalize_message_content(candidate)
+            if normalized_candidate:
+                return normalized_candidate
+        return _normalize_message_content(output)
+
+    if isinstance(output, AIMessage):
+        normalized_message = _normalize_message_content(output.content)
+        return normalized_message or None
+
+    content = getattr(output, "content", None)
+    normalized_content = _normalize_message_content(content)
+    if normalized_content:
+        return normalized_content
+
+    if answer_key:
+        nested = getattr(output, answer_key, None)
+        normalized_nested = _normalize_message_content(nested)
+        if normalized_nested:
+            return normalized_nested
+
+    fallback = _normalize_message_content(output)
+    return fallback or None
 
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
@@ -2537,7 +2569,7 @@ async def query_stream(payload: QueryRequest):
                 elif kind == "on_chain_end" and model:
                     output = data.get("output", {})
                     answer_key = answer_key_by_model.get(model)
-                    answer = output.get(answer_key) if answer_key else None
+                    answer = _extract_final_answer(output, answer_key)
                     if answer and not stream_emitted[model]:
                         yield f"data: {json.dumps({'model': model, 'content': answer}, ensure_ascii=False)}\n\n"
 
