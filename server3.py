@@ -5,6 +5,7 @@ import json
 import time
 import os
 import re
+import hashlib
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +21,7 @@ from dataclasses import replace
 import redis.asyncio as redis
 
 # LangChain & LangGraph
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
@@ -1161,6 +1162,27 @@ async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
 
+
+def _build_answer_prompt_inputs(state: AgentState, context_text: str) -> Dict[str, str]:
+    history_text = "\n".join(
+        f"{('사용자' if isinstance(msg, HumanMessage) else '어시스턴트')}: {msg.content}"
+        for msg in state.messages[:-1]
+    ) or "없음"
+    return {
+        "history": history_text,
+        "prev_context": context_text,
+        "question": state.messages[-1].content,
+    }
+
+
+def _format_prompt_for_logging(prompt: ChatPromptTemplate, prompt_inputs: Dict[str, str]) -> str:
+    rendered = prompt.format_prompt(**prompt_inputs).to_messages()
+    lines = []
+    for msg in rendered:
+        role = type(msg).__name__.replace("Message", "").upper()
+        lines.append(f"[{role}]\n{msg.content}")
+    return "\n\n".join(lines)
+
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = _build_llm(model_name)
 
@@ -1199,38 +1221,27 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    human_prompt = (
-        f"[제공된 정보]\n{context_text}\n\n"
-        f"[원본 질문]\n{state.messages[-1].content}"
-    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human",
+         "[대화 이력]\n{history}\n\n"
+         "[참고 문서]\n{prev_context}\n\n"
+         "[현재 질문]\n{question}")
+    ])
+    chain = prompt | llm
+    prompt_inputs = _build_answer_prompt_inputs(state, context_text)
+    prompt_log_text = _format_prompt_for_logging(prompt, prompt_inputs)
+    prompt_fingerprint = hashlib.sha1(prompt_log_text.encode("utf-8")).hexdigest()[:12]
 
     log_section(
         f"FINAL PROMPT ({model_name})",
-        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
+        f"prompt_fingerprint={prompt_fingerprint}\n{prompt_log_text}",
     )
 
-    messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
     fallback_message = "일시적으로 생성 결과가 비어 재시도해주세요"
 
     try:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human",
-             "[대화 이력]\n{history}\n\n"
-             "[참고 문서]\n{prev_context}\n\n"
-             "[현재 질문]\n{question}")
-        ])
-        chain = prompt | llm
-        history_text = "\n".join(
-            f"{('사용자' if isinstance(msg, HumanMessage) else '어시스턴트')}: {msg.content}"
-            for msg in state.messages[:-1]
-        ) or "없음"
-        prompt_inputs = {
-            "history": history_text,
-            "prev_context": context_text,
-            "question": state.messages[-1].content,
-        }
         if model_name == "solar_vllm_0":
             chunks: List[str] = []
             async for chunk in chain.astream(prompt_inputs, max_tokens_hint=max_tokens_hint):
@@ -1243,7 +1254,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 response_content = str(getattr(response, "content", "") or "").strip()
             final_answer = response_content.replace("<eos>", "").strip()
         else:
-            response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+            response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
             final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
     except ValueError as e:
         if "No generations found in stream" not in str(e):
@@ -1254,14 +1265,20 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             f"reason=stream_empty\n"
             f"conversation_id={state.conversation_id}\n"
             f"model_name={model_name}\n"
-            f"max_tokens_hint={max_tokens_hint}",
+            f"max_tokens_hint={max_tokens_hint}\n"
+            f"prompt_fingerprint={prompt_fingerprint}\n"
+            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
         )
 
         try:
-            if hasattr(llm, "ainvoke_non_stream"):
-                fallback_response = await llm.ainvoke_non_stream(messages, max_tokens_hint=max_tokens_hint)
-            else:
-                fallback_response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+            fallback_response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+
+            if not str(getattr(fallback_response, "content", "") or "").strip():
+                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
+                if hasattr(llm, "ainvoke_non_stream"):
+                    fallback_response = await llm.ainvoke_non_stream(formatted_messages, max_tokens_hint=max_tokens_hint)
+                else:
+                    fallback_response = await llm.ainvoke(formatted_messages, max_tokens_hint=max_tokens_hint)
 
             final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
             if not final_answer:
