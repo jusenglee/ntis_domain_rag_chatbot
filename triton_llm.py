@@ -32,6 +32,13 @@ class TritonChatModel(BaseChatModel):
 
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=full_text))])
 
+    async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
+        """스트림 경로 예외 시 강제 non-stream 호출용 API."""
+        result = await self._agenerate(messages, **kwargs)
+        if result.generations:
+            return result.generations[0].message
+        return AIMessage(content="")
+
     async def _astream(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
         """스트리밍 지원"""
         prompt = self._format_messages(messages)
