@@ -5,9 +5,9 @@ set -euo pipefail
 # 예) export VLLM_LOGGING_LEVEL=DEBUG
 : "${VLLM_LOGGING_LEVEL:=INFO}"
 
-MODEL_PATH="${SOLAR_VLLM_MODEL:-/model}"
-HOST="${SOLAR_VLLM_HOST:-0.0.0.0}"
-PORT="${SOLAR_VLLM_PORT:-8010}"
+MODEL_PATH="${GPT_OSS_MODEL:-/model}"
+HOST="${GPT_OSS_HOST:-0.0.0.0}"
+PORT="${GPT_OSS_PORT:-8010}"
 
 exec vllm serve "${MODEL_PATH}" \
   --host "${HOST}" \

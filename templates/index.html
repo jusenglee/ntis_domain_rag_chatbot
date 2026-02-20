@@ -318,12 +318,12 @@
 
     <div class="controls">
       <select id="modelA" title="모델 A">
-        <option value="solar">Solar-102B vLLM (solar_vllm_0)</option>
+        <option value="gpt_oss">GPT-OSS Triton (gpt_oss_triton_0)</option>
         <option value="gemma">Gemma Triton (gemma_triton_0)</option>
       </select>
       <select id="modelB" title="모델 B">
         <option value="gemma">Gemma Triton (gemma_triton_0)</option>
-        <option value="solar">Solar-102B vLLM (solar_vllm_0)</option>
+        <option value="gpt_oss">GPT-OSS Triton (gpt_oss_triton_0)</option>
       </select>
 
       <span id="convChip" class="chip" title="conversation_id">conv: (none)</span>
@@ -424,7 +424,7 @@
 
   function ensureDistinctModels(){
     if (modelA.value === modelB.value){
-      modelB.value = (modelA.value === "solar") ? "gemma" : "solar";
+      modelB.value = (modelA.value === "gpt_oss") ? "gemma" : "gpt_oss";
     }
   }
   modelA.addEventListener("change", ensureDistinctModels);
@@ -648,7 +648,7 @@
         const modelName = String(json.model || "").toUpperCase();
 
         // MODEL_A / MODEL_B 처리 (model_key 기반 계약)
-        if (modelName === "SOLAR" || modelKey === "solar") {
+        if (modelName === "GPT_OSS" || modelKey === "gpt_oss") {
           rawA += json.content;
           bubbles.bodyA.textContent = rawA;
         } else if (modelName === "GEMMA" || modelKey === "gemma") {

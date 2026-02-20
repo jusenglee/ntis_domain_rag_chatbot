@@ -2,7 +2,7 @@
 
 이 저장소에서 vLLM 서버 실행 커맨드는 아래 경로의 엔트리포인트 스크립트로 관리합니다.
 
-- `scripts/vllm/start_vllm_solar.sh`
+- `scripts/vllm/start_triton_gpt_oss.sh`
 
 ## 반영된 실행 옵션
 
@@ -21,7 +21,7 @@
 
 ```bash
 export VLLM_LOGGING_LEVEL=DEBUG
-./scripts/vllm/start_vllm_solar.sh
+./scripts/vllm/start_triton_gpt_oss.sh
 ```
 
 ## request_id 추적 검증
@@ -29,7 +29,7 @@ export VLLM_LOGGING_LEVEL=DEBUG
 1) 서버 기동
 
 ```bash
-./scripts/vllm/start_vllm_solar.sh
+./scripts/vllm/start_triton_gpt_oss.sh
 ```
 
 2) 클라이언트 요청 (`X-Request-Id` 전달)

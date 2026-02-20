@@ -27,5 +27,5 @@ export GEMMA_MAX_TOKENS=8192
 
 ## vLLM request_id 추적 운영 설정
 
-- 실행 경로: `scripts/vllm/start_vllm_solar.sh`
+- 실행 경로: `scripts/vllm/start_triton_gpt_oss.sh`
 - 상세 가이드: `docs/vllm_request_id_tracking.md`

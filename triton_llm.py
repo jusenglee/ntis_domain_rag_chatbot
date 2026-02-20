@@ -8,7 +8,7 @@ from triton_client import triton_infer, get_tokenizer_for_model
 
 class TritonChatModel(BaseChatModel):
     """LangChain 호환 Triton 래퍼"""
-    model_name: str = "gemma_triton_0"
+    model_name: str = "gpt_oss_triton_0"
 
     def _generate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         # 동기 호출은 구현 생략 (필요 시 추가)
