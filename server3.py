@@ -100,6 +100,17 @@ SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "10
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
+RAG_RENDER_TEXT_FIELDS = tuple(
+    field.strip()
+    for field in os.getenv(
+        "RAG_RENDER_TEXT_FIELDS",
+        "content_text,flat_text,keyword_text,summary_text,abstract_text",
+    ).split(",")
+    if field.strip()
+)
+RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
+RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
+RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
@@ -192,6 +203,93 @@ def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
     preferred_title = _resolve_title_from_payload(mapped_doc)
     if preferred_title:
         mapped_doc["title"] = preferred_title
+
+
+def _truncate_with_suffix(value: Any, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
+def _extract_allowed_render_fields(
+    hit_data: Dict[str, Any],
+    *,
+    allowed_fields: tuple[str, ...] = RAG_RENDER_TEXT_FIELDS,
+    max_chars_per_field: int = RAG_RENDER_TEXT_MAX_CHARS,
+    max_chars_total: int = RAG_RENDER_TEXT_TOTAL_MAX_CHARS,
+) -> Dict[str, str]:
+    """렌더링에 의미 있는 텍스트 필드만 allowlist 기반으로 안전 추출한다."""
+    render_fields: Dict[str, str] = {}
+    total_len = 0
+    for field_name in allowed_fields:
+        if field_name not in hit_data:
+            continue
+        raw = hit_data.get(field_name)
+        if raw is None:
+            continue
+        text = _truncate_with_suffix(raw, max_chars_per_field)
+        if not text:
+            continue
+        if max_chars_total > 0:
+            remaining = max_chars_total - total_len
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                text = _truncate_with_suffix(text, remaining)
+        if text:
+            render_fields[field_name] = text
+            total_len += len(text)
+    return render_fields
+
+
+def _build_refine_sample_preview(docs: List[Dict[str, Any]], is_detail: bool) -> Dict[str, Any]:
+    if not docs:
+        return {"sample_size": 0, "before_nonempty": 0, "after_nonempty": 0, "delta": 0}
+
+    sample_docs = docs[:max(RAG_RENDER_SAMPLE_SIZE, 1)]
+    before_nonempty = 0
+    after_nonempty = 0
+
+    for doc in sample_docs:
+        mapped_doc = _safe_map_doc(doc, context="rag_preview_compare")
+        if not mapped_doc:
+            continue
+        _apply_title_preference(mapped_doc)
+        before = format_metadata(
+            mapped_doc.get("meta_basic", {}),
+            max_sentences=MAX_FIELD_SENTENCES,
+            max_tokens=MAX_FIELD_TOKENS,
+        )
+        if is_detail:
+            detail = format_metadata(
+                mapped_doc.get("meta_detail", {}),
+                max_sentences=MAX_FIELD_SENTENCES,
+                max_tokens=MAX_FIELD_TOKENS,
+            )
+            before = "\n".join(part for part in [before, detail] if part)
+        after = format_metadata(
+            {
+                "meta_basic": mapped_doc.get("meta_basic", {}),
+                "meta_detail": mapped_doc.get("meta_detail", {}),
+                "render_text": {k: mapped_doc.get(k) for k in RAG_RENDER_TEXT_FIELDS if mapped_doc.get(k)},
+            },
+            max_sentences=MAX_FIELD_SENTENCES,
+            max_tokens=MAX_FIELD_TOKENS,
+        )
+        if before.strip():
+            before_nonempty += 1
+        if after.strip():
+            after_nonempty += 1
+
+    return {
+        "sample_size": len(sample_docs),
+        "before_nonempty": before_nonempty,
+        "after_nonempty": after_nonempty,
+        "delta": after_nonempty - before_nonempty,
+    }
 
 Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
@@ -1045,6 +1143,8 @@ class CustomRAGRetriever(BaseModel):
             else:
                 hit_data = getattr(hit, "__dict__", {})
 
+            safe_render_fields = _extract_allowed_render_fields(hit_data)
+
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
                 "title_text": hit_data.get("title_text"),
@@ -1057,6 +1157,8 @@ class CustomRAGRetriever(BaseModel):
                 "meta_detail" : hit_data.get("meta_detail", {}),
                 "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
+
+            rag_data.update(safe_render_fields)
 
             if hit_data.get("tag") is not None:
                 documents.append(rag_data)
@@ -1183,6 +1285,14 @@ async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
     researcher_hints = _build_researcher_hints_from_question_analysis(qa)
 
     if docs_for_ctx:
+        preview_stats = _build_refine_sample_preview(docs_for_ctx, is_detail)
+        logger.info(
+            "[RAG_TEXT_PREVIEW] sample=%s before_nonempty=%s after_nonempty=%s delta=%s",
+            preview_stats.get("sample_size", 0),
+            preview_stats.get("before_nonempty", 0),
+            preview_stats.get("after_nonempty", 0),
+            preview_stats.get("delta", 0),
+        )
         context_text = refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
@@ -2217,6 +2327,15 @@ def refine_documents_rule_based(
             )
 
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
+
+        render_text_parts = [
+            f"{field_name}: {mapped_doc.get(field_name)}"
+            for field_name in RAG_RENDER_TEXT_FIELDS
+            if mapped_doc.get(field_name)
+        ]
+        if render_text_parts:
+            refined_parts.append("\n".join(render_text_parts))
+
         refined_text = "\n".join(refined_parts)
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
