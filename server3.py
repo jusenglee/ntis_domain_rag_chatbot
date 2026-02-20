@@ -1095,8 +1095,13 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     )
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
-    response = await llm.ainvoke(messages)
-    final_answer = response.content.replace("<eos>", "").strip()
+    answer_parts: List[str] = []
+    async for chunk in llm.astream(messages):
+        text = getattr(chunk, "content", "")
+        if text:
+            answer_parts.append(text)
+
+    final_answer = "".join(answer_parts).replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
                 f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
@@ -1736,8 +1741,14 @@ async def query_stream(payload: QueryRequest):
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
-                    if "answer_gemma" in output:
-                        answer = output["answer_gemma"]
+                    answer = None
+
+                    if isinstance(output, dict):
+                        answer = output.get("answer_gemma") or output.get("answer_gpt")
+                    elif hasattr(output, "content"):
+                        answer = getattr(output, "content", None)
+
+                    if answer:
                         yield f"data: {json.dumps({'model' : 'GPT', 'content': answer}, ensure_ascii=False)}\n\n"
                         yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
