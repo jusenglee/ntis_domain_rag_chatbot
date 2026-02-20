@@ -1222,12 +1222,29 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
              "[현재 질문]\n{question}")
         ])
         chain = prompt | llm
+        history_text = "\n".join(
+            f"{('사용자' if isinstance(msg, HumanMessage) else '어시스턴트')}: {msg.content}"
+            for msg in state.messages[:-1]
+        ) or "없음"
+        prompt_inputs = {
+            "history": history_text,
+            "prev_context": context_text,
+            "question": state.messages[-1].content,
+        }
         if model_name == "solar_vllm_0":
-            chain = prompt | llm
-            response = await chain.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+            chunks: List[str] = []
+            async for chunk in chain.astream(prompt_inputs, max_tokens_hint=max_tokens_hint):
+                chunk_text = str(getattr(chunk, "content", "") or "")
+                if chunk_text:
+                    chunks.append(chunk_text)
+            response_content = "".join(chunks).strip()
+            if not response_content:
+                response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+                response_content = str(getattr(response, "content", "") or "").strip()
+            final_answer = response_content.replace("<eos>", "").strip()
         else:
             response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
-        final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
+            final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
     except ValueError as e:
         if "No generations found in stream" not in str(e):
             raise
@@ -2406,6 +2423,7 @@ async def query_stream(payload: QueryRequest):
         log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
 
         documents_used = []
+        stream_emitted = {"SOLAR": False, "GEMMA": False}
 
         try:
             async for event in graph.astream_events(inputs, version="v2"):
@@ -2416,13 +2434,28 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
+                        stream_emitted["SOLAR"] = True
                         yield f"data: {json.dumps({'model': 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
+                        stream_emitted["GEMMA"] = True
                         yield f"data: {json.dumps({'model': 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+                # 스트림 청크가 없더라도 최종 답변은 반드시 전달
+                elif kind == "on_chain_end" and node == "generate_answer_solar":
+                    output = data.get("output", {})
+                    answer = output.get("answer_solar")
+                    if answer and not stream_emitted["SOLAR"]:
+                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+
+                elif kind == "on_chain_end" and node == "generate_answer_gemma":
+                    output = data.get("output", {})
+                    answer = output.get("answer_gemma")
+                    if answer and not stream_emitted["GEMMA"]:
+                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
