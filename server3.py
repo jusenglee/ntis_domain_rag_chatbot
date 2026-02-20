@@ -34,7 +34,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
-from openai_compat_llm import OpenAICompatChatModel
+from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -1256,10 +1256,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         else:
             response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
             final_answer = str(getattr(response, "content", "") or "").replace("<eos>", "").strip()
-    except ValueError as e:
-        if "No generations found in stream" not in str(e):
-            raise
-
+    except EmptyStreamContentError as e:
         log_section(
             "GENERATE ANSWER FALLBACK",
             f"reason=stream_empty\n"
@@ -1267,6 +1264,38 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             f"model_name={model_name}\n"
             f"max_tokens_hint={max_tokens_hint}\n"
             f"prompt_fingerprint={prompt_fingerprint}\n"
+            f"error_type={type(e).__name__}\n"
+            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
+        )
+
+        try:
+            fallback_response = await chain.ainvoke(prompt_inputs, max_tokens_hint=max_tokens_hint)
+
+            if not str(getattr(fallback_response, "content", "") or "").strip():
+                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
+                if hasattr(llm, "ainvoke_non_stream"):
+                    fallback_response = await llm.ainvoke_non_stream(formatted_messages, max_tokens_hint=max_tokens_hint)
+                else:
+                    fallback_response = await llm.ainvoke(formatted_messages, max_tokens_hint=max_tokens_hint)
+
+            final_answer = str(getattr(fallback_response, "content", "") or "").replace("<eos>", "").strip()
+            if not final_answer:
+                final_answer = fallback_message
+        except Exception as fallback_error:
+            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
+            final_answer = fallback_message
+    except ValueError as e:
+        if "No generations found in stream" not in str(e):
+            raise
+
+        log_section(
+            "GENERATE ANSWER FALLBACK",
+            f"reason=stream_empty_legacy\n"
+            f"conversation_id={state.conversation_id}\n"
+            f"model_name={model_name}\n"
+            f"max_tokens_hint={max_tokens_hint}\n"
+            f"prompt_fingerprint={prompt_fingerprint}\n"
+            f"error_type={type(e).__name__}\n"
             f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
         )
 
@@ -2548,7 +2577,7 @@ async def query_stream(payload: QueryRequest):
             retryable = False
             user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
-            if "No generations found in stream" in str(e):
+            if isinstance(e, EmptyStreamContentError) or "No generations found in stream" in str(e):
                 category = "llm_empty_stream"
                 retryable = True
                 user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."

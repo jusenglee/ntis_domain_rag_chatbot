@@ -10,7 +10,11 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 
-class EmptyStreamContentError(RuntimeError):
+class OpenAICompatStreamError(RuntimeError):
+    """OpenAI 호환 모델 스트리밍 계약 위반 계열 기본 예외"""
+
+
+class EmptyStreamContentError(OpenAICompatStreamError):
     """스트림에서 실제 텍스트 청크를 수신하지 못했을 때 발생"""
 
 
