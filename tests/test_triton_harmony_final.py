@@ -60,3 +60,15 @@ def test_extract_harmony_visible_stream_text_hides_until_final_channel() -> None
 def test_model_guard_applies_only_to_target_model() -> None:
     assert _should_apply_harmony_final("gpt_oss_triton_0") is True
     assert _should_apply_harmony_final("other_model") is False
+
+
+def test_extract_harmony_final_assistantfinal_pattern_returns_suffix() -> None:
+    text = "analysis중assistantfinal{\"mode\":\"LOOKUP\"}<|return|>tail"
+
+    assert _extract_harmony_final(text) == "{\"mode\":\"LOOKUP\"}"
+
+
+def test_extract_harmony_visible_stream_text_shows_after_assistantfinal() -> None:
+    raw = "analysis토큰assistantfinal최종전략"
+
+    assert _extract_harmony_visible_stream_text(raw) == "최종전략"
