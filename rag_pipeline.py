@@ -4918,6 +4918,7 @@ def _run_rag_with_vectors(
             reason=(promotion or {}).get("reason"),
             kind=(promotion or {}).get("kind"),
             signals=(promotion or {}).get("signals"),
+            strategy_key=(promotion or {}).get("strategy_key"),
         )
 
         if promoted_mode in ("lookup", "join") and promoted_mode != mode and promoted_ids_map:
