@@ -30,7 +30,26 @@ PEOPLE_ORG_FIELDS = [
     "prtcp_org[].org_nm",
     "prtcp_org.org_nm",
 ]
-PJT_NO_FIELDS = ["pjt_no", "meta_basic.pjt_no"]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return bool(default)
+
+
+def _allow_legacy_meta_keys() -> bool:
+    return _env_bool("RAG_ALLOW_LEGACY_META_KEYS", default=False)
+
+
+def _pjt_no_fields() -> List[str]:
+    fields = ["pjt_no"]
+    if _allow_legacy_meta_keys():
+        fields.append("meta_basic.pjt_no")
+    return fields
 
 
 def _is_people_org_intent(intent: QueryIntent) -> bool:
@@ -62,7 +81,7 @@ def _ensure_pjt_no_fields(
         *,
         default_weights: Dict[str, float],
 ) -> SearchPreset:
-    for field in PJT_NO_FIELDS:
+    for field in _pjt_no_fields():
         if field in preset.lexical_fields:
             preset.lexical_field_weights.setdefault(field, default_weights.get(field, 1.0))
     return preset
