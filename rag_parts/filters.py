@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .constants import (
+    COL_PERF,
+    COL_PROJECT,
     PERF_TAGS,
     TAG_RI_PAPER,
     TAG_RI_IPR,
@@ -772,12 +774,28 @@ def build_collection_join_filter(
     validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
 
     col_norm = str(hop2_col or "").strip().lower()
-    if col_norm == "ntis_perf":
+
+    def _canonical_collection(name: str) -> str:
+        norm = str(name or "").strip().lower()
+        if not norm:
+            return ""
+
+        perf_aliases = {"ntis_perf", str(COL_PERF or "").strip().lower()}
+        project_aliases = {"ntis_project", str(COL_PROJECT or "").strip().lower()}
+
+        if norm in perf_aliases or norm.startswith("ntis_perf"):
+            return "ntis_perf"
+        if norm in project_aliases or norm.startswith("ntis_project"):
+            return "ntis_project"
+        return norm
+
+    col_canonical = _canonical_collection(col_norm)
+    if col_canonical == "ntis_perf":
         if mode == "group":
             return build_perf_filter_by_pjt_no(pjt_nos, query)
         return build_perf_filter_by_pjt_id(join_ids, query)
 
-    if col_norm == "ntis_project":
+    if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
         return pjt_filter or qmodels.Filter(must=[])
 
