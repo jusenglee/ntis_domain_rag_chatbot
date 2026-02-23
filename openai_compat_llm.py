@@ -27,6 +27,16 @@ class OpenAICompatChatModel(BaseChatModel):
     api_key: str = "EMPTY"
     timeout: float = 120.0
 
+    @staticmethod
+    def _extract_structured_output_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """구조화 출력 관련 파라미터만 안전하게 추출한다."""
+        passthrough: dict[str, Any] = {}
+        for key in ("response_format", "tools", "tool_choice"):
+            value = kwargs.get(key)
+            if value is not None:
+                passthrough[key] = value
+        return passthrough
+
     def _generate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         raise NotImplementedError("Use ainvoke/astream")
 
@@ -46,6 +56,7 @@ class OpenAICompatChatModel(BaseChatModel):
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        structured_kwargs = self._extract_structured_output_kwargs(kwargs)
         request_id = kwargs.get("request_id")
         extra_headers = {"x-request-id": request_id} if request_id else None
         t0 = time.monotonic()
@@ -57,6 +68,7 @@ class OpenAICompatChatModel(BaseChatModel):
             max_tokens=max_tokens_hint,
             stream=False,
             extra_headers=extra_headers,
+            **structured_kwargs,
         )
         content = (response.choices[0].message.content if response.choices else "") or ""
         dt_ms = (time.monotonic() - t0) * 1000
@@ -90,6 +102,7 @@ class OpenAICompatChatModel(BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        structured_kwargs = self._extract_structured_output_kwargs(kwargs)
         request_id = kwargs.get("request_id")
         extra_headers = {"x-request-id": request_id} if request_id else None
         t0 = time.monotonic()
@@ -109,6 +122,7 @@ class OpenAICompatChatModel(BaseChatModel):
             stop=request_params["stop"],
             stream=True,
             extra_headers=extra_headers,
+            **structured_kwargs,
         )
 
         emitted = False
@@ -153,6 +167,7 @@ class OpenAICompatChatModel(BaseChatModel):
                     stop=request_params["stop"],
                     stream=False,
                     extra_headers=extra_headers,
+                    **structured_kwargs,
                 )
                 fallback_content = (response.choices[0].message.content if response.choices else "") or ""
                 if fallback_content:

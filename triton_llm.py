@@ -1,10 +1,35 @@
 from typing import Any, List, Optional, AsyncIterator, Generator, cast
+import logging
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, AIMessageChunk
 from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChunk
 
 # 기존 코드의 함수 임포트 (경로는 환경에 맞게 조정하세요)
 from triton_client import triton_infer, get_tokenizer_for_model
+
+logger = logging.getLogger(__name__)
+
+
+
+def _extract_triton_passthrough_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """triton_infer가 받을 수 있는 확장 파라미터만 선별 전달한다."""
+    passthrough: dict[str, Any] = {}
+    for key in ("temperature", "top_p", "timeout_first", "timeout_idle"):
+        value = kwargs.get(key)
+        if value is not None:
+            passthrough[key] = value
+
+    unsupported_structured = [
+        key for key in ("response_format", "tools", "tool_choice")
+        if kwargs.get(key) is not None
+    ]
+    if unsupported_structured:
+        logger.warning(
+            "[triton_llm] structured output kwargs are not supported in Triton path and will be ignored: %s",
+            ", ".join(unsupported_structured),
+        )
+
+    return passthrough
 
 class TritonChatModel(BaseChatModel):
     """LangChain 호환 Triton 래퍼"""
@@ -19,12 +44,15 @@ class TritonChatModel(BaseChatModel):
         prompt = self._format_messages(messages)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
 
+        passthrough_kwargs = _extract_triton_passthrough_kwargs(kwargs)
+
         # triton_infer(..., stream=False) 계약: str 반환
         response_text = cast(str, triton_infer(
             self.model_name,
             prompt,
             stream=False,
             max_tokens=max_tokens_hint,
+            **passthrough_kwargs,
         ))
 
         full_text = response_text or ""
@@ -47,6 +75,8 @@ class TritonChatModel(BaseChatModel):
         import asyncio
         loop = asyncio.get_running_loop()
 
+        passthrough_kwargs = _extract_triton_passthrough_kwargs(kwargs)
+
         # stream=True
         # triton_infer(..., stream=True) 계약: generator 반환
         gen = cast(Generator[str, None, None], triton_infer(
@@ -54,6 +84,7 @@ class TritonChatModel(BaseChatModel):
             prompt,
             stream=True,
             max_tokens=max_tokens_hint,
+            **passthrough_kwargs,
         ))
 
         try:
