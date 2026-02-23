@@ -583,7 +583,7 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(norm_terms)))
     if not should:
         return None
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 def build_title_filter(terms: List[str]) -> Optional[Any]:
@@ -754,7 +754,7 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if pjt_no_values:
         should.extend(qmodels.FieldCondition(key=k, match=make_match_any(pjt_no_values)) for k in no_key_cands)
 
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 # -----------------------------
@@ -906,14 +906,17 @@ def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], qu
     must: List[Any] = []
     join_values_norm = _dedupe_non_empty(join_values)
     if join_values_norm:
-        join_any = qmodels.Filter(
+        join_any = _build_filter(
+            must=None,
             should=[
                 qmodels.FieldCondition(
                     key=k,
                     match=make_match_any(join_values_norm),
                 )
                 for k in key_cands
-            ]
+            ],
+            must_not=None,
+            min_should=1,
         )
         must.append(join_any)
 
