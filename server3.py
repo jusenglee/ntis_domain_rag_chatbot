@@ -103,7 +103,6 @@ DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "gpt_oss_first").
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
-PLANNER_SCHEMA_VERSION = "v2"
 RAG_RENDER_TEXT_FIELDS = tuple(
     field.strip()
     for field in os.getenv(
@@ -115,6 +114,7 @@ RAG_RENDER_TEXT_FIELDS = tuple(
 RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
 RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
+PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
@@ -787,7 +787,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm, parser_fallback_required = _build_llm(DEFAULT_MODEL_NAME, requires_structured_output=True)
+    llm, parser_fallback_required = _build_llm("gpt_oss_triton_0", requires_structured_output=True)
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
     structured_kwargs = _structured_output_kwargs_for_schema(QuestionAnalysis)
 
@@ -803,7 +803,6 @@ async def _run_question_analysis(
     )
 
     system_prompt = f"""
-    
         당신은 NTIS R&D 데이터 검색전략 플래너(LLM Planner)입니다.
         당신의 임무는 사용자 질의마다 단 하나의 최종 전략(Strategy JSON)을 확정하는 것입니다.
         실행 레이어(retrieval/filters/rerank/controller)는 당신의 전략을 변경/재해석하지 않고 그대로 실행합니다.
@@ -832,7 +831,7 @@ async def _run_question_analysis(
         [출력 계약]
         ====================
         1) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        2) strategy_version은 항상 v2로 고정합니다.
+        2) strategy_version은 항상 "{{PLANNER_SCHEMA_VERSION}}"로 고정합니다.
         3) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
         4) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
@@ -995,7 +994,7 @@ async def _run_question_analysis(
         [필수 출력 JSON 스키마]
         ====================
         반드시 아래 키를 모두 포함한 JSON 객체만 출력:
-        - strategy_version: v2
+        - strategy_version: "{{PLANNER_SCHEMA_VERSION}}"
         - mode: "SEARCH" | "LOOKUP" | "JOIN"
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
@@ -1032,6 +1031,7 @@ async def _run_question_analysis(
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
                 "question": question,
+                "PLANNER_SCHEMA_VERSION": PLANNER_SCHEMA_VERSION,
                 "MAX_TOP_K_SIZE": MAX_TOP_K_SIZE,
             }
             invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
