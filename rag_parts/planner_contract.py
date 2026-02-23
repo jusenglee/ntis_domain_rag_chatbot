@@ -182,3 +182,103 @@ def normalize_lookup_title_filter_policy(policy: Optional[str]) -> Optional[str]
     if value not in LOOKUP_TITLE_FILTER_POLICIES:
         return None
     return value
+
+
+@dataclass(frozen=True)
+class StrategyCompileResult:
+    target_cols: tuple[str, ...]
+    topk_spec: dict[str, Any]
+    rerank_spec: dict[str, Any]
+    filter_spec: dict[str, Any]
+    qdrant_filter: Optional[Any]
+    hop1_spec: Optional[dict[str, Any]]
+    hop2_spec: Optional[dict[str, Any]]
+    search_filter_enabled: bool
+    lookup_filter_enabled: bool
+    lookup_filter_policy: str
+    lookup_title_filter_policy: str
+    relation_lookup_enforce: bool
+
+
+class StrategyCompiler:
+    """planner_contract(JSON)를 실행 스펙으로 변환하는 컴파일러."""
+
+    @staticmethod
+    def compile(
+            *,
+            mode: str,
+            relation: Optional[Tuple[str, str]],
+            target_cols: list[str],
+            fallback_target_cols: list[str],
+            planner_filter_spec: Optional[dict[str, Any]],
+            topk_spec: Optional[dict[str, Any]],
+            rerank_spec: Optional[dict[str, Any]],
+            search_filter_signal: bool,
+            search_filter_conf_ok: bool,
+            lookup_filter_policy_hint: Optional[str],
+            lookup_title_filter_policy_hint: Optional[str],
+            detail_lookup_request: bool,
+    ) -> StrategyCompileResult:
+        from rag_parts.filters import compile_filter
+
+        planner_filter_spec_norm = dict(planner_filter_spec or {})
+
+        mode_norm = str(mode or "").strip().lower()
+        target_cols_norm = [str(c).strip() for c in (target_cols or []) if str(c).strip()]
+        if not target_cols_norm:
+            target_cols_norm = [str(c).strip() for c in (fallback_target_cols or []) if str(c).strip()]
+
+        lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_hint) or "hard"
+        lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_hint) or "soft"
+        if lookup_title_filter_policy == "hard" and not detail_lookup_request:
+            lookup_title_filter_policy = "soft"
+
+        search_filter_enabled = bool(mode_norm == "search" and search_filter_signal and search_filter_conf_ok)
+        lookup_filter_enabled = bool(
+            mode_norm == "lookup"
+            and lookup_filter_policy in ("hard", "must_one_then_should")
+            and search_filter_signal
+            and search_filter_conf_ok
+        )
+
+        relation_lookup_enforce_raw = planner_filter_spec_norm.get("relation_lookup_enforce")
+        relation_lookup_enforce = str(relation_lookup_enforce_raw).strip().lower() in ("1", "true", "yes", "y")
+
+        filter_spec = {
+            **planner_filter_spec_norm,
+            "search_filter_enabled": search_filter_enabled,
+            "lookup_filter_enabled": lookup_filter_enabled,
+            "relation_lookup_enforce": relation_lookup_enforce,
+            "lookup_filter_policy": lookup_filter_policy,
+            "lookup_title_filter_policy": lookup_title_filter_policy,
+            "filter_signal": bool(search_filter_signal),
+            "filter_conf_ok": bool(search_filter_conf_ok),
+        }
+
+        qdrant_filter = compile_filter(planner_filter_spec_norm.get("qdrant_filter"))
+        hop1_spec = None
+        hop2_spec = None
+        if relation and mode_norm == "join":
+            hop1_spec = {
+                "collection": relation[0],
+                "qdrant_filter": compile_filter(planner_filter_spec_norm.get("join_hop1_filter")),
+            }
+            hop2_spec = {
+                "collection": relation[1],
+                "qdrant_filter": compile_filter(planner_filter_spec_norm.get("join_filter")),
+            }
+
+        return StrategyCompileResult(
+            target_cols=tuple(target_cols_norm),
+            topk_spec=dict(topk_spec or {}),
+            rerank_spec=dict(rerank_spec or {}),
+            filter_spec=filter_spec,
+            qdrant_filter=qdrant_filter,
+            hop1_spec=hop1_spec,
+            hop2_spec=hop2_spec,
+            search_filter_enabled=search_filter_enabled,
+            lookup_filter_enabled=lookup_filter_enabled,
+            lookup_filter_policy=lookup_filter_policy,
+            lookup_title_filter_policy=lookup_title_filter_policy,
+            relation_lookup_enforce=relation_lookup_enforce,
+        )

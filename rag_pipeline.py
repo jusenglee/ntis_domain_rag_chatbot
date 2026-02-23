@@ -78,6 +78,7 @@ from rag_parts.planner_contract import (
     normalize_lookup_title_filter_policy,
     validate_planner_contract,
     StrategyViolation,
+    StrategyCompiler,
 )
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
@@ -3442,6 +3443,34 @@ def _run_rag_with_vectors(
             source="planner_filter_contract",
         )
 
+
+    compiled_strategy = StrategyCompiler.compile(
+        mode=plan.mode,
+        relation=relation,
+        target_cols=list(ctx.target_collections or []),
+        fallback_target_cols=list(plan.target_collections or []),
+        planner_filter_spec=planner_filter_spec,
+        topk_spec=topk_spec,
+        rerank_spec=rerank_spec,
+        search_filter_signal=search_filter_signal,
+        search_filter_conf_ok=search_filter_conf_ok,
+        lookup_filter_policy_hint=lookup_filter_policy,
+        lookup_title_filter_policy_hint=lookup_title_filter_policy,
+        detail_lookup_request=detail_lookup_request,
+    )
+    if compiled_strategy.hop1_spec or compiled_strategy.hop2_spec:
+        log_kv(
+            "RAG.JOIN.HOP.COMPILED",
+            hop1_spec=compiled_strategy.hop1_spec,
+            hop2_spec=compiled_strategy.hop2_spec,
+        )
+
+    search_filter_enabled = bool(compiled_strategy.search_filter_enabled)
+    lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
+    lookup_filter_policy = compiled_strategy.lookup_filter_policy
+    lookup_title_filter_policy = compiled_strategy.lookup_title_filter_policy
+    relation_lookup_enforce = bool(compiled_strategy.relation_lookup_enforce)
+
     join_hop1_lookup_filter_enabled = bool(
         plan.mode == "join"
         and (
@@ -3512,17 +3541,16 @@ def _run_rag_with_vectors(
     search_filter_server_policy = "disabled" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
     filter_spec = {
-        **planner_filter_spec,
-        "search_filter_enabled": search_filter_enabled,
-        "lookup_filter_enabled": lookup_filter_enabled,
-        "relation_lookup_enforce": relation_lookup_enforce,
-        "lookup_filter_policy": lookup_filter_policy,
-        "lookup_title_filter_policy": lookup_title_filter_policy,
-        "filter_signal": search_filter_signal,
-        "filter_conf_ok": search_filter_conf_ok,
+        **dict(compiled_strategy.filter_spec or {}),
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
     }
+
+    topk_spec = dict(compiled_strategy.topk_spec or {})
+    rerank_spec = dict(compiled_strategy.rerank_spec or {})
+    compiled_qdrant_filter = compiled_strategy.qdrant_filter
+    if compiled_qdrant_filter is not None:
+        log_kv("RAG.FILTER.COMPILED.QDRANT", compiled_filter=_serialize_filter_for_log(compiled_qdrant_filter))
     planner_filter_diff = _diff_filter_spec(
         planner_filter_spec=planner_filter_spec,
         executed_filter_spec=filter_spec,
@@ -3550,7 +3578,7 @@ def _run_rag_with_vectors(
         relation=relation,
         join_key_mode=resolved_join_key_mode,
         people_terms=tuple(people_terms or []),
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         search_filter_enabled=bool(search_filter_enabled),
         lookup_filter_enabled=bool(lookup_filter_enabled),
         relation_lookup_enforce=bool(relation_lookup_enforce),
@@ -3565,7 +3593,7 @@ def _run_rag_with_vectors(
         plan,
         relation=relation,
         join_key_mode=resolved_join_key_mode,
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         filters=filter_spec,
     )
     ctx.plan = plan
