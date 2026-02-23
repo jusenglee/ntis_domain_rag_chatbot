@@ -487,10 +487,25 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     }
 
 # --- Node 2: Rule-based Precheck ---
+def _is_short_query_exception(raw_query: str) -> bool:
+    """짧은 질의라도 약어/코드/ID 패턴이면 검색 플로우를 허용한다."""
+    text = str(raw_query or "").strip()
+    if not text:
+        return False
+
+    compact = re.sub(r"[\s\-_/]", "", text)
+    if re.fullmatch(r"\d{6,}", compact):
+        return True
+    if re.fullmatch(r"[A-Z]{3,}", compact):
+        return True
+    return False
+
+
 @measure_latency("rule_precheck")
 async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
     """규칙 기반 빠른 판단"""
-    user_msg = state.messages[-1].content.strip().lower()
+    raw_user_msg = state.messages[-1].content.strip()
+    user_msg = raw_user_msg.lower()
 
     greetings = ["안녕", "hello", "hi", "헬로", "반가워", "ㅎㅇ"]
     if any(g in user_msg for g in greetings) and len(user_msg) < 10:
@@ -502,7 +517,7 @@ async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
             )
         }
 
-    if len(user_msg) < 5:
+    if len(raw_user_msg) < 5 and not _is_short_query_exception(raw_user_msg):
         return {
             "rule_decision": RuleDecision(
                 action="direct_answer",
@@ -1002,6 +1017,49 @@ class CustomRAGRetriever(BaseModel):
     intent_payload: Optional[IntentPayloadV2] = None
 
     @staticmethod
+    def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV2] = None) -> Optional[str]:
+        tag = hit_data.get("tag")
+        if tag:
+            return str(tag)
+
+        collection = str(hit_data.get("_collection") or "").strip().lower()
+        if collection.startswith("ntis_project"):
+            return "IRD_NAI_PJT_INFO"
+        if collection.startswith("ntis_perf"):
+            # 성과 컬렉션에서 태그가 누락된 경우 기본 성과 스키마로 보정
+            return "IRD_NAI_RI_PAPER"
+
+        normalized_intent = getattr(intent_payload, "normalized_intent", None)
+        target_cols = getattr(normalized_intent, "target_cols", None) if normalized_intent else None
+        if isinstance(target_cols, list):
+            lowered = [str(c).strip().lower() for c in target_cols]
+            if any(c.startswith("ntis_project") for c in lowered):
+                return "IRD_NAI_PJT_INFO"
+            if any(c.startswith("ntis_perf") for c in lowered):
+                return "IRD_NAI_RI_PAPER"
+
+        return None
+
+    @staticmethod
+    def _has_minimum_document_fields(hit_data: Dict[str, Any]) -> bool:
+        candidates = [
+            hit_data.get("doc_id"),
+            hit_data.get("title"),
+            hit_data.get("title_text"),
+            hit_data.get("title1"),
+            hit_data.get("content"),
+            hit_data.get("meta_basic"),
+            hit_data.get("meta_detail"),
+        ]
+        for val in candidates:
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            return True
+        return False
+
+    @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV2]) -> Optional[Dict[str, Any]]:
         """RAG intent_payload.v2 송신 계약: normalized_intent 단일 필드만 전달."""
         if intent_payload is None:
@@ -1038,17 +1096,20 @@ class CustomRAGRetriever(BaseModel):
             else:
                 hit_data = getattr(hit, "__dict__", {})
 
+            inferred_tag = self._infer_tag_from_hit_data(hit_data, self.intent_payload)
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
                 "source_index" : idx,
                 "source_type": "hit",
-                "tag" : hit_data.get("tag"),
+                "tag" : inferred_tag,
+                "doc_id": hit_data.get("doc_id"),
+                "_collection": hit_data.get("_collection"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
-                "prtcp_mp" : hit_data.get("prtcp_mp", [])
+                "prtcp_mp" : hit_data.get("prtcp_mp", []),
             }
 
-            if hit_data.get("tag") is not None:
+            if inferred_tag is not None or self._has_minimum_document_fields(hit_data):
                 documents.append(rag_data)
 
         return {
