@@ -1322,7 +1322,8 @@ class CustomRAGRetriever(BaseModel):
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
-                "prtcp_mp" : hit_data.get("prtcp_mp", [])
+                "prtcp_mp" : hit_data.get("prtcp_mp", []),
+                "prtcp_org": hit_data.get("prtcp_org", []),
             }
 
             rag_data.update(safe_render_fields)
