@@ -38,6 +38,7 @@ from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
 from schemas import IntentPayloadV2
+from retrieval import ensure_keyword_index
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -97,6 +98,9 @@ MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -2392,12 +2396,52 @@ def sanitize_llm_json(msg) -> str:
     )
     raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
+
+def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bool:
+    try:
+        collection_info = client.get_collection(collection_name=collection_name)
+    except Exception:
+        return False
+
+    payload_schema = getattr(collection_info, "payload_schema", None)
+    if not isinstance(payload_schema, dict):
+        return False
+    return field_name in payload_schema
+
+
+def _ensure_boot_payload_indexes(client: Any) -> None:
+    targets = [
+        ("ntis_project", "pjt_id"),
+        ("ntis_project", "pjt_no"),
+        ("ntis_perf", "pjt_id"),
+        ("ntis_perf", "pjt_no"),
+    ]
+
+    for collection_name, field_name in targets:
+        if _has_payload_index(client, collection_name, field_name):
+            logger.info("[startup][payload-index] %s.%s -> skip(already_exists)", collection_name, field_name)
+            continue
+
+        try:
+            ensure_keyword_index(client, collection_name, field_name, wait=True)
+            if _has_payload_index(client, collection_name, field_name):
+                logger.info("[startup][payload-index] %s.%s -> ensured", collection_name, field_name)
+            else:
+                logger.warning("[startup][payload-index] %s.%s -> warning(not_confirmed)", collection_name, field_name)
+        except Exception as e:
+            logger.warning("[startup][payload-index] %s.%s -> warning(%s)", collection_name, field_name, e)
+
 # --- Lifespan & App Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global kv_store
 
-    build_rag_objects()
+    rag_resources = build_rag_objects()
+
+    if RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT:
+        _ensure_boot_payload_indexes(rag_resources.qdrant_client)
+    else:
+        logger.info("[startup][payload-index] disabled by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT")
 
     backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
