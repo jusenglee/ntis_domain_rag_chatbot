@@ -42,10 +42,10 @@ def _is_people_org_intent(intent: QueryIntent) -> bool:
 
 
 def _prioritize_people_org_fields(
-    preset: SearchPreset,
-    *,
-    intent: QueryIntent,
-    default_weights: Dict[str, float],
+        preset: SearchPreset,
+        *,
+        intent: QueryIntent,
+        default_weights: Dict[str, float],
 ) -> SearchPreset:
     if not _is_people_org_intent(intent):
         return preset
@@ -58,9 +58,9 @@ def _prioritize_people_org_fields(
 
 
 def _ensure_pjt_no_fields(
-    preset: SearchPreset,
-    *,
-    default_weights: Dict[str, float],
+        preset: SearchPreset,
+        *,
+        default_weights: Dict[str, float],
 ) -> SearchPreset:
     for field in PJT_NO_FIELDS:
         if field in preset.lexical_fields:
@@ -132,9 +132,9 @@ class SearchPreset:
         }
 
 def resolve_sparse_vector_name(
-    *,
-    runtime_sparse_vector_name: Optional[str],
-    preset_sparse_vector_name: Optional[str],
+        *,
+        runtime_sparse_vector_name: Optional[str],
+        preset_sparse_vector_name: Optional[str],
 ) -> tuple[str, str]:
     """Resolve sparse vector name with explicit priority.
 
@@ -160,11 +160,11 @@ def resolve_sparse_vector_name(
 
 
 def build_topk_spec(
-    preset: SearchPreset,
-    *,
-    sparse_vector_name: str,
-    sparse_topk: int,
-    sparse_weight: float,
+        preset: SearchPreset,
+        *,
+        sparse_vector_name: str,
+        sparse_topk: int,
+        sparse_weight: float,
 ) -> Dict[str, object]:
     # planner가 실행 레이어에 전달하는 retrieval 정책 스냅샷.
     # (실행 레이어에서 env 정책으로 재덮어쓰지 않도록 정규화)

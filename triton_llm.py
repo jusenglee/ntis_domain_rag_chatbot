@@ -1,5 +1,4 @@
-from typing import Any, List, Optional, AsyncIterator, Generator, cast
-import logging
+from typing import Any, List, Optional, AsyncIterator
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, AIMessageChunk
 from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChunk
@@ -7,45 +6,9 @@ from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChu
 # 기존 코드의 함수 임포트 (경로는 환경에 맞게 조정하세요)
 from triton_client import triton_infer, get_tokenizer_for_model
 
-logger = logging.getLogger(__name__)
-
-TRITON_STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset()
-
-
-def supports_triton_structured_output(model_name: str) -> bool:
-    """Triton 백엔드가 response_format 기반 구조화 출력을 지원하는지 반환한다."""
-    return model_name in TRITON_STRUCTURED_OUTPUT_CAPABLE_MODELS
-
-
-
-def _extract_triton_passthrough_kwargs(model_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """triton_infer가 받을 수 있는 확장 파라미터만 선별 전달한다."""
-    passthrough: dict[str, Any] = {}
-    for key in ("temperature", "top_p", "timeout_first", "timeout_idle"):
-        value = kwargs.get(key)
-        if value is not None:
-            passthrough[key] = value
-
-    structured_keys = ("response_format", "tools", "tool_choice")
-    if supports_triton_structured_output(model_name):
-        for key in structured_keys:
-            value = kwargs.get(key)
-            if value is not None:
-                passthrough[key] = value
-    else:
-        unsupported_structured = [key for key in structured_keys if kwargs.get(key) is not None]
-        if unsupported_structured:
-            logger.info(
-                "[triton_llm] model=%s parser fallback mode: ignoring unsupported kwargs=%s",
-                model_name,
-                ", ".join(unsupported_structured),
-            )
-
-    return passthrough
-
 class TritonChatModel(BaseChatModel):
     """LangChain 호환 Triton 래퍼"""
-    model_name: str = "gpt_oss_triton_0"
+    model_name: str = "gpt_oss_0"
 
     def _generate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         # 동기 호출은 구현 생략 (필요 시 추가)
@@ -54,29 +17,20 @@ class TritonChatModel(BaseChatModel):
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         # 비동기 호출 (스트리밍 없이 결과만 반환)
         prompt = self._format_messages(messages)
+        full_text = ""
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
-
-        passthrough_kwargs = _extract_triton_passthrough_kwargs(self.model_name, kwargs)
-
-        # triton_infer(..., stream=False) 계약: str 반환
-        response_text = cast(str, triton_infer(
+        # stream=False로 호출
+        gen = triton_infer(
             self.model_name,
             prompt,
             stream=False,
             max_tokens=max_tokens_hint,
-            **passthrough_kwargs,
-        ))
-
-        full_text = response_text or ""
+        )
+        for chunk in gen:
+            if chunk:
+                full_text += chunk
 
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=full_text))])
-
-    async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
-        """스트림 경로 예외 시 강제 non-stream 호출용 API."""
-        result = await self._agenerate(messages, **kwargs)
-        if result.generations:
-            return result.generations[0].message
-        return AIMessage(content="")
 
     async def _astream(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
         """스트리밍 지원"""
@@ -87,17 +41,13 @@ class TritonChatModel(BaseChatModel):
         import asyncio
         loop = asyncio.get_running_loop()
 
-        passthrough_kwargs = _extract_triton_passthrough_kwargs(self.model_name, kwargs)
-
         # stream=True
-        # triton_infer(..., stream=True) 계약: generator 반환
-        gen = cast(Generator[str, None, None], triton_infer(
+        gen = triton_infer(
             self.model_name,
             prompt,
             stream=True,
             max_tokens=max_tokens_hint,
-            **passthrough_kwargs,
-        ))
+        )
 
         try:
             while True:

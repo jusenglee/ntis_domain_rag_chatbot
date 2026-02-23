@@ -21,10 +21,10 @@ class StrategyViolation(RuntimeError):
 
 
 def planner_contract_mode(
-    strategy_mode: Optional[str],
-    strategy_action: Optional[str],
-    strategy_relation: Optional[Tuple[str, str]],
-    fallback_mode: Optional[str],
+        strategy_mode: Optional[str],
+        strategy_action: Optional[str],
+        strategy_relation: Optional[Tuple[str, str]],
+        fallback_mode: Optional[str],
 ) -> tuple[str, list[str]]:
     """planner 계약: planner가 고른 mode를 실행 mode로 유지하고 오류만 보고한다."""
     errors: list[str] = []
@@ -59,14 +59,14 @@ def planner_contract_mode(
 
 
 def validate_planner_contract(
-    *,
-    mode: Optional[str],
-    head: Optional[str],
-    relation: Optional[Tuple[str, str]],
-    target_cols: list[str],
-    ids_map: Optional[dict[str, Any]],
-    relation_target_cols: Optional[tuple[str, str]],
-    join_key_mode: Optional[str],
+        *,
+        mode: Optional[str],
+        head: Optional[str],
+        relation: Optional[Tuple[str, str]],
+        target_cols: list[str],
+        ids_map: Optional[dict[str, Any]],
+        relation_target_cols: Optional[tuple[str, str]],
+        join_key_mode: Optional[str],
 ) -> list[PlannerContractViolation]:
     """실행 직전 planner 계약 위반을 에러 코드로 수집한다."""
     violations: list[PlannerContractViolation] = []

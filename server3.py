@@ -5,9 +5,7 @@ import json
 import time
 import os
 import re
-import hashlib
-from functools import lru_cache
-from typing import Annotated, Optional, List, Dict, Any, Literal, Mapping, Union
+from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -22,11 +20,11 @@ from dataclasses import replace
 import redis.asyncio as redis
 
 # LangChain & LangGraph
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
+from langchain_core.output_parsers import PydanticOutputParser
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -34,8 +32,7 @@ from langgraph.graph.message import add_messages
 # --- User Modules ---
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
-from triton_llm import TritonChatModel, supports_triton_structured_output
-from langchain_core.output_parsers import PydanticOutputParser
+from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -91,29 +88,12 @@ templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
 kv_store: Optional[KVStore] = None
-# 대화 저장 상한(턴 단위). 1턴 = Human 1개 + AI 1개 메시지.
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
-GPT_OSS_RESPONSE_MAX_TOKENS_HINT = int(os.getenv("GPT_OSS_RESPONSE_MAX_TOKENS_HINT", "4096"))
-GPT_OSS_DEADLINE_MS = int(os.getenv("GPT_OSS_DEADLINE_MS", "4500"))
-GPT_OSS_STREAM_MAX_CHARS = int(os.getenv("GPT_OSS_STREAM_MAX_CHARS", "8000"))
-DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "gpt_oss_first").strip().lower()
-DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
-RAG_RENDER_TEXT_FIELDS = tuple(
-    field.strip()
-    for field in os.getenv(
-        "RAG_RENDER_TEXT_FIELDS",
-        "content_text,flat_text,keyword_text,summary_text,abstract_text",
-    ).split(",")
-    if field.strip()
-)
-RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
-RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
-RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
@@ -132,10 +112,6 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "confidence",
 }
 
-
-STRUCTURED_OUTPUT_KWARGS: tuple[str, ...] = ("response_format", "tools", "tool_choice")
-STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset()
-
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
         return None
@@ -144,14 +120,6 @@ def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if qa.mode in (None, "SEARCH", "LOOKUP"):
         return SHORT_ANSWER_MAX_TOKENS_HINT
     return None
-
-
-def _is_detail_action(qa: Optional["QuestionAnalysis"]) -> bool:
-    return bool(qa and qa.action == "detail")
-
-
-def _should_expand_detail_context(qa: Optional["QuestionAnalysis"]) -> bool:
-    return bool(qa and (qa.action == "detail" or qa.mode == "JOIN"))
 
 def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> str:
     if not value:
@@ -169,132 +137,6 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
-
-
-def sanitize_llm_json(raw: Any) -> str:
-    """LLM 응답에서 JSON payload를 최대한 안전하게 추출한다."""
-    if hasattr(raw, "content"):
-        raw = getattr(raw, "content")
-    if isinstance(raw, dict):
-        return json.dumps(raw, ensure_ascii=False)
-
-    text = str(raw or "").strip()
-    if not text:
-        return "{}"
-
-    text = _strip_gpt_oss_sections(text)
-
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if 0 <= start < end:
-        return text[start : end + 1]
-    return text
-
-
-def _strip_gpt_oss_sections(text: str) -> str:
-    """gpt-oss 계열 출력에서 분석/메타 섹션을 제거해 JSON 파싱 성공률을 높인다."""
-    t = text or ""
-
-    assistantfinal_idx = t.find("assistantfinal")
-    if assistantfinal_idx != -1:
-        return t[assistantfinal_idx + len("assistantfinal") :].strip()
-
-    assistant_idx = t.rfind("\nassistant")
-    if assistant_idx != -1:
-        return t[assistant_idx + len("\nassistant") :].strip()
-
-    if t.lstrip().startswith("analysis"):
-        return t.split("\n", 1)[-1].strip()
-
-    return t.strip()
-
-
-def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _latency_ms(latencies: Dict[str, float], key: str) -> Optional[int]:
-    value = latencies.get(key)
-    if value is None:
-        return None
-    try:
-        return int(float(value) * 1000)
-    except (TypeError, ValueError):
-        return None
-
-
-def _select_final_answer(
-        state: "AgentState",
-        *,
-        policy: Optional[str] = None,
-        gpt_oss_deadline_ms: Optional[int] = None,
-) -> Dict[str, Any]:
-    resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "gpt_oss_first").strip().lower()
-    if resolved_policy not in {"gpt_oss_first", "gemma_first"}:
-        logger.warning("Unknown DUAL_MODEL_MERGE_POLICY=%s, fallback to gpt_oss_first", resolved_policy)
-        resolved_policy = "gpt_oss_first"
-
-    deadline_ms = GPT_OSS_DEADLINE_MS if gpt_oss_deadline_ms is None else gpt_oss_deadline_ms
-
-    gpt_oss_text = _as_nonempty_text(state.answer_gpt_oss)
-    gemma_text = _as_nonempty_text(state.answer_gemma)
-    gpt_oss_dt_ms = _latency_ms(state.latencies, "generate_answer_gpt_oss")
-    gemma_dt_ms = _latency_ms(state.latencies, "generate_answer_gemma")
-
-    gpt_oss_within_deadline = gpt_oss_text is not None and (gpt_oss_dt_ms is None or gpt_oss_dt_ms <= deadline_ms)
-    gpt_oss_abnormal = (gpt_oss_text is None) or (gpt_oss_dt_ms is not None and gpt_oss_dt_ms > deadline_ms)
-    gemma_normal = gemma_text is not None
-
-    if resolved_policy == "gemma_first":
-        if gemma_normal:
-            return {
-                "answer": gemma_text,
-                "chosen_model": "gemma",
-                "reason": "policy_gemma_first",
-                "gpt_oss_dt_ms": gpt_oss_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-        if gpt_oss_within_deadline:
-            return {
-                "answer": gpt_oss_text,
-                "chosen_model": "gpt_oss",
-                "reason": "policy_gemma_first_fallback_to_gpt_oss",
-                "gpt_oss_dt_ms": gpt_oss_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-    else:
-        if gpt_oss_within_deadline:
-            return {
-                "answer": gpt_oss_text,
-                "chosen_model": "gpt_oss",
-                "reason": "gpt_oss_ok_within_deadline",
-                "gpt_oss_dt_ms": gpt_oss_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-        if gpt_oss_abnormal and gemma_normal:
-            return {
-                "answer": gemma_text,
-                "chosen_model": "gemma",
-                "reason": "gpt_oss_timeout_or_empty_use_gemma",
-                "gpt_oss_dt_ms": gpt_oss_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-
-    return {
-        "answer": DUAL_MODEL_FALLBACK_MESSAGE,
-        "chosen_model": "fallback",
-        "reason": "both_models_abnormal",
-        "gpt_oss_dt_ms": gpt_oss_dt_ms,
-        "gemma_dt_ms": gemma_dt_ms,
-    }
-
 
 def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
@@ -344,93 +186,6 @@ def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
     preferred_title = _resolve_title_from_payload(mapped_doc)
     if preferred_title:
         mapped_doc["title"] = preferred_title
-
-
-def _truncate_with_suffix(value: Any, max_chars: int) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars] + "..."
-    return text
-
-
-def _extract_allowed_render_fields(
-        hit_data: Dict[str, Any],
-        *,
-        allowed_fields: tuple[str, ...] = RAG_RENDER_TEXT_FIELDS,
-        max_chars_per_field: int = RAG_RENDER_TEXT_MAX_CHARS,
-        max_chars_total: int = RAG_RENDER_TEXT_TOTAL_MAX_CHARS,
-) -> Dict[str, str]:
-    """렌더링에 의미 있는 텍스트 필드만 allowlist 기반으로 안전 추출한다."""
-    render_fields: Dict[str, str] = {}
-    total_len = 0
-    for field_name in allowed_fields:
-        if field_name not in hit_data:
-            continue
-        raw = hit_data.get(field_name)
-        if raw is None:
-            continue
-        text = _truncate_with_suffix(raw, max_chars_per_field)
-        if not text:
-            continue
-        if max_chars_total > 0:
-            remaining = max_chars_total - total_len
-            if remaining <= 0:
-                break
-            if len(text) > remaining:
-                text = _truncate_with_suffix(text, remaining)
-        if text:
-            render_fields[field_name] = text
-            total_len += len(text)
-    return render_fields
-
-
-def _build_refine_sample_preview(docs: List[Dict[str, Any]], is_detail: bool) -> Dict[str, Any]:
-    if not docs:
-        return {"sample_size": 0, "before_nonempty": 0, "after_nonempty": 0, "delta": 0}
-
-    sample_docs = docs[:max(RAG_RENDER_SAMPLE_SIZE, 1)]
-    before_nonempty = 0
-    after_nonempty = 0
-
-    for doc in sample_docs:
-        mapped_doc = _safe_map_doc(doc, context="rag_preview_compare")
-        if not mapped_doc:
-            continue
-        _apply_title_preference(mapped_doc)
-        before = format_metadata(
-            mapped_doc.get("meta_basic", {}),
-            max_sentences=MAX_FIELD_SENTENCES,
-            max_tokens=MAX_FIELD_TOKENS,
-        )
-        if is_detail:
-            detail = format_metadata(
-                mapped_doc.get("meta_detail", {}),
-                max_sentences=MAX_FIELD_SENTENCES,
-                max_tokens=MAX_FIELD_TOKENS,
-            )
-            before = "\n".join(part for part in [before, detail] if part)
-        after = format_metadata(
-            {
-                "meta_basic": mapped_doc.get("meta_basic", {}),
-                "meta_detail": mapped_doc.get("meta_detail", {}),
-                "render_text": {k: mapped_doc.get(k) for k in RAG_RENDER_TEXT_FIELDS if mapped_doc.get(k)},
-            },
-            max_sentences=MAX_FIELD_SENTENCES,
-            max_tokens=MAX_FIELD_TOKENS,
-        )
-        if before.strip():
-            before_nonempty += 1
-        if after.strip():
-            after_nonempty += 1
-
-    return {
-        "sample_size": len(sample_docs),
-        "before_nonempty": before_nonempty,
-        "after_nonempty": after_nonempty,
-        "delta": after_nonempty - before_nonempty,
-    }
 
 Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
@@ -672,11 +427,10 @@ class AgentState(BaseModel):
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
-    prepared_context_text: Optional[str] = None
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
-    answer_gpt_oss: Optional[str] = None
+    answer_gpt: Optional[str] = None
 
     # 메타데이터
     conversation_id: str = ""
@@ -721,12 +475,13 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     """Redis에서 대화 이력 및 이전 컨텍스트 로드"""
     cid = state.conversation_id
     loaded_history, ctx_list, fallback_context = await load_conversation_memory(cid)
+    current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
                 f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
-        "chat_history": loaded_history,
+        "chat_history": current_full_history,
         "prev_context": ctx_list,
         "fallback_context": fallback_context
     }
@@ -773,7 +528,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     result = await _run_question_analysis(
         question=state.messages[-1].content,
         conversation_id=state.conversation_id,
-        chat_history=state.chat_history + [state.messages[-1]],
+        chat_history=state.chat_history,
         prev_context=state.prev_context,
     )
     return {"question_analysis": result}
@@ -787,9 +542,8 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm, parser_fallback_required = _build_llm("gpt_oss_triton_0", requires_structured_output=True)
+    llm = TritonChatModel(model_name=DEFAULT_MODEL_NAME)  # GPT
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
-    structured_kwargs = _structured_output_kwargs_for_schema(QuestionAnalysis)
 
     history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
@@ -828,16 +582,17 @@ async def _run_question_analysis(
         3) SEARCH는 누락 방지, LOOKUP/JOIN은 정확도/재현성 최우선입니다.
         
         ====================
-        [출력 계약]
+        [출력 강제 규칙]
         ====================
-        1) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        2) strategy_version은 항상 "{{PLANNER_SCHEMA_VERSION}}"로 고정합니다.
-        3) 아래 키를 반드시 모두 포함합니다:
+        1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
+        2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
+        3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
+        4) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        4) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
-        5) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
-        6) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
-        7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
+        5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
+        6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
+        7) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
+        8) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
         [Mode 정의]
@@ -986,7 +741,7 @@ async def _run_question_analysis(
         ====================
         [limit 규칙]
         ====================
-        - limit는 1~{{MAX_TOP_K_SIZE}} 범위 정수
+        - limit는 1~{MAX_TOP_K_SIZE} 범위 정수
         - 사용자가 상위 N개 명시 시 반영(단 MAX 초과 금지)
         - 불명확하면 20
         
@@ -994,7 +749,7 @@ async def _run_question_analysis(
         [필수 출력 JSON 스키마]
         ====================
         반드시 아래 키를 모두 포함한 JSON 객체만 출력:
-        - strategy_version: "{{PLANNER_SCHEMA_VERSION}}"
+        - strategy_version: "{PLANNER_SCHEMA_VERSION}"
         - mode: "SEARCH" | "LOOKUP" | "JOIN"
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
@@ -1006,12 +761,8 @@ async def _run_question_analysis(
         - limit: int
         - retrieval_query: string
         - confidence: float (0.0~1.0)
-
-        아래 형식 지침을 반드시 따를 것:
-        {{format_instructions}}
-
-        JSON 외 어떤 텍스트도 출력 금지.
     
+        {{format_instructions}}
     """
 
 
@@ -1020,27 +771,18 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    chain = prompt | llm
+    chain = prompt | llm | sanitize_llm_json | parser
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            invoke_payload = {
+            result: QuestionAnalysis = await chain.ainvoke({
                 "format_instructions": parser.get_format_instructions(),
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
-                "question": question,
-                "PLANNER_SCHEMA_VERSION": PLANNER_SCHEMA_VERSION,
-                "MAX_TOP_K_SIZE": MAX_TOP_K_SIZE,
-            }
-            invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
-            llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
-            result = _parse_structured_response(
-                parser,
-                llm_result,
-                fallback_to_json_extraction=parser_fallback_required,
-            )
+                "question": question
+            })
             normalized_payload = _normalize_none_string(result.model_dump())
             _validate_question_analysis_required_keys(normalized_payload)
             result = QuestionAnalysis.model_validate(normalized_payload)
@@ -1074,7 +816,7 @@ async def _run_question_analysis(
             )
             return result
 
-        except (ValidationError, PlannerV2ParseError, ValueError, TypeError) as e:
+        except (ValidationError, LLMJSONExtractionError, PlannerV2ParseError, ValueError) as e:
             last_error = e
             should_retry = attempt < max_attempts
             backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
@@ -1169,20 +911,25 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                     f"Confidence: {result.confidence:.2f}")
         return {"knowledge_sufficiency": result}
 
-    llm, parser_fallback_required = _build_llm("gemma_triton_0", requires_structured_output=True)
-
+    llm = TritonChatModel(model_name="gemma_triton_0")
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
-    structured_kwargs = _structured_output_kwargs_for_schema(KnowledgeSufficiency)
 
     prev_context_str = None
 
 
-    prev_context_str = refine_documents_rule_based(
-        state.prev_context,
-        _is_detail_action(qa),
-        org_filters=(qa.filters if qa else None),
-        ids_map=(qa.ids_map if qa else None),
-    )
+    if qa and qa.mode == "JOIN":
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            True,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
+    else:
+        prev_context_str = refine_documents_rule_based(
+            state.prev_context,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+        )
 
 
     system_prompt = (
@@ -1200,7 +947,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "   - 키워드 또는 짧은 구 형태\n"
         "   - 핵심 개념 5개 이내\n"
         "   - 최대 120자 이내\n"
-        "4. confidence: 판단 신뢰도 (0.0~1.0)"
+        "4. confidence: 판단 신뢰도 (0.0~1.0)\n\n"
+        "{format_instructions}"
     )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -1211,91 +959,34 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
          "[현재 질문]\n{question}")
     ])
 
-    chain = prompt | llm
-    max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            invoke_payload = {
-                "format_instructions": parser.get_format_instructions(),
-                "history": history_str or '없음',
-                "prev_context": prev_context_str or "없음",
-                "question": state.messages[-1].content,
-            }
-            invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
-            llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
-            result = _parse_structured_response(
-                parser,
-                llm_result,
-                fallback_to_json_extraction=parser_fallback_required,
-            )
-            result = KnowledgeSufficiency.model_validate(result.model_dump())
-
-            log_section("KNOWLEDGE SUFFICIENCY",
-                        f"coq: {state.conversation_id}{state.question}\n"
-                        f"Requires New: {result.requires_new_knowledge}\n"
-                        f"Search Intent: {result.search_intent}\n"
-                        f"Query: {result.retrieval_query}\n"
-                        f"Confidence: {result.confidence:.2f}")
-
-            return {"knowledge_sufficiency": result}
-
-        except (ValidationError, ValueError, TypeError) as e:
-            last_error = e
-            should_retry = attempt < max_attempts
-            backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
-            logger.warning(
-                "[KNOWLEDGE.SUFFICIENCY] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s",
-                state.conversation_id,
-                attempt,
-                max_attempts,
-                int(should_retry),
-                backoff_seconds,
-                int(not should_retry),
-                type(e).__name__,
-                e,
-            )
-            if should_retry:
-                await asyncio.sleep(backoff_seconds)
-                continue
-
-    logger.error(f"Knowledge Sufficiency Error: {last_error}")
-    return {
-        "knowledge_sufficiency": KnowledgeSufficiency(
-            requires_new_knowledge="high",
-            search_intent="일반 검색",
-            retrieval_query=state.messages[-1].content,
-            confidence=0.5
-        )
-    }
-
-
-
-def _parse_structured_response(
-        parser: PydanticOutputParser,
-        llm_result: Any,
-        *,
-        fallback_to_json_extraction: bool,
-):
-    """구조화 출력 지원 시에는 스키마 객체로 바로 검증하고, 미지원 시 기존 JSON 추출 경로를 사용한다."""
-    if fallback_to_json_extraction:
-        sanitize_fn = globals().get("sanitize_llm_json")
-        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
-        return parser.invoke(sanitized_payload)
-
     try:
-        return parser.invoke(llm_result)
-    except Exception as first_error:
-        sanitize_fn = globals().get("sanitize_llm_json")
-        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
-        try:
-            return parser.invoke(sanitized_payload)
-        except Exception as second_error:
-            raise ValueError(
-                "Structured response parsing failed after sanitize_llm_json retry "
-                f"(initial_error={type(first_error).__name__}, retry_error={type(second_error).__name__})"
-            ) from first_error
+        chain = prompt | llm | sanitize_llm_json | parser
+        result: KnowledgeSufficiency = await chain.ainvoke({
+            "format_instructions": parser.get_format_instructions(),
+            "history": history_str or '없음',
+            "prev_context": prev_context_str or "없음",
+            "question": state.messages[-1].content
+        })
+
+        log_section("KNOWLEDGE SUFFICIENCY",
+                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"Requires New: {result.requires_new_knowledge}\n"
+                    f"Search Intent: {result.search_intent}\n"
+                    f"Query: {result.retrieval_query}\n"
+                    f"Confidence: {result.confidence:.2f}")
+
+        return {"knowledge_sufficiency": result}
+
+    except Exception as e:
+        logger.error(f"Knowledge Sufficiency Error: {e}")
+        return {
+            "knowledge_sufficiency": KnowledgeSufficiency(
+                requires_new_knowledge="high",
+                search_intent="일반 검색",
+                retrieval_query=state.messages[-1].content,
+                confidence=0.5
+            )
+        }
 
 
 # --- Node 6: RAG Search (Parallel) ---
@@ -1347,23 +1038,15 @@ class CustomRAGRetriever(BaseModel):
             else:
                 hit_data = getattr(hit, "__dict__", {})
 
-            safe_render_fields = _extract_allowed_render_fields(hit_data)
-
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
-                "title_text": hit_data.get("title_text"),
-                "title1": hit_data.get("title1"),
-                "title2": hit_data.get("title2"),
                 "source_index" : idx,
                 "source_type": "hit",
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
-                "prtcp_mp" : hit_data.get("prtcp_mp", []),
-                "prtcp_org": hit_data.get("prtcp_org", []),
+                "prtcp_mp" : hit_data.get("prtcp_mp", [])
             }
-
-            rag_data.update(safe_render_fields)
 
             if hit_data.get("tag") is not None:
                 documents.append(rag_data)
@@ -1443,7 +1126,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
     except StrategyViolation:
         raise
     except Exception as e:
-        logger.exception(f"❌ RAG Error: {e}")
+        logger.error(f"❌ RAG Error: {e}")
         return {"context": []}
 
 
@@ -1453,84 +1136,40 @@ async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - Gemma"""
     return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
-# --- Node 7-2: Refine Answer - gpt-oss ---
-@measure_latency("generate_answer_gpt_oss")
-async def node_generate_answer_gpt_oss(state: AgentState) -> Dict[str, Any]:
-    """RAG 결과로 Fast Answer 보강 - gpt-oss"""
-    return await _generate_answer(state, "gpt_oss_triton_0", "answer_gpt_oss")
+# --- Node 7-2: Refine Answer - GPT ---
+@measure_latency("generate_answer_gpt")
+async def node_generate_answer_gpt(state: AgentState) -> Dict[str, Any]:
+    """RAG 결과로 Fast Answer 보강 - GPT"""
+    return await _generate_answer(state, "gpt_oss_triton_0", "answer_gpt")
 
 
-
-
-def _requires_structured_output_from_capabilities(model_name: str) -> bool:
-    """모델 capability 기반 구조화 출력 지원 여부."""
-    return model_name in STRUCTURED_OUTPUT_CAPABLE_MODELS and supports_triton_structured_output(model_name)
-
-
-def _structured_output_kwargs_for_schema(schema: type[BaseModel]) -> Dict[str, Any]:
-    schema_payload = schema.model_json_schema()
-    schema_name = schema.__name__
-    kwargs: Dict[str, Any] = {}
-    if "response_format" in STRUCTURED_OUTPUT_KWARGS:
-        kwargs["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "schema": schema_payload,
-            },
-        }
-    return kwargs
-
-
-def _build_llm(model_name: str, *, requires_structured_output: bool = False):
-    model_supports_structured = _requires_structured_output_from_capabilities(model_name)
-    fallback_required = bool(requires_structured_output and not model_supports_structured)
-
-    if requires_structured_output:
-        if fallback_required:
-            logger.warning(
-                "[STRUCTURED_OUTPUT] model=%s parser fallback mode enabled (fallback_required=%s)",
-                model_name,
-                fallback_required,
-            )
-        else:
-            logger.info(
-                "[STRUCTURED_OUTPUT] model=%s structured output passthrough enabled (fallback_required=%s)",
-                model_name,
-                fallback_required,
-            )
-
-    return TritonChatModel(model_name=model_name), fallback_required
-
-
-@lru_cache(maxsize=1)
-def _read_system_prompt_cached(path_str: str) -> str:
-    return Path(path_str).read_text(encoding="utf-8")
-
+import aiofiles
 
 async def load_system_prompt(path: Path) -> str:
-    return await asyncio.to_thread(_read_system_prompt_cached, str(path.resolve()))
+    async with aiofiles.open(path, encoding="utf-8") as f:
+        return await f.read()
 
+async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
+    llm = TritonChatModel(model_name=model_name)
 
-@measure_latency("prepare_answer_context")
-async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
-    """모델 공통 답변 컨텍스트를 1회 생성해 병렬 노드에서 재사용"""
+    ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
+
+
+
+    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
     fallback_context = state.fallback_context if state.context else None
-    is_detail = _should_expand_detail_context(qa)
+    is_detail = False
+
+    # ✅ 2) JOIN이면 detail 우선
+    if qa and qa.mode == "JOIN":
+        is_detail = True
+
     researcher_hints = _build_researcher_hints_from_question_analysis(qa)
 
     if docs_for_ctx:
-        preview_stats = _build_refine_sample_preview(docs_for_ctx, is_detail)
-        logger.info(
-            "[RAG_TEXT_PREVIEW] sample=%s before_nonempty=%s after_nonempty=%s delta=%s",
-            preview_stats.get("sample_size", 0),
-            preview_stats.get("before_nonempty", 0),
-            preview_stats.get("after_nonempty", 0),
-            preview_stats.get("delta", 0),
-        )
         context_text = refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
@@ -1543,202 +1182,31 @@ async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
         context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
     else:
         context_text = "없음"
-
-    return {"prepared_context_text": context_text}
-
-
-def _build_answer_prompt_inputs(state: AgentState, context_text: str) -> Dict[str, str]:
-    history_text = "\n".join(
-        f"{('사용자' if isinstance(msg, HumanMessage) else '어시스턴트')}: {msg.content}"
-        for msg in state.messages[:-1]
-    ) or "없음"
-    return {
-        "history": history_text,
-        "prev_context": context_text,
-        "question": state.messages[-1].content,
-    }
-
-
-def _format_prompt_for_logging(prompt: ChatPromptTemplate, prompt_inputs: Dict[str, str]) -> str:
-    rendered = prompt.format_prompt(**prompt_inputs).to_messages()
-    lines = []
-    for msg in rendered:
-        role = type(msg).__name__.replace("Message", "").upper()
-        lines.append(f"[{role}]\n{msg.content}")
-    return "\n\n".join(lines)
-
-
-def _apply_response_char_limit(text: str, max_chars: int) -> tuple[str, bool]:
-    cleaned = (text or "").replace("<eos>", "").strip()
-    if max_chars <= 0:
-        return cleaned, False
-    if len(cleaned) <= max_chars:
-        return cleaned, False
-    return cleaned[:max_chars].rstrip() + "…", True
-
-async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    llm, _ = _build_llm(model_name)
-
-    ks = state.knowledge_sufficiency
-    qa = state.question_analysis
-
-
-
-
-    context_text = state.prepared_context_text or "없음"
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human",
-         "[대화 이력]\n{history}\n\n"
-         "[참고 문서]\n{prev_context}\n\n"
-         "[현재 질문]\n{question}")
-    ])
-    chain = prompt | llm
-    prompt_inputs = _build_answer_prompt_inputs(state, context_text)
-    prompt_log_text = _format_prompt_for_logging(prompt, prompt_inputs)
-    prompt_fingerprint = hashlib.sha1(prompt_log_text.encode("utf-8")).hexdigest()[:12]
+    human_prompt = (
+        f"[제공된 정보]\n{context_text}\n\n"
+        f"[원본 질문]\n{state.messages[-1].content}"
+    )
 
     log_section(
         f"FINAL PROMPT ({model_name})",
-        f"prompt_fingerprint={prompt_fingerprint}\n{prompt_log_text}",
+        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
     )
 
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    effective_max_tokens = max_tokens_hint
-    if model_name == "gpt_oss_triton_0" and effective_max_tokens is None:
-        effective_max_tokens = GPT_OSS_RESPONSE_MAX_TOKENS_HINT
-    llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
-    t0 = time.monotonic()
-    fallback_message = DUAL_MODEL_FALLBACK_MESSAGE
-    chunk_count = 0
-    resp_chars = 0
-    truncated = False
-    stream_char_limit = GPT_OSS_STREAM_MAX_CHARS
-
-    try:
-        if model_name == "gpt_oss_triton_0":
-            chunks: List[str] = []
-            stream_chars = 0
-            async for chunk in chain.astream(
-                    prompt_inputs,
-                    max_tokens_hint=effective_max_tokens,
-                    request_id=llm_request_id,
-            ):
-                chunk_text = str(getattr(chunk, "content", "") or "")
-                if chunk_text:
-                    chunk_len = len(chunk_text)
-                    if stream_char_limit > 0 and stream_chars + chunk_len > stream_char_limit:
-                        remaining = max(stream_char_limit - stream_chars, 0)
-                        if remaining > 0:
-                            chunks.append(chunk_text[:remaining])
-                            stream_chars += remaining
-                        truncated = True
-                        break
-                    chunks.append(chunk_text)
-                    stream_chars += chunk_len
-            chunk_count = len(chunks)
-            response_content = "".join(chunks).strip()
-            if not response_content:
-                response = await chain.ainvoke(
-                    prompt_inputs,
-                    max_tokens_hint=effective_max_tokens,
-                    request_id=llm_request_id,
-                )
-                response_content, truncated = _apply_response_char_limit(
-                    str(getattr(response, "content", "") or ""),
-                    stream_char_limit,
-                )
-            else:
-                response_content, post_truncated = _apply_response_char_limit(response_content, stream_char_limit)
-                truncated = truncated or post_truncated
-            resp_chars = len(response_content)
-            final_answer = response_content
-        else:
-            response = await chain.ainvoke(prompt_inputs, max_tokens_hint=effective_max_tokens)
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(response, "content", "") or ""),
-                stream_char_limit,
-            )
-    except ValueError as e:
-        if "No generations found in stream" not in str(e):
-            raise
-
-        log_section(
-            "GENERATE ANSWER FALLBACK",
-            f"reason=stream_empty_legacy\n"
-            f"conversation_id={state.conversation_id}\n"
-            f"model_name={model_name}\n"
-            f"max_tokens_hint={max_tokens_hint}\n"
-            f"effective_max_tokens={effective_max_tokens}\n"
-            f"prompt_fingerprint={prompt_fingerprint}\n"
-            f"error_type={type(e).__name__}\n"
-            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
-        )
-
-        try:
-            fallback_response = await chain.ainvoke(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
-            )
-
-            if not str(getattr(fallback_response, "content", "") or "").strip():
-                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
-                if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-                else:
-                    fallback_response = await llm.ainvoke(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(fallback_response, "content", "") or ""),
-                stream_char_limit,
-            )
-            resp_chars = len(final_answer)
-            if not final_answer:
-                final_answer = fallback_message
-        except Exception as fallback_error:
-            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
-            final_answer = fallback_message
-
-    if resp_chars == 0 and final_answer:
-        resp_chars = len(final_answer)
-
-    dt_ms = int((time.monotonic() - t0) * 1000)
-    log_section(
-        "VLLM CALL SUMMARY",
-        f"request_id={llm_request_id}\n"
-        f"dt_ms={dt_ms}\n"
-        f"chunks={chunk_count}\n"
-        f"resp_chars={resp_chars}\n"
-        f"truncated={str(truncated).lower()}\n"
-        f"stream_char_limit={stream_char_limit}\n"
-        f"chunk_count={chunk_count}\n"
-        f"effective_max_tokens={effective_max_tokens}\n"
-        f"prompt_fingerprint={prompt_fingerprint}",
-    )
-
-    if not final_answer:
-        final_answer = fallback_message
+    response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+    final_answer = response.content.replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
                 f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
                 f"ctx_chars={len(context_text)}\n"
                 f"{final_answer[:100]}")
-    return {final_field: str(final_answer)}
-
+    return {final_field: final_answer}
 
 
 # --- Node 8: Direct Answer (Rule-based) ---
@@ -1747,7 +1215,7 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
     response_text = state.rule_decision.direct_response
     return {
         "answer_gemma": response_text,
-        "answer_gpt_oss": response_text,
+        "answer_gpt": response_text,
         "messages": [AIMessage(content=response_text)]
     }
 
@@ -1758,25 +1226,21 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     ks = state.knowledge_sufficiency
     strategy = ks.requires_new_knowledge if ks else "unknown"
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
-    gpt_oss_preview = _truncate_text(state.answer_gpt_oss, HISTORY_PREVIEW_LIMIT)
-    decision = _select_final_answer(state)
+    gpt_preview = _truncate_text(state.answer_gpt, HISTORY_PREVIEW_LIMIT)
 
+    # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
                 f"coq: {state.conversation_id}{state.question}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"gpt_oss: {gpt_oss_preview}\n"
-                f"chosen_model: {decision['chosen_model']}\n"
-                f"reason: {decision['reason']}\n"
-                f"gpt_oss_dt_ms: {decision['gpt_oss_dt_ms']}\n"
-                f"gemma_dt_ms: {decision['gemma_dt_ms']}")
+                f"GPT: {gpt_preview}")
 
     return {
-        "messages": [AIMessage(content=decision["answer"])],
+        "messages": [AIMessage(content=state.answer_gpt)],
         "answer_gemma": state.answer_gemma,
-        "answer_gpt_oss": state.answer_gpt_oss,
-        "context": state.context,
-        "fallback_context": state.fallback_context,
+        "answer_gpt": state.answer_gpt,
+        "context" : state.context,
+        "fallback_context": state.fallback_context
     }
 
 # --- Node 10: Save History ---
@@ -1784,32 +1248,29 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 async def node_save_history(state: AgentState) -> Dict[str, Any]:
     """Redis에 대화 저장"""
 
-    if not kv_store:
-        return {}
-
     cid = state.conversation_id
 
     new_turn = state.messages[-2:]  # [Human, AI]
     full_history = state.chat_history + new_turn
-    max_messages = MAX_HISTORY_TURNS * 2
-    trimmed_history = full_history[-max_messages:]
+    trimmed_history = full_history[-MAX_HISTORY_TURNS:]
 
     serialized_hist = _serialize_history(trimmed_history)
 
-    await kv_store.set(
-        f"conversation:{cid}:history",
-        json.dumps(serialized_hist, ensure_ascii=False),
-        ex=REDIS_TTL,
-    )
+    if kv_store:
+        await kv_store.set(
+            f"conversation:{cid}:history",
+            json.dumps(serialized_hist, ensure_ascii=False),
+            ex=REDIS_TTL,
+        )
 
-    if kv_store and state.context:
+    if state.context:
         await kv_store.set(
             f"conversation:{cid}:last_context",
             json.dumps(state.context, ensure_ascii=False),
             ex=REDIS_TTL,
         )
 
-    if kv_store and state.fallback_context:
+    if state.fallback_context:
         await kv_store.set(
             f"conversation:{cid}:last_fallback_context",
             state.fallback_context,
@@ -2094,9 +1555,8 @@ def build_advanced_workflow():
 
     # 두 모델 각각의 Refined Answer 노드
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
-    workflow.add_node("generate_answer_gpt_oss", node_generate_answer_gpt_oss)
+    workflow.add_node("generate_answer_gpt", node_generate_answer_gpt)
     workflow.add_node("join_answers", node_join_answers)
-    workflow.add_node("prepare_answer_context", node_prepare_answer_context)
 
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
@@ -2128,7 +1588,7 @@ def build_advanced_workflow():
         ks = state.knowledge_sufficiency
 
         if ks.requires_new_knowledge == "low" and state.prev_context:
-            return "prepare_answer_context"
+            return ["generate_answer_gpt", "generate_answer_gemma"]
 
         return "rag_search"
 
@@ -2136,21 +1596,20 @@ def build_advanced_workflow():
         "join_analysis",
         route_after_join_analysis,
         {
-            "prepare_answer_context": "prepare_answer_context",
+            "generate_answer_gpt": "generate_answer_gpt",
+            "generate_answer_gemma": "generate_answer_gemma",
             "rag_search": "rag_search"
         }
     )
 
 
-    # RAG 검색 완료 후 컨텍스트 1회 준비 뒤 두 모델로 Refine
-    workflow.add_edge("rag_search", "prepare_answer_context")
-
-    workflow.add_edge("prepare_answer_context", "generate_answer_gemma")
-    workflow.add_edge("prepare_answer_context", "generate_answer_gpt_oss")
+    # RAG 검색 완료 후 두 모델로 Refine
+    workflow.add_edge("rag_search", "generate_answer_gemma")
+    workflow.add_edge("rag_search", "generate_answer_gpt")
 
     # Refined Answer 완료 후 join
     workflow.add_edge("generate_answer_gemma", "join_answers")
-    workflow.add_edge("generate_answer_gpt_oss", "join_answers")
+    workflow.add_edge("generate_answer_gpt", "join_answers")
 
     # Refined answers join도 merge로
     workflow.add_edge("join_answers", "merge_answers")
@@ -2453,20 +1912,11 @@ def _format_org_line(
     return "- 참여기관: 정보 없음"
 
 
-def _safe_map_doc(doc: Union[Document, Mapping[str, Any]], *, context: str) -> Optional[Dict[str, Any]]:
-    """문서 매핑 래퍼.
-
-    기대 입력:
-    - LangChain ``Document`` 인스턴스
-    - ``dict``/``Mapping[str, Any]`` 형태의 런타임 문서 페이로드
-    """
+def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
     try:
         return RagMapper.map(doc)
     except MappingError as exc:
-        if isinstance(doc, Document):
-            source_idx = doc.metadata.get("source_index")
-        else:
-            source_idx = doc.get("source_index")
+        source_idx = doc.get("source_index")
         logger.warning(
             "문서 매핑 실패(%s): source_index=%s, error=%s",
             context,
@@ -2477,7 +1927,7 @@ def _safe_map_doc(doc: Union[Document, Mapping[str, Any]], *, context: str) -> O
 
 
 def summarize_documents_headlines(
-        docs: List[Union[Document, Mapping[str, Any]]],
+        docs: List[Document],
         *,
         researchers: Optional[List[Any]] = None,
         organizations: Optional[List[Any]] = None,
@@ -2485,12 +1935,6 @@ def summarize_documents_headlines(
         ids_map: Optional[Dict[str, Any]] = None,
         max_matches: int = 5,
 ) -> str:
-    """문서 목록에서 헤드라인 컨텍스트를 구성한다.
-
-    기대 입력:
-    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
-    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
-    """
     headlines: List[str] = []
 
     for doc in docs:
@@ -2498,10 +1942,7 @@ def summarize_documents_headlines(
         if not mapped_doc:
             continue
         _apply_title_preference(mapped_doc)
-        if isinstance(doc, Document):
-            source_idx = doc.metadata.get("source_index")
-        else:
-            source_idx = doc.get("source_index")
+        source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
@@ -2538,7 +1979,7 @@ def summarize_documents_headlines(
 
 
 def refine_documents_rule_based(
-        docs: List[Union[Document, Mapping[str, Any]]],
+        docs: List[Document],
         is_detail: bool = False,
         *,
         researchers: Optional[List[Any]] = None,
@@ -2548,12 +1989,6 @@ def refine_documents_rule_based(
         max_matches: int = 5,
         relax_limits: bool = False,
 ) -> str:
-    """룰 기반으로 문서 본문을 정제해 컨텍스트 문자열로 변환한다.
-
-    기대 입력:
-    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
-    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
-    """
     context_chunks: List[str] = []
     field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
     field_max_tokens = None if relax_limits else MAX_FIELD_TOKENS
@@ -2566,10 +2001,7 @@ def refine_documents_rule_based(
             continue
         _apply_title_preference(mapped_doc)
 
-        if isinstance(doc, Document):
-            source_idx = doc.metadata.get("source_index")
-        else:
-            source_idx = doc.get("source_index")
+        source_idx = doc.get("source_index")
 
         title = mapped_doc.get("title", "제목 없음")
         # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
@@ -2599,15 +2031,6 @@ def refine_documents_rule_based(
             )
 
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
-
-        render_text_parts = [
-            f"{field_name}: {mapped_doc.get(field_name)}"
-            for field_name in RAG_RENDER_TEXT_FIELDS
-            if mapped_doc.get(field_name)
-        ]
-        if render_text_parts:
-            refined_parts.append("\n".join(render_text_parts))
-
         refined_text = "\n".join(refined_parts)
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
@@ -2739,7 +2162,94 @@ def format_metadata(
     return "\n".join(lines) if lines else ""
 
 
+class LLMJSONExtractionError(ValueError):
+    """LLM 응답에서 JSON 객체/배열 추출 실패 시 발생."""
 
+
+def _summarize_text(text: str, head: int = 160, tail: int = 160) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= head + tail + 20:
+        return compact
+    return f"{compact[:head]} ... {compact[-tail:]}"
+
+
+def _iter_json_candidates(text: str) -> List[str]:
+    candidates: List[tuple[int, str]] = []
+
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
+        block = match.group(1).strip()
+        if block:
+            candidates.append((match.start(), block))
+
+    def find_matching_end(start_idx: int, open_ch: str, close_ch: str) -> Optional[int]:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start_idx, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+
+            if ch == "\"":
+                in_string = True
+                continue
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return None
+
+    for match in re.finditer(r"[\{\[]", text):
+        start_idx = match.start()
+        open_ch = text[start_idx]
+        close_ch = "}" if open_ch == "{" else "]"
+        end_idx = find_matching_end(start_idx, open_ch, close_ch)
+        if end_idx is None:
+            continue
+        candidates.append((start_idx, text[start_idx:end_idx + 1].strip()))
+
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for _, candidate in sorted(candidates, key=lambda item: item[0]):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return ordered
+
+
+def sanitize_llm_json(msg) -> str:
+    text = msg.content if hasattr(msg, "content") else str(msg)
+    last_error: Optional[Exception] = None
+
+    for candidate in _iter_json_candidates(text):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+
+        if isinstance(parsed, (dict, list)):
+            return candidate
+
+    summary = _summarize_text(text)
+    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no_candidates"
+    logger.warning(
+        "JSON extraction failed: length=%s, preview=%s, error=%s",
+        len(text),
+        summary,
+        error_detail,
+    )
+    raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
 # --- Lifespan & App Setup ---
 @asynccontextmanager
@@ -2748,7 +2258,7 @@ async def lifespan(app: FastAPI):
 
     build_rag_objects()
 
-    backend = os.getenv("MEMORY_BACKEND", "redis").strip().lower()
+    backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
 
     if backend == "redis":
@@ -2775,9 +2285,8 @@ async def lifespan(app: FastAPI):
             kv_store = RedisKVStore(r)
             logger.info("✅ Redis connected: %s", REDIS_URL)
         except Exception as e:
-            kv_store = MemoryKVStore()
+            kv_store = None
             logger.error("❌ Redis connection failed: %s", e, exc_info=True)
-            logger.warning("⚠️ Redis 실패 → MemoryKVStore 폴백")
 
     elif backend == "memory":
         kv_store = MemoryKVStore()
@@ -2811,76 +2320,6 @@ class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
 
-
-def _normalize_message_content(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        normalized_parts: List[str] = []
-        for item in value:
-            normalized_item = _normalize_message_content(item)
-            if normalized_item:
-                normalized_parts.append(normalized_item)
-        return "".join(normalized_parts)
-    if isinstance(value, dict):
-        if isinstance(value.get("text"), str):
-            return value["text"]
-        if isinstance(value.get("content"), str):
-            return value["content"]
-        return ""
-    return str(value)
-
-
-def _extract_stream_text(chunk) -> str:
-    if chunk is None:
-        return ""
-
-    content = getattr(chunk, "content", None)
-    normalized_content = _normalize_message_content(content)
-    if normalized_content:
-        return normalized_content
-
-    message = getattr(chunk, "message", None)
-    message_content = getattr(message, "content", None)
-    normalized_message_content = _normalize_message_content(message_content)
-    if normalized_message_content:
-        return normalized_message_content
-
-    return ""
-
-
-def _extract_final_answer(output: Any, answer_key: Optional[str]) -> Optional[str]:
-    if output is None:
-        return None
-
-    if isinstance(output, dict):
-        if answer_key:
-            candidate = output.get(answer_key)
-            normalized_candidate = _normalize_message_content(candidate)
-            if normalized_candidate:
-                return normalized_candidate
-        return _normalize_message_content(output)
-
-    if isinstance(output, AIMessage):
-        normalized_message = _normalize_message_content(output.content)
-        return normalized_message or None
-
-    content = getattr(output, "content", None)
-    normalized_content = _normalize_message_content(content)
-    if normalized_content:
-        return normalized_content
-
-    if answer_key:
-        nested = getattr(output, answer_key, None)
-        normalized_nested = _normalize_message_content(nested)
-        if normalized_nested:
-            return normalized_nested
-
-    fallback = _normalize_message_content(output)
-    return fallback or None
-
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
     """스트리밍 응답 엔드포인트 (두 모델 비교)"""
@@ -2912,46 +2351,31 @@ async def query_stream(payload: QueryRequest):
         log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
 
         documents_used = []
-        stream_emitted = {"GPT_OSS": False, "GEMMA": False}
-        stream_model_by_node = {
-            "generate_answer_gpt_oss": "GPT_OSS",
-            "generate_answer_gemma": "GEMMA",
-        }
-        answer_key_by_model = {
-            "GPT_OSS": "answer_gpt_oss",
-            "GEMMA": "answer_gemma",
-        }
 
         try:
             async for event in graph.astream_events(inputs, version="v2"):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-
-                model = stream_model_by_node.get(node)
-
-                if kind == "on_chat_model_stream" and model:
+                # Answer 스트리밍 - GPT
+                if kind == "on_chat_model_stream" and node == "generate_answer_gpt":
                     chunk = data.get("chunk")
-                    chunk_text = _extract_stream_text(chunk)
-                    if chunk_text:
-                        stream_emitted[model] = True
-                        yield f"data: {json.dumps({'model': model, 'content': chunk_text}, ensure_ascii=False)}\n\n"
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield f"data: {json.dumps({'model' : 'GPT', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
-                # 스트림 청크가 없더라도 최종 답변은 반드시 전달
-                elif kind == "on_chain_end" and model:
-                    output = data.get("output", {})
-                    answer_key = answer_key_by_model.get(model)
-                    answer = _extract_final_answer(output, answer_key)
-                    if answer and not stream_emitted[model]:
-                        yield f"data: {json.dumps({'model': model, 'content': answer}, ensure_ascii=False)}\n\n"
+                # Answer 스트리밍 - Gemma
+                elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
+                    chunk = data.get("chunk")
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model': 'GPT_OSS', 'content': answer}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'GPT', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
                     yield f"data: {json.dumps({'status': 'retrieve'}, ensure_ascii=False)}\n\n"
@@ -2978,28 +2402,7 @@ async def query_stream(payload: QueryRequest):
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
-            category = "internal_error"
-            retryable = False
-            user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-
-            if "No generations found in stream" in str(e):
-                category = "llm_empty_stream"
-                retryable = True
-                user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."
-            elif "retriev" in str(error_code).lower() or "retriev" in str(reason).lower() or "retriev" in str(e).lower():
-                category = "retrieval_error"
-                retryable = True
-                user_message = "자료 검색 중 문제가 발생했습니다. 다시 시도해 주세요."
-
-            error_payload = {
-                "error": str(e),
-                "error_code": error_code,
-                "reason": reason,
-                "retryable": retryable,
-                "category": category,
-                "user_message": user_message,
-            }
-            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -3038,13 +2441,11 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
-        answer_gpt_oss = final_state.get("answer_gpt_oss")
-
         return {
             "success": True,
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
-            "answer_gpt_oss": answer_gpt_oss,
+            "answer_gpt": final_state.get("answer_gpt"),
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,

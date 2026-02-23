@@ -83,7 +83,7 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
         if enc is None:
             enc = SparseTextEmbedding(
                 model_name=model_id,
-                cache_dir="./Qdrant/ModelsCache",
+                cache_dir="../../Models/hub/",
             )
             _SPARSE_ENCODERS[model_id] = enc
         return enc
@@ -260,9 +260,9 @@ def _supports_qdrant_hybrid_query() -> bool:
 
 
 def _build_hybrid_query_model(
-    *,
-    prefetch: Sequence[Any],
-    fusion: Any,
+        *,
+        prefetch: Sequence[Any],
+        fusion: Any,
 ) -> Any:
     query_model = getattr(models, "Query", None)
     if inspect.isclass(query_model):
@@ -291,17 +291,17 @@ def _get_fusion_rrf() -> Any:
 
 
 def _qdrant_hybrid_query_once(
-    client: Any,
-    *,
-    collection_name: str,
-    query_text: str,
-    emb_map: Dict[str, Any],
-    sparse_vector_name: str,
-    top_k_dense: int,
-    top_k_lexical_candidates: int,
-    top_k_lexical: int,
-    lexical_fields: Optional[List[str]],
-    query_filter: Any = None,
+        client: Any,
+        *,
+        collection_name: str,
+        query_text: str,
+        emb_map: Dict[str, Any],
+        sparse_vector_name: str,
+        top_k_dense: int,
+        top_k_lexical_candidates: int,
+        top_k_lexical: int,
+        lexical_fields: Optional[List[str]],
+        query_filter: Any = None,
 ) -> Optional[List[models.ScoredPoint]]:
     if not _supports_qdrant_hybrid_query():
         return None
@@ -501,9 +501,9 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
-    mode: str,
-    fields: List[str],
-    extra_fields: Optional[List[str]] = None,
+        mode: str,
+        fields: List[str],
+        extra_fields: Optional[List[str]] = None,
 ):
     """
     Qdrant with_payload:
@@ -729,7 +729,7 @@ def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
     #         point.payload.setdefault("_vec", vec_name)
     # except Exception as e:  # pragma: no cover
     #     logger.warning(f"[retrieval] _set_payload_hint failed: {e}")
-        #return None
+    #return None
     return
 
 # =========================
@@ -777,25 +777,25 @@ def _combine_filters(base: Optional[models.Filter], extra: Optional[models.Filte
 # =========================
 
 def dense_retrieve_hybrid_multi(
-    *,
-    client: QdrantClient,
-    emb_map: Dict[str, Any],
-    expanded_text: str,
-    keywords: List[str],
-    collection_name: str,
-    lexical_fields: Optional[List[str]] = None,
-    lexical_field_weights: Optional[Dict[str, float]] = None,
-    lexical_scoring_mode: str = "bm25",
-    top_k_dense: int = _DEFAULT_TOPK_DENSE,
-    top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
-    top_k_lexical: int = _DEFAULT_TOPK_LEX,
-    sparse_vector_name: Optional[str] = None,
-    sparse_topk: Optional[int] = None,
-    query_filter: Optional[models.Filter] = None,
-    timings: Optional[Dict[str, float]] = None,
-    hybrid_once: Optional[bool] = None,
-    require_hybrid_both_sides: bool = False,
-    contract_scope: Optional[str] = None,
+        *,
+        client: QdrantClient,
+        emb_map: Dict[str, Any],
+        expanded_text: str,
+        keywords: List[str],
+        collection_name: str,
+        lexical_fields: Optional[List[str]] = None,
+        lexical_field_weights: Optional[Dict[str, float]] = None,
+        lexical_scoring_mode: str = "bm25",
+        top_k_dense: int = _DEFAULT_TOPK_DENSE,
+        top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
+        top_k_lexical: int = _DEFAULT_TOPK_LEX,
+        sparse_vector_name: Optional[str] = None,
+        sparse_topk: Optional[int] = None,
+        query_filter: Optional[models.Filter] = None,
+        timings: Optional[Dict[str, float]] = None,
+        hybrid_once: Optional[bool] = None,
+        require_hybrid_both_sides: bool = False,
+        contract_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
@@ -823,8 +823,8 @@ def dense_retrieve_hybrid_multi(
     if hybrid_once_eff:
         if not sparse_vector_name or not emb_map:
             msg = (
-                "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
-                % (bool(sparse_vector_name), bool(emb_map), contract_scope)
+                    "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
+                    % (bool(sparse_vector_name), bool(emb_map), contract_scope)
             )
             if force_hybrid_once:
                 raise RuntimeError(msg)
@@ -1076,10 +1076,10 @@ def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _select_meta_fields(
-    meta: Dict[str, Any],
-    query_text: str,
-    *,
-    include_meta_long: Optional[bool] = None,
+        meta: Dict[str, Any],
+        query_text: str,
+        *,
+        include_meta_long: Optional[bool] = None,
 ) -> List[str]:
     if not isinstance(meta, dict) or not meta:
         return []
@@ -1179,7 +1179,7 @@ def build_context_docstyle(
 
         meta_detail = pl.get("meta_detail") if isinstance(pl.get("meta_detail"), dict) else {}
         detail_only = meta_source == "detail_only" or (
-            fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset
+                fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset
         )
         if detail_only:
             meta = dict(meta_detail)
@@ -1193,7 +1193,7 @@ def build_context_docstyle(
             or meta.get("eng_pjt_nm")
             or "",
             max_chars=200,
-        )
+            )
         doc_id = _safe_str(pl.get("doc_id") or "", max_chars=160)
         systems = pl.get("systems") if isinstance(pl.get("systems"), list) else []
         urls = pl.get("urls") if isinstance(pl.get("urls"), list) else []
@@ -1206,7 +1206,7 @@ def build_context_docstyle(
                 or pl.get("content2")
                 or "",
                 max_chars=per_doc_char_budget,
-            )
+                )
         meta_lines = ""
         if include_meta:
             meta_full = dict(meta)

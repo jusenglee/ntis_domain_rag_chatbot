@@ -36,9 +36,9 @@ def _get_payload(point: Any) -> Optional[Dict[str, Any]]:
 
 
 def extract_pjt_ids(
-    points: Iterable[Any],
-    *,
-    max_ids: int = 80,
+        points: Iterable[Any],
+        *,
+        max_ids: int = 80,
 ) -> List[str] | Tuple[List[str], List[str]]:
     """
     Hop1 결과 포인트들에서 PJT_ID 후보를 추출합니다.

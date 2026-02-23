@@ -20,11 +20,11 @@ from .query_intent import (
 
 
 def classify_query_compat(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str],
-    hint: Optional[Dict[str, Any]] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str],
+        hint: Optional[Dict[str, Any]] = None,
 ) -> QueryIntent:
     """query_intent.classify_query signature 호환 래퍼."""
     sig = inspect.signature(_classify_query)
@@ -147,16 +147,16 @@ class JoinHopPlan:
 
 
 def normalize_intent(
-    intent: QueryIntent,
-    *,
-    query: str,
-    keywords: List[str],
-    hint_people_terms: Optional[List[str]] = None,
-    hint_org_terms: Optional[List[str]] = None,
-    hint_org_role: Optional[str] = None,
-    hint_lead_org_terms: Optional[List[str]] = None,
-    hint_participant_org_terms: Optional[List[str]] = None,
-    hint_people_affiliation_org_terms: Optional[List[str]] = None,
+        intent: QueryIntent,
+        *,
+        query: str,
+        keywords: List[str],
+        hint_people_terms: Optional[List[str]] = None,
+        hint_org_terms: Optional[List[str]] = None,
+        hint_org_role: Optional[str] = None,
+        hint_lead_org_terms: Optional[List[str]] = None,
+        hint_participant_org_terms: Optional[List[str]] = None,
+        hint_people_affiliation_org_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
     ids_map = _normalize_ids_map(getattr(intent, "ids_map", None) or getattr(intent, "ids", None) or {})
     ids_flat = _normalize_terms(getattr(intent, "ids_flat", None) or [])

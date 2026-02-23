@@ -7,13 +7,13 @@ from rag_parts.planner_contract import StrategyViolation
 
 
 def evaluate_reranked_contract(
-    *,
-    reranked: list[Any],
-    min_reranked: int,
-    min_final_avg: float,
-    min_final_max: float,
-    score_topn: int,
-    timing_put: Callable[[str, Any], None],
+        *,
+        reranked: list[Any],
+        min_reranked: int,
+        min_final_avg: float,
+        min_final_max: float,
+        score_topn: int,
+        timing_put: Callable[[str, Any], None],
 ) -> Optional[str]:
     if not reranked:
         return "no_reranked"
@@ -44,13 +44,13 @@ def evaluate_reranked_contract(
 
 
 def enforce_reranked_contract(
-    *,
-    reranked: list[Any],
-    min_reranked: int,
-    min_final_avg: float,
-    min_final_max: float,
-    score_topn: int,
-    timing_put: Callable[[str, Any], None],
+        *,
+        reranked: list[Any],
+        min_reranked: int,
+        min_final_avg: float,
+        min_final_max: float,
+        score_topn: int,
+        timing_put: Callable[[str, Any], None],
 ) -> Optional[str]:
     contract_fail_reason = evaluate_reranked_contract(
         reranked=reranked,

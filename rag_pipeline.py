@@ -395,11 +395,11 @@ def _timing_put(timings: Dict[str, Any], key: str, value: Any) -> None:
     timings[key] = value
 
 def _record_col_timings(
-    timings: Dict[str, Any],
-    col: str,
-    *,
-    stats: Dict[str, float],
-    local_timings: Dict[str, float],
+        timings: Dict[str, Any],
+        col: str,
+        *,
+        stats: Dict[str, float],
+        local_timings: Dict[str, float],
 ) -> None:
     prefix = f"col.{col}"
     for k, v in (stats or {}).items():
@@ -459,10 +459,10 @@ def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
     return stats
 
 def _ensure_join_keys_in_payload(
-    points: Iterable[Any],
-    *,
-    force_from_meta: bool = False,
-    force_tag_from_tags: bool = True,
+        points: Iterable[Any],
+        *,
+        force_from_meta: bool = False,
+        force_tag_from_tags: bool = True,
 ) -> Dict[str, int]:
     stats = {
         "total": 0,
@@ -508,9 +508,9 @@ def _debug_force_join_keys_enabled() -> bool:
     return bool(_TEST_ONLY_FORCE_JOIN_KEYS_FROM_META)
 
 def _raise_on_missing_join_keys(
-    points: Iterable[Any],
-    *,
-    scope: str,
+        points: Iterable[Any],
+        *,
+        scope: str,
 ) -> Dict[str, int]:
     missing = _count_missing_join_keys(points)
     if not (missing.get("missing_pjt_any") or missing.get("missing_tag")):
@@ -575,13 +575,13 @@ def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
 
 
 def _ensure_join_mode_has_keys(
-    *,
-    has_join_keys: bool,
-    join_key_mode: str,
-    hop1_top: List[Any],
-    hop1_col: str,
-    join_pjt_ids_count: int = 0,
-    join_pjt_nos_count: int = 0,
+        *,
+        has_join_keys: bool,
+        join_key_mode: str,
+        hop1_top: List[Any],
+        hop1_col: str,
+        join_pjt_ids_count: int = 0,
+        join_pjt_nos_count: int = 0,
 ) -> None:
     """
     mode=join 계약:
@@ -671,10 +671,10 @@ def _ensure_iterable_list(value: Any) -> List[Any]:
 
 
 def _pick_matching_prtcp_mp(
-    pl: Dict[str, Any],
-    *,
-    people_terms: Optional[List[str]] = None,
-    person_ids: Optional[List[str]] = None,
+        pl: Dict[str, Any],
+        *,
+        people_terms: Optional[List[str]] = None,
+        person_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     members = pl.get("prtcp_mp")
     if not isinstance(members, list):
@@ -878,10 +878,10 @@ def _resolve_output_fieldset(output_type: Optional[str]) -> Tuple[str, ...]:
 
 
 def _should_use_list_context(
-    *,
-    action: str,
-    base_route: str,
-    output_type: Optional[str],
+        *,
+        action: str,
+        base_route: str,
+        output_type: Optional[str],
 ) -> bool:
     ot = _normalize_output_type(output_type)
     if ot in ("list", "stats"):
@@ -890,16 +890,16 @@ def _should_use_list_context(
 
 
 def _build_context_with_output_type(
-    points: List[Any],
-    *,
-    action: str,
-    base_route: str,
-    output_type: Optional[str],
-    max_items: int,
-    query_text: str,
-    people_terms: Optional[List[str]] = None,
-    person_ids: Optional[List[str]] = None,
-    org_role: Optional[str] = None,
+        points: List[Any],
+        *,
+        action: str,
+        base_route: str,
+        output_type: Optional[str],
+        max_items: int,
+        query_text: str,
+        people_terms: Optional[List[str]] = None,
+        person_ids: Optional[List[str]] = None,
+        org_role: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
     fieldset = _resolve_output_fieldset(output_type)
     if _should_use_list_context(action=action, base_route=base_route, output_type=output_type):
@@ -1039,10 +1039,10 @@ def _call_dense_retrieve_hybrid_multi(
     )
 
 def _validate_lookup_join_hybrid_metrics(
-    *,
-    mode: str,
-    contract_scope: str,
-    timings: Mapping[str, Any],
+        *,
+        mode: str,
+        contract_scope: str,
+        timings: Mapping[str, Any],
 ) -> None:
     if str(mode).strip().lower() not in ("lookup", "join"):
         return
@@ -1106,15 +1106,15 @@ def _ensure_collection_mark(points: List[Any], col: str) -> None:
         _attach_collection(p, col)
 
 def _apply_dense_threshold(
-    sr: Dict[str, Any],
-    *,
-    use_dense_threshold: bool,
-    min_dense_score: float,
-    log_prefix: str,
-    col: Optional[str] = None,
-    action: Optional[str] = None,
-    base_route: Optional[str] = None,
-    relation: Optional[Tuple[str, str]] = None,
+        sr: Dict[str, Any],
+        *,
+        use_dense_threshold: bool,
+        min_dense_score: float,
+        log_prefix: str,
+        col: Optional[str] = None,
+        action: Optional[str] = None,
+        base_route: Optional[str] = None,
+        relation: Optional[Tuple[str, str]] = None,
 ) -> None:
     dense_map = sr.get("dense")
     if not isinstance(dense_map, dict):
@@ -1388,12 +1388,12 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
     return out
 
 def _filter_score(
-    p: Any,
-    it: NormalizedIntent,
-    base_route: str,
-    *,
-    strict_ids: bool,
-    mode: str = "search",
+        p: Any,
+        it: NormalizedIntent,
+        base_route: str,
+        *,
+        strict_ids: bool,
+        mode: str = "search",
 ) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title_text"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
@@ -1726,11 +1726,11 @@ def _final_rerank(
         fam = item["fam"]
         tag_sc = item["tag"]
         tot = (
-            (w_rrf * norm_rrf[i])
-            + (w_kw * norm_kw[i])
-            + (w_f * norm_f[i])
-            + (w_fam * norm_fam[i])
-            + (w_tag * norm_tag[i])
+                (w_rrf * norm_rrf[i])
+                + (w_kw * norm_kw[i])
+                + (w_f * norm_f[i])
+                + (w_fam * norm_fam[i])
+                + (w_tag * norm_tag[i])
         )
         legacy_tot = (legacy_w_rrf * rrf_sc) + (legacy_w_kw * kw_sc) + (legacy_w_f * f_sc) + fam + tag_sc
 
@@ -1821,11 +1821,11 @@ def _has_relation_join_ids(it: NormalizedIntent) -> bool:
 
 
 def _resolve_join_execution_policy(
-    *,
-    relation: Optional[Tuple[str, str]],
-    mode: str,
-    action: Optional[str],
-    has_relation_join_ids: bool,
+        *,
+        relation: Optional[Tuple[str, str]],
+        mode: str,
+        action: Optional[str],
+        has_relation_join_ids: bool,
 ) -> Dict[str, Any]:
     """JOIN 경로 실행 정책을 단일화한다.
 
@@ -1879,10 +1879,10 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
 
 
 def _build_plan(
-    it: NormalizedIntent,
-    *,
-    preferred_mode: Optional[str] = None,
-    preferred_mode_source: Optional[str] = None,
+        it: NormalizedIntent,
+        *,
+        preferred_mode: Optional[str] = None,
+        preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
     action = it.action
     base_route = it.base_route
@@ -1953,12 +1953,12 @@ def _normalize_strategy_target_cols(cols: Any) -> List[str]:
 
 
 def _strategy_consistency_or_violation(
-    *,
-    strict: bool,
-    mismatch_kind: str,
-    planner_value: Any,
-    executed_value: Any,
-    context: Optional[Dict[str, Any]] = None,
+        *,
+        strict: bool,
+        mismatch_kind: str,
+        planner_value: Any,
+        executed_value: Any,
+        context: Optional[Dict[str, Any]] = None,
 ) -> None:
     if planner_value == executed_value:
         return
@@ -1981,11 +1981,11 @@ def _strategy_consistency_or_violation(
 
 
 def _strategy_must_match_or_violation(
-    *,
-    mismatch_kind: str,
-    planner_value: Any,
-    executed_value: Any,
-    context: Optional[Dict[str, Any]] = None,
+        *,
+        mismatch_kind: str,
+        planner_value: Any,
+        executed_value: Any,
+        context: Optional[Dict[str, Any]] = None,
 ) -> None:
     """planner 계약 불일치 시 즉시 중단한다(환경 strict 토글 무시)."""
     _strategy_consistency_or_violation(
@@ -1998,9 +1998,9 @@ def _strategy_must_match_or_violation(
 
 
 def _diff_filter_spec(
-    *,
-    planner_filter_spec: Dict[str, Any],
-    executed_filter_spec: Dict[str, Any],
+        *,
+        planner_filter_spec: Dict[str, Any],
+        executed_filter_spec: Dict[str, Any],
 ) -> Dict[str, Any]:
     """planner가 명시한 filter 계약 키 기준으로 실행 스펙 diff를 계산한다."""
     planner_keys = sorted(str(k) for k in (planner_filter_spec or {}).keys())
@@ -2406,17 +2406,17 @@ def _run_rag_with_vectors(
             data["relation"] = _normalize_relation_hint(data.get("relation"))
 
         for key in (
-            "years",
-            "people_terms",
-            "gender_terms",
-            "org_terms",
-            "perf_types",
-            "keywords",
-            "perf_tag_filters",
-            "project_tag_filters",
-            "tag_filters",
-            "ids_flat",
-            "remove_terms_for_head",
+                "years",
+                "people_terms",
+                "gender_terms",
+                "org_terms",
+                "perf_types",
+                "keywords",
+                "perf_tag_filters",
+                "project_tag_filters",
+                "tag_filters",
+                "ids_flat",
+                "remove_terms_for_head",
         ):
             if key in data:
                 data[key] = _normalize_hint_terms(data.get(key))
@@ -2706,8 +2706,8 @@ def _run_rag_with_vectors(
         include_people_filter_in_gate = bool(
             people_filter is not None
             and (
-                bool(effective_people_affiliation_org_terms)
-                or (org_role == "affiliation")
+                    bool(effective_people_affiliation_org_terms)
+                    or (org_role == "affiliation")
             )
         )
         if participant_org_filter is not None:
@@ -2741,8 +2741,8 @@ def _run_rag_with_vectors(
             include_people_filter_in_gate=bool(
                 people_filter is not None
                 and (
-                    bool(effective_people_affiliation_org_terms)
-                    or (org_role == "affiliation")
+                        bool(effective_people_affiliation_org_terms)
+                        or (org_role == "affiliation")
                 )
             ),
         )
@@ -3188,8 +3188,8 @@ def _run_rag_with_vectors(
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     lookup_filter_policy_raw = (
-        getattr(ctx, "lookup_filter_policy_hint", None)
-        or os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")
+            getattr(ctx, "lookup_filter_policy_hint", None)
+            or os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")
     )
     lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_raw)
     if lookup_filter_policy is None:
@@ -3211,8 +3211,8 @@ def _run_rag_with_vectors(
     detail_lookup_request = bool(
         plan.mode == "lookup"
         and (
-            str(action or "").strip().lower() == "detail"
-            or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
+                str(action or "").strip().lower() == "detail"
+                or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
         )
     )
     if lookup_title_filter_policy == "hard" and not detail_lookup_request:
@@ -3324,12 +3324,12 @@ def _run_rag_with_vectors(
     join_hop1_lookup_filter_enabled = bool(
         plan.mode == "join"
         and (
-            relation_lookup_enforce
-            or (
-                base_route == "project"
-                and relation == ("project", "perf")
-                and bool(people_terms)
-            )
+                relation_lookup_enforce
+                or (
+                        base_route == "project"
+                        and relation == ("project", "perf")
+                        and bool(people_terms)
+                )
         )
     )
     if join_hop1_lookup_filter_enabled:
@@ -3752,10 +3752,10 @@ def _run_rag_with_vectors(
             missing = _count_missing_join_keys(hop1_top)
             if missing.get("missing_pjt_any") or missing.get("missing_tag"):
                 if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in (
-                    "1",
-                    "true",
-                    "yes",
-                    "y",
+                        "1",
+                        "true",
+                        "yes",
+                        "y",
                 ):
                     _hydrate_points_payload(qdr, hop1_top)
                 _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup")
@@ -3847,10 +3847,10 @@ def _run_rag_with_vectors(
                 join_promote_one_must = bool(
                     people_promote_one_must
                     or (
-                        join_hop1_lookup_filter_enabled
-                        and lookup_filter_policy == "must_one_then_should"
-                        and not people_ids
-                        and len(people_terms) == 1
+                            join_hop1_lookup_filter_enabled
+                            and lookup_filter_policy == "must_one_then_should"
+                            and not people_ids
+                            and len(people_terms) == 1
                     )
                 )
                 final_people_terms = list(ctx.people_terms or people_terms or [])
@@ -3888,7 +3888,7 @@ def _run_rag_with_vectors(
                         hop1_lookup_filter = _and_filter(
                             hop1_lookup_filter,
                             participant_org_filter or org_filter,
-                        )
+                            )
                     if project_tag_filter:
                         hop1_lookup_filter = _and_filter(hop1_lookup_filter, project_tag_filter)
                 elif hop1_col == COL_PERF:
@@ -4795,7 +4795,7 @@ def _run_rag_with_vectors(
             "[RAG.HYDRATE_CHECK] top_k=%s missing_meta_basic_kor_pjt_nm=%s",
             check_top_k,
             missing_kor or "none",
-        )
+            )
 
         # 공통 필터 적용 검증(관측용): LOOKUP/JOIN에서 인명 하드 필터가 걸렸는데 topN에 0건이면 경고
         probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
@@ -4904,9 +4904,9 @@ def _run_rag_with_vectors(
 # Public entry
 # -------------------------
 def run_rag_once(
-    query: str,
-    model_name: str = DEFAULT_MODEL_NAME,
-    intent_payload: Any = None,
+        query: str,
+        model_name: str = DEFAULT_MODEL_NAME,
+        intent_payload: Any = None,
 ) -> RagResult:
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
@@ -4929,9 +4929,9 @@ def run_rag_once(
     )
 
 def run_rag_ab_compare(
-    query: str,
-    model_name: str = DEFAULT_MODEL_NAME,
-    intent_payload: Any = None,
+        query: str,
+        model_name: str = DEFAULT_MODEL_NAME,
+        intent_payload: Any = None,
 ) -> Dict[str, RagResult]:
     res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload)
     return {"M": res_m}

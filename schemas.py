@@ -7,33 +7,6 @@ from typing import Any, Dict, Literal, Optional, Tuple
 from rag_parts.pipeline_steps import NormalizedIntent
 
 
-def _ensure_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, (tuple, set)):
-        return list(value)
-    return [value]
-
-
-def _ensure_ids_map(value: Any) -> Dict[str, list[str]]:
-    if not isinstance(value, dict):
-        return {}
-    out: Dict[str, list[str]] = {}
-    for key, raw in value.items():
-        skey = str(key).strip()
-        if not skey:
-            continue
-        vals = []
-        for item in _ensure_list(raw):
-            text = str(item).strip()
-            if text:
-                vals.append(text)
-        out[skey] = vals
-    return out
-
-
 @dataclass(frozen=True)
 class IntentPayloadV2:
     """RAG intent_payload.v2 계약: normalized_intent 단일 필드."""
@@ -123,29 +96,29 @@ class ExecutionContext:
             join_key_mode=getattr(intent, "join_key_mode", None),
             is_id_query=intent.is_id_query,
             output_type=intent.output_type,
-            categories=_ensure_list(getattr(intent, "categories", [])),
-            planner_limit=getattr(intent, "planner_limit", None),
-            retrieval_query=getattr(intent, "retrieval_query", None),
-            planner_confidence=getattr(intent, "planner_confidence", None),
-            years=[str(v).strip() for v in _ensure_list(getattr(intent, "years", [])) if str(v).strip()],
-            year_from=getattr(intent, "year_from", None),
-            year_to=getattr(intent, "year_to", None),
-            people_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "people_terms", [])) if str(v).strip()],
-            gender_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "gender_terms", [])) if str(v).strip()],
-            org_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "org_terms", [])) if str(v).strip()],
-            org_role=getattr(intent, "org_role", None),
-            lead_org_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "lead_org_terms", [])) if str(v).strip()],
-            participant_org_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "participant_org_terms", [])) if str(v).strip()],
-            people_affiliation_org_terms=[str(v).strip() for v in _ensure_list(getattr(intent, "people_affiliation_org_terms", [])) if str(v).strip()],
-            perf_types=[str(v).strip() for v in _ensure_list(getattr(intent, "perf_types", [])) if str(v).strip()],
-            keywords=[str(v).strip() for v in _ensure_list(getattr(intent, "keywords", [])) if str(v).strip()],
-            title=[str(v).strip() for v in _ensure_list(getattr(intent, "title", [])) if str(v).strip()],
-            perf_tag_filters=[str(v).strip() for v in _ensure_list(getattr(intent, "perf_tag_filters", [])) if str(v).strip()],
-            project_tag_filters=[str(v).strip() for v in _ensure_list(getattr(intent, "project_tag_filters", [])) if str(v).strip()],
-            tag_filters=[str(v).strip() for v in _ensure_list(getattr(intent, "tag_filters", [])) if str(v).strip()],
-            ids_map=_ensure_ids_map(getattr(intent, "ids_map", {})),
-            ids_flat=[str(v).strip() for v in _ensure_list(getattr(intent, "ids_flat", [])) if str(v).strip()],
-            remove_terms_for_head=[str(v).strip() for v in _ensure_list(getattr(intent, "remove_terms_for_head", [])) if str(v).strip()],
+            categories=list(intent.categories),
+            planner_limit=intent.planner_limit,
+            retrieval_query=intent.retrieval_query,
+            planner_confidence=intent.planner_confidence,
+            years=list(intent.years),
+            year_from=intent.year_from,
+            year_to=intent.year_to,
+            people_terms=list(intent.people_terms),
+            gender_terms=list(intent.gender_terms),
+            org_terms=list(intent.org_terms),
+            org_role=intent.org_role,
+            lead_org_terms=list(getattr(intent, "lead_org_terms", []) or []),
+            participant_org_terms=list(getattr(intent, "participant_org_terms", []) or []),
+            people_affiliation_org_terms=list(getattr(intent, "people_affiliation_org_terms", []) or []),
+            perf_types=list(intent.perf_types),
+            keywords=list(intent.keywords),
+            title=list(intent.title),
+            perf_tag_filters=list(intent.perf_tag_filters),
+            project_tag_filters=list(intent.project_tag_filters),
+            tag_filters=list(intent.tag_filters),
+            ids_map=dict(intent.ids_map),
+            ids_flat=list(intent.ids_flat),
+            remove_terms_for_head=list(intent.remove_terms_for_head),
             people_terms_match_mode=getattr(intent, "people_terms_match_mode", None),
             people_terms_min_should=getattr(intent, "people_terms_min_should", None),
             lookup_filter_policy_hint=getattr(intent, "lookup_filter_policy", None),

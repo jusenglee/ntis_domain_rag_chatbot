@@ -4,11 +4,11 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 def promote_mode_from_search_hits(
-    *,
-    current_mode: str,
-    search_hits: List[Any],
-    ids_map: Dict[str, List[str]],
-    planner_strategy: Any,
+        *,
+        current_mode: str,
+        search_hits: List[Any],
+        ids_map: Dict[str, List[str]],
+        planner_strategy: Any,
 ) -> Dict[str, Any]:
     """검색 hit 기반 mode 승격 정책(기본 비활성).
 

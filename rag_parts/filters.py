@@ -751,13 +751,13 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
 
 def build_collection_join_filter(
-    *,
-    hop2_col: str,
-    join_key_mode: str,
-    join_ids: List[str],
-    pjt_nos: List[str],
-    query: str = "",
-    fallback_spec: Optional[JoinFilterInput] = None,
+        *,
+        hop2_col: str,
+        join_key_mode: str,
+        join_ids: List[str],
+        pjt_nos: List[str],
+        query: str = "",
+        fallback_spec: Optional[JoinFilterInput] = None,
 ) -> "qmodels.Filter":
     """Hop2 컬렉션 기준으로 JOIN 필터를 생성한다.
 

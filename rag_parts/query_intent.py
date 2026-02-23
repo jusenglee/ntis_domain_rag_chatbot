@@ -427,13 +427,13 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         if norm in _ORG_TERM_STOPWORDS:
             return
         if any(sw in norm for sw in ("과제", "성과", "목록", "조회", "정보")) and not any(
-            sf.lower() in norm for sf in _ORG_SUFFIXES
+                sf.lower() in norm for sf in _ORG_SUFFIXES
         ):
             return
         if not (
-            _ORG_ACRONYM_RE.fullmatch(term)
-            or any(sf in term for sf in _ORG_SUFFIXES)
-            or re.search(r"[가-힣]{2,}(?:대학|대학교|연구원|연구소|센터|공단|청)", term)
+                _ORG_ACRONYM_RE.fullmatch(term)
+                or any(sf in term for sf in _ORG_SUFFIXES)
+                or re.search(r"[가-힣]{2,}(?:대학|대학교|연구원|연구소|센터|공단|청)", term)
         ):
             return
 
@@ -587,10 +587,10 @@ def _choose_project_key_type(q: str, ids_map: Dict[str, List[str]], *, prefer: O
 
 
 def normalize_ids_map_for_strategy(
-    q: str,
-    ids_map: Dict[str, List[str]],
-    *,
-    prefer_project_key: Optional[str] = None,
+        q: str,
+        ids_map: Dict[str, List[str]],
+        *,
+        prefer_project_key: Optional[str] = None,
 ) -> tuple[Dict[str, List[str]], Optional[str]]:
     """extract 단계 후보 ids_map을 normalize/plan 단계용으로 정규화한다."""
     normalized = {k: _normalize_str_list(v) for k, v in (ids_map or {}).items()}
@@ -777,24 +777,24 @@ def _extract_people_terms_for_affiliation(q: str) -> List[str]:
 
 
 def _apply_affiliation_intent(
-    q: str,
-    *,
-    org_role: Optional[str],
-    people_terms: List[str],
-    org_terms: List[str],
-    ids_map: Dict[str, List[str]],
-    relation: Optional[Tuple[str, str]],
+        q: str,
+        *,
+        org_role: Optional[str],
+        people_terms: List[str],
+        org_terms: List[str],
+        ids_map: Dict[str, List[str]],
+        relation: Optional[Tuple[str, str]],
 ) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
     if org_role != "affiliation":
         return people_terms, org_terms, relation
 
     tl = (q or "").lower()
     has_people_signal = (
-        bool(people_terms)
-        or bool(ids_map.get("person_no"))
-        or bool(_NAME_NEAR_CUE_RE.search(q or ""))
-        or bool(_NAME_LABEL_RE.search(q or ""))
-        or _has_any_cue(tl, PEOPLE_CUES)
+            bool(people_terms)
+            or bool(ids_map.get("person_no"))
+            or bool(_NAME_NEAR_CUE_RE.search(q or ""))
+            or bool(_NAME_LABEL_RE.search(q or ""))
+            or _has_any_cue(tl, PEOPLE_CUES)
     )
     if not has_people_signal:
         return people_terms, org_terms, relation
@@ -814,13 +814,13 @@ def _strip_non_join_relation(relation: Optional[Tuple[str, str]]) -> Optional[Tu
 
 
 def _normalize_base_route_for_people_org_project_perf(
-    *,
-    base_route: str,
-    has_people: bool,
-    has_org: bool,
-    has_project: bool,
-    has_perf: bool,
-    wants_list: bool,
+        *,
+        base_route: str,
+        has_people: bool,
+        has_org: bool,
+        has_project: bool,
+        has_perf: bool,
+        wants_list: bool,
 ) -> str:
     """
     사람/기관 + 과제 + 성과 신호가 동시에 있으면 head를 project/perf로 정규화한다.
@@ -837,15 +837,15 @@ def _normalize_base_route_for_people_org_project_perf(
 
 
 def _resolve_action(
-    *,
-    base_route: str,
-    relation: Optional[Tuple[str, str]],
-    wants_count: bool,
-    wants_list: bool,
-    wants_detail: bool,
-    intent: str,
-    ids_map: Dict[str, List[str]],
-    is_id_query: bool,
+        *,
+        base_route: str,
+        relation: Optional[Tuple[str, str]],
+        wants_count: bool,
+        wants_list: bool,
+        wants_detail: bool,
+        intent: str,
+        ids_map: Dict[str, List[str]],
+        is_id_query: bool,
 ) -> str:
     if base_route == "support":
         return "support"
@@ -959,8 +959,8 @@ class QueryIntent:
 
 
 def normalize_join_key_mode(
-    join_key_mode: Optional[str],
-    ids_map: Optional[Dict[str, List[str]]],
+        join_key_mode: Optional[str],
+        ids_map: Optional[Dict[str, List[str]]],
 ) -> tuple[Optional[Literal["instance", "group"]], list[str], list[str]]:
     """JOIN key mode와 ids_map 정합성을 정규화한다."""
     ids_map = ids_map if isinstance(ids_map, dict) else {}
@@ -1222,11 +1222,11 @@ def relation_target_collections(relation: Optional[Tuple[str, str]]) -> List[str
 
 
 def _classify_query_heuristic(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str] = None,
-    ids_map: Optional[Dict[str, List[str]]] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str] = None,
+        ids_map: Optional[Dict[str, List[str]]] = None,
 ) -> QueryIntent:
     q = (q or "").strip()
     tl = q.lower()
@@ -1242,15 +1242,15 @@ def _classify_query_heuristic(
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
 
     is_id_query = (
-        len(rare_kws) >= 2
-        or bool(_RST_ID_RE.search(q))
-        or bool(_DOI_RE.search(q))
-        or bool(_ISSN_RE.search(q))
-        or bool(_PATENT_REG_NO_RE.search(q))
-        or bool(_PJT_ID_NUM_RE.search(q))
-        or bool(_PJT_NO_LABEL_RE.search(q))
-        or _has_any_cue(tl, ID_QUERY_CUES)
-        or any(bool(v) for v in (ids_map or {}).values())
+            len(rare_kws) >= 2
+            or bool(_RST_ID_RE.search(q))
+            or bool(_DOI_RE.search(q))
+            or bool(_ISSN_RE.search(q))
+            or bool(_PATENT_REG_NO_RE.search(q))
+            or bool(_PJT_ID_NUM_RE.search(q))
+            or bool(_PJT_NO_LABEL_RE.search(q))
+            or _has_any_cue(tl, ID_QUERY_CUES)
+            or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
@@ -1370,11 +1370,11 @@ def _classify_query_heuristic(
 
 
 def classify_query(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str] = None,
-    hint: Optional[Any] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str] = None,
+        hint: Optional[Any] = None,
 ) -> QueryIntent:
     q = (q or "").strip()
     tl = q.lower()
