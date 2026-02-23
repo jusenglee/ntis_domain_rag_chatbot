@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .query_intent import normalize_org_terms
+
 from .constants import (
     COL_PERF,
     COL_PROJECT,
@@ -378,14 +380,15 @@ def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
 
 def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
     """참여기관/참여인력소속기관을 nested로 매칭."""
-    if qmodels is None or not spec.terms:
+    terms_norm = normalize_org_terms(spec.terms)
+    if qmodels is None or not terms_norm:
         return None
 
     nested_conditions: List[Any] = []
 
     # prtcp_org[] -> org_nm
     should_org: List[Any] = [
-        qmodels.FieldCondition(key="org_nm", match=make_match_any(spec.terms))
+        qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm))
     ]
     nested_filter_org = _build_filter(must=None, should=should_org, must_not=None, min_should=1)
     nested_org = _make_nested_condition("prtcp_org", nested_filter_org)
@@ -393,7 +396,7 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
         nested_conditions.append(nested_org)
 
     # prtcp_mp[] -> blng_org_nm
-    nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
+    nested_mp_org = _build_prtcp_mp_org_nested_filter(terms_norm)
     if nested_mp_org is not None:
         nested_conditions.append(nested_mp_org)
 
@@ -410,7 +413,8 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     - participant: prtcp_org/prtcp_mp nested 중심
     - None: (최상위 org_nm) OR (nested 참여기관/참여인력소속기관)
     """
-    if qmodels is None or not spec.terms:
+    terms_norm = normalize_org_terms(spec.terms)
+    if qmodels is None or not terms_norm:
         return None
 
     role = (spec.role or "").strip().lower() or None
@@ -420,7 +424,7 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     should: List[Any] = []
 
     # 최상위 기관명
-    should.append(qmodels.FieldCondition(key="org_nm", match=make_match_any(spec.terms)))
+    should.append(qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm)))
 
     # role=None 이면 nested도 함께 OR
     if role is None:
@@ -562,7 +566,7 @@ def _build_prtcp_mp_people_nested_filter(
     people_terms = [str(x).strip() for x in (people_terms or []) if str(x).strip()]
     person_ids = [str(x).strip() for x in (person_ids or []) if str(x).strip()]
     gender_terms = [str(x).strip() for x in (gender_terms or []) if str(x).strip()]
-    org_terms = [str(x).strip() for x in (org_terms or []) if str(x).strip()]
+    org_terms = normalize_org_terms([str(x).strip() for x in (org_terms or []) if str(x).strip()])
 
     force_one_must = bool(promote_one_must and not person_ids and len(people_terms) == 1)
 
