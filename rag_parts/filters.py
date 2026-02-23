@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -85,6 +86,50 @@ _PJT_ID_VALUE_RE = re.compile(r"^\d{8,12}$")
 # -----------------------------
 NestedCondition = getattr(qmodels, "NestedCondition", None) if qmodels else None
 Nested = getattr(qmodels, "Nested", None) if qmodels else None
+
+logger = logging.getLogger(__name__)
+_PROJECT_KEY_POLICY_LOGGED = False
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return bool(default)
+
+
+def _allow_legacy_meta_keys() -> bool:
+    return _env_bool("RAG_ALLOW_LEGACY_META_KEYS", default=False)
+
+
+def _log_project_key_policy_once() -> None:
+    global _PROJECT_KEY_POLICY_LOGGED
+    if _PROJECT_KEY_POLICY_LOGGED:
+        return
+    _PROJECT_KEY_POLICY_LOGGED = True
+    mode = "legacy-enabled" if _allow_legacy_meta_keys() else "top-level-only"
+    logger.info("project key policy mode=%s (RAG_ALLOW_LEGACY_META_KEYS)", mode)
+
+
+def _project_key_candidates(kind: str) -> List[str]:
+    if kind == "pjt_id":
+        primary = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+        legacy = "meta_basic.pjt_id"
+    else:
+        primary = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+        legacy = "meta_basic.pjt_no"
+
+    key_cands: List[str] = []
+    for key in (primary, kind):
+        if key and key not in key_cands:
+            key_cands.append(key)
+
+    if _allow_legacy_meta_keys() and legacy not in key_cands:
+        key_cands.append(legacy)
+
+    return key_cands
 
 
 def make_match_any(values: List[str]):
@@ -538,7 +583,7 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(norm_terms)))
     if not should:
         return None
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 def build_title_filter(terms: List[str]) -> Optional[Any]:
@@ -699,18 +744,9 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if pjt_id_values and pjt_no_values:
         raise ValueError("build_project_id_filter는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
 
-    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-
-    id_key_cands: List[str] = []
-    for k in [primary_id, "meta_basic.pjt_id", "pjt_id"]:
-        if k and k not in id_key_cands:
-            id_key_cands.append(k)
-
-    no_key_cands: List[str] = []
-    for k in [primary_no, "meta_basic.pjt_no", "pjt_no"]:
-        if k and k not in no_key_cands:
-            no_key_cands.append(k)
+    _log_project_key_policy_once()
+    id_key_cands = _project_key_candidates("pjt_id")
+    no_key_cands = _project_key_candidates("pjt_no")
 
     should: List[Any] = []
     if pjt_id_values:
@@ -718,7 +754,7 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if pjt_no_values:
         should.extend(qmodels.FieldCondition(key=k, match=make_match_any(pjt_no_values)) for k in no_key_cands)
 
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 # -----------------------------
@@ -742,8 +778,9 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
     validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
 
-    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    _log_project_key_policy_once()
+    primary_id = _project_key_candidates("pjt_id")[0]
+    primary_no = _project_key_candidates("pjt_no")[0]
 
     must: List[Any] = []
     if mode == "group":
@@ -869,14 +906,17 @@ def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], qu
     must: List[Any] = []
     join_values_norm = _dedupe_non_empty(join_values)
     if join_values_norm:
-        join_any = qmodels.Filter(
+        join_any = _build_filter(
+            must=None,
             should=[
                 qmodels.FieldCondition(
                     key=k,
                     match=make_match_any(join_values_norm),
                 )
                 for k in key_cands
-            ]
+            ],
+            must_not=None,
+            min_should=1,
         )
         must.append(join_any)
 
@@ -889,22 +929,14 @@ def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], qu
 
 def build_perf_filter_by_pjt_id(pjt_ids: List[str], query: str = "") -> "qmodels.Filter":
     """PJT_ID 키 계열만 사용해서 perf 필터를 생성한다."""
-    primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    key_cands: List[str] = []
-    for k in [primary, "meta_basic.pjt_id", "pjt_id"]:
-        if k and k not in key_cands:
-            key_cands.append(k)
-    return _build_perf_filter_for_keys(pjt_ids, key_cands, query)
+    _log_project_key_policy_once()
+    return _build_perf_filter_for_keys(pjt_ids, _project_key_candidates("pjt_id"), query)
 
 
 def build_perf_filter_by_pjt_no(pjt_nos: List[str], query: str = "") -> "qmodels.Filter":
     """PJT_NO 키 계열만 사용해서 perf 필터를 생성한다."""
-    primary = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-    key_cands: List[str] = []
-    for k in [primary, "meta_basic.pjt_no", "pjt_no"]:
-        if k and k not in key_cands:
-            key_cands.append(k)
-    return _build_perf_filter_for_keys(pjt_nos, key_cands, query)
+    _log_project_key_policy_once()
+    return _build_perf_filter_for_keys(pjt_nos, _project_key_candidates("pjt_no"), query)
 
 
 def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":

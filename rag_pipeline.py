@@ -97,7 +97,8 @@ from rag_parts.promotion import (
     promote_mode_from_search_hits as _promote_mode_from_search_hits,
 )
 from rag_parts.join import (
-    extract_pjt_ids as _extract_pjt_ids,
+    extract_join_keys as _extract_join_keys,
+    is_valid_join_key as _is_valid_join_key,
     normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.filters import (
@@ -437,14 +438,19 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
-def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
+def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "instance") -> Dict[str, int]:
     stats = {
         "total": 0,
         "missing_pjt_id": 0,
         "missing_pjt_no": 0,
         "missing_tag": 0,
         "missing_pjt_any": 0,
+        "invalid_pjt_id": 0,
+        "invalid_pjt_no": 0,
+        "suspected_swap": 0,
+        "same_id_no": 0,
     }
+    mode = str(join_key_mode or "instance").strip().lower()
     for p in points or []:
         payload = getattr(p, "payload", None) or {}
         if not isinstance(payload, dict):
@@ -461,6 +467,24 @@ def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
             stats["missing_tag"] += 1
         if not pjt_id and not pjt_no:
             stats["missing_pjt_any"] += 1
+
+        if pjt_id and pjt_no and pjt_id == pjt_no:
+            stats["same_id_no"] += 1
+
+        if mode == "instance":
+            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+                stats["invalid_pjt_id"] += 1
+            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+                stats["invalid_pjt_no"] += 1
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, mode="instance")) and _is_valid_join_key(pjt_no, mode="instance"):
+                stats["suspected_swap"] += 1
+        elif mode == "group":
+            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+                stats["invalid_pjt_no"] += 1
+            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+                stats["invalid_pjt_id"] += 1
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, mode="group")) and _is_valid_join_key(pjt_id, mode="group"):
+                stats["suspected_swap"] += 1
     return stats
 
 def _ensure_join_keys_in_payload(
@@ -516,32 +540,20 @@ def _raise_on_missing_join_keys(
         points: Iterable[Any],
         *,
         scope: str,
+        join_key_mode: str = "instance",
 ) -> Dict[str, int]:
-    missing = _count_missing_join_keys(points)
-    if not (missing.get("missing_pjt_any") or missing.get("missing_tag")):
+    missing = _count_missing_join_keys(points, join_key_mode=join_key_mode)
+    has_missing = bool(missing.get("missing_pjt_any") or missing.get("missing_tag"))
+    has_invalid = bool(missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no"))
+    if not (has_missing or has_invalid):
         return missing
 
-    log_kv(
-        "RAG.JOIN_KEYS.MISSING",
-        level="error",
-        scope=scope,
-        missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
-        missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
-        missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
-        missing_tag=int(missing.get("missing_tag", 0) or 0),
-        total=int(missing.get("total", 0) or 0),
-    )
-
-    if _debug_force_join_keys_enabled():
-        forced = _ensure_join_keys_in_payload(points)
-        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced)
-        missing = _count_missing_join_keys(points)
-        if not (missing.get("missing_pjt_any") or missing.get("missing_tag")):
-            return missing
+    if has_missing:
         log_kv(
-            "RAG.JOIN_KEYS.DEBUG_FORCE_FAILED",
+            "RAG.JOIN_KEYS.MISSING",
             level="error",
             scope=scope,
+            join_key_mode=join_key_mode,
             missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
             missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
             missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
@@ -549,35 +561,56 @@ def _raise_on_missing_join_keys(
             total=int(missing.get("total", 0) or 0),
         )
 
+    if has_invalid:
+        log_kv(
+            "RAG.JOIN_KEYS.INVALID",
+            level="error",
+            scope=scope,
+            join_key_mode=join_key_mode,
+            invalid_pjt_id=int(missing.get("invalid_pjt_id", 0) or 0),
+            invalid_pjt_no=int(missing.get("invalid_pjt_no", 0) or 0),
+            suspected_swap=int(missing.get("suspected_swap", 0) or 0),
+            same_id_no=int(missing.get("same_id_no", 0) or 0),
+            total=int(missing.get("total", 0) or 0),
+        )
+
+    if has_missing and _debug_force_join_keys_enabled():
+        forced = _ensure_join_keys_in_payload(points)
+        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced)
+        missing = _count_missing_join_keys(points, join_key_mode=join_key_mode)
+        has_missing = bool(missing.get("missing_pjt_any") or missing.get("missing_tag"))
+        has_invalid = bool(missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no"))
+        if not (has_missing or has_invalid):
+            return missing
+        if has_missing:
+            log_kv(
+                "RAG.JOIN_KEYS.DEBUG_FORCE_FAILED",
+                level="error",
+                scope=scope,
+                missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
+                missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
+                missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
+                missing_tag=int(missing.get("missing_tag", 0) or 0),
+                total=int(missing.get("total", 0) or 0),
+            )
+
+    error_code = "JOIN_KEYS_INVALID" if has_invalid else "JOIN_KEYS_MISSING"
+
     raise StrategyViolation(
-        error_code="JOIN_KEYS_MISSING",
+        error_code=error_code,
         reason=(
-            f"[{scope}] missing join keys in hop1 payload: "
+            f"[{scope}] invalid/missing join keys in hop1 payload: "
             f"missing_pjt_id={missing.get('missing_pjt_id', 0)}, "
             f"missing_pjt_no={missing.get('missing_pjt_no', 0)}, "
             f"missing_pjt_any={missing.get('missing_pjt_any', 0)}, "
             f"missing_tag={missing.get('missing_tag', 0)}, "
+            f"invalid_pjt_id={missing.get('invalid_pjt_id', 0)}, "
+            f"invalid_pjt_no={missing.get('invalid_pjt_no', 0)}, "
+            f"suspected_swap={missing.get('suspected_swap', 0)}, "
+            f"same_id_no={missing.get('same_id_no', 0)}, "
             f"total={missing.get('total', 0)}"
         ),
     )
-
-def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    pjt_nos: List[str] = []
-    seen: set[str] = set()
-    for p in points or []:
-        payload = getattr(p, "payload", None) or {}
-        if not isinstance(payload, dict):
-            continue
-        # pjt_no 추출은 group join 전용이며 pjt_id를 대체키로 사용하지 않는다.
-        pjt_no = _pick_first(payload.get("pjt_no"))
-        if not pjt_no or pjt_no in seen:
-            continue
-        seen.add(pjt_no)
-        pjt_nos.append(pjt_no)
-        if len(pjt_nos) >= max_ids:
-            break
-    return pjt_nos
-
 
 def _ensure_join_mode_has_keys(
         *,
@@ -605,7 +638,7 @@ def _ensure_join_mode_has_keys(
         return
 
     if hop1_top:
-        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys")
+        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys", join_key_mode=join_key_mode)
 
     join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
     raise StrategyViolation(
@@ -3922,8 +3955,8 @@ def _run_rag_with_vectors(
                 ctx_hard_limit,
             )
             _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-            missing = _count_missing_join_keys(hop1_top)
-            if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+            missing = _count_missing_join_keys(hop1_top, join_key_mode="instance")
+            if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
                 if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in (
                         "1",
                         "true",
@@ -3931,9 +3964,9 @@ def _run_rag_with_vectors(
                         "y",
                 ):
                     _hydrate_points_payload(qdr, hop1_top)
-                _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup")
+                _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup", join_key_mode="instance")
 
-        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        join_ids = [str(x).strip() for x in _extract_join_keys(hop1_top, mode="instance", max_ids=50).get("keys", []) if str(x).strip()]
         join_keys = list(dict.fromkeys(join_ids))
         log_kv(
             "RAG.PERF.FOLLOWUP.JOIN_IDS",
@@ -4177,18 +4210,37 @@ def _run_rag_with_vectors(
                     ctx_hard_limit,
                 )
                 _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-                missing = _count_missing_join_keys(hop1_top)
-                if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+                missing = _count_missing_join_keys(hop1_top, join_key_mode=join_key_mode)
+                if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
                     if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
                         _hydrate_points_payload(qdr, hop1_top)
-                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}")
+                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode)
 
             if join_key_mode == "group":
-                join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
+                join_pjt_nos = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_ids = []
             else:
-                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
+                join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_nos = []
+
+            if int(join_key_result.get("suspected_swap_count", 0) or 0) > 0:
+                log_kv(
+                    "RAG.JOIN_KEYS.SUSPECTED_SWAP",
+                    level="error",
+                    scope=f"join_hop1:{hop1_col}:extract",
+                    join_key_mode=join_key_mode,
+                    suspected_swap_count=int(join_key_result.get("suspected_swap_count", 0) or 0),
+                    suspected_swaps=join_key_result.get("suspected_swaps", [])[:10],
+                )
+                raise StrategyViolation(
+                    error_code="JOIN_KEYS_INVALID",
+                    reason=(
+                        f"[join_hop1:{hop1_col}:extract] suspected join key swap detected "
+                        f"(join_key_mode={join_key_mode}, count={int(join_key_result.get('suspected_swap_count', 0) or 0)})"
+                    ),
+                )
 
             log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
             if join_key_mode == "group":
