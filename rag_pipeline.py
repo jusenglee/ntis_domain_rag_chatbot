@@ -97,7 +97,8 @@ from rag_parts.promotion import (
     promote_mode_from_search_hits as _promote_mode_from_search_hits,
 )
 from rag_parts.join import (
-    extract_pjt_ids as _extract_pjt_ids,
+    extract_join_keys as _extract_join_keys,
+    is_valid_join_key as _is_valid_join_key,
     normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.filters import (
@@ -437,22 +438,6 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
-_PJT_ID_ALLOWED_RE = re.compile(r"^\d{8,12}$")
-_PJT_NO_ALLOWED_RE = re.compile(os.getenv("RAG_JOIN_PJT_NO_ALLOWED_RE", r"^[A-Za-z0-9_-]{4,40}$"))
-
-
-def _is_valid_join_key(value: str, *, key: str, join_key_mode: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return False
-    mode = str(join_key_mode or "instance").strip().lower()
-    if mode == "group" and key == "pjt_no":
-        return bool(_PJT_NO_ALLOWED_RE.fullmatch(text))
-    if mode == "instance" and key == "pjt_id":
-        return bool(_PJT_ID_ALLOWED_RE.fullmatch(text))
-    return True
-
-
 def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "instance") -> Dict[str, int]:
     stats = {
         "total": 0,
@@ -487,18 +472,18 @@ def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "ins
             stats["same_id_no"] += 1
 
         if mode == "instance":
-            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode):
+            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
                 stats["invalid_pjt_id"] += 1
-            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode="group"):
+            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode)) and _is_valid_join_key(pjt_no, key="pjt_id", join_key_mode=mode):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, mode="instance")) and _is_valid_join_key(pjt_no, mode="instance"):
                 stats["suspected_swap"] += 1
         elif mode == "group":
-            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode):
+            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode="instance"):
+            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
                 stats["invalid_pjt_id"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode)) and _is_valid_join_key(pjt_id, key="pjt_no", join_key_mode=mode):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, mode="group")) and _is_valid_join_key(pjt_id, mode="group"):
                 stats["suspected_swap"] += 1
     return stats
 
@@ -626,24 +611,6 @@ def _raise_on_missing_join_keys(
             f"total={missing.get('total', 0)}"
         ),
     )
-
-def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    pjt_nos: List[str] = []
-    seen: set[str] = set()
-    for p in points or []:
-        payload = getattr(p, "payload", None) or {}
-        if not isinstance(payload, dict):
-            continue
-        # pjt_no 추출은 group join 전용이며 pjt_id를 대체키로 사용하지 않는다.
-        pjt_no = _pick_first(payload.get("pjt_no"))
-        if not pjt_no or pjt_no in seen:
-            continue
-        seen.add(pjt_no)
-        pjt_nos.append(pjt_no)
-        if len(pjt_nos) >= max_ids:
-            break
-    return pjt_nos
-
 
 def _ensure_join_mode_has_keys(
         *,
@@ -3999,7 +3966,7 @@ def _run_rag_with_vectors(
                     _hydrate_points_payload(qdr, hop1_top)
                 _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup", join_key_mode="instance")
 
-        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        join_ids = [str(x).strip() for x in _extract_join_keys(hop1_top, mode="instance", max_ids=50).get("keys", []) if str(x).strip()]
         join_keys = list(dict.fromkeys(join_ids))
         log_kv(
             "RAG.PERF.FOLLOWUP.JOIN_IDS",
@@ -4250,11 +4217,30 @@ def _run_rag_with_vectors(
                     _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode)
 
             if join_key_mode == "group":
-                join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
+                join_pjt_nos = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_ids = []
             else:
-                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
+                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
+                join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_nos = []
+
+            if int(join_key_result.get("suspected_swap_count", 0) or 0) > 0:
+                log_kv(
+                    "RAG.JOIN_KEYS.SUSPECTED_SWAP",
+                    level="error",
+                    scope=f"join_hop1:{hop1_col}:extract",
+                    join_key_mode=join_key_mode,
+                    suspected_swap_count=int(join_key_result.get("suspected_swap_count", 0) or 0),
+                    suspected_swaps=join_key_result.get("suspected_swaps", [])[:10],
+                )
+                raise StrategyViolation(
+                    error_code="JOIN_KEYS_INVALID",
+                    reason=(
+                        f"[join_hop1:{hop1_col}:extract] suspected join key swap detected "
+                        f"(join_key_mode={join_key_mode}, count={int(join_key_result.get('suspected_swap_count', 0) or 0)})"
+                    ),
+                )
 
             log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
             if join_key_mode == "group":
