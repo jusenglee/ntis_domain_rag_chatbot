@@ -16,6 +16,7 @@ from .query_intent import (
     classify_query as _classify_query,
     normalize_categories,
     normalize_join_key_mode,
+    normalize_org_terms,
 )
 
 
@@ -163,9 +164,9 @@ def normalize_intent(
     if not ids_flat:
         ids_flat = _flatten_ids(ids_map)
 
-    org_terms = _normalize_terms(getattr(intent, "org_terms", None) or [])
+    org_terms = normalize_org_terms(_normalize_terms(getattr(intent, "org_terms", None) or []))
     if hint_org_terms:
-        org_terms = _normalize_terms(list(hint_org_terms))
+        org_terms = normalize_org_terms(list(hint_org_terms))
 
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])
 
@@ -177,13 +178,22 @@ def normalize_intent(
 
     org_role = (hint_org_role or getattr(intent, "org_role", None) or "").strip().lower() or None
 
-    lead_org_terms = _normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or [])
-    participant_org_terms = _normalize_terms(
+    lead_org_terms = normalize_org_terms(_normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or []))
+    participant_org_terms = normalize_org_terms(_normalize_terms(
         hint_participant_org_terms or getattr(intent, "participant_org_terms", None) or []
-    )
-    people_affiliation_org_terms = _normalize_terms(
+    ))
+    people_affiliation_org_terms = normalize_org_terms(_normalize_terms(
         hint_people_affiliation_org_terms or getattr(intent, "people_affiliation_org_terms", None) or []
-    )
+    ))
+
+    if not org_terms and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
+        org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
+    if org_role in ("lead", "performer", "performing") and not lead_org_terms and org_terms:
+        lead_org_terms = list(org_terms)
+    if org_role == "participant" and not participant_org_terms and org_terms:
+        participant_org_terms = list(org_terms)
+    if org_role == "affiliation" and not people_affiliation_org_terms and org_terms:
+        people_affiliation_org_terms = list(org_terms)
 
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
