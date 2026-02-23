@@ -16,6 +16,7 @@ Triton Inference Server gRPC 클라이언트 래퍼 모듈.
 
 import hashlib
 import json
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -50,6 +51,18 @@ _PROMPT_TOKEN_CACHE_LOCK = threading.Lock()
 _PROMPT_TOKEN_CACHE_MAX = 1024
 _SHORT_PROMPT_CHAR_THRESHOLD = 2000
 _SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
+_HARMONY_FINAL_MODEL = "gpt_oss_triton_0"
+_HARMONY_FINAL_MARKER = "<|channel|>final<|message|>"
+_HARMONY_END_MARKERS = ("<|return|>/<|end|>", "<|return|>", "<|end|>")
+
+_HARMONY_FULL_PATTERN = re.compile(
+    r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|return\|>/<\|end\|>",
+    flags=re.DOTALL,
+)
+_HARMONY_FALLBACK_PATTERN = re.compile(
+    r"<\|channel\|>final<\|message\|>(.*)",
+    flags=re.DOTALL,
+)
 
 # ---------------------------------------------------------------------------
 # 0. 토크나이저 관련 유틸
@@ -123,6 +136,54 @@ def _get_prompt_tokens(model_name: str, prompt: str) -> int:
         fallback = max(1, len(prompt) // 2)
         _set_cached_prompt_tokens(cache_key, fallback)
         return fallback
+
+
+def _should_apply_harmony_final(model_name: str) -> bool:
+    return model_name == _HARMONY_FINAL_MODEL
+
+
+def _trim_harmony_end_markers(text: str) -> str:
+    trimmed = text
+    for marker in _HARMONY_END_MARKERS:
+        marker_idx = trimmed.find(marker)
+        if marker_idx != -1:
+            trimmed = trimmed[:marker_idx]
+    return trimmed
+
+
+def _extract_harmony_final(text: str) -> str:
+    """
+    Harmony 형식 응답에서 final 채널 내용만 추출.
+
+    지원 포맷:
+    1) <|start|>assistant<|channel|>final<|message|>...<|return|>/<|end|>
+    2) <|channel|>final<|message|>...
+
+    매칭 실패 시에는 원문을 반환한다.
+    """
+    full_match = _HARMONY_FULL_PATTERN.search(text)
+    if full_match:
+        return full_match.group(1).strip()
+
+    fallback_match = _HARMONY_FALLBACK_PATTERN.search(text)
+    if fallback_match:
+        return _trim_harmony_end_markers(fallback_match.group(1)).strip()
+
+    return text.strip()
+
+
+def _extract_harmony_visible_stream_text(buffer: str) -> str:
+    final_idx = buffer.find(_HARMONY_FINAL_MARKER)
+    if final_idx != -1:
+        content = buffer[final_idx + len(_HARMONY_FINAL_MARKER):]
+        return _trim_harmony_end_markers(content)
+
+    # Harmony 제어 토큰이 보이면 final 채널이 나오기 전까지는 숨긴다.
+    if "<|channel|>" in buffer or "<|start|>" in buffer or "<|message|>" in buffer:
+        return ""
+
+    # plain text 응답은 기존처럼 그대로 노출
+    return buffer
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +373,7 @@ def _triton_stream_generator(
 
     q: List[str] = []
     done = threading.Event()
+    apply_harmony_final = _should_apply_harmony_final(model_name)
 
     def on_resp(result, error):
         """
@@ -362,12 +424,26 @@ def _triton_stream_generator(
         last_yield_time = start_time
         got_first = False
 
+        harmony_buffer = ""
+        flushed_len = 0
+
         while not done.is_set() or q:
             if q:
                 chunk = q.pop(0)
                 got_first = True
                 last_yield_time = time.time()
-                yield chunk
+
+                if not apply_harmony_final:
+                    yield chunk
+                    continue
+
+                harmony_buffer += chunk
+                visible_text = _extract_harmony_visible_stream_text(harmony_buffer)
+                if len(visible_text) > flushed_len:
+                    delta = visible_text[flushed_len:]
+                    flushed_len = len(visible_text)
+                    if delta:
+                        yield delta
             else:
                 now = time.time()
                 if not got_first and (now - start_time > first_token_timeout):
@@ -377,6 +453,13 @@ def _triton_stream_generator(
                     logger.warning("[WARN] Idle timeout after response started")
                     break
                 time.sleep(0.005)
+
+        if apply_harmony_final:
+            final_text = _extract_harmony_final(harmony_buffer)
+            if len(final_text) > flushed_len:
+                delta = final_text[flushed_len:]
+                if delta:
+                    yield delta
     finally:
         # 스트림 종료 (에러/정상 여부와 상관없이)
         try:
@@ -424,6 +507,9 @@ def _triton_infer_sync(
         accumulated_text += chunk
 
     accumulated_text = accumulated_text.strip()
+
+    if _should_apply_harmony_final(model_name):
+        accumulated_text = _extract_harmony_final(accumulated_text)
 
     return accumulated_text
 
@@ -506,7 +592,7 @@ def triton_infer(
             request_type="stream",
         )
 
-        # raw 스트림 그대로 반환
+        # 모델별 후처리 반영 스트림 반환
         return base_gen
 
     # Sync Path: 스트리밍을 내부적으로 사용하여 최종 문자열 반환
