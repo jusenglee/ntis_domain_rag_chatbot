@@ -182,6 +182,8 @@ def sanitize_llm_json(raw: Any) -> str:
     if not text:
         return "{}"
 
+    text = _strip_gpt_oss_sections(text)
+
     fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
     if fenced:
         text = fenced.group(1).strip()
@@ -191,6 +193,24 @@ def sanitize_llm_json(raw: Any) -> str:
     if 0 <= start < end:
         return text[start : end + 1]
     return text
+
+
+def _strip_gpt_oss_sections(text: str) -> str:
+    """gpt-oss 계열 출력에서 분석/메타 섹션을 제거해 JSON 파싱 성공률을 높인다."""
+    t = text or ""
+
+    assistantfinal_idx = t.find("assistantfinal")
+    if assistantfinal_idx != -1:
+        return t[assistantfinal_idx + len("assistantfinal") :].strip()
+
+    assistant_idx = t.rfind("\nassistant")
+    if assistant_idx != -1:
+        return t[assistant_idx + len("\nassistant") :].strip()
+
+    if t.lstrip().startswith("analysis"):
+        return t.split("\n", 1)[-1].strip()
+
+    return t.strip()
 
 
 def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
