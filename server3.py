@@ -23,6 +23,7 @@ import redis.asyncio as redis
 
 # LangChain & LangGraph
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
@@ -162,6 +163,28 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
+
+
+def sanitize_llm_json(raw: Any) -> str:
+    """LLM 응답에서 JSON payload를 최대한 안전하게 추출한다."""
+    if hasattr(raw, "content"):
+        raw = getattr(raw, "content")
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+
+    text = str(raw or "").strip()
+    if not text:
+        return "{}"
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        return text[start : end + 1]
+    return text
 
 
 def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
@@ -1162,29 +1185,25 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
          "[현재 질문]\n{question}")
     ])
 
-    try:
-        chain = prompt | llm
-        invoke_payload = {
-            "format_instructions": parser.get_format_instructions(),
-            "history": history_str or '없음',
-            "prev_context": prev_context_str or "없음",
-            "question": state.messages[-1].content
-        }
-        invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
-        llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
-        result = _parse_structured_response(
-            parser,
-            llm_result,
-            fallback_to_json_extraction=parser_fallback_required,
-        )
+    chain = prompt | llm
+    max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
+    last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            result: KnowledgeSufficiency = await chain.ainvoke({
+            invoke_payload = {
+                "format_instructions": parser.get_format_instructions(),
                 "history": history_str or '없음',
                 "prev_context": prev_context_str or "없음",
-                "question": state.messages[-1].content
-            })
+                "question": state.messages[-1].content,
+            }
+            invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
+            llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
+            result = _parse_structured_response(
+                parser,
+                llm_result,
+                fallback_to_json_extraction=parser_fallback_required,
+            )
             result = KnowledgeSufficiency.model_validate(result.model_dump())
 
             log_section("KNOWLEDGE SUFFICIENCY",
@@ -1235,7 +1254,9 @@ def _parse_structured_response(
 ):
     """구조화 출력 지원 시에는 스키마 객체로 바로 검증하고, 미지원 시 기존 JSON 추출 경로를 사용한다."""
     if fallback_to_json_extraction:
-        return parser.invoke(sanitize_llm_json(llm_result))
+        sanitize_fn = globals().get("sanitize_llm_json")
+        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
+        return parser.invoke(sanitized_payload)
     return parser.invoke(llm_result)
 
 
