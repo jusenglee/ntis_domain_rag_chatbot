@@ -1255,7 +1255,19 @@ def _parse_structured_response(
         sanitize_fn = globals().get("sanitize_llm_json")
         sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
         return parser.invoke(sanitized_payload)
-    return parser.invoke(llm_result)
+
+    try:
+        return parser.invoke(llm_result)
+    except Exception as first_error:
+        sanitize_fn = globals().get("sanitize_llm_json")
+        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
+        try:
+            return parser.invoke(sanitized_payload)
+        except Exception as second_error:
+            raise ValueError(
+                "Structured response parsing failed after sanitize_llm_json retry "
+                f"(initial_error={type(first_error).__name__}, retry_error={type(second_error).__name__})"
+            ) from first_error
 
 
 # --- Node 6: RAG Search (Parallel) ---
