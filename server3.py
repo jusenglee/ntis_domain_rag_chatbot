@@ -985,6 +985,11 @@ async def _run_question_analysis(
         - limit: int
         - retrieval_query: string
         - confidence: float (0.0~1.0)
+
+        아래 형식 지침을 반드시 따를 것:
+        {format_instructions}
+
+        JSON 외 어떤 텍스트도 출력 금지.
     
     """
 
