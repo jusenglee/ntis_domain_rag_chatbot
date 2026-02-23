@@ -672,13 +672,12 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     """Redis에서 대화 이력 및 이전 컨텍스트 로드"""
     cid = state.conversation_id
     loaded_history, ctx_list, fallback_context = await load_conversation_memory(cid)
-    current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
                 f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
-        "chat_history": current_full_history,
+        "chat_history": loaded_history,
         "prev_context": ctx_list,
         "fallback_context": fallback_context
     }
@@ -725,7 +724,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     result = await _run_question_analysis(
         question=state.messages[-1].content,
         conversation_id=state.conversation_id,
-        chat_history=state.chat_history,
+        chat_history=state.chat_history + [state.messages[-1]],
         prev_context=state.prev_context,
     )
     return {"question_analysis": result}
