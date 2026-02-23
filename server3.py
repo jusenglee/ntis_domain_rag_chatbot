@@ -36,7 +36,7 @@ from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
-from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
+from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
 from schemas import IntentPayloadV2
 from settings import (
     REDIS_URL,
@@ -372,6 +372,7 @@ class QuestionAnalysisV2(BaseModel):
         (실행 직전 validate_planner_contract에서 수집/차단)
 
         단, 모드가 JOIN이 아닐 때 join_key_mode가 들어오면 실행 혼선을 막기 위해 null로 정규화한다.
+        또한 사람/기관 이름 기반 질의는 SEARCH 오염 방지를 위해 LOOKUP 우선으로 정규화한다.
         """
         if self.mode != "JOIN":
             # 파싱 단계에서는 실패시키지 않고 정규화만 한다.
@@ -380,6 +381,36 @@ class QuestionAnalysisV2(BaseModel):
             except Exception:
                 # Pydantic config가 frozen인 경우 등
                 pass
+
+        if self.mode == "SEARCH":
+            filters = dict(self.filters or {})
+            name_lookup_keys = (
+                "participant_researcher_name",
+                "researcher_name",
+                "people_name",
+                "lead_org_name",
+                "participant_org_name",
+                "people_affiliation_org_name",
+                "org_name",
+                "org",
+            )
+
+            def _has_non_empty(v: Any) -> bool:
+                if v is None:
+                    return False
+                if isinstance(v, str):
+                    return bool(v.strip())
+                if isinstance(v, (list, tuple, set)):
+                    return any(str(x).strip() for x in v if x is not None)
+                return bool(str(v).strip())
+
+            has_name_lookup_signal = any(_has_non_empty(filters.get(k)) for k in name_lookup_keys)
+            if has_name_lookup_signal:
+                try:
+                    object.__setattr__(self, "mode", "LOOKUP")
+                except Exception:
+                    pass
+
         return self
 
 
@@ -632,6 +663,7 @@ async def _run_question_analysis(
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
+        - 사람 이름/기관명 기반 질의(예: "신동구 참여과제", "김재수 논문", "삼성 참여 과제")는 mode="LOOKUP"을 우선합니다.
         - people/org 식별 Hop1(2-hop)은 기본 비활성입니다. (동명이인/식별자 요구 등 예외에서만 사용)
         
         ====================
@@ -703,7 +735,15 @@ async def _run_question_analysis(
         - lead_org_name (배열)               : org_nm (수행기관)
         - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
         - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
-        - org_role (문자열, 선택): "lead" | "participant" | null
+        - year_from / year_to (문자열): 예) "2021" ~ "2023", "2020" 이후는 year_from만
+        - perf_types (배열): ["논문", "특허", "보고서", ...] 성과유형
+        - title_terms (배열): 타이틀 키워드
+        - org_role (문자열, 선택): "lead" | "participant" | "affiliation" | null
+        - 기관 슬롯은 역할별로 엄격 분리합니다(혼용 금지):
+          * "ETRI 수행 과제" -> lead_org_name=["ETRI"]
+          * "ETRI 참여 과제" -> participant_org_name=["ETRI"]
+          * "ETRI 소속 연구자 과제" -> people_affiliation_org_name=["ETRI"]
+          * 역할이 명확하면 해당 슬롯 외 나머지 두 슬롯은 반드시 []
         
         사람/기관 필터 강도 규칙(중요):
         - ID가 있으면 must 수준(LOOKUP 하드필터)로 가정
@@ -1401,6 +1441,9 @@ async def build_intent_payload(
     hint_participant_org_terms: List[str] = []
     hint_people_affiliation_org_terms: List[str] = []
     hint_title_terms: List[str] = []
+    hint_year_from: str | None = None
+    hint_year_to: str | None = None
+    hint_perf_types: List[str] = []
     hint_org_role = None
 
     if question_analysis and isinstance(question_analysis.filters, dict):
@@ -1418,6 +1461,13 @@ async def build_intent_payload(
             hint_title_terms = _normalize_hint_terms([*hint_title_terms, *title_terms])
             kws = list(dict.fromkeys([*kws, *title_terms]))
 
+        hint_year_from = str(filters.get("year_from") or "").strip() or hint_year_from
+        hint_year_to = str(filters.get("year_to") or "").strip() or hint_year_to
+        perf_types_hint = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+        if perf_types_hint:
+            hint_perf_types = _normalize_hint_terms([*hint_perf_types, *perf_types_hint])
+            kws = list(dict.fromkeys([*kws, *perf_types_hint]))
+
         hint_org_role = filters.get("org_role")
 
         people_terms_hint = _normalize_hint_terms([
@@ -1427,12 +1477,12 @@ async def build_intent_payload(
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
-        lead_org_terms_hint = _normalize_hint_terms(
+        lead_org_terms_hint = normalize_org_terms(_normalize_hint_terms(
             filters.get("lead_org_name") or filters.get("performing_org_name")
-        )
-        participant_org_terms_hint = _normalize_hint_terms(filters.get("participant_org_name"))
-        people_affiliation_org_terms_hint = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
-        generic_org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+        ))
+        participant_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("participant_org_name")))
+        people_affiliation_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("people_affiliation_org_name")))
+        generic_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("org_name") or filters.get("org")))
 
         if lead_org_terms_hint:
             hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
@@ -1445,7 +1495,7 @@ async def build_intent_payload(
                 [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
             )
 
-        org_terms_hint = _normalize_hint_terms([
+        org_terms_hint = normalize_org_terms([
             *generic_org_terms_hint,
             *lead_org_terms_hint,
             *participant_org_terms_hint,
@@ -1458,6 +1508,9 @@ async def build_intent_payload(
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
         "title_terms": hint_title_terms,
+        "year_from": hint_year_from,
+        "year_to": hint_year_to,
+        "perf_types": hint_perf_types,
         "org_role": hint_org_role,
         "lead_org_terms": hint_lead_org_terms,
         "participant_org_terms": hint_participant_org_terms,
@@ -1527,6 +1580,23 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     }
     relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
 
+    filters = dict(getattr(qa, "filters", {}) or {})
+    lead_org_terms = normalize_org_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+    participant_org_terms = normalize_org_terms(filters.get("participant_org_name"))
+    people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
+    org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms, *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else [])])
+
+    planner_year_from = str(filters.get("year_from") or "").strip() or None
+    planner_year_to = str(filters.get("year_to") or "").strip() or None
+    planner_years = _normalize_hint_terms(filters.get("years"))
+    if not planner_year_from and planner_years:
+        planner_year_from = planner_years[0]
+    if not planner_year_to and planner_years:
+        planner_year_to = planner_years[-1]
+
+    planner_perf_types = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+    planner_title_terms = _normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
+
     patched = replace(
         intent,
         base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
@@ -1537,6 +1607,16 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),
         planner_confidence=confidence,
+        org_role=str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None,
+        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
+        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
+        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
+        year_from=planner_year_from or getattr(intent, "year_from", None),
+        year_to=planner_year_to or getattr(intent, "year_to", None),
+        years=planner_years or list(getattr(intent, "years", []) or []),
+        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        title=planner_title_terms or list(getattr(intent, "title", []) or []),
     )
     return patched, True
 

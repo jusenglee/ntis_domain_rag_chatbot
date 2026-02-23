@@ -108,8 +108,77 @@ _ORG_TERM_STOPWORDS = {
 }
 
 
+_ORG_ALIAS_GROUPS = [
+    ["etri", "한국전자통신연구원"],
+    ["kist", "한국과학기술연구원"],
+    ["kaist", "한국과학기술원"],
+]
+
+_ORG_LEGAL_PREFIX_RE = re.compile(r"^(?:\(주\)|㈜|주식회사|\(재\)|재단법인)\s*")
+_ORG_PAREN_RE = re.compile(r"[\(\[\{<].*?[\)\]\}>]")
+_ORG_SUFFIX_TRIM_RE = re.compile(r"(?:대학교|대학|연구원|연구소)$")
+
+
 def _normalize_org_term(term: str) -> str:
-    return re.sub(r"\s+", " ", (term or "")).strip()
+    text = re.sub(r"\s+", " ", (term or "")).strip()
+    if not text:
+        return ""
+    text = _ORG_LEGAL_PREFIX_RE.sub("", text)
+    text = _ORG_PAREN_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip(" .,-")
+    return text
+
+
+def normalize_org_terms(values: Any, *, with_alias: bool = True) -> List[str]:
+    if values is None:
+        seq: List[Any] = []
+    elif isinstance(values, str):
+        seq = [values]
+    elif isinstance(values, (list, tuple, set)):
+        seq = list(values)
+    else:
+        seq = [values]
+
+    base_terms: List[str] = []
+    seen_base: set[str] = set()
+    for raw in seq:
+        term = _normalize_org_term(str(raw))
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen_base:
+            continue
+        seen_base.add(key)
+        base_terms.append(term)
+
+    if not with_alias:
+        return base_terms
+
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _push(term: str) -> None:
+        t = _normalize_org_term(term)
+        if not t:
+            return
+        k = t.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(t)
+
+    for term in base_terms:
+        _push(term)
+        trimmed = _ORG_SUFFIX_TRIM_RE.sub("", term).strip()
+        if trimmed and len(trimmed) >= 2:
+            _push(trimmed)
+        tl = term.lower()
+        for group in _ORG_ALIAS_GROUPS:
+            if any(alias in tl for alias in group):
+                for alias in group:
+                    _push(alias)
+
+    return out
 
 
 def _is_rare_token(tok: str) -> bool:
@@ -208,7 +277,7 @@ ORG_ROLE_AFFILIATION_CUES = [
     "소속", "소속기관", "소속 기관", "재직", "근무",
 ]
 ORG_ROLE_PARTICIPANT_CUES = [
-    "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+    "참여", "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
     "공동", "협력", "컨소시엄",
 ]
 ORG_ROLE_PERFORMER_CUES = [
@@ -898,7 +967,14 @@ class QueryIntent:
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     org_role: Optional[str] = None
+    lead_org_terms: List[str] = field(default_factory=list)
+    participant_org_terms: List[str] = field(default_factory=list)
+    people_affiliation_org_terms: List[str] = field(default_factory=list)
     years: List[str] = field(default_factory=list)
+    year_from: Optional[str] = None
+    year_to: Optional[str] = None
+    perf_types: List[str] = field(default_factory=list)
+    title: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
     # tag filters
@@ -938,7 +1014,14 @@ class QueryIntent:
             "gender_terms": self.gender_terms,
             "org_terms": self.org_terms,
             "org_role": self.org_role,
+            "lead_org_terms": self.lead_org_terms,
+            "participant_org_terms": self.participant_org_terms,
+            "people_affiliation_org_terms": self.people_affiliation_org_terms,
             "years": self.years,
+            "year_from": self.year_from,
+            "year_to": self.year_to,
+            "perf_types": self.perf_types,
+            "title": self.title,
             "ids_map": self.ids_map,
             "ids_flat": self.ids_flat,
             "project_tag_filters": self.project_tag_filters,
@@ -1137,7 +1220,14 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "people_terms": _get_attr(hint, "people_terms"),
         "org_terms": _get_attr(hint, "organizations") or _get_attr(hint, "org_terms"),
         "org_role": _get_attr(hint, "org_role"),
+        "lead_org_terms": _get_attr(hint, "lead_org_name") or _get_attr(hint, "lead_org_terms"),
+        "participant_org_terms": _get_attr(hint, "participant_org_name") or _get_attr(hint, "participant_org_terms"),
+        "people_affiliation_org_terms": _get_attr(hint, "people_affiliation_org_name") or _get_attr(hint, "people_affiliation_org_terms"),
         "years": _get_attr(hint, "years"),
+        "year_from": _get_attr(hint, "year_from"),
+        "year_to": _get_attr(hint, "year_to"),
+        "perf_types": _get_attr(hint, "perf_types"),
+        "title": _get_attr(hint, "title") or _get_attr(hint, "title_terms"),
         "project_tag_filters": _get_attr(hint, "project_tag_filters"),
         "perf_tag_filters": _get_attr(hint, "perf_tag_filters"),
         "wants_count": _get_attr(hint, "wants_count"),
@@ -1257,11 +1347,19 @@ def _classify_query_heuristic(
     # entities
     people_terms: List[str] = []
     gender_terms = extract_gender_terms(q, kws)
-    org_terms = extract_org_terms(q, kws)
+    org_terms = normalize_org_terms(extract_org_terms(q, kws))
     org_role = extract_org_role(q)
     years = extract_years(q)
+    lead_org_terms: List[str] = []
+    participant_org_terms: List[str] = []
+    people_affiliation_org_terms: List[str] = []
     if org_role == "affiliation":
         people_terms = _extract_people_terms_for_affiliation(q)
+        people_affiliation_org_terms = list(org_terms)
+    elif org_role in ("lead", "performer", "performing"):
+        lead_org_terms = list(org_terms)
+    elif org_role == "participant":
+        participant_org_terms = list(org_terms)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
@@ -1350,7 +1448,14 @@ def _classify_query_heuristic(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        lead_org_terms=lead_org_terms,
+        participant_org_terms=participant_org_terms,
+        people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
@@ -1470,9 +1575,28 @@ def classify_query(
 
     people_terms = _normalize_str_list(plan.get("people_terms") or plan.get("researchers"))
     gender_terms = _normalize_str_list(plan.get("gender_terms"))
-    org_terms = _normalize_str_list(plan.get("org_terms") or plan.get("organizations"))
+    plan_filters = plan.get("filters") if isinstance(plan.get("filters"), dict) else {}
+    org_terms = normalize_org_terms(_normalize_str_list(plan.get("org_terms") or plan.get("organizations")))
+    lead_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("lead_org_terms")
+        or (plan_filters.get("lead_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    participant_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("participant_org_terms")
+        or (plan_filters.get("participant_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    people_affiliation_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("people_affiliation_org_terms")
+        or (plan_filters.get("people_affiliation_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    if not org_terms:
+        org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
     org_role = str(plan.get("org_role") or "").strip().lower() or None
     years = _normalize_str_list(plan.get("years"))
+    year_from = str(plan.get("year_from") or "").strip() or None
+    year_to = str(plan.get("year_to") or "").strip() or None
+    perf_types = _normalize_str_list(plan.get("perf_types"))
+    title_terms = _normalize_str_list(plan.get("title") or plan.get("title_terms"))
 
     if not gender_terms:
         gender_terms = extract_gender_terms(q, kws)
@@ -1480,8 +1604,18 @@ def classify_query(
         org_role = extract_org_role(q)
     if not years:
         years = extract_years(q)
+    if not year_from and years:
+        year_from = years[0]
+    if not year_to and years:
+        year_to = years[-1]
     if org_role == "affiliation" and not people_terms:
         people_terms = _extract_people_terms_for_affiliation(q)
+    if org_role in ("lead", "performer", "performing") and not lead_org_terms:
+        lead_org_terms = list(org_terms)
+    if org_role == "participant" and not participant_org_terms:
+        participant_org_terms = list(org_terms)
+    if org_role == "affiliation" and not people_affiliation_org_terms:
+        people_affiliation_org_terms = list(org_terms)
 
     has_people = bool(people_terms) or bool(ids_map.get("person_no"))
     has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
@@ -1569,7 +1703,14 @@ def classify_query(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        lead_org_terms=lead_org_terms,
+        participant_org_terms=participant_org_terms,
+        people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,

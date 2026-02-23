@@ -60,6 +60,7 @@ from rag_parts.query_intent import (
     get_relation_route,
     relation_target_collections,
     normalize_categories,
+    normalize_org_terms,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -78,6 +79,7 @@ from rag_parts.planner_contract import (
     normalize_lookup_title_filter_policy,
     validate_planner_contract,
     StrategyViolation,
+    StrategyCompiler,
 )
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
@@ -91,6 +93,9 @@ from rag_parts.rank_merge import (
     rrf_merge as _rrf_merge,
 )
 from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
+from rag_parts.promotion import (
+    promote_mode_from_search_hits as _promote_mode_from_search_hits,
+)
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
     normalize_relation_hint as _normalize_relation_hint,
@@ -1856,10 +1861,11 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     우선순위(강제):
     0) relation action -> join (ids 유무와 무관)
     1) relation + join ids -> join
-    2) id query 또는 명확한 ids -> lookup
-    3) list/stats/download -> lookup
-    4) topic/search -> search (기본 유지)
-    5) 그 외 -> search
+    2) 사람/기관 이름 기반 질의 -> lookup (SEARCH 오염 방지)
+    3) id query 또는 명확한 ids -> lookup
+    4) list/stats/download -> lookup
+    5) topic/search -> search (기본 유지)
+    6) 그 외 -> search
     """
     action = it.action
     rel = it.relation
@@ -1869,6 +1875,24 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
         return "lookup", "people_project_lookup"
     if rel and _has_relation_join_ids(it):
         return "join", "relation_ids"
+
+    people_terms = [str(t).strip() for t in (getattr(it, "people_terms", None) or []) if str(t).strip()]
+    lead_org_terms = [str(t).strip() for t in (getattr(it, "lead_org_terms", None) or []) if str(t).strip()]
+    participant_org_terms = [str(t).strip() for t in (getattr(it, "participant_org_terms", None) or []) if str(t).strip()]
+    affiliation_org_terms = [str(t).strip() for t in (getattr(it, "people_affiliation_org_terms", None) or []) if str(t).strip()]
+    org_terms = [str(t).strip() for t in (getattr(it, "org_terms", None) or []) if str(t).strip()]
+
+    has_name_lookup_signal = bool(
+        people_terms
+        or lead_org_terms
+        or participant_org_terms
+        or affiliation_org_terms
+        or org_terms
+        or (str(getattr(it, "org_role", "") or "").strip().lower() in ("lead", "performer", "performing", "participant", "affiliation"))
+    )
+    if has_name_lookup_signal and action not in ("support",):
+        return "lookup", "people_org_name_lookup"
+
     if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
         return "lookup", "id_or_exact"
     if action in ("list", "stats", "download"):
@@ -2224,6 +2248,7 @@ def _run_rag_with_vectors(
         sparse_topk: Optional[int] = None,
         sparse_weight: Optional[float] = None,
         domain_hint: Optional[str] = None,
+        promotion_depth: int = 0,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, Any] = _init_timings()
@@ -2470,10 +2495,10 @@ def _run_rag_with_vectors(
                 "org_terms": [],
             }
 
-        lead_org_terms = _normalize_hint_terms(filters_obj.get("lead_org_name"))
-        participant_org_terms = _normalize_hint_terms(filters_obj.get("participant_org_name"))
-        people_affiliation_org_terms = _normalize_hint_terms(filters_obj.get("people_affiliation_org_name"))
-        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name"))
+        lead_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("lead_org_name")))
+        participant_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("participant_org_name")))
+        people_affiliation_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("people_affiliation_org_name")))
+        generic_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("org_name")))
 
         org_terms = _normalize_hint_terms(
             [
@@ -2607,18 +2632,18 @@ def _run_rag_with_vectors(
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
-    lead_org_terms = [t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()]
-    participant_org_terms = [
+    org_terms = normalize_org_terms([t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()])
+    lead_org_terms = normalize_org_terms([t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()])
+    participant_org_terms = normalize_org_terms([
         t.strip() for t in (list(getattr(ctx, "participant_org_terms", []) or []) or []) if str(t).strip()
-    ]
-    people_affiliation_org_terms = [
+    ])
+    people_affiliation_org_terms = normalize_org_terms([
         t.strip()
         for t in (list(getattr(ctx, "people_affiliation_org_terms", []) or []) or [])
         if str(t).strip()
-    ]
+    ])
     if (not org_terms) and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
-        org_terms = _normalize_hint_terms([
+        org_terms = normalize_org_terms([
             *lead_org_terms,
             *participant_org_terms,
             *people_affiliation_org_terms,
@@ -3442,6 +3467,34 @@ def _run_rag_with_vectors(
             source="planner_filter_contract",
         )
 
+
+    compiled_strategy = StrategyCompiler.compile(
+        mode=plan.mode,
+        relation=relation,
+        target_cols=list(ctx.target_collections or []),
+        fallback_target_cols=list(plan.target_collections or []),
+        planner_filter_spec=planner_filter_spec,
+        topk_spec=topk_spec,
+        rerank_spec=rerank_spec,
+        search_filter_signal=search_filter_signal,
+        search_filter_conf_ok=search_filter_conf_ok,
+        lookup_filter_policy_hint=lookup_filter_policy,
+        lookup_title_filter_policy_hint=lookup_title_filter_policy,
+        detail_lookup_request=detail_lookup_request,
+    )
+    if compiled_strategy.hop1_spec or compiled_strategy.hop2_spec:
+        log_kv(
+            "RAG.JOIN.HOP.COMPILED",
+            hop1_spec=compiled_strategy.hop1_spec,
+            hop2_spec=compiled_strategy.hop2_spec,
+        )
+
+    search_filter_enabled = bool(compiled_strategy.search_filter_enabled)
+    lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
+    lookup_filter_policy = compiled_strategy.lookup_filter_policy
+    lookup_title_filter_policy = compiled_strategy.lookup_title_filter_policy
+    relation_lookup_enforce = bool(compiled_strategy.relation_lookup_enforce)
+
     join_hop1_lookup_filter_enabled = bool(
         plan.mode == "join"
         and (
@@ -3512,17 +3565,16 @@ def _run_rag_with_vectors(
     search_filter_server_policy = "disabled" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
     filter_spec = {
-        **planner_filter_spec,
-        "search_filter_enabled": search_filter_enabled,
-        "lookup_filter_enabled": lookup_filter_enabled,
-        "relation_lookup_enforce": relation_lookup_enforce,
-        "lookup_filter_policy": lookup_filter_policy,
-        "lookup_title_filter_policy": lookup_title_filter_policy,
-        "filter_signal": search_filter_signal,
-        "filter_conf_ok": search_filter_conf_ok,
+        **dict(compiled_strategy.filter_spec or {}),
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
     }
+
+    topk_spec = dict(compiled_strategy.topk_spec or {})
+    rerank_spec = dict(compiled_strategy.rerank_spec or {})
+    compiled_qdrant_filter = compiled_strategy.qdrant_filter
+    if compiled_qdrant_filter is not None:
+        log_kv("RAG.FILTER.COMPILED.QDRANT", compiled_filter=_serialize_filter_for_log(compiled_qdrant_filter))
     planner_filter_diff = _diff_filter_spec(
         planner_filter_spec=planner_filter_spec,
         executed_filter_spec=filter_spec,
@@ -3550,7 +3602,7 @@ def _run_rag_with_vectors(
         relation=relation,
         join_key_mode=resolved_join_key_mode,
         people_terms=tuple(people_terms or []),
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         search_filter_enabled=bool(search_filter_enabled),
         lookup_filter_enabled=bool(lookup_filter_enabled),
         relation_lookup_enforce=bool(relation_lookup_enforce),
@@ -3565,7 +3617,7 @@ def _run_rag_with_vectors(
         plan,
         relation=relation,
         join_key_mode=resolved_join_key_mode,
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         filters=filter_spec,
     )
     ctx.plan = plan
@@ -4467,7 +4519,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -4479,7 +4531,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
@@ -4839,20 +4891,86 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
-    # promotion 비활성 기본값(disable): 명시적으로 켠 경우에만 동작 가능
+    # promotion feature-flag: 1차 SEARCH hit에서 ID를 추출해 2차 LOOKUP/JOIN 실행
     promotion_mode = mode
     promotion_intent = it
     promotion_feature_mode = str(os.getenv("RAG_PROMOTION_MODE", "disable") or "disable").strip().lower()
     promotion_enabled = promotion_feature_mode in ("enable", "enabled", "on", "1", "true", "yes", "y")
-    if promotion_enabled:
-        # 기본 정책은 비활성. 켜져도 현재는 passthrough 동작만 수행한다.
-        log_kv(
-            "RAG.PROMOTION.DISABLED_POLICY",
-            promotion_feature_mode=promotion_feature_mode,
-            planner_mode=planner_mode,
-            executed_mode=promotion_mode,
-            reason="promotion_policy_passthrough",
+    promotion_max_depth = max(0, int(os.getenv("RAG_PROMOTION_MAX_DEPTH", "1") or "1"))
+
+    if promotion_enabled and mode == "search" and promotion_depth < promotion_max_depth:
+        promotion = _promote_mode_from_search_hits(
+            current_mode=mode,
+            search_hits=list(merged_rrf or []),
+            ids_map=dict(getattr(it, "ids_map", {}) or {}),
+            planner_strategy=strategy,
         )
+        promoted_mode = str((promotion or {}).get("mode", mode) or mode).strip().lower()
+        promoted_ids_map = dict((promotion or {}).get("ids_map", {}) or {})
+
+        log_kv(
+            "RAG.PROMOTION.DECISION",
+            promotion_feature_mode=promotion_feature_mode,
+            promotion_depth=promotion_depth,
+            promotion_max_depth=promotion_max_depth,
+            current_mode=mode,
+            promoted_mode=promoted_mode,
+            reason=(promotion or {}).get("reason"),
+            kind=(promotion or {}).get("kind"),
+            signals=(promotion or {}).get("signals"),
+            strategy_key=(promotion or {}).get("strategy_key"),
+        )
+
+        if promoted_mode in ("lookup", "join") and promoted_mode != mode and promoted_ids_map:
+            promoted_relation = relation
+            planner_rel = (promotion or {}).get("planner_relation")
+            planner_action_for_promotion = str((promotion or {}).get("planner_action", "") or "").strip().lower()
+            if promoted_mode == "join" and promoted_relation is None and isinstance(planner_rel, tuple) and len(planner_rel) == 2:
+                promoted_relation = planner_rel
+            if promoted_mode == "join" and promoted_relation is None and planner_action_for_promotion == "relation":
+                promoted_relation = ("project", "perf")
+
+            promoted_intent = replace(
+                it,
+                mode=promoted_mode,
+                relation=promoted_relation,
+                ids_map=promoted_ids_map,
+                ids_flat=[v for vals in promoted_ids_map.values() for v in (vals or []) if str(v).strip()],
+            )
+            promoted_payload = {"normalized_intent": promoted_intent}
+
+            log_kv(
+                "RAG.PROMOTION.REEXECUTE",
+                from_mode=mode,
+                to_mode=promoted_mode,
+                planner_relation=planner_rel,
+                promoted_relation=promoted_relation,
+                promoted_ids_keys=sorted(promoted_ids_map.keys()),
+                promotion_depth=promotion_depth,
+            )
+
+            promoted_result = _run_rag_with_vectors(
+                query=query,
+                model_name=model_name,
+                intent_payload=promoted_payload,
+                stack=stack,
+                vector_names=vector_names,
+                w_dense_map=w_dense_map,
+                lexical_field_weights=lexical_field_weights,
+                sparse_vector_name=sparse_vector_name,
+                sparse_topk=sparse_topk,
+                sparse_weight=sparse_weight,
+                domain_hint=domain_hint,
+                promotion_depth=promotion_depth + 1,
+            )
+
+            timings_merged = dict(timings)
+            timings_merged["phase.promotion_reexecute"] = 1.0
+            for k, v in (promoted_result.timings or {}).items():
+                if k.startswith("phase.") or k.startswith("info."):
+                    timings_merged[f"promotion.{k}"] = v
+            promoted_result.timings = timings_merged
+            return promoted_result
 
     # final rerank
     t0 = time.time()
@@ -5047,6 +5165,7 @@ def run_rag_once(
         w_dense_map=w_dense_map,
         lexical_field_weights=None,
         domain_hint=domain_hint,
+        promotion_depth=0,
     )
 
 def run_rag_ab_compare(
