@@ -1858,10 +1858,11 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     우선순위(강제):
     0) relation action -> join (ids 유무와 무관)
     1) relation + join ids -> join
-    2) id query 또는 명확한 ids -> lookup
-    3) list/stats/download -> lookup
-    4) topic/search -> search (기본 유지)
-    5) 그 외 -> search
+    2) 사람/기관 이름 기반 질의 -> lookup (SEARCH 오염 방지)
+    3) id query 또는 명확한 ids -> lookup
+    4) list/stats/download -> lookup
+    5) topic/search -> search (기본 유지)
+    6) 그 외 -> search
     """
     action = it.action
     rel = it.relation
@@ -1871,6 +1872,24 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
         return "lookup", "people_project_lookup"
     if rel and _has_relation_join_ids(it):
         return "join", "relation_ids"
+
+    people_terms = [str(t).strip() for t in (getattr(it, "people_terms", None) or []) if str(t).strip()]
+    lead_org_terms = [str(t).strip() for t in (getattr(it, "lead_org_terms", None) or []) if str(t).strip()]
+    participant_org_terms = [str(t).strip() for t in (getattr(it, "participant_org_terms", None) or []) if str(t).strip()]
+    affiliation_org_terms = [str(t).strip() for t in (getattr(it, "people_affiliation_org_terms", None) or []) if str(t).strip()]
+    org_terms = [str(t).strip() for t in (getattr(it, "org_terms", None) or []) if str(t).strip()]
+
+    has_name_lookup_signal = bool(
+        people_terms
+        or lead_org_terms
+        or participant_org_terms
+        or affiliation_org_terms
+        or org_terms
+        or (str(getattr(it, "org_role", "") or "").strip().lower() in ("lead", "performer", "performing", "participant", "affiliation"))
+    )
+    if has_name_lookup_signal and action not in ("support",):
+        return "lookup", "people_org_name_lookup"
+
     if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
         return "lookup", "id_or_exact"
     if action in ("list", "stats", "download"):
