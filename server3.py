@@ -35,7 +35,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
-from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
+from langchain_core.output_parsers import PydanticOutputParser
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -1146,6 +1146,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         return {"knowledge_sufficiency": result}
 
     llm, parser_fallback_required = _build_llm("gemma_triton_0", requires_structured_output=True)
+
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
     structured_kwargs = _structured_output_kwargs_for_schema(KnowledgeSufficiency)
 
@@ -1454,12 +1455,12 @@ def _build_llm(model_name: str, *, requires_structured_output: bool = False):
                 "[STRUCTURED_OUTPUT] model=%s does not support structured output; forcing OpenAICompatChatModel and enabling parser fallback",
                 model_name,
             )
-            return OpenAICompatChatModel(model_name=model_name), True
+            return TritonChatModel(model_name=model_name), True
         logger.info(
             "[STRUCTURED_OUTPUT] model=%s supports structured output; using OpenAICompatChatModel",
             model_name,
         )
-        return OpenAICompatChatModel(model_name=model_name), False
+        return TritonChatModel(model_name=model_name), False
 
     return TritonChatModel(model_name=model_name), False
 
@@ -1625,7 +1626,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 str(getattr(response, "content", "") or ""),
                 stream_char_limit,
             )
-    except EmptyStreamContentError as e:
+    except Exception as e:
         log_section(
             "GENERATE ANSWER FALLBACK",
             f"reason=stream_empty\n"
@@ -2988,7 +2989,7 @@ async def query_stream(payload: QueryRequest):
             retryable = False
             user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
-            if isinstance(e, EmptyStreamContentError) or "No generations found in stream" in str(e):
+            if isinstance(e, Exception) or "No generations found in stream" in str(e):
                 category = "llm_empty_stream"
                 retryable = True
                 user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."

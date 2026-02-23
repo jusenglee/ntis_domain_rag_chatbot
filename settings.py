@@ -38,7 +38,7 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 TRITON_URL         = os.getenv("TRITON_URL", "203.250.234.159:8001")
 DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "gpt_oss_triton_0")
 TOKENIZER_MAP = {
-    "gpt_oss_triton_0": os.getenv("GPT_OSS_TOKENIZER", "./Models/gpt-oss-20b"),
+    "gpt_oss_triton_0": "./Models/gpt-oss-20b",
     "gemma_triton_0": "./Models/gemma-3-27b-it",
 }
 
