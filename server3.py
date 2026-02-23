@@ -7,7 +7,7 @@ import os
 import re
 import hashlib
 from functools import lru_cache
-from typing import Annotated, Optional, List, Dict, Any, Literal
+from typing import Annotated, Optional, List, Dict, Any, Literal, Mapping, Union
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -23,6 +23,7 @@ import redis.asyncio as redis
 
 # LangChain & LangGraph
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
@@ -93,6 +94,7 @@ templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
 kv_store: Optional[KVStore] = None
+# 대화 저장 상한(턴 단위). 1턴 = Human 1개 + AI 1개 메시지.
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
@@ -146,6 +148,14 @@ def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
         return SHORT_ANSWER_MAX_TOKENS_HINT
     return None
 
+
+def _is_detail_action(qa: Optional["QuestionAnalysis"]) -> bool:
+    return bool(qa and qa.action == "detail")
+
+
+def _should_expand_detail_context(qa: Optional["QuestionAnalysis"]) -> bool:
+    return bool(qa and (qa.action == "detail" or qa.mode == "JOIN"))
+
 def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> str:
     if not value:
         return ""
@@ -162,6 +172,28 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
+
+
+def sanitize_llm_json(raw: Any) -> str:
+    """LLM 응답에서 JSON payload를 최대한 안전하게 추출한다."""
+    if hasattr(raw, "content"):
+        raw = getattr(raw, "content")
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+
+    text = str(raw or "").strip()
+    if not text:
+        return "{}"
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        return text[start : end + 1]
+    return text
 
 
 def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
@@ -672,13 +704,12 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     """Redis에서 대화 이력 및 이전 컨텍스트 로드"""
     cid = state.conversation_id
     loaded_history, ctx_list, fallback_context = await load_conversation_memory(cid)
-    current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
                 f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
-        "chat_history": current_full_history,
+        "chat_history": loaded_history,
         "prev_context": ctx_list,
         "fallback_context": fallback_context
     }
@@ -725,7 +756,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     result = await _run_question_analysis(
         question=state.messages[-1].content,
         conversation_id=state.conversation_id,
-        chat_history=state.chat_history,
+        chat_history=state.chat_history + [state.messages[-1]],
         prev_context=state.prev_context,
     )
     return {"question_analysis": result}
@@ -1121,19 +1152,12 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     prev_context_str = None
 
 
-    if qa and qa.mode == "JOIN":
-        prev_context_str = refine_documents_rule_based(
-            state.prev_context,
-            True,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-        )
-    else:
-        prev_context_str = refine_documents_rule_based(
-            state.prev_context,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-        )
+    prev_context_str = refine_documents_rule_based(
+        state.prev_context,
+        _is_detail_action(qa),
+        org_filters=(qa.filters if qa else None),
+        ids_map=(qa.ids_map if qa else None),
+    )
 
 
     system_prompt = (
@@ -1163,7 +1187,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     ])
 
     chain = prompt | llm
-    max_attempts = max(1, int(os.getenv("KS_RETRY_ATTEMPTS", "2")))
+    max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
@@ -1172,7 +1196,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                 "format_instructions": parser.get_format_instructions(),
                 "history": history_str or '없음',
                 "prev_context": prev_context_str or "없음",
-                "question": state.messages[-1].content
+                "question": state.messages[-1].content,
             }
             invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
             llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
@@ -1231,7 +1255,9 @@ def _parse_structured_response(
 ):
     """구조화 출력 지원 시에는 스키마 객체로 바로 검증하고, 미지원 시 기존 JSON 추출 경로를 사용한다."""
     if fallback_to_json_extraction:
-        return parser.invoke(sanitize_llm_json(llm_result))
+        sanitize_fn = globals().get("sanitize_llm_json")
+        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
+        return parser.invoke(sanitized_payload)
     return parser.invoke(llm_result)
 
 
@@ -1296,7 +1322,8 @@ class CustomRAGRetriever(BaseModel):
                 "tag" : hit_data.get("tag"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
-                "prtcp_mp" : hit_data.get("prtcp_mp", [])
+                "prtcp_mp" : hit_data.get("prtcp_mp", []),
+                "prtcp_org": hit_data.get("prtcp_org", []),
             }
 
             rag_data.update(safe_render_fields)
@@ -1453,7 +1480,7 @@ async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
 
     docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
     fallback_context = state.fallback_context if state.context else None
-    is_detail = bool(qa and qa.mode == "JOIN")
+    is_detail = _should_expand_detail_context(qa)
     researcher_hints = _build_researcher_hints_from_question_analysis(qa)
 
     if docs_for_ctx:
@@ -1763,29 +1790,32 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 async def node_save_history(state: AgentState) -> Dict[str, Any]:
     """Redis에 대화 저장"""
 
+    if not kv_store:
+        return {}
+
     cid = state.conversation_id
 
     new_turn = state.messages[-2:]  # [Human, AI]
     full_history = state.chat_history + new_turn
-    trimmed_history = full_history[-MAX_HISTORY_TURNS:]
+    max_messages = MAX_HISTORY_TURNS * 2
+    trimmed_history = full_history[-max_messages:]
 
     serialized_hist = _serialize_history(trimmed_history)
 
-    if kv_store:
-        await kv_store.set(
-            f"conversation:{cid}:history",
-            json.dumps(serialized_hist, ensure_ascii=False),
-            ex=REDIS_TTL,
-        )
+    await kv_store.set(
+        f"conversation:{cid}:history",
+        json.dumps(serialized_hist, ensure_ascii=False),
+        ex=REDIS_TTL,
+    )
 
-    if state.context:
+    if kv_store and state.context:
         await kv_store.set(
             f"conversation:{cid}:last_context",
             json.dumps(state.context, ensure_ascii=False),
             ex=REDIS_TTL,
         )
 
-    if state.fallback_context:
+    if kv_store and state.fallback_context:
         await kv_store.set(
             f"conversation:{cid}:last_fallback_context",
             state.fallback_context,
@@ -2429,11 +2459,20 @@ def _format_org_line(
     return "- 참여기관: 정보 없음"
 
 
-def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
+def _safe_map_doc(doc: Union[Document, Mapping[str, Any]], *, context: str) -> Optional[Dict[str, Any]]:
+    """문서 매핑 래퍼.
+
+    기대 입력:
+    - LangChain ``Document`` 인스턴스
+    - ``dict``/``Mapping[str, Any]`` 형태의 런타임 문서 페이로드
+    """
     try:
         return RagMapper.map(doc)
     except MappingError as exc:
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
         logger.warning(
             "문서 매핑 실패(%s): source_index=%s, error=%s",
             context,
@@ -2444,7 +2483,7 @@ def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
 
 
 def summarize_documents_headlines(
-    docs: List[Document],
+    docs: List[Union[Document, Mapping[str, Any]]],
     *,
     researchers: Optional[List[Any]] = None,
     organizations: Optional[List[Any]] = None,
@@ -2452,6 +2491,12 @@ def summarize_documents_headlines(
     ids_map: Optional[Dict[str, Any]] = None,
     max_matches: int = 5,
 ) -> str:
+    """문서 목록에서 헤드라인 컨텍스트를 구성한다.
+
+    기대 입력:
+    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
+    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
+    """
     headlines: List[str] = []
 
     for doc in docs:
@@ -2459,7 +2504,10 @@ def summarize_documents_headlines(
         if not mapped_doc:
             continue
         _apply_title_preference(mapped_doc)
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
@@ -2496,7 +2544,7 @@ def summarize_documents_headlines(
 
 
 def refine_documents_rule_based(
-    docs: List[Document],
+    docs: List[Union[Document, Mapping[str, Any]]],
     is_detail: bool = False,
     *,
     researchers: Optional[List[Any]] = None,
@@ -2506,6 +2554,12 @@ def refine_documents_rule_based(
     max_matches: int = 5,
     relax_limits: bool = False,
 ) -> str:
+    """룰 기반으로 문서 본문을 정제해 컨텍스트 문자열로 변환한다.
+
+    기대 입력:
+    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
+    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
+    """
     context_chunks: List[str] = []
     field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
     field_max_tokens = None if relax_limits else MAX_FIELD_TOKENS
@@ -2518,7 +2572,10 @@ def refine_documents_rule_based(
             continue
         _apply_title_preference(mapped_doc)
 
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
 
         title = mapped_doc.get("title", "제목 없음")
         # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
@@ -2724,8 +2781,9 @@ async def lifespan(app: FastAPI):
             kv_store = RedisKVStore(r)
             logger.info("✅ Redis connected: %s", REDIS_URL)
         except Exception as e:
-            kv_store = None
+            kv_store = MemoryKVStore()
             logger.error("❌ Redis connection failed: %s", e, exc_info=True)
+            logger.warning("⚠️ Redis 실패 → MemoryKVStore 폴백")
 
     elif backend == "memory":
         kv_store = MemoryKVStore()
