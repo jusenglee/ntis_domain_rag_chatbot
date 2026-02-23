@@ -85,9 +85,6 @@ def setup_file_logging(log_path="logs/server3.log"):
     root.addHandler(fh)
     root.addHandler(sh)
 
-    vllm_client_level = os.getenv("VLLM_CLIENT_LOG_LEVEL", "INFO").upper()
-    logging.getLogger("openai_compat_llm").setLevel(getattr(logging, vllm_client_level, logging.INFO))
-
 setup_file_logging()
 
 templates = Jinja2Templates(directory="templates")
@@ -1259,7 +1256,19 @@ def _parse_structured_response(
         sanitize_fn = globals().get("sanitize_llm_json")
         sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
         return parser.invoke(sanitized_payload)
-    return parser.invoke(llm_result)
+
+    try:
+        return parser.invoke(llm_result)
+    except Exception as first_error:
+        sanitize_fn = globals().get("sanitize_llm_json")
+        sanitized_payload = sanitize_fn(llm_result) if callable(sanitize_fn) else str(llm_result)
+        try:
+            return parser.invoke(sanitized_payload)
+        except Exception as second_error:
+            raise ValueError(
+                "Structured response parsing failed after sanitize_llm_json retry "
+                f"(initial_error={type(first_error).__name__}, retry_error={type(second_error).__name__})"
+            ) from first_error
 
 
 # --- Node 6: RAG Search (Parallel) ---
@@ -1628,51 +1637,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 str(getattr(response, "content", "") or ""),
                 stream_char_limit,
             )
-    except Exception as e:
-        log_section(
-            "GENERATE ANSWER FALLBACK",
-            f"reason=stream_empty\n"
-            f"conversation_id={state.conversation_id}\n"
-            f"model_name={model_name}\n"
-            f"max_tokens_hint={max_tokens_hint}\n"
-            f"effective_max_tokens={effective_max_tokens}\n"
-            f"prompt_fingerprint={prompt_fingerprint}\n"
-            f"error_type={type(e).__name__}\n"
-            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
-        )
-
-        try:
-            fallback_response = await chain.ainvoke(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
-            )
-
-            if not str(getattr(fallback_response, "content", "") or "").strip():
-                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
-                if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-                else:
-                    fallback_response = await llm.ainvoke(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(fallback_response, "content", "") or ""),
-                stream_char_limit,
-            )
-            resp_chars = len(final_answer)
-            if not final_answer:
-                final_answer = fallback_message
-        except Exception as fallback_error:
-            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
-            final_answer = fallback_message
     except ValueError as e:
         if "No generations found in stream" not in str(e):
             raise
@@ -2991,7 +2955,7 @@ async def query_stream(payload: QueryRequest):
             retryable = False
             user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
-            if isinstance(e, Exception) or "No generations found in stream" in str(e):
+            if "No generations found in stream" in str(e):
                 category = "llm_empty_stream"
                 retryable = True
                 user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."

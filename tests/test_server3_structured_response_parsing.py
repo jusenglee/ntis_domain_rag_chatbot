@@ -78,11 +78,28 @@ def test_parse_structured_response_without_fallback_success() -> None:
     assert parsed.confidence == 0.97
 
 
-def test_parse_structured_response_without_fallback_failure() -> None:
-    helper = _load_parse_helper(sanitize_impl=None)
+def test_parse_structured_response_without_fallback_secondary_sanitize_success() -> None:
+    helper = _load_parse_helper(
+        sanitize_impl=lambda _: '{"requires_new_knowledge":"high","search_intent":"일반 검색","retrieval_query":"x","confidence":0.5}'
+    )
     parser = _FakeParser()
 
-    with pytest.raises(json.JSONDecodeError):
+    parsed = helper(
+        parser,
+        _AIMessage("analysis... assistantfinal... {not json in first pass}"),
+        fallback_to_json_extraction=False,
+    )
+
+    assert isinstance(parsed, KnowledgeSufficiency)
+    assert parsed.requires_new_knowledge == "high"
+    assert parsed.search_intent == "일반 검색"
+
+
+def test_parse_structured_response_without_fallback_failure() -> None:
+    helper = _load_parse_helper(sanitize_impl=lambda _: "{invalid json}")
+    parser = _FakeParser()
+
+    with pytest.raises(ValueError, match="Structured response parsing failed after sanitize_llm_json retry"):
         helper(
             parser,
             _AIMessage("not-json"),
