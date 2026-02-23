@@ -60,6 +60,7 @@ from rag_parts.query_intent import (
     get_relation_route,
     relation_target_collections,
     normalize_categories,
+    normalize_org_terms,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -2471,10 +2472,10 @@ def _run_rag_with_vectors(
                 "org_terms": [],
             }
 
-        lead_org_terms = _normalize_hint_terms(filters_obj.get("lead_org_name"))
-        participant_org_terms = _normalize_hint_terms(filters_obj.get("participant_org_name"))
-        people_affiliation_org_terms = _normalize_hint_terms(filters_obj.get("people_affiliation_org_name"))
-        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name"))
+        lead_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("lead_org_name")))
+        participant_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("participant_org_name")))
+        people_affiliation_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("people_affiliation_org_name")))
+        generic_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("org_name")))
 
         org_terms = _normalize_hint_terms(
             [
@@ -2608,18 +2609,18 @@ def _run_rag_with_vectors(
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
-    lead_org_terms = [t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()]
-    participant_org_terms = [
+    org_terms = normalize_org_terms([t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()])
+    lead_org_terms = normalize_org_terms([t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()])
+    participant_org_terms = normalize_org_terms([
         t.strip() for t in (list(getattr(ctx, "participant_org_terms", []) or []) or []) if str(t).strip()
-    ]
-    people_affiliation_org_terms = [
+    ])
+    people_affiliation_org_terms = normalize_org_terms([
         t.strip()
         for t in (list(getattr(ctx, "people_affiliation_org_terms", []) or []) or [])
         if str(t).strip()
-    ]
+    ])
     if (not org_terms) and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
-        org_terms = _normalize_hint_terms([
+        org_terms = normalize_org_terms([
             *lead_org_terms,
             *participant_org_terms,
             *people_affiliation_org_terms,
