@@ -3037,6 +3037,7 @@ def _run_rag_with_vectors(
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+    planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "1")
     planner_mode_locked = str(plan.mode or "").strip().lower()
     planner_relation_locked = plan.relation
     planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
@@ -3111,7 +3112,59 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
+        if planner_invalid_fallback:
+            fallback_mode = "lookup" if (_has_any_ids(it) or bool(getattr(it, "is_id_query", False))) else "search"
+            fallback_plan, fallback_policy_reason = _build_plan(
+                intent_view,
+                preferred_mode=fallback_mode,
+                preferred_mode_source="planner_invalid_fallback",
+            )
+            fallback_plan = replace(
+                fallback_plan,
+                relation=None,
+                join_key_mode=None,
+                target_collections=tuple(_default_target_collections_for_route(base_route)),
+            )
+            if pending_strategy_filter_spec:
+                fallback_plan = replace(fallback_plan, filters=pending_strategy_filter_spec)
+            log_kv(
+                "RAG.PLAN.FALLBACK_ON_INVALID_PLANNER",
+                level="warning",
+                fallback_enabled=int(planner_invalid_fallback),
+                error_code="PLANNER_INVALID_STRATEGY",
+                planner_raw={
+                    "mode": planner_strategy_mode,
+                    "action": planner_strategy_action,
+                    "relation": planner_strategy_relation,
+                    "join_key_mode": getattr(ctx, "join_key_mode", None),
+                    "target_cols": list(getattr(ctx, "target_collections", []) or []),
+                    "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+                },
+                fallback_rule="ids_or_id_query=>lookup_else_search",
+                fallback_mode=fallback_mode,
+                fallback_policy_reason=fallback_policy_reason,
+                fallback_target_cols=list(fallback_plan.target_collections),
+            )
+            plan = fallback_plan
+            ctx.plan = plan
+            ctx.target_collections = list(plan.target_collections)
+            planner_strategy_mode = plan.mode
+            planner_strategy_action = plan.action
+            planner_strategy_relation = plan.relation
+            strategy_snapshot = StrategySpec(
+                mode=planner_strategy_mode,
+                action=planner_strategy_action,
+                relation=planner_strategy_relation,
+                join_key_mode=None,
+            )
+            strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
+            planner_recalled = True
+            mode_override_requested = True
+            mode_override_reason = "planner_invalid_fallback"
+            mode_override_from = planner_mode_locked
+            mode_override_to = planner_strategy_mode
+        else:
+            raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
     planner_raw_join_key_mode = strategy_snapshot.join_key_mode
     resolved_join_key_mode = str(planner_raw_join_key_mode or "").strip().lower() or None
@@ -3143,11 +3196,65 @@ def _run_rag_with_vectors(
     )
     if planner_contract_violations:
         first = planner_contract_violations[0]
-        raise StrategyViolation(
-            error_code=first.error_code,
-            reason=first.reason,
-            violations=planner_contract_violations,
-        )
+        if planner_invalid_fallback:
+            fallback_mode = "lookup" if (_has_any_ids(it) or bool(getattr(it, "is_id_query", False))) else "search"
+            fallback_plan, fallback_policy_reason = _build_plan(
+                intent_view,
+                preferred_mode=fallback_mode,
+                preferred_mode_source="planner_contract_fallback",
+            )
+            fallback_plan = replace(
+                fallback_plan,
+                relation=None,
+                join_key_mode=None,
+                target_collections=tuple(_default_target_collections_for_route(base_route)),
+            )
+            if pending_strategy_filter_spec:
+                fallback_plan = replace(fallback_plan, filters=pending_strategy_filter_spec)
+            log_kv(
+                "RAG.PLAN.FALLBACK_ON_CONTRACT_VIOLATION",
+                level="warning",
+                fallback_enabled=int(planner_invalid_fallback),
+                error_code=first.error_code,
+                planner_raw={
+                    "mode": planner_strategy_mode,
+                    "action": planner_strategy_action,
+                    "relation": planner_strategy_relation,
+                    "join_key_mode": join_key_mode_for_contract,
+                    "target_cols": list(getattr(ctx, "target_collections", []) or []),
+                    "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+                },
+                violation_count=len(planner_contract_violations),
+                fallback_rule="ids_or_id_query=>lookup_else_search",
+                fallback_mode=fallback_mode,
+                fallback_policy_reason=fallback_policy_reason,
+                fallback_target_cols=list(fallback_plan.target_collections),
+            )
+            plan = fallback_plan
+            ctx.plan = plan
+            ctx.target_collections = list(plan.target_collections)
+            planner_strategy_mode = plan.mode
+            planner_strategy_action = plan.action
+            planner_strategy_relation = plan.relation
+            resolved_join_key_mode = None
+            join_key_mode_for_contract = None
+            strategy_snapshot = StrategySpec(
+                mode=planner_strategy_mode,
+                action=planner_strategy_action,
+                relation=planner_strategy_relation,
+                join_key_mode=None,
+            )
+            planner_recalled = True
+            mode_override_requested = True
+            mode_override_reason = "planner_contract_fallback"
+            mode_override_from = planner_mode_locked
+            mode_override_to = planner_strategy_mode
+        else:
+            raise StrategyViolation(
+                error_code=first.error_code,
+                reason=first.reason,
+                violations=planner_contract_violations,
+            )
 
     planner_filter_spec = dict(plan.filters or {})
 
