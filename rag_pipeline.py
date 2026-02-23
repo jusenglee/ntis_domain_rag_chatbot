@@ -93,6 +93,9 @@ from rag_parts.rank_merge import (
     rrf_merge as _rrf_merge,
 )
 from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
+from rag_parts.promotion import (
+    promote_mode_from_search_hits as _promote_mode_from_search_hits,
+)
 from rag_parts.join import (
     extract_pjt_ids as _extract_pjt_ids,
     normalize_relation_hint as _normalize_relation_hint,
@@ -2245,6 +2248,7 @@ def _run_rag_with_vectors(
         sparse_topk: Optional[int] = None,
         sparse_weight: Optional[float] = None,
         domain_hint: Optional[str] = None,
+        promotion_depth: int = 0,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, Any] = _init_timings()
@@ -4887,20 +4891,85 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
-    # promotion 비활성 기본값(disable): 명시적으로 켠 경우에만 동작 가능
+    # promotion feature-flag: 1차 SEARCH hit에서 ID를 추출해 2차 LOOKUP/JOIN 실행
     promotion_mode = mode
     promotion_intent = it
     promotion_feature_mode = str(os.getenv("RAG_PROMOTION_MODE", "disable") or "disable").strip().lower()
     promotion_enabled = promotion_feature_mode in ("enable", "enabled", "on", "1", "true", "yes", "y")
-    if promotion_enabled:
-        # 기본 정책은 비활성. 켜져도 현재는 passthrough 동작만 수행한다.
-        log_kv(
-            "RAG.PROMOTION.DISABLED_POLICY",
-            promotion_feature_mode=promotion_feature_mode,
-            planner_mode=planner_mode,
-            executed_mode=promotion_mode,
-            reason="promotion_policy_passthrough",
+    promotion_max_depth = max(0, int(os.getenv("RAG_PROMOTION_MAX_DEPTH", "1") or "1"))
+
+    if promotion_enabled and mode == "search" and promotion_depth < promotion_max_depth:
+        promotion = _promote_mode_from_search_hits(
+            current_mode=mode,
+            search_hits=list(merged_rrf or []),
+            ids_map=dict(getattr(it, "ids_map", {}) or {}),
+            planner_strategy=strategy,
         )
+        promoted_mode = str((promotion or {}).get("mode", mode) or mode).strip().lower()
+        promoted_ids_map = dict((promotion or {}).get("ids_map", {}) or {})
+
+        log_kv(
+            "RAG.PROMOTION.DECISION",
+            promotion_feature_mode=promotion_feature_mode,
+            promotion_depth=promotion_depth,
+            promotion_max_depth=promotion_max_depth,
+            current_mode=mode,
+            promoted_mode=promoted_mode,
+            reason=(promotion or {}).get("reason"),
+            kind=(promotion or {}).get("kind"),
+            signals=(promotion or {}).get("signals"),
+        )
+
+        if promoted_mode in ("lookup", "join") and promoted_mode != mode and promoted_ids_map:
+            promoted_relation = relation
+            planner_rel = (promotion or {}).get("planner_relation")
+            planner_action_for_promotion = str((promotion or {}).get("planner_action", "") or "").strip().lower()
+            if promoted_mode == "join" and promoted_relation is None and isinstance(planner_rel, tuple) and len(planner_rel) == 2:
+                promoted_relation = planner_rel
+            if promoted_mode == "join" and promoted_relation is None and planner_action_for_promotion == "relation":
+                promoted_relation = ("project", "perf")
+
+            promoted_intent = replace(
+                it,
+                mode=promoted_mode,
+                relation=promoted_relation,
+                ids_map=promoted_ids_map,
+                ids_flat=[v for vals in promoted_ids_map.values() for v in (vals or []) if str(v).strip()],
+            )
+            promoted_payload = {"normalized_intent": promoted_intent}
+
+            log_kv(
+                "RAG.PROMOTION.REEXECUTE",
+                from_mode=mode,
+                to_mode=promoted_mode,
+                planner_relation=planner_rel,
+                promoted_relation=promoted_relation,
+                promoted_ids_keys=sorted(promoted_ids_map.keys()),
+                promotion_depth=promotion_depth,
+            )
+
+            promoted_result = _run_rag_with_vectors(
+                query=query,
+                model_name=model_name,
+                intent_payload=promoted_payload,
+                stack=stack,
+                vector_names=vector_names,
+                w_dense_map=w_dense_map,
+                lexical_field_weights=lexical_field_weights,
+                sparse_vector_name=sparse_vector_name,
+                sparse_topk=sparse_topk,
+                sparse_weight=sparse_weight,
+                domain_hint=domain_hint,
+                promotion_depth=promotion_depth + 1,
+            )
+
+            timings_merged = dict(timings)
+            timings_merged["phase.promotion_reexecute"] = 1.0
+            for k, v in (promoted_result.timings or {}).items():
+                if k.startswith("phase.") or k.startswith("info."):
+                    timings_merged[f"promotion.{k}"] = v
+            promoted_result.timings = timings_merged
+            return promoted_result
 
     # final rerank
     t0 = time.time()
@@ -5095,6 +5164,7 @@ def run_rag_once(
         w_dense_map=w_dense_map,
         lexical_field_weights=None,
         domain_hint=domain_hint,
+        promotion_depth=0,
     )
 
 def run_rag_ab_compare(
