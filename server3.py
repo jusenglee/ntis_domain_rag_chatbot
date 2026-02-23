@@ -1142,6 +1142,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         return {"knowledge_sufficiency": result}
 
     llm, parser_fallback_required = _build_llm("gemma_triton_0", requires_structured_output=True)
+
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
     structured_kwargs = _structured_output_kwargs_for_schema(KnowledgeSufficiency)
 
