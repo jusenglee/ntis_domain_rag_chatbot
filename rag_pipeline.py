@@ -21,6 +21,7 @@ import re
 import time
 import inspect
 import json
+import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1259,6 +1260,46 @@ def _to_text(v: object) -> str:
         return ""
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_for_title_match(text: object) -> str:
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(text))
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"[\u2000-\u200B\u202F\u205F\u3000]", " ", s)
+    s = re.sub(r"[\[\]{}()<>《》〈〉「」『』【】]", " ", s)
+    s = re.sub(r"[\"'`´]+", "", s)
+    s = re.sub(r"[·•ㆍ]", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _soft_title_contains(doc_payload: Mapping[str, Any], title_terms: List[str]) -> bool:
+    if not isinstance(doc_payload, Mapping):
+        return False
+
+    normalized_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for raw in title_terms or []:
+        term = normalize_for_title_match(raw)
+        if len(term) <= 2:
+            continue
+        term_key = term.lower()
+        if term_key and term_key not in seen_terms:
+            seen_terms.add(term_key)
+            normalized_terms.append(term_key)
+    if not normalized_terms:
+        return False
+
+    for field in ("title1", "title2", "title_text"):
+        title_val = normalize_for_title_match(doc_payload.get(field, "")).lower()
+        if not title_val:
+            continue
+        for term in normalized_terms:
+            if term in title_val:
+                return True
+    return False
 
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
@@ -5041,6 +5082,34 @@ def _run_rag_with_vectors(
             return promoted_result
 
     # final rerank
+    title_post_filter_applied = False
+    title_post_filter_hits = 0
+    if (
+        plan.mode == "lookup"
+        and lookup_title_filter_policy == "soft"
+        and bool(title_terms)
+    ):
+        title_post_filter_applied = True
+        title_filter_topn = max(1, int(os.getenv("RAG_TITLE_POST_FILTER_TOPN", "80")))
+        post_filter_pool = list(merged_rrf[:title_filter_topn])
+        merged_rrf = [
+            p for p in post_filter_pool
+            if _soft_title_contains(getattr(p, "payload", None) or {}, title_terms)
+        ]
+        title_post_filter_hits = len(merged_rrf)
+        log_kv(
+            "RAG.TITLE_POST_FILTER",
+            applied=int(title_post_filter_applied),
+            policy=lookup_title_filter_policy,
+            topn=title_filter_topn,
+            input_count=len(post_filter_pool),
+            hits=title_post_filter_hits,
+            title_terms=title_terms[:6],
+        )
+
+    _timing_put(timings, "info.title_post_filter_applied", int(title_post_filter_applied))
+    _timing_put(timings, "info.title_post_filter_hits", int(title_post_filter_hits))
+
     t0 = time.time()
     final_keep = int((rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
