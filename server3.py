@@ -103,6 +103,7 @@ DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "gpt_oss_first").
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
+PLANNER_SCHEMA_VERSION = "v2"
 RAG_RENDER_TEXT_FIELDS = tuple(
     field.strip()
     for field in os.getenv(
@@ -114,7 +115,6 @@ RAG_RENDER_TEXT_FIELDS = tuple(
 RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
 RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
-PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
@@ -211,10 +211,10 @@ def _latency_ms(latencies: Dict[str, float], key: str) -> Optional[int]:
 
 
 def _select_final_answer(
-    state: "AgentState",
-    *,
-    policy: Optional[str] = None,
-    gpt_oss_deadline_ms: Optional[int] = None,
+        state: "AgentState",
+        *,
+        policy: Optional[str] = None,
+        gpt_oss_deadline_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
     resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "gpt_oss_first").strip().lower()
     if resolved_policy not in {"gpt_oss_first", "gemma_first"}:
@@ -336,11 +336,11 @@ def _truncate_with_suffix(value: Any, max_chars: int) -> str:
 
 
 def _extract_allowed_render_fields(
-    hit_data: Dict[str, Any],
-    *,
-    allowed_fields: tuple[str, ...] = RAG_RENDER_TEXT_FIELDS,
-    max_chars_per_field: int = RAG_RENDER_TEXT_MAX_CHARS,
-    max_chars_total: int = RAG_RENDER_TEXT_TOTAL_MAX_CHARS,
+        hit_data: Dict[str, Any],
+        *,
+        allowed_fields: tuple[str, ...] = RAG_RENDER_TEXT_FIELDS,
+        max_chars_per_field: int = RAG_RENDER_TEXT_MAX_CHARS,
+        max_chars_total: int = RAG_RENDER_TEXT_TOTAL_MAX_CHARS,
 ) -> Dict[str, str]:
     """렌더링에 의미 있는 텍스트 필드만 allowlist 기반으로 안전 추출한다."""
     render_fields: Dict[str, str] = {}
@@ -767,7 +767,7 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm, parser_fallback_required = _build_llm("gpt_oss_triton_0", requires_structured_output=True)
+    llm, parser_fallback_required = _build_llm(DEFAULT_MODEL_NAME, requires_structured_output=True)
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
     structured_kwargs = _structured_output_kwargs_for_schema(QuestionAnalysis)
 
@@ -783,6 +783,7 @@ async def _run_question_analysis(
     )
 
     system_prompt = f"""
+    
         당신은 NTIS R&D 데이터 검색전략 플래너(LLM Planner)입니다.
         당신의 임무는 사용자 질의마다 단 하나의 최종 전략(Strategy JSON)을 확정하는 것입니다.
         실행 레이어(retrieval/filters/rerank/controller)는 당신의 전략을 변경/재해석하지 않고 그대로 실행합니다.
@@ -811,7 +812,7 @@ async def _run_question_analysis(
         [출력 계약]
         ====================
         1) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        2) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
+        2) strategy_version은 항상 v2로 고정합니다.
         3) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
         4) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
@@ -966,7 +967,7 @@ async def _run_question_analysis(
         ====================
         [limit 규칙]
         ====================
-        - limit는 1~{MAX_TOP_K_SIZE} 범위 정수
+        - limit는 1~{{MAX_TOP_K_SIZE}} 범위 정수
         - 사용자가 상위 N개 명시 시 반영(단 MAX 초과 금지)
         - 불명확하면 20
         
@@ -974,7 +975,7 @@ async def _run_question_analysis(
         [필수 출력 JSON 스키마]
         ====================
         반드시 아래 키를 모두 포함한 JSON 객체만 출력:
-        - strategy_version: "{PLANNER_SCHEMA_VERSION}"
+        - strategy_version: v2
         - mode: "SEARCH" | "LOOKUP" | "JOIN"
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
@@ -988,7 +989,7 @@ async def _run_question_analysis(
         - confidence: float (0.0~1.0)
 
         아래 형식 지침을 반드시 따를 것:
-        {format_instructions}
+        {{format_instructions}}
 
         JSON 외 어떤 텍스트도 출력 금지.
     
@@ -1010,7 +1011,8 @@ async def _run_question_analysis(
                 "format_instructions": parser.get_format_instructions(),
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
-                "question": question
+                "question": question,
+                "MAX_TOP_K_SIZE": MAX_TOP_K_SIZE,
             }
             invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
             llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
@@ -1030,7 +1032,7 @@ async def _run_question_analysis(
                 attempt,
                 attempt - 1,
                 0,
-            )
+                )
             log_section(
                 "QUESTION ANALYSIS",
                 f"coq: {conversation_id}{question}\n"
@@ -1077,7 +1079,7 @@ async def _run_question_analysis(
         max_attempts - 1,
         type(last_error).__name__ if last_error else "unknown",
         last_error,
-    )
+        )
     raise StrategyViolation(
         error_code="PLANNER_PARSE_FINAL_FAILED",
         reason=str(last_error or "planner parse failed"),
@@ -1251,10 +1253,10 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
 
 
 def _parse_structured_response(
-    parser: PydanticOutputParser,
-    llm_result: Any,
-    *,
-    fallback_to_json_extraction: bool,
+        parser: PydanticOutputParser,
+        llm_result: Any,
+        *,
+        fallback_to_json_extraction: bool,
 ):
     """구조화 출력 지원 시에는 스키마 객체로 바로 검증하고, 미지원 시 기존 JSON 추출 경로를 사용한다."""
     if fallback_to_json_extraction:
@@ -1360,9 +1362,9 @@ def _filter_hit_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [doc for doc in docs if isinstance(doc, dict) and _is_hit_source(doc)]
 
 def _resolve_rag_queries(
-    state: AgentState,
-    qa: Optional[QuestionAnalysis],
-    ks: Optional[KnowledgeSufficiency],
+        state: AgentState,
+        qa: Optional[QuestionAnalysis],
+        ks: Optional[KnowledgeSufficiency],
 ) -> tuple[str, str, str, float]:
     raw_query = state.question
     hint_query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or raw_query
@@ -1603,9 +1605,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             chunks: List[str] = []
             stream_chars = 0
             async for chunk in chain.astream(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
+                    prompt_inputs,
+                    max_tokens_hint=effective_max_tokens,
+                    request_id=llm_request_id,
             ):
                 chunk_text = str(getattr(chunk, "content", "") or "")
                 if chunk_text:
@@ -1833,10 +1835,10 @@ async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessa
     return loaded_history, ctx_list, fallback_context
 
 async def build_intent_payload(
-    question: str,
-    conversation_id: str,
-    chat_history: List[BaseMessage],
-    prev_context: List[Dict[str, Any]],
+        question: str,
+        conversation_id: str,
+        chat_history: List[BaseMessage],
+        prev_context: List[Dict[str, Any]],
 ) -> tuple[IntentPayloadV2, Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
     question_analysis = None
@@ -2171,19 +2173,19 @@ def _extract_org_fields(org: Any) -> tuple[str, str, str]:
     if isinstance(org, dict):
         name = org.get("org_nm") or org.get("org_name") or org.get("name")
         org_id = (
-            org.get("org_id")
-            or org.get("org_cd")
-            or org.get("org_code")
-            or org.get("org_no")
+                org.get("org_id")
+                or org.get("org_cd")
+                or org.get("org_code")
+                or org.get("org_no")
         )
         role = org.get("org_slct_nm") or org.get("role") or org.get("org_role")
     else:
         name = getattr(org, "org_nm", None) or getattr(org, "name", None)
         org_id = (
-            getattr(org, "org_id", None)
-            or getattr(org, "org_cd", None)
-            or getattr(org, "org_code", None)
-            or getattr(org, "org_no", None)
+                getattr(org, "org_id", None)
+                or getattr(org, "org_cd", None)
+                or getattr(org, "org_code", None)
+                or getattr(org, "org_no", None)
         )
         role = getattr(org, "org_slct_nm", None) or getattr(org, "role", None)
     return (
@@ -2194,9 +2196,9 @@ def _extract_org_fields(org: Any) -> tuple[str, str, str]:
 
 
 def _collect_org_hints(
-    organizations: Optional[List[Any]],
-    filters: Optional[Dict[str, Any]],
-    ids_map: Optional[Dict[str, Any]],
+        organizations: Optional[List[Any]],
+        filters: Optional[Dict[str, Any]],
+        ids_map: Optional[Dict[str, Any]],
 ) -> tuple[list[str], list[str], Optional[str]]:
     org_terms: list[str] = []
     org_ids: list[str] = []
@@ -2227,12 +2229,12 @@ def _collect_org_hints(
 
 
 def _match_prtcp_orgs(
-    prtcp_orgs: List[Dict[str, Any]],
-    org_terms: list[str],
-    org_ids: list[str],
-    role_hint: Optional[str],
-    *,
-    max_matches: int = 5,
+        prtcp_orgs: List[Dict[str, Any]],
+        org_terms: list[str],
+        org_ids: list[str],
+        role_hint: Optional[str],
+        *,
+        max_matches: int = 5,
 ) -> List[Dict[str, Any]]:
     if not prtcp_orgs or (not org_terms and not org_ids):
         return []
@@ -2308,10 +2310,10 @@ def _format_org_entry(org_nm: str, role: str, role_confirmed: bool) -> str:
 
 
 def _match_prtcp_members(
-    prtcp_members: List[Dict[str, Any]],
-    researchers: Optional[List[Any]],
-    *,
-    max_matches: int = 5,
+        prtcp_members: List[Dict[str, Any]],
+        researchers: Optional[List[Any]],
+        *,
+        max_matches: int = 5,
 ) -> List[Dict[str, Any]]:
     if not prtcp_members or not researchers:
         return []
@@ -2377,10 +2379,10 @@ def _match_prtcp_members(
 
 
 def _format_researcher_line(
-    matched_members: List[Dict[str, Any]],
-    fallback_lines: List[str],
-    *,
-    max_matches: int = 5,
+        matched_members: List[Dict[str, Any]],
+        fallback_lines: List[str],
+        *,
+        max_matches: int = 5,
 ) -> str:
     if matched_members:
         names = []
@@ -2406,10 +2408,10 @@ def _format_researcher_line(
 
 
 def _format_org_line(
-    matched_orgs: List[Dict[str, Any]],
-    prtcp_orgs: List[Dict[str, Any]],
-    *,
-    max_matches: int = 5,
+        matched_orgs: List[Dict[str, Any]],
+        prtcp_orgs: List[Dict[str, Any]],
+        *,
+        max_matches: int = 5,
 ) -> str:
     if matched_orgs:
         entries = []
@@ -2455,13 +2457,13 @@ def _safe_map_doc(doc: Union[Document, Mapping[str, Any]], *, context: str) -> O
 
 
 def summarize_documents_headlines(
-    docs: List[Union[Document, Mapping[str, Any]]],
-    *,
-    researchers: Optional[List[Any]] = None,
-    organizations: Optional[List[Any]] = None,
-    org_filters: Optional[Dict[str, Any]] = None,
-    ids_map: Optional[Dict[str, Any]] = None,
-    max_matches: int = 5,
+        docs: List[Union[Document, Mapping[str, Any]]],
+        *,
+        researchers: Optional[List[Any]] = None,
+        organizations: Optional[List[Any]] = None,
+        org_filters: Optional[Dict[str, Any]] = None,
+        ids_map: Optional[Dict[str, Any]] = None,
+        max_matches: int = 5,
 ) -> str:
     """문서 목록에서 헤드라인 컨텍스트를 구성한다.
 
@@ -2516,15 +2518,15 @@ def summarize_documents_headlines(
 
 
 def refine_documents_rule_based(
-    docs: List[Union[Document, Mapping[str, Any]]],
-    is_detail: bool = False,
-    *,
-    researchers: Optional[List[Any]] = None,
-    organizations: Optional[List[Any]] = None,
-    org_filters: Optional[Dict[str, Any]] = None,
-    ids_map: Optional[Dict[str, Any]] = None,
-    max_matches: int = 5,
-    relax_limits: bool = False,
+        docs: List[Union[Document, Mapping[str, Any]]],
+        is_detail: bool = False,
+        *,
+        researchers: Optional[List[Any]] = None,
+        organizations: Optional[List[Any]] = None,
+        org_filters: Optional[Dict[str, Any]] = None,
+        ids_map: Optional[Dict[str, Any]] = None,
+        max_matches: int = 5,
+        relax_limits: bool = False,
 ) -> str:
     """룰 기반으로 문서 본문을 정제해 컨텍스트 문자열로 변환한다.
 
@@ -2630,8 +2632,8 @@ def refine_documents_rule_based(
 
         if not relax_limits:
             while body_sentences and (
-                len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
-                or body_token_count + extra_token_count > MAX_DOC_TOKENS
+                    len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
+                    or body_token_count + extra_token_count > MAX_DOC_TOKENS
             ):
                 body_token_count -= body_token_counts.pop()
                 body_sentences.pop()
@@ -2663,10 +2665,10 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _limit_text_by_sentences_and_tokens(
-    text: str,
-    *,
-    max_sentences: Optional[int],
-    max_tokens: Optional[int],
+        text: str,
+        *,
+        max_sentences: Optional[int],
+        max_tokens: Optional[int],
 ) -> str:
     if not text:
         return ""
@@ -2688,10 +2690,10 @@ def _limit_text_by_sentences_and_tokens(
 
 
 def format_metadata(
-    metadata: Dict[str, Any],
-    *,
-    max_sentences: Optional[int] = None,
-    max_tokens: Optional[int] = None,
+        metadata: Dict[str, Any],
+        *,
+        max_sentences: Optional[int] = None,
+        max_tokens: Optional[int] = None,
 ) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
