@@ -61,5 +61,9 @@ def rrf_merge(sources: List[RankSource], *, rrf_k: int = 60, keep: int = 2000) -
         payload = getattr(point, "payload", None)
         if isinstance(payload, dict):
             payload["_rrf"] = float(merged_score)
+        try:
+            setattr(point, "_rrf", float(merged_score))
+        except Exception:
+            pass
         out.append(point)
     return out
