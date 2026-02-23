@@ -101,6 +101,8 @@ PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "
 RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
+RAG_KEY_PJT_ID = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+RAG_KEY_PJT_NO = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -115,6 +117,21 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "retrieval_query",
     "confidence",
 }
+
+
+def validate_project_key_env_or_raise() -> None:
+    """JOIN/LOOKUP용 프로젝트 키 환경변수 계약을 검증한다."""
+    if RAG_KEY_PJT_ID == RAG_KEY_PJT_NO:
+        raise RuntimeError(
+            "환경변수 계약 위반: RAG_KEY_PJT_ID와 RAG_KEY_PJT_NO는 동일하면 안 됩니다. "
+            f"(current='{RAG_KEY_PJT_ID}')"
+        )
+
+    logger.info(
+        "[startup][key-mapping] RAG_KEY_PJT_ID=%s, RAG_KEY_PJT_NO=%s",
+        RAG_KEY_PJT_ID,
+        RAG_KEY_PJT_NO,
+    )
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -2435,6 +2452,8 @@ def _ensure_boot_payload_indexes(client: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global kv_store
+
+    validate_project_key_env_or_raise()
 
     rag_resources = build_rag_objects()
 
