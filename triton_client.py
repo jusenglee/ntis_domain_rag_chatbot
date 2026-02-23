@@ -53,6 +53,7 @@ _SHORT_PROMPT_CHAR_THRESHOLD = 2000
 _SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
 _HARMONY_FINAL_MODEL = "gpt_oss_triton_0"
 _HARMONY_FINAL_MARKER = "<|channel|>final<|message|>"
+_HARMONY_ASSISTANTFINAL_MARKER = "assistantfinal"
 _HARMONY_END_MARKERS = ("<|return|>/<|end|>", "<|return|>", "<|end|>")
 
 _HARMONY_FULL_PATTERN = re.compile(
@@ -169,6 +170,11 @@ def _extract_harmony_final(text: str) -> str:
     if fallback_match:
         return _trim_harmony_end_markers(fallback_match.group(1)).strip()
 
+    assistantfinal_idx = text.find(_HARMONY_ASSISTANTFINAL_MARKER)
+    if assistantfinal_idx != -1:
+        content = text[assistantfinal_idx + len(_HARMONY_ASSISTANTFINAL_MARKER):]
+        return _trim_harmony_end_markers(content).strip()
+
     return text.strip()
 
 
@@ -176,6 +182,11 @@ def _extract_harmony_visible_stream_text(buffer: str) -> str:
     final_idx = buffer.find(_HARMONY_FINAL_MARKER)
     if final_idx != -1:
         content = buffer[final_idx + len(_HARMONY_FINAL_MARKER):]
+        return _trim_harmony_end_markers(content)
+
+    assistantfinal_idx = buffer.find(_HARMONY_ASSISTANTFINAL_MARKER)
+    if assistantfinal_idx != -1:
+        content = buffer[assistantfinal_idx + len(_HARMONY_ASSISTANTFINAL_MARKER):]
         return _trim_harmony_end_markers(content)
 
     # Harmony 제어 토큰이 보이면 final 채널이 나오기 전까지는 숨긴다.
