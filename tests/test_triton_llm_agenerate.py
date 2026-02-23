@@ -50,11 +50,14 @@ def _load_triton_chat_model(triton_infer_impl):
     source = Path("triton_llm.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="triton_llm.py")
 
+    helper_node = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_extract_triton_passthrough_kwargs"
+    )
     class_node = next(
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TritonChatModel"
     )
 
-    module = ast.Module(body=[class_node], type_ignores=[])
+    module = ast.Module(body=[helper_node, class_node], type_ignores=[])
     ast.fix_missing_locations(module)
 
     namespace = {
@@ -75,6 +78,7 @@ def _load_triton_chat_model(triton_infer_impl):
         "ChatGenerationChunk": ChatGenerationChunk,
         "triton_infer": triton_infer_impl,
         "get_tokenizer_for_model": lambda *_: None,
+        "logger": type("_Logger", (), {"warning": lambda *args, **kwargs: None})(),
     }
     exec(compile(module, filename="triton_llm.py", mode="exec"), namespace)
     return namespace["TritonChatModel"]

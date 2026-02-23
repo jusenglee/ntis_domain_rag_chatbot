@@ -35,7 +35,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
-from openai_compat_llm import EmptyStreamContentError
+from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -133,6 +133,10 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "retrieval_query",
     "confidence",
 }
+
+
+STRUCTURED_OUTPUT_KWARGS: tuple[str, ...] = ("response_format", "tools", "tool_choice")
+STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset({"gpt_oss_triton_0"})
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -736,8 +740,9 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
-    llm = _build_llm("gpt_oss_triton_0")
+    llm, parser_fallback_required = _build_llm("gpt_oss_triton_0", requires_structured_output=True)
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
+    structured_kwargs = _structured_output_kwargs_for_schema(QuestionAnalysis)
 
     history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
@@ -965,18 +970,25 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    chain = prompt | llm | sanitize_llm_json | parser
+    chain = prompt | llm
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            result: QuestionAnalysis = await chain.ainvoke({
+            invoke_payload = {
                 "format_instructions": parser.get_format_instructions(),
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
                 "question": question
-            })
+            }
+            invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
+            llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
+            result = _parse_structured_response(
+                parser,
+                llm_result,
+                fallback_to_json_extraction=parser_fallback_required,
+            )
             normalized_payload = _normalize_none_string(result.model_dump())
             _validate_question_analysis_required_keys(normalized_payload)
             result = QuestionAnalysis.model_validate(normalized_payload)
@@ -1105,8 +1117,9 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                     f"Confidence: {result.confidence:.2f}")
         return {"knowledge_sufficiency": result}
 
-    llm = TritonChatModel(model_name="gemma_triton_0")
+    llm, parser_fallback_required = _build_llm("gemma_triton_0", requires_structured_output=True)
     parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
+    structured_kwargs = _structured_output_kwargs_for_schema(KnowledgeSufficiency)
 
     prev_context_str = None
 
@@ -1154,13 +1167,20 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     ])
 
     try:
-        chain = prompt | llm | sanitize_llm_json | parser
-        result: KnowledgeSufficiency = await chain.ainvoke({
+        chain = prompt | llm
+        invoke_payload = {
             "format_instructions": parser.get_format_instructions(),
             "history": history_str or '없음',
             "prev_context": prev_context_str or "없음",
             "question": state.messages[-1].content
-        })
+        }
+        invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
+        llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
+        result = _parse_structured_response(
+            parser,
+            llm_result,
+            fallback_to_json_extraction=parser_fallback_required,
+        )
 
         log_section("KNOWLEDGE SUFFICIENCY",
                     f"coq: {state.conversation_id}{state.question}\n"
@@ -1181,6 +1201,19 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
                 confidence=0.5
             )
         }
+
+
+
+def _parse_structured_response(
+    parser: PydanticOutputParser,
+    llm_result: Any,
+    *,
+    fallback_to_json_extraction: bool,
+):
+    """구조화 출력 지원 시에는 스키마 객체로 바로 검증하고, 미지원 시 기존 JSON 추출 경로를 사용한다."""
+    if fallback_to_json_extraction:
+        return parser.invoke(sanitize_llm_json(llm_result))
+    return parser.invoke(llm_result)
 
 
 # --- Node 6: RAG Search (Parallel) ---
@@ -1344,8 +1377,46 @@ async def node_generate_answer_gpt_oss(state: AgentState) -> Dict[str, Any]:
     return await _generate_answer(state, "gpt_oss_triton_0", "answer_gpt_oss")
 
 
-def _build_llm(model_name: str):
-    return TritonChatModel(model_name=model_name)
+
+
+def _requires_structured_output_from_capabilities(model_name: str) -> bool:
+    """모델 capability 기반 구조화 출력 지원 여부."""
+    return model_name in STRUCTURED_OUTPUT_CAPABLE_MODELS
+
+
+def _structured_output_kwargs_for_schema(schema: type[BaseModel]) -> Dict[str, Any]:
+    schema_payload = schema.model_json_schema()
+    schema_name = schema.__name__
+    if "response_format" not in STRUCTURED_OUTPUT_KWARGS:
+        return {}
+    return {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "schema": schema_payload,
+            },
+        },
+    }
+
+
+def _build_llm(model_name: str, *, requires_structured_output: bool = False):
+    model_supports_structured = _requires_structured_output_from_capabilities(model_name)
+    if requires_structured_output:
+        if not model_supports_structured:
+            logger.warning(
+                "[STRUCTURED_OUTPUT] model=%s does not support structured output; forcing OpenAICompatChatModel and enabling parser fallback",
+                model_name,
+            )
+            return OpenAICompatChatModel(model_name=model_name), True
+        logger.info(
+            "[STRUCTURED_OUTPUT] model=%s supports structured output; using OpenAICompatChatModel",
+            model_name,
+        )
+        return OpenAICompatChatModel(model_name=model_name), False
+
+    return TritonChatModel(model_name=model_name), False
+
 
 @lru_cache(maxsize=1)
 def _read_system_prompt_cached(path_str: str) -> str:
@@ -1421,7 +1492,7 @@ def _apply_response_char_limit(text: str, max_chars: int) -> tuple[str, bool]:
     return cleaned[:max_chars].rstrip() + "…", True
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    llm = _build_llm(model_name)
+    llm, _ = _build_llm(model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
