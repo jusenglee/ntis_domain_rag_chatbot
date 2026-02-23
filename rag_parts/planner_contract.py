@@ -173,8 +173,8 @@ def normalize_lookup_title_filter_policy(policy: Optional[str]) -> Optional[str]
     """lookup title 필터 정책 정규화.
 
     정책 계약:
-    - soft: title_terms를 should로 적용.
-    - hard: title_terms를 must로 적용(단, detail lookup에서만 허용).
+    - soft: server-side title filter를 적용하지 않고, title_terms는 soft ranking 신호로만 활용.
+    - hard: title_terms를 server-side must로 적용(단, detail lookup에서만 허용).
     """
     value = str(policy or "").strip().lower()
     if not value:
