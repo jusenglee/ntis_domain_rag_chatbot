@@ -2,12 +2,38 @@
 from __future__ import annotations
 
 import re
+import os
+import logging
 from typing import Any, Dict, List, Optional
 
 from rag_parts.search_strategy import build_strategy_key
 
 
 _PJT_ID_RE = re.compile(r"^\d{8,12}$")
+logger = logging.getLogger(__name__)
+_PROJECT_KEY_POLICY_LOGGED = False
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return bool(default)
+
+
+def _allow_legacy_meta_keys() -> bool:
+    return _env_bool("RAG_ALLOW_LEGACY_META_KEYS", default=False)
+
+
+def _log_project_key_policy_once() -> None:
+    global _PROJECT_KEY_POLICY_LOGGED
+    if _PROJECT_KEY_POLICY_LOGGED:
+        return
+    _PROJECT_KEY_POLICY_LOGGED = True
+    mode = "legacy-enabled" if _allow_legacy_meta_keys() else "top-level-only"
+    logger.info("project key policy mode=%s (RAG_ALLOW_LEGACY_META_KEYS)", mode)
 
 
 def _as_list(value: Any) -> List[str]:
@@ -68,8 +94,11 @@ def _extract_ids_from_hits(search_hits: List[Any], *, limit: int = 20) -> Dict[s
         if not isinstance(payload, dict):
             continue
 
-        _add("pjt_id", _payload_get(payload, "pjt_id", "meta_basic.pjt_id"))
-        _add("pjt_no", _payload_get(payload, "pjt_no", "meta_basic.pjt_no"))
+        _log_project_key_policy_once()
+        pjt_id_keys = ["pjt_id"] + (["meta_basic.pjt_id"] if _allow_legacy_meta_keys() else [])
+        pjt_no_keys = ["pjt_no"] + (["meta_basic.pjt_no"] if _allow_legacy_meta_keys() else [])
+        _add("pjt_id", _payload_get(payload, *pjt_id_keys))
+        _add("pjt_no", _payload_get(payload, *pjt_no_keys))
         _add("rst_id", _payload_get(payload, "rst_id", "meta_basic.rst_id", "id"))
         _add("doi", _payload_get(payload, "doi", "meta_basic.doi"))
         _add("issn", _payload_get(payload, "issn", "eissn", "pissn", "meta_basic.issn"))
