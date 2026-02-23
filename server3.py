@@ -26,7 +26,6 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
-from langchain_core.output_parsers import PydanticOutputParser
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -781,17 +780,16 @@ async def _run_question_analysis(
         3) SEARCH는 누락 방지, LOOKUP/JOIN은 정확도/재현성 최우선입니다.
         
         ====================
-        [출력 강제 규칙]
+        [출력 계약]
         ====================
-        1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
-        2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
-        4) 아래 키를 반드시 모두 포함합니다:
+        1) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
+        2) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
+        3) 아래 키를 반드시 모두 포함합니다:
            strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
-        6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
-        7) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
-        8) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
+        4) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
+        5) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
+        6) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
+        7) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
         
         ====================
         [Mode 정의]
@@ -961,7 +959,6 @@ async def _run_question_analysis(
         - retrieval_query: string
         - confidence: float (0.0~1.0)
     
-        {{format_instructions}}
     """
 
 
@@ -1022,7 +1019,7 @@ async def _run_question_analysis(
             )
             return result
 
-        except (ValidationError, LLMJSONExtractionError, PlannerV2ParseError, ValueError) as e:
+        except (ValidationError, PlannerV2ParseError, ValueError, TypeError) as e:
             last_error = e
             should_retry = attempt < max_attempts
             backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
@@ -1154,8 +1151,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         "   - 키워드 또는 짧은 구 형태\n"
         "   - 핵심 개념 5개 이내\n"
         "   - 최대 120자 이내\n"
-        "4. confidence: 판단 신뢰도 (0.0~1.0)\n\n"
-        "{format_instructions}"
+        "4. confidence: 판단 신뢰도 (0.0~1.0)"
     )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -1182,25 +1178,52 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             fallback_to_json_extraction=parser_fallback_required,
         )
 
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result: KnowledgeSufficiency = await chain.ainvoke({
+                "history": history_str or '없음',
+                "prev_context": prev_context_str or "없음",
+                "question": state.messages[-1].content
+            })
+            result = KnowledgeSufficiency.model_validate(result.model_dump())
 
-        return {"knowledge_sufficiency": result}
+            log_section("KNOWLEDGE SUFFICIENCY",
+                        f"coq: {state.conversation_id}{state.question}\n"
+                        f"Requires New: {result.requires_new_knowledge}\n"
+                        f"Search Intent: {result.search_intent}\n"
+                        f"Query: {result.retrieval_query}\n"
+                        f"Confidence: {result.confidence:.2f}")
 
-    except Exception as e:
-        logger.error(f"Knowledge Sufficiency Error: {e}")
-        return {
-            "knowledge_sufficiency": KnowledgeSufficiency(
-                requires_new_knowledge="high",
-                search_intent="일반 검색",
-                retrieval_query=state.messages[-1].content,
-                confidence=0.5
+            return {"knowledge_sufficiency": result}
+
+        except (ValidationError, ValueError, TypeError) as e:
+            last_error = e
+            should_retry = attempt < max_attempts
+            backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
+            logger.warning(
+                "[KNOWLEDGE.SUFFICIENCY] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s",
+                state.conversation_id,
+                attempt,
+                max_attempts,
+                int(should_retry),
+                backoff_seconds,
+                int(not should_retry),
+                type(e).__name__,
+                e,
             )
-        }
+            if should_retry:
+                await asyncio.sleep(backoff_seconds)
+                continue
+
+    logger.error(f"Knowledge Sufficiency Error: {last_error}")
+    return {
+        "knowledge_sufficiency": KnowledgeSufficiency(
+            requires_new_knowledge="high",
+            search_intent="일반 검색",
+            retrieval_query=state.messages[-1].content,
+            confidence=0.5
+        )
+    }
 
 
 
@@ -2669,94 +2692,7 @@ def format_metadata(
     return "\n".join(lines) if lines else ""
 
 
-class LLMJSONExtractionError(ValueError):
-    """LLM 응답에서 JSON 객체/배열 추출 실패 시 발생."""
 
-
-def _summarize_text(text: str, head: int = 160, tail: int = 160) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= head + tail + 20:
-        return compact
-    return f"{compact[:head]} ... {compact[-tail:]}"
-
-
-def _iter_json_candidates(text: str) -> List[str]:
-    candidates: List[tuple[int, str]] = []
-
-    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
-        block = match.group(1).strip()
-        if block:
-            candidates.append((match.start(), block))
-
-    def find_matching_end(start_idx: int, open_ch: str, close_ch: str) -> Optional[int]:
-        depth = 0
-        in_string = False
-        escaped = False
-        for idx in range(start_idx, len(text)):
-            ch = text[idx]
-            if in_string:
-                if escaped:
-                    escaped = False
-                    continue
-                if ch == "\\":
-                    escaped = True
-                elif ch == "\"":
-                    in_string = False
-                continue
-
-            if ch == "\"":
-                in_string = True
-                continue
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-                if depth == 0:
-                    return idx
-        return None
-
-    for match in re.finditer(r"[\{\[]", text):
-        start_idx = match.start()
-        open_ch = text[start_idx]
-        close_ch = "}" if open_ch == "{" else "]"
-        end_idx = find_matching_end(start_idx, open_ch, close_ch)
-        if end_idx is None:
-            continue
-        candidates.append((start_idx, text[start_idx:end_idx + 1].strip()))
-
-    seen: set[str] = set()
-    ordered: List[str] = []
-    for _, candidate in sorted(candidates, key=lambda item: item[0]):
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        ordered.append(candidate)
-    return ordered
-
-
-def sanitize_llm_json(msg) -> str:
-    text = msg.content if hasattr(msg, "content") else str(msg)
-    last_error: Optional[Exception] = None
-
-    for candidate in _iter_json_candidates(text):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            last_error = exc
-            continue
-
-        if isinstance(parsed, (dict, list)):
-            return candidate
-
-    summary = _summarize_text(text)
-    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no_candidates"
-    logger.warning(
-        "JSON extraction failed: length=%s, preview=%s, error=%s",
-        len(text),
-        summary,
-        error_detail,
-    )
-    raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
 # --- Lifespan & App Setup ---
 @asynccontextmanager
