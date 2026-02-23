@@ -1162,29 +1162,25 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
          "[현재 질문]\n{question}")
     ])
 
-    try:
-        chain = prompt | llm
-        invoke_payload = {
-            "format_instructions": parser.get_format_instructions(),
-            "history": history_str or '없음',
-            "prev_context": prev_context_str or "없음",
-            "question": state.messages[-1].content
-        }
-        invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
-        llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
-        result = _parse_structured_response(
-            parser,
-            llm_result,
-            fallback_to_json_extraction=parser_fallback_required,
-        )
+    chain = prompt | llm
+    max_attempts = max(1, int(os.getenv("KS_RETRY_ATTEMPTS", "2")))
+    last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            result: KnowledgeSufficiency = await chain.ainvoke({
+            invoke_payload = {
+                "format_instructions": parser.get_format_instructions(),
                 "history": history_str or '없음',
                 "prev_context": prev_context_str or "없음",
                 "question": state.messages[-1].content
-            })
+            }
+            invoke_kwargs = structured_kwargs if not parser_fallback_required else {}
+            llm_result = await chain.ainvoke(invoke_payload, **invoke_kwargs)
+            result = _parse_structured_response(
+                parser,
+                llm_result,
+                fallback_to_json_extraction=parser_fallback_required,
+            )
             result = KnowledgeSufficiency.model_validate(result.model_dump())
 
             log_section("KNOWLEDGE SUFFICIENCY",
