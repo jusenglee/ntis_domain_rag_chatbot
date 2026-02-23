@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, AsyncIterator
+from typing import Any, List, Optional, AsyncIterator, Generator, cast
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, AIMessageChunk
 from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChunk
@@ -17,18 +17,17 @@ class TritonChatModel(BaseChatModel):
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         # 비동기 호출 (스트리밍 없이 결과만 반환)
         prompt = self._format_messages(messages)
-        full_text = ""
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
-        # stream=False로 호출
-        gen = triton_infer(
+
+        # triton_infer(..., stream=False) 계약: str 반환
+        response_text = cast(str, triton_infer(
             self.model_name,
             prompt,
             stream=False,
             max_tokens=max_tokens_hint,
-        )
-        for chunk in gen:
-            if chunk:
-                full_text += chunk
+        ))
+
+        full_text = response_text or ""
 
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=full_text))])
 
@@ -49,12 +48,13 @@ class TritonChatModel(BaseChatModel):
         loop = asyncio.get_running_loop()
 
         # stream=True
-        gen = triton_infer(
+        # triton_infer(..., stream=True) 계약: generator 반환
+        gen = cast(Generator[str, None, None], triton_infer(
             self.model_name,
             prompt,
             stream=True,
             max_tokens=max_tokens_hint,
-        )
+        ))
 
         try:
             while True:
