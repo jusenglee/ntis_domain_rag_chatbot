@@ -4225,20 +4225,25 @@ def _run_rag_with_vectors(
                 join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_nos = []
 
-            if int(join_key_result.get("suspected_swap_count", 0) or 0) > 0:
+            invalid_values = [str(x).strip() for x in (join_key_result.get("invalid_values") or []) if str(x).strip()]
+            suspected_swap_count = int(join_key_result.get("suspected_swap_count", 0) or 0)
+            if invalid_values or suspected_swap_count > 0:
                 log_kv(
-                    "RAG.JOIN_KEYS.SUSPECTED_SWAP",
+                    "RAG.JOIN_KEYS.INVALID",
                     level="error",
                     scope=f"join_hop1:{hop1_col}:extract",
                     join_key_mode=join_key_mode,
-                    suspected_swap_count=int(join_key_result.get("suspected_swap_count", 0) or 0),
-                    suspected_swaps=join_key_result.get("suspected_swaps", [])[:10],
+                    invalid_count=len(invalid_values),
+                    invalid_values=invalid_values[:10],
+                    suspected_swap_count=suspected_swap_count,
+                    suspected_swaps=(join_key_result.get("suspected_swaps") or [])[:10],
                 )
                 raise StrategyViolation(
                     error_code="JOIN_KEYS_INVALID",
                     reason=(
-                        f"[join_hop1:{hop1_col}:extract] suspected join key swap detected "
-                        f"(join_key_mode={join_key_mode}, count={int(join_key_result.get('suspected_swap_count', 0) or 0)})"
+                        f"[join_hop1:{hop1_col}:extract] invalid join keys detected "
+                        f"(join_key_mode={join_key_mode}, invalid_count={len(invalid_values)}, "
+                        f"suspected_swap_count={suspected_swap_count})"
                     ),
                 )
 
