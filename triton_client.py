@@ -64,10 +64,21 @@ _HARMONY_FALLBACK_PATTERN = re.compile(
     r"<\|channel\|>final<\|message\|>(.*)",
     flags=re.DOTALL,
 )
-
+ASSISTANT_FINAL_MARKER = "assistantfinal"
 # ---------------------------------------------------------------------------
 # 0. 토크나이저 관련 유틸
 # ---------------------------------------------------------------------------
+def _is_gpt_oss_model(model_name: str) -> bool:
+    """
+    gpt-oss 계열 모델 판별용 헬퍼.
+
+    - 현재는 이름에 "gpt" 와 "oss" 둘 다 들어가면 gpt-oss 로 간주.
+    - 모델 이름 규칙이 바뀌면 이 함수를 수정하면 된다.
+    """
+    name = model_name.lower()
+    return ("gpt" in name) and ("oss" in name)
+
+
 def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
     """
     모델 이름에 대응하는 토크나이저를 캐시해서 반환.
@@ -261,6 +272,80 @@ def _compute_max_new_tokens(
 
     max_new = min(cap, available)
     return max(MIN_NEW_TOKENS, max_new)
+
+
+# ---------------------------------------------------------------------------
+# 2. gpt-oss assistantfinal 포맷 처리
+# ---------------------------------------------------------------------------
+def extract_final_answer(raw: str) -> str:
+    """
+    gpt-oss가 analysis/.../assistantfinal 포맷으로 뱉을 때,
+    마지막 assistantfinal 이후 텍스트만 추출.
+
+    - 마커가 없으면 raw 전체를 그대로 반환 (타 모델에 대한 안전장치)
+    """
+    if not raw:
+        return ""
+
+    text = str(raw).strip()
+    idx = text.rfind(ASSISTANT_FINAL_MARKER)
+    if idx == -1:
+        # 마커 없으면 그냥 원본 반환
+        return text
+
+    final = text[idx + len(ASSISTANT_FINAL_MARKER):]
+    # 콜론/공백 정리
+    final = final.lstrip(" :\n\t")
+    logger.info(final)
+    return final.strip()
+
+
+def stream_after_assistantfinal(chunks):
+    """
+    gpt-oss 스트리밍 결과(chunks)를 받아서
+    'assistantfinal' 이후 텍스트만 yield하는 제너레이터.
+    """
+    marker = ASSISTANT_FINAL_MARKER.lower()
+    seen = False
+    buf = ""
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+
+        buf += chunk
+
+        if not seen:
+            pos = buf.lower().find(marker)
+            if pos == -1:
+                # 아직 마커 안 나왔으면 계속 버퍼에만 쌓음
+                continue
+
+            # 처음으로 마커를 발견한 시점
+            seen = True
+            start = pos + len(ASSISTANT_FINAL_MARKER)
+            # 마커 앞부분은 버리고, 마커 뒤부터 사용
+            buf = buf[start:]
+            buf = buf.lstrip(" :\n\t")
+
+            if not buf:
+                continue
+
+        # 여기부터는 전부 '최종 답변'에 해당
+        yield buf
+        buf = ""
+
+    # 스트림 종료 후 마무리 처리
+    if seen and buf:
+        # assistantfinal 이후 남은 찌꺼기
+        yield buf
+    elif not seen and buf:
+        # assistantfinal이 한 번도 안 나온 경우 fallback:
+        # 전체 버퍼를 그냥 보내거나, 정책에 따라 버릴 수도 있음.
+        logger.warning(
+            "[gpt-oss] assistantfinal 마커를 찾지 못했습니다. 전체 버퍼를 그대로 전송합니다."
+        )
+        yield buf
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +604,9 @@ def _triton_infer_sync(
 
     accumulated_text = accumulated_text.strip()
 
-    if _should_apply_harmony_final(model_name):
-        accumulated_text = _extract_harmony_final(accumulated_text)
+    # 3) gpt-oss 계열이면 assistantfinal 이후만 추출
+    if _is_gpt_oss_model(model_name):
+        return extract_final_answer(accumulated_text)
 
     return accumulated_text
 
@@ -603,7 +689,12 @@ def triton_infer(
             request_type="stream",
         )
 
-        # 모델별 후처리 반영 스트림 반환
+        # gpt-oss 계열이면 assistantfinal 이후만 스트리밍
+        if _is_gpt_oss_model(model_name):
+            logger.info("[TRITON] gpt-oss 모델 감지 → assistantfinal 이후만 스트리밍")
+            return stream_after_assistantfinal(base_gen)
+
+        # 그 외 모델은 raw 스트림 그대로
         return base_gen
 
     # Sync Path: 스트리밍을 내부적으로 사용하여 최종 문자열 반환
