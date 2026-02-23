@@ -17,6 +17,12 @@ export GEMMA_MAX_TOKENS=8192
 - Gemma 모델에서는 `GEMMA_MAX_TOKENS`가 `MAX_TOKENS`보다 우선합니다.
 - `DEFAULT_MAX_MODEL_LEN`은 모델별 길이를 지정하지 않았을 때의 기본값입니다.
 
+## 대화 이력 보존 단위
+
+- `server3.py`의 `MAX_HISTORY_TURNS`는 **턴(turn) 단위** 상한입니다.
+- 1턴은 `HumanMessage` 1개 + `AIMessage` 1개(총 2개 메시지)로 계산합니다.
+- 실제 저장 시에는 `max_messages = MAX_HISTORY_TURNS * 2`로 환산한 뒤 최근 메시지만 슬라이싱합니다.
+
 ## 수동 확인 시나리오 (최종 응답 페이로드 절단 완화)
 
 1. 긴 `meta_basic`/`meta_detail` 및 본문이 포함된 문서를 반환하도록 질의합니다.

@@ -94,6 +94,7 @@ templates = Jinja2Templates(directory="templates")
 
 # --- Configuration ---
 kv_store: Optional[KVStore] = None
+# 대화 저장 상한(턴 단위). 1턴 = Human 1개 + AI 1개 메시지.
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
@@ -1792,7 +1793,8 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     new_turn = state.messages[-2:]  # [Human, AI]
     full_history = state.chat_history + new_turn
-    trimmed_history = full_history[-MAX_HISTORY_TURNS:]
+    max_messages = MAX_HISTORY_TURNS * 2
+    trimmed_history = full_history[-max_messages:]
 
     serialized_hist = _serialize_history(trimmed_history)
 
