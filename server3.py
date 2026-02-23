@@ -1790,6 +1790,9 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 async def node_save_history(state: AgentState) -> Dict[str, Any]:
     """Redis에 대화 저장"""
 
+    if not kv_store:
+        return {}
+
     cid = state.conversation_id
 
     new_turn = state.messages[-2:]  # [Human, AI]
@@ -1799,21 +1802,20 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     serialized_hist = _serialize_history(trimmed_history)
 
-    if kv_store:
-        await kv_store.set(
-            f"conversation:{cid}:history",
-            json.dumps(serialized_hist, ensure_ascii=False),
-            ex=REDIS_TTL,
-        )
+    await kv_store.set(
+        f"conversation:{cid}:history",
+        json.dumps(serialized_hist, ensure_ascii=False),
+        ex=REDIS_TTL,
+    )
 
-    if state.context:
+    if kv_store and state.context:
         await kv_store.set(
             f"conversation:{cid}:last_context",
             json.dumps(state.context, ensure_ascii=False),
             ex=REDIS_TTL,
         )
 
-    if state.fallback_context:
+    if kv_store and state.fallback_context:
         await kv_store.set(
             f"conversation:{cid}:last_fallback_context",
             state.fallback_context,
@@ -2779,8 +2781,9 @@ async def lifespan(app: FastAPI):
             kv_store = RedisKVStore(r)
             logger.info("✅ Redis connected: %s", REDIS_URL)
         except Exception as e:
-            kv_store = None
+            kv_store = MemoryKVStore()
             logger.error("❌ Redis connection failed: %s", e, exc_info=True)
+            logger.warning("⚠️ Redis 실패 → MemoryKVStore 폴백")
 
     elif backend == "memory":
         kv_store = MemoryKVStore()
