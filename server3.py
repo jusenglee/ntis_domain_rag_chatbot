@@ -148,6 +148,14 @@ def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
         return SHORT_ANSWER_MAX_TOKENS_HINT
     return None
 
+
+def _is_detail_action(qa: Optional["QuestionAnalysis"]) -> bool:
+    return bool(qa and qa.action == "detail")
+
+
+def _should_expand_detail_context(qa: Optional["QuestionAnalysis"]) -> bool:
+    return bool(qa and (qa.action == "detail" or qa.mode == "JOIN"))
+
 def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> str:
     if not value:
         return ""
@@ -1145,19 +1153,12 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
     prev_context_str = None
 
 
-    if qa and qa.mode == "JOIN":
-        prev_context_str = refine_documents_rule_based(
-            state.prev_context,
-            True,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-        )
-    else:
-        prev_context_str = refine_documents_rule_based(
-            state.prev_context,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-        )
+    prev_context_str = refine_documents_rule_based(
+        state.prev_context,
+        _is_detail_action(qa),
+        org_filters=(qa.filters if qa else None),
+        ids_map=(qa.ids_map if qa else None),
+    )
 
 
     system_prompt = (
@@ -1480,7 +1481,7 @@ async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
 
     docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
     fallback_context = state.fallback_context if state.context else None
-    is_detail = bool(qa and qa.mode == "JOIN")
+    is_detail = _should_expand_detail_context(qa)
     researcher_hints = _build_researcher_hints_from_question_analysis(qa)
 
     if docs_for_ctx:
