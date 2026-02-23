@@ -4515,7 +4515,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -4527,7 +4527,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)

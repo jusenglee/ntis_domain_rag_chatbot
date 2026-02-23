@@ -971,6 +971,10 @@ class QueryIntent:
     participant_org_terms: List[str] = field(default_factory=list)
     people_affiliation_org_terms: List[str] = field(default_factory=list)
     years: List[str] = field(default_factory=list)
+    year_from: Optional[str] = None
+    year_to: Optional[str] = None
+    perf_types: List[str] = field(default_factory=list)
+    title: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
     # tag filters
@@ -1014,6 +1018,10 @@ class QueryIntent:
             "participant_org_terms": self.participant_org_terms,
             "people_affiliation_org_terms": self.people_affiliation_org_terms,
             "years": self.years,
+            "year_from": self.year_from,
+            "year_to": self.year_to,
+            "perf_types": self.perf_types,
+            "title": self.title,
             "ids_map": self.ids_map,
             "ids_flat": self.ids_flat,
             "project_tag_filters": self.project_tag_filters,
@@ -1216,6 +1224,10 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "participant_org_terms": _get_attr(hint, "participant_org_name") or _get_attr(hint, "participant_org_terms"),
         "people_affiliation_org_terms": _get_attr(hint, "people_affiliation_org_name") or _get_attr(hint, "people_affiliation_org_terms"),
         "years": _get_attr(hint, "years"),
+        "year_from": _get_attr(hint, "year_from"),
+        "year_to": _get_attr(hint, "year_to"),
+        "perf_types": _get_attr(hint, "perf_types"),
+        "title": _get_attr(hint, "title") or _get_attr(hint, "title_terms"),
         "project_tag_filters": _get_attr(hint, "project_tag_filters"),
         "perf_tag_filters": _get_attr(hint, "perf_tag_filters"),
         "wants_count": _get_attr(hint, "wants_count"),
@@ -1440,6 +1452,10 @@ def _classify_query_heuristic(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
@@ -1577,6 +1593,10 @@ def classify_query(
         org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
     org_role = str(plan.get("org_role") or "").strip().lower() or None
     years = _normalize_str_list(plan.get("years"))
+    year_from = str(plan.get("year_from") or "").strip() or None
+    year_to = str(plan.get("year_to") or "").strip() or None
+    perf_types = _normalize_str_list(plan.get("perf_types"))
+    title_terms = _normalize_str_list(plan.get("title") or plan.get("title_terms"))
 
     if not gender_terms:
         gender_terms = extract_gender_terms(q, kws)
@@ -1584,6 +1604,10 @@ def classify_query(
         org_role = extract_org_role(q)
     if not years:
         years = extract_years(q)
+    if not year_from and years:
+        year_from = years[0]
+    if not year_to and years:
+        year_to = years[-1]
     if org_role == "affiliation" and not people_terms:
         people_terms = _extract_people_terms_for_affiliation(q)
     if org_role in ("lead", "performer", "performing") and not lead_org_terms:
@@ -1683,6 +1707,10 @@ def classify_query(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,

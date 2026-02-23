@@ -735,6 +735,9 @@ async def _run_question_analysis(
         - lead_org_name (배열)               : org_nm (수행기관)
         - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
         - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
+        - year_from / year_to (문자열): 예) "2021" ~ "2023", "2020" 이후는 year_from만
+        - perf_types (배열): ["논문", "특허", "보고서", ...] 성과유형
+        - title_terms (배열): 타이틀 키워드
         - org_role (문자열, 선택): "lead" | "participant" | "affiliation" | null
         - 기관 슬롯은 역할별로 엄격 분리합니다(혼용 금지):
           * "ETRI 수행 과제" -> lead_org_name=["ETRI"]
@@ -1438,6 +1441,9 @@ async def build_intent_payload(
     hint_participant_org_terms: List[str] = []
     hint_people_affiliation_org_terms: List[str] = []
     hint_title_terms: List[str] = []
+    hint_year_from: str | None = None
+    hint_year_to: str | None = None
+    hint_perf_types: List[str] = []
     hint_org_role = None
 
     if question_analysis and isinstance(question_analysis.filters, dict):
@@ -1454,6 +1460,13 @@ async def build_intent_payload(
             title_terms = _normalize_hint_terms(title_hint)
             hint_title_terms = _normalize_hint_terms([*hint_title_terms, *title_terms])
             kws = list(dict.fromkeys([*kws, *title_terms]))
+
+        hint_year_from = str(filters.get("year_from") or "").strip() or hint_year_from
+        hint_year_to = str(filters.get("year_to") or "").strip() or hint_year_to
+        perf_types_hint = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+        if perf_types_hint:
+            hint_perf_types = _normalize_hint_terms([*hint_perf_types, *perf_types_hint])
+            kws = list(dict.fromkeys([*kws, *perf_types_hint]))
 
         hint_org_role = filters.get("org_role")
 
@@ -1495,6 +1508,9 @@ async def build_intent_payload(
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
         "title_terms": hint_title_terms,
+        "year_from": hint_year_from,
+        "year_to": hint_year_to,
+        "perf_types": hint_perf_types,
         "org_role": hint_org_role,
         "lead_org_terms": hint_lead_org_terms,
         "participant_org_terms": hint_participant_org_terms,
@@ -1570,6 +1586,17 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
     org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms, *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else [])])
 
+    planner_year_from = str(filters.get("year_from") or "").strip() or None
+    planner_year_to = str(filters.get("year_to") or "").strip() or None
+    planner_years = _normalize_hint_terms(filters.get("years"))
+    if not planner_year_from and planner_years:
+        planner_year_from = planner_years[0]
+    if not planner_year_to and planner_years:
+        planner_year_to = planner_years[-1]
+
+    planner_perf_types = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+    planner_title_terms = _normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
+
     patched = replace(
         intent,
         base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
@@ -1585,6 +1612,11 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
         participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
         people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
+        year_from=planner_year_from or getattr(intent, "year_from", None),
+        year_to=planner_year_to or getattr(intent, "year_to", None),
+        years=planner_years or list(getattr(intent, "years", []) or []),
+        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        title=planner_title_terms or list(getattr(intent, "title", []) or []),
     )
     return patched, True
 
