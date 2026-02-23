@@ -28,6 +28,7 @@ def test_promote_search_to_join_when_relation_and_ids_extracted() -> None:
     )
     assert out["mode"] == "join"
     assert out["ids_map"].get("pjt_id")
+    assert out.get("strategy_key")
 
 
 def test_promote_search_to_lookup_for_list_action_with_ids() -> None:
@@ -39,3 +40,4 @@ def test_promote_search_to_lookup_for_list_action_with_ids() -> None:
         planner_strategy=_Strategy(action="list", relation=None),
     )
     assert out["mode"] == "lookup"
+    assert out.get("strategy_key")

@@ -8,6 +8,12 @@ from typing import Any, Dict, List, Optional
 _PJT_ID_RE = re.compile(r"^\d{8,12}$")
 
 
+def _build_strategy_key(action: Optional[str], mode: Optional[str]) -> str:
+    action_norm = str(action or "").strip().lower() or "unknown"
+    mode_norm = str(mode or "").strip().lower() or "unknown"
+    return f"{action_norm}:{mode_norm}"
+
+
 def _as_list(value: Any) -> List[str]:
     if value is None:
         return []
@@ -129,6 +135,7 @@ def promote_mode_from_search_hits(
             "planner_action": planner_action,
             "planner_relation": planner_relation,
             "query_text": None,
+            "strategy_key": _build_strategy_key(planner_action, mode_now),
             "allowed": {"policy": "search_only", "lookup": False, "join": False},
             "signals": {"has_pjt_id": int(bool((merged_ids_map.get("pjt_id") or []))), "has_pjt_no": int(bool((merged_ids_map.get("pjt_no") or []))), "has_history_nuance": 0, "has_detail_nuance": 0, "wants_project_perf_relation": 0},
         }
@@ -157,6 +164,8 @@ def promote_mode_from_search_hits(
             kind = "search_to_lookup"
             reason = "search_hit_ids_and_lookup_like_action"
 
+    strategy_key = _build_strategy_key(planner_action, promote_mode)
+
     return {
         "mode": promote_mode,
         "kind": kind,
@@ -166,6 +175,7 @@ def promote_mode_from_search_hits(
         "planner_action": planner_action,
         "planner_relation": planner_relation,
         "query_text": None,
+        "strategy_key": strategy_key,
         "allowed": {
             "policy": "search_hit_promotion",
             "lookup": bool(action_like_lookup and (has_pjt_id or has_pjt_no or has_perf_id)),
