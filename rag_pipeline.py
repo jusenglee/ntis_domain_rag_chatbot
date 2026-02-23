@@ -2092,7 +2092,7 @@ def _hydrate_points_payload(
 ) -> None:
     """
     Always hydrate points with FULL payload from Qdrant (with_payload=True).
-    - 내부 메타(_collection/_rrf/_final_*)는 보존하지 않고 DB payload로 덮어씀
+    - hydration 전 내부 메타(_collection/_rrf/_final_* 등)를 백업 후 merge
     - include_fields는 호환용으로만 두고 무시
     """
     _INTERNAL_KEYS = {
@@ -2186,15 +2186,29 @@ def _hydrate_points_payload(
                 if rid is None:
                     continue
                 rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-            # payload를 "그대로" 덮어씀 (내부 메타 유지 X)
+            # payload hydrate 후 내부 메타 키를 복원해 유지
             for p in chunk:
                 pid = _get(p, "id", None)
                 if pid is None:
                     continue
                 key = str(pid)
-                if key in rec_payload:
-                    _normalize_project_tag(rec_payload[key])
-                    _set(p, "payload", rec_payload[key])
+                if key not in rec_payload:
+                    continue
+
+                prev_payload = _get(p, "payload", {}) or {}
+                if not isinstance(prev_payload, dict):
+                    prev_payload = {}
+                preserved_internal = {
+                    k: v for k, v in prev_payload.items()
+                    if isinstance(k, str) and (k in _INTERNAL_KEYS or k.startswith("_final_"))
+                }
+
+                hydrated_payload = rec_payload[key]
+                if not isinstance(hydrated_payload, dict):
+                    hydrated_payload = {}
+                _normalize_project_tag(hydrated_payload)
+                hydrated_payload.update(preserved_internal)
+                _set(p, "payload", hydrated_payload)
 
 
 def _run_rag_with_vectors(
