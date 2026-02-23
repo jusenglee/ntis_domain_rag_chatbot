@@ -36,7 +36,7 @@ from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
-from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
+from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
 from schemas import IntentPayloadV2
 from settings import (
     REDIS_URL,
@@ -703,7 +703,12 @@ async def _run_question_analysis(
         - lead_org_name (배열)               : org_nm (수행기관)
         - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
         - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
-        - org_role (문자열, 선택): "lead" | "participant" | null
+        - org_role (문자열, 선택): "lead" | "participant" | "affiliation" | null
+        - 기관 슬롯은 역할별로 엄격 분리합니다(혼용 금지):
+          * "ETRI 수행 과제" -> lead_org_name=["ETRI"]
+          * "ETRI 참여 과제" -> participant_org_name=["ETRI"]
+          * "ETRI 소속 연구자 과제" -> people_affiliation_org_name=["ETRI"]
+          * 역할이 명확하면 해당 슬롯 외 나머지 두 슬롯은 반드시 []
         
         사람/기관 필터 강도 규칙(중요):
         - ID가 있으면 must 수준(LOOKUP 하드필터)로 가정
@@ -1427,12 +1432,12 @@ async def build_intent_payload(
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
-        lead_org_terms_hint = _normalize_hint_terms(
+        lead_org_terms_hint = normalize_org_terms(_normalize_hint_terms(
             filters.get("lead_org_name") or filters.get("performing_org_name")
-        )
-        participant_org_terms_hint = _normalize_hint_terms(filters.get("participant_org_name"))
-        people_affiliation_org_terms_hint = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
-        generic_org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+        ))
+        participant_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("participant_org_name")))
+        people_affiliation_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("people_affiliation_org_name")))
+        generic_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("org_name") or filters.get("org")))
 
         if lead_org_terms_hint:
             hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
@@ -1445,7 +1450,7 @@ async def build_intent_payload(
                 [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
             )
 
-        org_terms_hint = _normalize_hint_terms([
+        org_terms_hint = normalize_org_terms([
             *generic_org_terms_hint,
             *lead_org_terms_hint,
             *participant_org_terms_hint,
@@ -1527,6 +1532,12 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     }
     relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
 
+    filters = dict(getattr(qa, "filters", {}) or {})
+    lead_org_terms = normalize_org_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+    participant_org_terms = normalize_org_terms(filters.get("participant_org_name"))
+    people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
+    org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms, *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else [])])
+
     patched = replace(
         intent,
         base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
@@ -1537,6 +1548,11 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),
         planner_confidence=confidence,
+        org_role=str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None,
+        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
+        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
+        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
     )
     return patched, True
 
