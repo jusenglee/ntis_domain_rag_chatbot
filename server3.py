@@ -34,7 +34,8 @@ from langgraph.graph.message import add_messages
 # --- User Modules ---
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
-from triton_llm import TritonChatModel
+from triton_llm import TritonChatModel, supports_triton_structured_output
+from langchain_core.output_parsers import PydanticOutputParser
 from rag_pipeline import run_rag_ab_compare
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
@@ -133,7 +134,7 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
 
 
 STRUCTURED_OUTPUT_KWARGS: tuple[str, ...] = ("response_format", "tools", "tool_choice")
-STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset({"gpt_oss_triton_0"})
+STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset()
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -1436,41 +1437,43 @@ async def node_generate_answer_gpt_oss(state: AgentState) -> Dict[str, Any]:
 
 def _requires_structured_output_from_capabilities(model_name: str) -> bool:
     """모델 capability 기반 구조화 출력 지원 여부."""
-    return model_name in STRUCTURED_OUTPUT_CAPABLE_MODELS
+    return model_name in STRUCTURED_OUTPUT_CAPABLE_MODELS and supports_triton_structured_output(model_name)
 
 
 def _structured_output_kwargs_for_schema(schema: type[BaseModel]) -> Dict[str, Any]:
     schema_payload = schema.model_json_schema()
     schema_name = schema.__name__
-    if "response_format" not in STRUCTURED_OUTPUT_KWARGS:
-        return {}
-    return {
-        "response_format": {
+    kwargs: Dict[str, Any] = {}
+    if "response_format" in STRUCTURED_OUTPUT_KWARGS:
+        kwargs["response_format"] = {
             "type": "json_schema",
             "json_schema": {
                 "name": schema_name,
                 "schema": schema_payload,
             },
-        },
-    }
+        }
+    return kwargs
 
 
 def _build_llm(model_name: str, *, requires_structured_output: bool = False):
     model_supports_structured = _requires_structured_output_from_capabilities(model_name)
-    if requires_structured_output:
-        if not model_supports_structured:
-            logger.warning(
-                "[STRUCTURED_OUTPUT] model=%s does not support structured output; enabling parser fallback",
-                model_name,
-            )
-            return TritonChatModel(model_name=model_name), True
-        logger.info(
-            "[STRUCTURED_OUTPUT] model=%s supports structured output; using TritonChatModel",
-            model_name,
-        )
-        return TritonChatModel(model_name=model_name), False
+    fallback_required = bool(requires_structured_output and not model_supports_structured)
 
-    return TritonChatModel(model_name=model_name), False
+    if requires_structured_output:
+        if fallback_required:
+            logger.warning(
+                "[STRUCTURED_OUTPUT] model=%s parser fallback mode enabled (fallback_required=%s)",
+                model_name,
+                fallback_required,
+            )
+        else:
+            logger.info(
+                "[STRUCTURED_OUTPUT] model=%s structured output passthrough enabled (fallback_required=%s)",
+                model_name,
+                fallback_required,
+            )
+
+    return TritonChatModel(model_name=model_name), fallback_required
 
 
 @lru_cache(maxsize=1)

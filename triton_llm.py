@@ -9,9 +9,16 @@ from triton_client import triton_infer, get_tokenizer_for_model
 
 logger = logging.getLogger(__name__)
 
+TRITON_STRUCTURED_OUTPUT_CAPABLE_MODELS = frozenset()
 
 
-def _extract_triton_passthrough_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+def supports_triton_structured_output(model_name: str) -> bool:
+    """Triton 백엔드가 response_format 기반 구조화 출력을 지원하는지 반환한다."""
+    return model_name in TRITON_STRUCTURED_OUTPUT_CAPABLE_MODELS
+
+
+
+def _extract_triton_passthrough_kwargs(model_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
     """triton_infer가 받을 수 있는 확장 파라미터만 선별 전달한다."""
     passthrough: dict[str, Any] = {}
     for key in ("temperature", "top_p", "timeout_first", "timeout_idle"):
@@ -19,15 +26,20 @@ def _extract_triton_passthrough_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]
         if value is not None:
             passthrough[key] = value
 
-    unsupported_structured = [
-        key for key in ("response_format", "tools", "tool_choice")
-        if kwargs.get(key) is not None
-    ]
-    if unsupported_structured:
-        logger.warning(
-            "[triton_llm] structured output kwargs are not supported in Triton path and will be ignored: %s",
-            ", ".join(unsupported_structured),
-        )
+    structured_keys = ("response_format", "tools", "tool_choice")
+    if supports_triton_structured_output(model_name):
+        for key in structured_keys:
+            value = kwargs.get(key)
+            if value is not None:
+                passthrough[key] = value
+    else:
+        unsupported_structured = [key for key in structured_keys if kwargs.get(key) is not None]
+        if unsupported_structured:
+            logger.info(
+                "[triton_llm] model=%s parser fallback mode: ignoring unsupported kwargs=%s",
+                model_name,
+                ", ".join(unsupported_structured),
+            )
 
     return passthrough
 
@@ -44,7 +56,7 @@ class TritonChatModel(BaseChatModel):
         prompt = self._format_messages(messages)
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
 
-        passthrough_kwargs = _extract_triton_passthrough_kwargs(kwargs)
+        passthrough_kwargs = _extract_triton_passthrough_kwargs(self.model_name, kwargs)
 
         # triton_infer(..., stream=False) 계약: str 반환
         response_text = cast(str, triton_infer(
@@ -75,7 +87,7 @@ class TritonChatModel(BaseChatModel):
         import asyncio
         loop = asyncio.get_running_loop()
 
-        passthrough_kwargs = _extract_triton_passthrough_kwargs(kwargs)
+        passthrough_kwargs = _extract_triton_passthrough_kwargs(self.model_name, kwargs)
 
         # stream=True
         # triton_infer(..., stream=True) 계약: generator 반환
