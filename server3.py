@@ -7,7 +7,7 @@ import os
 import re
 import hashlib
 from functools import lru_cache
-from typing import Annotated, Optional, List, Dict, Any, Literal
+from typing import Annotated, Optional, List, Dict, Any, Literal, Mapping, Union
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -2433,11 +2433,20 @@ def _format_org_line(
     return "- 참여기관: 정보 없음"
 
 
-def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
+def _safe_map_doc(doc: Union[Document, Mapping[str, Any]], *, context: str) -> Optional[Dict[str, Any]]:
+    """문서 매핑 래퍼.
+
+    기대 입력:
+    - LangChain ``Document`` 인스턴스
+    - ``dict``/``Mapping[str, Any]`` 형태의 런타임 문서 페이로드
+    """
     try:
         return RagMapper.map(doc)
     except MappingError as exc:
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
         logger.warning(
             "문서 매핑 실패(%s): source_index=%s, error=%s",
             context,
@@ -2448,7 +2457,7 @@ def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
 
 
 def summarize_documents_headlines(
-    docs: List[Document],
+    docs: List[Union[Document, Mapping[str, Any]]],
     *,
     researchers: Optional[List[Any]] = None,
     organizations: Optional[List[Any]] = None,
@@ -2456,6 +2465,12 @@ def summarize_documents_headlines(
     ids_map: Optional[Dict[str, Any]] = None,
     max_matches: int = 5,
 ) -> str:
+    """문서 목록에서 헤드라인 컨텍스트를 구성한다.
+
+    기대 입력:
+    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
+    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
+    """
     headlines: List[str] = []
 
     for doc in docs:
@@ -2463,7 +2478,10 @@ def summarize_documents_headlines(
         if not mapped_doc:
             continue
         _apply_title_preference(mapped_doc)
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
         title = mapped_doc.get("title", "제목 없음")
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
@@ -2500,7 +2518,7 @@ def summarize_documents_headlines(
 
 
 def refine_documents_rule_based(
-    docs: List[Document],
+    docs: List[Union[Document, Mapping[str, Any]]],
     is_detail: bool = False,
     *,
     researchers: Optional[List[Any]] = None,
@@ -2510,6 +2528,12 @@ def refine_documents_rule_based(
     max_matches: int = 5,
     relax_limits: bool = False,
 ) -> str:
+    """룰 기반으로 문서 본문을 정제해 컨텍스트 문자열로 변환한다.
+
+    기대 입력:
+    - ``docs``의 각 원소는 ``Document`` 또는 ``dict``/``Mapping[str, Any]``.
+    - ``source_index``는 ``Document``면 ``doc.metadata``에서, dict 계열이면 ``doc.get``으로 조회.
+    """
     context_chunks: List[str] = []
     field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
     field_max_tokens = None if relax_limits else MAX_FIELD_TOKENS
@@ -2522,7 +2546,10 @@ def refine_documents_rule_based(
             continue
         _apply_title_preference(mapped_doc)
 
-        source_idx = doc.get("source_index")
+        if isinstance(doc, Document):
+            source_idx = doc.metadata.get("source_index")
+        else:
+            source_idx = doc.get("source_index")
 
         title = mapped_doc.get("title", "제목 없음")
         # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
