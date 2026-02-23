@@ -3583,9 +3583,14 @@ def _run_rag_with_vectors(
             applied=0,
         )
 
-    title_filter_applied_to = None
-    if title_filter and plan.mode == "lookup":
-        title_filter_applied_to = "project/perf"
+    title_filter_server_applied = bool(
+        title_filter
+        and plan.mode == "lookup"
+        and lookup_filter_enabled
+        and lookup_title_filter_policy == "hard"
+        and search_filter_conf_ok
+    )
+    title_filter_applied_to = "project/perf" if title_filter_server_applied else None
     tag_filter_applied_to = None
     if (project_tag_filter or perf_tag_filter) and plan.mode == "lookup":
         tag_targets: list[str] = []
@@ -3601,6 +3606,7 @@ def _run_rag_with_vectors(
         **dict(compiled_strategy.filter_spec or {}),
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
+        "title_filter_server_applied": bool(title_filter_server_applied),
     }
 
     topk_spec = dict(compiled_strategy.topk_spec or {})
@@ -3732,6 +3738,7 @@ def _run_rag_with_vectors(
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
+        title_filter_server_applied=int(title_filter_server_applied),
         tag_filter_applied_to=tag_filter_applied_to,
         search_filter_server_policy=search_filter_server_policy,
         search_filter_server_applied=int(search_filter_server_applied),
@@ -4576,7 +4583,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -4588,7 +4595,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
@@ -4740,6 +4747,7 @@ def _run_rag_with_vectors(
             search_filter_enabled=search_filter_enabled,
             search_filter_signal=search_filter_signal,
             search_filter_conf_ok=search_filter_conf_ok,
+            title_filter_server_applied=int(title_filter_server_applied),
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,
@@ -4747,7 +4755,10 @@ def _run_rag_with_vectors(
             sparse_topk=int(sparse_topk_eff),
             sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
-            executed_filter_spec_json=_serialize_filter_for_log(qfilter),
+            executed_filter_spec_json={
+                "qfilter": _serialize_filter_for_log(qfilter),
+                "title_filter_server_applied": bool(title_filter_server_applied and col in (COL_PROJECT, COL_PERF)),
+            },
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
         )
