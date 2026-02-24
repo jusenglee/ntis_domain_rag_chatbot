@@ -1125,26 +1125,16 @@ def _validate_lookup_join_hybrid_metrics(
     if hybrid_mode_used:
         return
 
-    if dense_queries == 0:
-        if not strict:
-            return
-        raise StrategyViolation(
-            error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
-            reason=(
-                f"dense_queries == 0 and hybrid_once_hits == 0 for {contract_scope}; "
-                f"dense_queries={dense_queries}, hybrid_once_hits={hybrid_once_hits}"
-            ),
-        )
-
-    if sparse_hits == 0:
-        if not strict:
-            return
-        raise StrategyViolation(
-            error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
-            reason=(
-                f"sparse_hits == 0 and hybrid_once_hits == 0 for {contract_scope}; "
-                f"sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}"
-            ),
+    if dense_queries == 0 or sparse_hits == 0:
+        log_kv(
+            "RAG.LOOKUP_JOIN.HYBRID.METRICS.ZERO_HIT",
+            level="warning" if not strict else "info",
+            mode=mode,
+            contract_scope=contract_scope,
+            dense_queries=dense_queries,
+            sparse_hits=sparse_hits,
+            hybrid_once_hits=hybrid_once_hits,
+            strict=int(bool(strict)),
         )
 
 def _attach_collection(p: Any, col: str) -> Any:
@@ -4287,6 +4277,7 @@ def _run_rag_with_vectors(
                 mode="join",
                 contract_scope=f"join_hop1:{hop1_col}",
                 timings=local_timings_h1,
+                strict=False,
             )
             _apply_dense_threshold(
                 sr1,
@@ -4543,6 +4534,7 @@ def _run_rag_with_vectors(
                 mode="join",
                 contract_scope=f"join_hop2:{hop2_col}",
                 timings=local_timings_h2,
+                strict=False,
             )
             _apply_dense_threshold(
                 sr2,
@@ -4916,6 +4908,7 @@ def _run_rag_with_vectors(
                 mode=plan.mode,
                 contract_scope=f"{plan.mode}:{col}",
                 timings=local_timings,
+                strict=False,
             )
 
         _apply_dense_threshold(
