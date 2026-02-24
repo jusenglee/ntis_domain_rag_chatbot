@@ -103,3 +103,101 @@ def test_people_aggregation_enforces_year_window_filter() -> None:
     assert [item["hm_nm"] for item in agg["rank_items"]] == ["홍길동"]
     assert agg["window_docs"] == 1
     assert agg["meta"]["stats"]["window_applied"] == {"from": "2024", "to": "2024"}
+
+
+def test_people_aggregation_deduplicates_duplicate_participants_by_project() -> None:
+    build_agg = _load_people_agg_fn()
+    point = SimpleNamespace(
+        payload={
+            "stan_yr": "2024",
+            "meta_basic": {"pjt_id": "PJ-1"},
+            "tag": "IRD_NAI_PJT_INFO",
+            "prtcp_mp": [
+                {"hm_id": "P-1", "hm_nm": "홍길동"},
+                {"hm_id": "P-1", "hm_nm": "홍길동"},
+            ],
+        }
+    )
+
+    agg = build_agg(reranked=[point], intent=_intent(top_k=5), hinted_limit=0, policy_limit=10)
+    assert agg is not None
+    assert len(agg["rank_items"]) == 1
+    assert agg["rank_items"][0]["project_participation_count"] == 1
+
+
+def test_people_aggregation_prefers_hm_id_as_group_key() -> None:
+    build_agg = _load_people_agg_fn()
+    points = [
+        SimpleNamespace(
+            payload={
+                "stan_yr": "2024",
+                "meta_basic": {"pjt_id": "PJ-1"},
+                "tag": "IRD_NAI_PJT_INFO",
+                "prtcp_mp": [{"hm_id": "P-1", "hm_nm": "홍길동"}],
+            }
+        ),
+        SimpleNamespace(
+            payload={
+                "stan_yr": "2024",
+                "meta_basic": {"pjt_id": "PJ-2"},
+                "tag": "IRD_NAI_PJT_INFO",
+                "prtcp_mp": [{"hm_id": "P-1", "hm_nm": "홍 길 동"}],
+            }
+        ),
+    ]
+
+    agg = build_agg(reranked=points, intent=_intent(top_k=5), hinted_limit=0, policy_limit=10)
+    assert agg is not None
+    assert len(agg["rank_items"]) == 1
+    assert agg["rank_items"][0]["hm_id"] == "P-1"
+    assert agg["rank_items"][0]["project_participation_count"] == 2
+
+
+def test_people_aggregation_stable_tie_break_sorting() -> None:
+    build_agg = _load_people_agg_fn()
+    points = [
+        SimpleNamespace(
+            payload={
+                "stan_yr": "2024",
+                "meta_basic": {"pjt_id": "PJ-1"},
+                "tag": "IRD_NAI_PJT_INFO",
+                "prtcp_mp": [
+                    {"hm_id": "P-2", "hm_nm": "가나다"},
+                    {"hm_id": "P-1", "hm_nm": "가나다"},
+                ],
+            }
+        )
+    ]
+
+    agg = build_agg(reranked=points, intent=_intent(top_k=5), hinted_limit=0, policy_limit=10)
+    assert agg is not None
+    assert [item["hm_id"] for item in agg["rank_items"]] == ["P-1", "P-2"]
+
+
+def test_people_aggregation_applies_recent_n_year_window() -> None:
+    build_agg = _load_people_agg_fn()
+    current_year = time.gmtime().tm_year
+    points = [
+        SimpleNamespace(
+            payload={
+                "stan_yr": str(current_year),
+                "prtcp_mp": [{"hm_id": "P-1", "hm_nm": "홍길동"}],
+                "meta_basic": {"pjt_id": "PJ-1"},
+                "tag": "IRD_NAI_PJT_INFO",
+            }
+        ),
+        SimpleNamespace(
+            payload={
+                "stan_yr": str(current_year - 5),
+                "prtcp_mp": [{"hm_id": "P-2", "hm_nm": "김철수"}],
+                "meta_basic": {"pjt_id": "PJ-2"},
+                "tag": "IRD_NAI_PJT_INFO",
+            }
+        ),
+    ]
+
+    agg = build_agg(reranked=points, intent=_intent(window_years=1, top_k=5), hinted_limit=0, policy_limit=10)
+    assert agg is not None
+    assert agg["window_years"]["from"] == str(current_year)
+    assert agg["window_years"]["to"] == str(current_year)
+    assert [item["hm_id"] for item in agg["rank_items"]] == ["P-1"]

@@ -125,6 +125,7 @@ def _load_refine_documents_rule_based() -> Any:
         ).strip(),
         "_limit_text_by_sentences_and_tokens": lambda text, **kwargs: text,
         "_split_sentences": lambda text: [line for line in text.splitlines() if line.strip()],
+        "log_section": lambda *args, **kwargs: None,
     }
     exec(compile(module, filename="server3.py", mode="exec"), namespace)
     return namespace["refine_documents_rule_based"]
@@ -194,3 +195,37 @@ def test_refine_documents_rule_based_exposes_participant_organization_line():
 
     assert "참여기관" in output
     assert "한국전자통신연구원" in output
+
+
+def test_retriever_stats_response_includes_topk_metric_window_contract():
+    retriever_cls = _load_retriever_class()
+    retriever = retriever_cls(model_name="x", top_k=2, intent_payload=None)
+
+    def _fake_run_rag_ab_compare(**kwargs):
+        return {
+            "M": SimpleNamespace(
+                reranked_hits=[],
+                context="stats-ctx",
+                aggregation={
+                    "metric": "project_participation_count",
+                    "window_years": {"from": "2020", "to": "2024"},
+                    "candidate_docs": 12,
+                    "rank_items": [
+                        {"hm_id": "P-1", "hm_nm": "홍길동", "project_participation_count": 7},
+                        {"hm_id": "P-2", "hm_nm": "김철수", "project_participation_count": 5},
+                        {"hm_id": "P-3", "hm_nm": "이영희", "project_participation_count": 4},
+                    ],
+                },
+            )
+        }
+
+    retriever.retrieve.__globals__["run_rag_ab_compare"] = _fake_run_rag_ab_compare
+
+    out = retriever.retrieve("최근 5년 최다 참여 연구자")
+    docs = out["documents"]
+
+    assert len(docs) == 2
+    assert [doc["rank_item"]["hm_id"] for doc in docs] == ["P-1", "P-2"]
+    assert all(doc["source_type"] == "aggregation" for doc in docs)
+    assert all(doc["metric"] == "project_participation_count" for doc in docs)
+    assert all(doc["window_years"] == {"from": "2020", "to": "2024"} for doc in docs)
