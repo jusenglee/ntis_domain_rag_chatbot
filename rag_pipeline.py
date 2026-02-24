@@ -3496,7 +3496,8 @@ def _run_rag_with_vectors(
             else None
         )
 
-    if relation and plan.mode in ("search", "lookup"):
+    relation_mode_conflict = bool(relation and plan.mode in ("search", "lookup"))
+    if relation_mode_conflict:
         logger.warning(
             "[RAG] relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
             plan.mode,
@@ -3511,6 +3512,17 @@ def _run_rag_with_vectors(
             payload_mode=planner_mode,
             base_route=base_route,
             action=action,
+        )
+    else:
+        log_kv(
+            "RAG.PLAN.MODE_CONFLICT",
+            level="info",
+            mode=plan.mode,
+            relation=relation,
+            payload_mode=planner_mode,
+            base_route=base_route,
+            action=action,
+            conflict=0,
         )
 
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
