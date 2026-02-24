@@ -21,3 +21,13 @@
 
 ## 목표
 - 송신/수신 스키마를 단일화하여 `intent_payload.v2 schema mismatch` 경고를 제거
+
+
+## 랭킹 집계 정책 필드 (normalized_intent 내부)
+- `stats_metric` (기본: `project_participation_count`)
+- `window_years` (기본: 최근 `3`년)
+- `candidate_n` (기본: `50`)
+- `top_k` (기본: `1`, 요청값 존재 시 해당 값 사용)
+- `tie_break` (기본: `performance_count_desc_name_asc`)
+
+해당 필드는 `action=stats` + `wants_rank=true` 시 집계 실행 단계에서 사용되며, 최종 aggregation `meta.stats.*`에 적용값이 기록됩니다.

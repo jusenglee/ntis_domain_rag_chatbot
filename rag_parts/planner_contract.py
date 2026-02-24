@@ -165,6 +165,34 @@ TITLE_MATCH_MODE_EXACT = "EXACT"
 TITLE_MATCH_MODE_TEXT = "TEXT"
 TITLE_MATCH_MODE_CONTAINS = "CONTAINS"
 
+DEFAULT_STATS_METRIC = "project_participation_count"
+DEFAULT_STATS_WINDOW_YEARS = 3
+DEFAULT_STATS_CANDIDATE_N = 50
+DEFAULT_STATS_TOP_K = 1
+DEFAULT_STATS_TIE_BREAK = "performance_count_desc_name_asc"
+
+
+def normalize_stats_policy_value(
+        *,
+        stats_metric: Optional[str],
+        window_years: Optional[int],
+        candidate_n: Optional[int],
+        top_k: Optional[int],
+        tie_break: Optional[str],
+) -> dict[str, Any]:
+    metric = str(stats_metric or "").strip() or DEFAULT_STATS_METRIC
+    window = int(window_years or DEFAULT_STATS_WINDOW_YEARS)
+    candidate = int(candidate_n or DEFAULT_STATS_CANDIDATE_N)
+    top = int(top_k or DEFAULT_STATS_TOP_K)
+    tie = str(tie_break or "").strip() or DEFAULT_STATS_TIE_BREAK
+    return {
+        "stats_metric": metric,
+        "window_years": max(1, window),
+        "candidate_n": max(1, candidate),
+        "top_k": max(1, top),
+        "tie_break": tie,
+    }
+
 
 def normalize_lookup_filter_policy(policy: Optional[str]) -> Optional[str]:
     value = str(policy or "").strip().lower()

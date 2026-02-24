@@ -80,6 +80,7 @@ from rag_parts.planner_contract import (
     normalize_lookup_title_filter_policy,
     resolve_lookup_title_match_mode,
     validate_planner_contract,
+    normalize_stats_policy_value,
     StrategyViolation,
     StrategyCompiler,
 )
@@ -1007,6 +1008,30 @@ def _resolve_people_agg_candidate_limit(*, hinted_limit: int, policy_limit: int,
     return min(total_docs, policy)
 
 
+def _extract_year_from_payload(payload: Dict[str, Any]) -> Optional[int]:
+    candidates: List[str] = []
+    meta_basic = payload.get("meta_basic") if isinstance(payload.get("meta_basic"), Mapping) else {}
+
+    def _append_year_tokens(raw: Any) -> None:
+        if raw is None:
+            return
+        text = str(raw).strip()
+        if not text:
+            return
+        candidates.append(text)
+
+    _append_year_tokens(payload.get("stan_yr"))
+    _append_year_tokens(meta_basic.get("stan_yr") if isinstance(meta_basic, Mapping) else None)
+    _append_year_tokens(payload.get("dt1"))
+    _append_year_tokens(payload.get("dt2"))
+
+    for token in candidates:
+        m = re.search(r"(19|20)\d{2}", token)
+        if m:
+            return int(m.group(0))
+    return None
+
+
 def _build_people_superlative_aggregation(
         *,
         reranked: List[Any],
@@ -1021,9 +1046,17 @@ def _build_people_superlative_aggregation(
     if not bool(getattr(intent, "wants_rank", False)):
         return None
 
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(intent, "stats_metric", None),
+        window_years=getattr(intent, "window_years", None),
+        candidate_n=getattr(intent, "candidate_n", None),
+        top_k=getattr(intent, "top_k", None),
+        tie_break=getattr(intent, "tie_break", None),
+    )
+
     candidate_docs = _resolve_people_agg_candidate_limit(
         hinted_limit=hinted_limit,
-        policy_limit=policy_limit,
+        policy_limit=int(stats_policy["candidate_n"]),
         total_docs=len(reranked or []),
     )
     if candidate_docs <= 0:
@@ -1032,8 +1065,28 @@ def _build_people_superlative_aggregation(
     perf_types_filter = {t.strip() for t in (getattr(intent, "perf_types", []) or []) if str(t).strip()}
     grouped: Dict[str, Dict[str, Any]] = {}
 
+    now_year = time.gmtime().tm_year
+    fallback_year_from = max(1900, now_year - int(stats_policy["window_years"]) + 1)
+    window_year_from = str(getattr(intent, "year_from", "") or "").strip()
+    window_year_to = str(getattr(intent, "year_to", "") or "").strip()
+    years_raw = [str(y).strip() for y in (getattr(intent, "years", []) or []) if str(y).strip()]
+    if years_raw and not window_year_from:
+        window_year_from = min(years_raw)
+    if years_raw and not window_year_to:
+        window_year_to = max(years_raw)
+
+    y_from = int(window_year_from) if window_year_from.isdigit() else fallback_year_from
+    y_to = int(window_year_to) if window_year_to.isdigit() else now_year
+    if y_from > y_to:
+        y_from, y_to = y_to, y_from
+
+    window_docs = 0
     for point in (reranked or [])[:candidate_docs]:
         payload = getattr(point, "payload", None) or {}
+        doc_year = _extract_year_from_payload(payload)
+        if doc_year is None or doc_year < y_from or doc_year > y_to:
+            continue
+        window_docs += 1
         participants = payload.get("prtcp_mp") or []
         if not isinstance(participants, list):
             continue
@@ -1075,16 +1128,18 @@ def _build_people_superlative_aggregation(
         return None
 
     rank_items: List[Dict[str, Any]] = []
+    metric_key = str(stats_policy["stats_metric"])
     for value in grouped.values():
         project_count = len(value.get("project_ids") or set())
         performance_count = int(value.get("performance_count", 0))
+        score = project_count if metric_key == "project_participation_count" else performance_count
         rank_items.append({
             "person_key": value.get("person_key"),
             "hm_id": value.get("hm_id"),
             "hm_nm": value.get("hm_nm"),
             "project_participation_count": project_count,
             "performance_count": performance_count,
-            "score": project_count,
+            "score": score,
         })
 
     rank_items.sort(
@@ -1097,18 +1152,23 @@ def _build_people_superlative_aggregation(
         )
     )
 
-    top_k = max(1, min(len(rank_items), max(1, int(getattr(intent, "planner_limit", 0) or 10))))
-    window_years = {
-        "from": str(getattr(intent, "year_from", "") or "").strip() or None,
-        "to": str(getattr(intent, "year_to", "") or "").strip() or None,
-        "years": [str(y).strip() for y in (getattr(intent, "years", []) or []) if str(y).strip()],
-    }
+    top_k = max(1, min(len(rank_items), int(stats_policy["top_k"])))
 
     return {
         "rank_items": rank_items[:top_k],
-        "metric": "project_participation_count",
-        "window_years": window_years,
+        "metric": metric_key,
+        "window_years": {"from": str(y_from), "to": str(y_to), "years": years_raw},
         "candidate_docs": candidate_docs,
+        "window_docs": window_docs,
+        "meta": {
+            "stats": {
+                "metric_applied": metric_key,
+                "window_applied": {"from": str(y_from), "to": str(y_to)},
+                "candidate_n_applied": int(stats_policy["candidate_n"]),
+                "top_k_applied": int(top_k),
+                "tie_break_applied": str(stats_policy["tie_break"]),
+            }
+        },
     }
 
 class _PrecomputedEmbedding:
@@ -2216,6 +2276,13 @@ def _build_plan(
     base_route = it.base_route
     rel = it.relation
     output_type = getattr(it, "output_type", None)
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(it, "stats_metric", None),
+        window_years=getattr(it, "window_years", None),
+        candidate_n=getattr(it, "candidate_n", None),
+        top_k=getattr(it, "top_k", None),
+        tie_break=getattr(it, "tie_break", None),
+    )
 
     if preferred_mode:
         mode = preferred_mode
@@ -2235,6 +2302,11 @@ def _build_plan(
         relation=rel,
         join_key_mode=getattr(it, "join_key_mode", None),
         output_type=output_type,
+        stats_metric=stats_policy["stats_metric"],
+        window_years=stats_policy["window_years"],
+        candidate_n=stats_policy["candidate_n"],
+        top_k=stats_policy["top_k"],
+        tie_break=stats_policy["tie_break"],
         target_collections=tuple(target_cols),
         filters={},
     ), mode_reason

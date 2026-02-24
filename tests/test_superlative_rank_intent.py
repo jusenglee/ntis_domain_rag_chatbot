@@ -31,3 +31,16 @@ def test_org_superlative_hint_rank_is_normalized_to_stats() -> None:
     assert intent.action == "stats"
     assert normalized.action == "stats"
     assert normalized.output_type == "stats"
+
+
+def test_normalize_intent_sets_default_stats_policy() -> None:
+    intent = classify_query(
+        "가장 많은 과제를 수행한 연구자",
+        ["가장", "많은", "과제", "수행", "연구자"],
+        hint={"head": "people"},
+    )
+    normalized = normalize_intent(intent, query="가장 많은 과제를 수행한 연구자", keywords=["연구자"])
+    assert normalized.stats_metric == "project_participation_count"
+    assert normalized.window_years == 3
+    assert normalized.candidate_n == 50
+    assert normalized.top_k == 1

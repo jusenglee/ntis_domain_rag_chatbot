@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 
 from rag_parts.pipeline_steps import NormalizedIntent
+from rag_parts.planner_contract import normalize_stats_policy_value
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,11 @@ class QueryPlan:
     relation: Optional[Tuple[str, str]]
     join_key_mode: Optional[str]
     output_type: Optional[str]
+    stats_metric: str
+    window_years: int
+    candidate_n: int
+    top_k: int
+    tie_break: str
     target_collections: Tuple[str, ...]
     # server-side filters by collection (optional)
     filters: Dict[str, Any]
@@ -84,9 +90,28 @@ class ExecutionContext:
     people_terms_match_mode: Optional[str] = None
     people_terms_min_should: Optional[int] = None
     lookup_filter_policy_hint: Optional[str] = None
+    stats_metric: Optional[str] = None
+    window_years: Optional[int] = None
+    candidate_n: Optional[int] = None
+    top_k: Optional[int] = None
+    tie_break: Optional[str] = None
     plan: Optional[QueryPlan] = None
     strategy: Optional[StrategySpec] = None
     target_collections: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        policy = normalize_stats_policy_value(
+            stats_metric=self.stats_metric,
+            window_years=self.window_years,
+            candidate_n=self.candidate_n,
+            top_k=self.top_k,
+            tie_break=self.tie_break,
+        )
+        self.stats_metric = policy["stats_metric"]
+        self.window_years = policy["window_years"]
+        self.candidate_n = policy["candidate_n"]
+        self.top_k = policy["top_k"]
+        self.tie_break = policy["tie_break"]
 
     @classmethod
     def from_intent(cls, intent: Any) -> "ExecutionContext":
@@ -125,6 +150,11 @@ class ExecutionContext:
             people_terms_match_mode=getattr(intent, "people_terms_match_mode", None),
             people_terms_min_should=getattr(intent, "people_terms_min_should", None),
             lookup_filter_policy_hint=getattr(intent, "lookup_filter_policy", None),
+            stats_metric=getattr(intent, "stats_metric", None),
+            window_years=getattr(intent, "window_years", None),
+            candidate_n=getattr(intent, "candidate_n", None),
+            top_k=getattr(intent, "top_k", None),
+            tie_break=getattr(intent, "tie_break", None),
         )
 
     def intent_view(self) -> Any:
@@ -165,4 +195,9 @@ class ExecutionContext:
             people_terms_match_mode=self.people_terms_match_mode,
             people_terms_min_should=self.people_terms_min_should,
             lookup_filter_policy=self.lookup_filter_policy_hint,
+            stats_metric=self.stats_metric,
+            window_years=self.window_years,
+            candidate_n=self.candidate_n,
+            top_k=self.top_k,
+            tie_break=self.tie_break,
         )
