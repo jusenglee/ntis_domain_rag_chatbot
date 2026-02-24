@@ -2194,29 +2194,59 @@ def _resolve_join_execution_policy(
         relation: Optional[Tuple[str, str]],
         mode: str,
         action: Optional[str],
-        has_relation_join_ids: bool,
+        join_key_mode: Optional[str],
+        seed_join_pjt_ids: Optional[List[str]] = None,
+        seed_join_pjt_nos: Optional[List[str]] = None,
+        has_people_org_gate: bool = False,
 ) -> Dict[str, Any]:
-    """JOIN 경로 실행 정책을 단일화한다.
+    """JOIN 경로 Hop1 실행 정책을 단일화한다.
 
-    정책:
-    - relation && mode=join 이면 ids 유무와 무관하게 Hop1→Hop2 경로를 강제한다.
-    - "skip" 개념을 제거하고 required/executed 신호만 남긴다.
+    우선순위:
+    1) instance + ids_map.pjt_id   -> hop1_strategy="skip"
+    2) group + ids_map.pjt_no      -> hop1_strategy="lookup"
+    3) people/org 조건 존재        -> hop1_strategy="lookup"
+    4) 그 외                        -> hop1_strategy="search"
     """
-    is_required = bool(relation and mode == "join")
-    if not is_required:
+    is_join_mode = bool(relation and mode == "join")
+    if not is_join_mode:
         return {
-            "required": False,
+            "hop1_strategy": None,
             "reason": None,
             "action": action,
-            "has_relation_join_ids": bool(has_relation_join_ids),
+            "seed_key_source": None,
+            "seed_key_count": 0,
         }
 
-    reason = "seed_ids_present" if has_relation_join_ids else "hop1_key_extraction_required"
+    seed_join_pjt_ids = [str(x).strip() for x in (seed_join_pjt_ids or []) if str(x).strip()]
+    seed_join_pjt_nos = [str(x).strip() for x in (seed_join_pjt_nos or []) if str(x).strip()]
+
+    if join_key_mode == "instance" and seed_join_pjt_ids:
+        hop1_strategy = "skip"
+        reason = "instance_seed_pjt_id"
+        seed_key_source = "ids_map.pjt_id"
+        seed_key_count = len(seed_join_pjt_ids)
+    elif join_key_mode == "group" and seed_join_pjt_nos:
+        hop1_strategy = "lookup"
+        reason = "group_seed_pjt_no_expand"
+        seed_key_source = "ids_map.pjt_no"
+        seed_key_count = len(seed_join_pjt_nos)
+    elif has_people_org_gate:
+        hop1_strategy = "lookup"
+        reason = "people_org_gate_lookup"
+        seed_key_source = "people_org_conditions"
+        seed_key_count = 0
+    else:
+        hop1_strategy = "search"
+        reason = "default_hop1_search"
+        seed_key_source = None
+        seed_key_count = 0
+
     return {
-        "required": True,
+        "hop1_strategy": hop1_strategy,
         "reason": reason,
         "action": action,
-        "has_relation_join_ids": bool(has_relation_join_ids),
+        "seed_key_source": seed_key_source,
+        "seed_key_count": seed_key_count,
     }
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
@@ -3981,28 +4011,6 @@ def _run_rag_with_vectors(
             people_terms=people_terms[:4],
             relation_lookup_enforce=int(relation_lookup_enforce),
         )
-    join_execution_policy = _resolve_join_execution_policy(
-        relation=relation,
-        mode=plan.mode,
-        action=action,
-        has_relation_join_ids=has_relation_join_ids,
-    )
-    if join_execution_policy["required"]:
-        logger.warning(
-            "[RAG] join required: relation=%s action=%s has_relation_join_ids=%s reason=%s",
-            relation,
-            action,
-            has_relation_join_ids,
-            join_execution_policy["reason"],
-        )
-        log_kv(
-            "RAG.PLAN.JOIN_REQUIRED",
-            level="warning",
-            relation=relation,
-            action=action,
-            has_relation_join_ids=int(has_relation_join_ids),
-            reason=join_execution_policy["reason"],
-        )
 
     # allowlist는 검증 전용: 실행 target_cols를 재결정하지 않는다.
     if effective_allow:
@@ -4438,7 +4446,25 @@ def _run_rag_with_vectors(
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
         seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
 
-
+        has_people_org_gate = bool(people_terms or people_ids or org_terms)
+        join_execution_policy = _resolve_join_execution_policy(
+            relation=relation,
+            mode=plan.mode,
+            action=action,
+            join_key_mode=join_key_mode,
+            seed_join_pjt_ids=seed_join_pjt_ids,
+            seed_join_pjt_nos=seed_join_pjt_nos,
+            has_people_org_gate=has_people_org_gate,
+        )
+        hop1_strategy = str(join_execution_policy.get("hop1_strategy") or "search")
+        logger.warning(
+            "[RAG] join hop1 strategy resolved: relation=%s action=%s join_key_mode=%s hop1_strategy=%s reason=%s",
+            relation,
+            action,
+            join_key_mode,
+            hop1_strategy,
+            join_execution_policy.get("reason"),
+        )
 
         # relation mapping
         hop1_col = hop2_col = ""
@@ -4477,7 +4503,7 @@ def _run_rag_with_vectors(
             hop1_top: List[Any] = []
             hop1_filter = None
 
-            # 1) Hop1 (SEARCH): mode=join이면 ids 유무와 무관하게 항상 수행
+            # 1) Hop1 전략 적용: skip | lookup | search
             has_seed_join_keys = bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids)
             log_kv(
                 "RAG.PLAN.JOIN_EXECUTED",
@@ -4485,12 +4511,16 @@ def _run_rag_with_vectors(
                 action=action,
                 join_key_mode=join_key_mode,
                 has_seed_join_keys=int(has_seed_join_keys),
+                hop1_strategy=hop1_strategy,
+                seed_key_source=join_execution_policy.get("seed_key_source"),
+                seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
             )
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
             elif join_key_mode == "instance" and seed_join_pjt_ids:
                 join_pjt_ids = seed_join_pjt_ids[:]
 
+            local_timings_h1: Dict[str, float] = {}
             hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
             if  people_filter:
                 hop1_filter = _and_filter(hop1_filter, people_filter)
@@ -4558,6 +4588,12 @@ def _run_rag_with_vectors(
                     hop1_filter = _and_filter(hop1_filter, year_range_filter)
             if hop1_col == COL_PERF and perf_type_filter:
                 hop1_filter = _and_filter(hop1_filter, perf_type_filter)
+            if hop1_strategy == "lookup" and join_key_mode == "group" and seed_join_pjt_nos:
+                hop1_filter = _and_filter(hop1_filter, build_project_id_filter([], seed_join_pjt_nos))
+            if hop1_strategy == "skip" and join_key_mode == "instance" and seed_join_pjt_ids:
+                hop1_filter = _and_filter(hop1_filter, build_project_id_filter(seed_join_pjt_ids, []))
+                hop1_k_base = max(10, min(hop1_k_base, 30))
+                hop1_keep = max(1, min(hop1_keep, 1))
 
             log_kv(
                 "RAG.JOIN.HOP1",
@@ -4577,7 +4613,6 @@ def _run_rag_with_vectors(
                 emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
             emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
 
-            local_timings_h1: Dict[str, float] = {}
             sr1 = _call_dense_retrieve_hybrid_multi(
                 qdr=qdr,
                 emb_map=emb_map_h1,

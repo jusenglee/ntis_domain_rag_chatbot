@@ -834,8 +834,12 @@ async def _run_question_analysis(
         
         1) relation="project_perf"
           - head="perf"를 기본으로 사용
-          - hop1(project): project 후보에서 pjt_id(또는 group이면 pjt_no) 확보
-          - hop2(perf): hop1에서 얻은 키 집합을 하드필터로 적용
+          - Hop1 전략 우선순위(항상 SEARCH 아님):
+            * instance + ids_map.pjt_id 존재 => Hop1 skip (필요시 context용 단건 lookup 허용)
+            * group + ids_map.pjt_no 존재 => Hop1 lookup(pjt_no must)로 group 인스턴스 pjt_id 확장
+            * people/org 조건 존재 => Hop1 lookup(people/org gate)
+            * 그 외 => Hop1 search
+          - hop2(perf): hop1/seed에서 확보한 키 집합을 하드필터로 적용
             * join_key_mode="instance": pjt_id IN (...) must
             * join_key_mode="group": pjt_no IN (...) must
         
