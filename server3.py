@@ -542,6 +542,11 @@ def measure_latency(node_name: str):
         return wrapper
     return decorator
 
+
+
+def _format_coq(conversation_id: str, question: str) -> str:
+    return f"coq: {conversation_id} | q: {question}"
+
 # --- Node 1: Load Memory ---
 @measure_latency("load_memory")
 async def node_load_memory(state: AgentState) -> Dict[str, Any]:
@@ -551,7 +556,7 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
-                f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
+                f"{_format_coq(cid, state.messages[-1].content)}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
         "chat_history": current_full_history,
@@ -908,7 +913,7 @@ async def _run_question_analysis(
                 )
             log_section(
                 "QUESTION ANALYSIS",
-                f"coq: {conversation_id}{question}\n"
+                f"{_format_coq(conversation_id, question)}\n"
                 f"StrategyVersion: {result.strategy_version}\n"
                 f"Mode: {result.mode}\n"
                 f"Head: {result.head}\n"
@@ -1000,7 +1005,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1015,7 +1020,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1080,7 +1085,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         })
 
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1224,6 +1229,22 @@ def _is_hit_source(doc: Dict[str, Any]) -> bool:
 def _filter_hit_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [doc for doc in docs if isinstance(doc, dict) and _is_hit_source(doc)]
 
+
+def _friendly_strategy_violation_message(
+        *,
+        error_code: str,
+        reason: str,
+        question_analysis: Optional[QuestionAnalysis],
+) -> str:
+    mode = str(getattr(question_analysis, "mode", "") or "").strip().upper()
+    action = str(getattr(question_analysis, "action", "") or "").strip().lower()
+    ids_map = getattr(question_analysis, "ids_map", None) or {}
+    has_explicit_id = isinstance(ids_map, dict) and any(bool(v) for v in ids_map.values())
+
+    if error_code == "RAG_EMPTY_RESULT_CONTRACT" and mode == "LOOKUP" and (action == "detail" or has_explicit_id):
+        return "요청하신 식별자(ID)에 해당하는 상세 정보를 찾지 못했습니다. ID를 다시 확인해 주세요."
+    return "요청을 처리하는 중 검색 전략 계약 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
 def _resolve_rag_queries(
         state: AgentState,
         qa: Optional[QuestionAnalysis],
@@ -1276,7 +1297,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             )
 
         log_section("RAG SEARCH",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Query: {search_query}\n"
                     f"Found: {len(docs)} docs\n")
         log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
@@ -1449,7 +1470,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
-                f"coq: {state.conversation_id}{state.question}\n"
+                f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
                 f"GPT: {gpt_preview}")
@@ -1502,7 +1523,7 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
     log_section("PERFORMANCE REPORT",
-                f"coq: {state.conversation_id}{state.question}\nTotal: {total_time:.3f}s\n{latency_report}")
+                f"{_format_coq(state.conversation_id, state.question)}\nTotal: {total_time:.3f}s\n{latency_report}")
 
     return {}
 
@@ -2757,7 +2778,7 @@ async def query_stream(payload: QueryRequest):
                     continue
                 ref_docs.append(RagMapper.get_references(d))
 
-            # log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
+            # log_section("REF PUSH", f"{_format_coq(conversation_id, question)}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
@@ -2768,6 +2789,15 @@ async def query_stream(payload: QueryRequest):
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
+            if isinstance(e, StrategyViolation):
+                user_message = _friendly_strategy_violation_message(
+                    error_code=error_code,
+                    reason=reason,
+                    question_analysis=question_analysis,
+                )
+                yield f"data: {json.dumps({'answer': user_message, 'error_code': error_code, 'reason': reason, 'degraded': True}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'status': 'done', 'degraded': True}, ensure_ascii=False)}\n\n"
+                return
             yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

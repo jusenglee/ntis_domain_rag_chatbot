@@ -102,6 +102,8 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 ### 4.2 LOOKUP (정확형 – 사용자 실질 요구 최다)
 
 #### 언제 LOOKUP인가?
+
+- 구현 보강: `상세(detail)` + 명시적 ID 질의는 preset 선택 시 `id_exact` 계열로 최적화한다(예: `stop_if_top1_confident`).
 다음 중 하나면 **무조건 LOOKUP 우선**:
 
 A) **ID 기반 질문**  
@@ -203,6 +205,14 @@ C) **사람/기관 기반 질문 (중요)**
 - server-side 필터로 **오염 차단**
 - 하이브리드 검색은 **항상 유지**
 - 📌 LOOKUP이라도 **BM25-only 금지**
+
+
+### LOOKUP ID 상세조회 계약(운영 보강)
+- `mode=lookup` + 명시적 식별자(`pjt_id/pjt_no/성과ID`)가 있는 상세 조회는 결과 계약의 최소 건수를 별도 임계치로 적용한다.
+- 기본값: `RAG_MIN_RERANKED_LOOKUP_ID=1`
+- 목적: 단건이 정상인 ID 상세조회에서 `min_reranked=4` 같은 일반 임계치로 인한 오탐 실패를 방지한다.
+- 추가 보강: 요청 `limit`/`hinted_limit`이 존재하면 최종 `min_reranked`는 해당 값 이하로 clamp한다.
+- 일반 탐색/목록/토픽 시나리오의 최소 건수 계약은 기존 정책을 유지한다.
 
 ---
 

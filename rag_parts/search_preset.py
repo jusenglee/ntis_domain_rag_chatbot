@@ -253,10 +253,10 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
 
     # ---- action presets ----
     action = intent.action
-
+    action_for_preset = "id_exact" if (action == "detail" and bool(getattr(intent, "is_id_query", False))) else action
 
     # 1) Support (QnA/Manual)
-    if action == "support":
+    if action_for_preset == "support":
         top_k_lex = _i("RAG_TOPK_LEX_SUPPORT", _i("RAG_TOPK_LEX", 50))
         w_lex = _f("RAG_W_LEX_SUPPORT", _f("RAG_W_LEX", 0.25))
         preset = SearchPreset(
@@ -280,7 +280,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 2) Relation (2-hop) — hop1/hop2는 파이프라인에서 별도 조정 가능.
-    if action == "relation":
+    if action_for_preset == "relation":
         top_k_lex = _i("RAG_TOPK_LEX_REL", 180)
         w_lex = _f("RAG_W_LEX_REL", 0.65)
         preset = SearchPreset(
@@ -304,7 +304,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 3) Exact ID lookup
-    if action == "id_exact":
+    if action_for_preset == "id_exact":
         top_k_lex = _i("RAG_TOPK_LEX_ID_EXACT", 160)
         w_lex = _f("RAG_W_LEX_ID_EXACT", 0.78)
         preset = SearchPreset(
@@ -329,7 +329,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 4) Fuzzy ID-like query
-    if action == "id_fuzzy":
+    if action_for_preset == "id_fuzzy":
         top_k_lex = _i("RAG_TOPK_LEX_ID", 120)
         w_lex = _f("RAG_W_LEX_ID", 0.60)
         preset = SearchPreset(
@@ -353,7 +353,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 5) List/filter
-    if action in ("list", "download", "stats"):
+    if action_for_preset in ("list", "download", "stats"):
         top_k_lex = _i("RAG_TOPK_LEX_FILTER", 180)
         w_lex = _f("RAG_W_LEX_FILTER", 0.65)
         preset = SearchPreset(
@@ -384,7 +384,7 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
     # 6) Topic summary
-    if action == "topic":
+    if action_for_preset == "topic":
         top_k_lex = _i("RAG_TOPK_LEX_TOPIC", 80)
         w_lex = _f("RAG_W_LEX_TOPIC", 0.22)
         preset = SearchPreset(

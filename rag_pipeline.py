@@ -1108,7 +1108,7 @@ def _validate_lookup_join_hybrid_metrics(
     if str(mode).strip().lower() not in ("lookup", "join"):
         return
     dense_queries = float(timings.get("dense_queries", 0.0) or 0.0)
-    sparse_hits = float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+    sparse_hits = _resolve_sparse_hits_metric(timings)
     hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
     hybrid_mode_used = hybrid_once_hits > 0
 
@@ -1136,6 +1136,41 @@ def _validate_lookup_join_hybrid_metrics(
             hybrid_once_hits=hybrid_once_hits,
             strict=int(bool(strict)),
         )
+
+
+def _resolve_sparse_hits_metric(timings: Mapping[str, Any]) -> float:
+    if not isinstance(timings, Mapping):
+        return 0.0
+    return float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+
+
+def _resolve_effective_min_reranked(
+        *,
+        intent: NormalizedIntent,
+        mode: str,
+        base_route: str,
+        preset_min_reranked: int,
+        hinted_limit: int = 0,
+) -> tuple[int, str]:
+    effective_min_reranked = max(0, int(preset_min_reranked or 0))
+    clamp_reasons: list[str] = []
+
+    hinted_limit_val = max(0, int(hinted_limit or 0))
+    if hinted_limit_val > 0:
+        effective_min_reranked = min(effective_min_reranked, hinted_limit_val)
+        clamp_reasons.append("hinted_limit")
+
+    if str(mode).strip().lower() != "lookup":
+        return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
+
+    if str(base_route or "").strip().lower() not in ("", "project", "perf"):
+        return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
+
+    if _has_explicit_identifiers(intent):
+        id_lookup_min_reranked = max(0, int(os.getenv("RAG_MIN_RERANKED_LOOKUP_ID", "1")))
+        effective_min_reranked = min(effective_min_reranked, id_lookup_min_reranked)
+        clamp_reasons.append("lookup_id_query")
+    return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
 
 def _attach_collection(p: Any, col: str) -> Any:
     if p is None or not col:
@@ -5010,7 +5045,7 @@ def _run_rag_with_vectors(
                 "dense_hits": float(d_hit),
                 "lex_hits": float(l_hit),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "sparse_hits": _resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "best_dense": float(best_dense) if best_dense is not None else -1.0,
@@ -5035,7 +5070,7 @@ def _run_rag_with_vectors(
             per_col_stats[col] = {
                 "hybrid_hits": float(len(hybrid_points)),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "sparse_hits": _resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "total": float(local_timings.get("total", 0.0)),
@@ -5220,13 +5255,32 @@ def _run_rag_with_vectors(
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
     min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
+    effective_min_reranked, min_reranked_clamp_reason = _resolve_effective_min_reranked(
+        intent=promotion_intent,
+        mode=promotion_mode,
+        base_route=base_route,
+        preset_min_reranked=min_reranked,
+        hinted_limit=hinted_limit,
+    )
+    _timing_put(timings, "info.contract_min_reranked", int(min_reranked))
+    _timing_put(timings, "info.contract_effective_min_reranked", int(effective_min_reranked))
+    _timing_put(timings, "info.contract_min_reranked_clamp_reason", min_reranked_clamp_reason)
+    log_kv(
+        "RAG.CONTRACT.MIN_RERANKED",
+        mode=promotion_mode,
+        base_route=base_route,
+        preset_min_reranked=int(min_reranked),
+        hinted_limit=int(max(0, int(hinted_limit or 0))),
+        effective_min_reranked=int(effective_min_reranked),
+        clamp_reason=min_reranked_clamp_reason,
+    )
     min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
     min_final_max = float(os.getenv("RAG_FALLBACK_MIN_FINAL_MAX", "0"))
     score_topn = max(1, int(os.getenv("RAG_FALLBACK_SCORE_TOPN", "5")))
 
     contract_fail_reason = _enforce_reranked_contract(
         reranked=reranked,
-        min_reranked=min_reranked,
+        min_reranked=effective_min_reranked,
         min_final_avg=min_final_avg,
         min_final_max=min_final_max,
         score_topn=score_topn,

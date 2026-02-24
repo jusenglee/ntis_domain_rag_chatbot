@@ -9,6 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import rag_parts.filters as filters
 from rag_parts.planner_contract import StrategyCompiler
+from rag_parts.search_preset import build_search_preset
 from rag_parts.result_contract import enforce_reranked_contract
 
 
@@ -39,13 +40,13 @@ def _load_validate_lookup_join_hybrid_metrics() -> Any:
     source = Path("rag_pipeline.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="rag_pipeline.py")
 
-    target = next(
+    targets = [
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name == "_validate_lookup_join_hybrid_metrics"
-    )
-    module = ast.Module(body=[target], type_ignores=[])
+        and node.name in ("_resolve_sparse_hits_metric", "_validate_lookup_join_hybrid_metrics")
+    ]
+    module = ast.Module(body=targets, type_ignores=[])
     ast.fix_missing_locations(module)
 
     class _StrategyViolation(RuntimeError):
@@ -63,6 +64,30 @@ def _load_validate_lookup_join_hybrid_metrics() -> Any:
     exec(compile(module, filename="rag_pipeline.py", mode="exec"), ns)
     return ns["_validate_lookup_join_hybrid_metrics"], _StrategyViolation
 
+
+
+
+def _load_lookup_contract_helpers() -> Dict[str, Any]:
+    source = Path("rag_pipeline.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="rag_pipeline.py")
+
+    targets = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in ("_has_any_ids", "_has_explicit_identifiers", "_resolve_sparse_hits_metric", "_resolve_effective_min_reranked")
+    ]
+    module = ast.Module(body=targets, type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    ns: Dict[str, Any] = {
+        "Any": Any,
+        "Mapping": Mapping,
+        "NormalizedIntent": Any,
+        "os": __import__("os"),
+    }
+    exec(compile(module, filename="rag_pipeline.py", mode="exec"), ns)
+    return ns
 
 def _contains_title_match_any(obj: Any) -> bool:
     if obj is None:
@@ -302,3 +327,92 @@ def test_lookup_join_validation_calls_use_explicit_non_strict_policy() -> None:
 
     assert 'contract_scope=f"{plan.mode}:{col}",' in source
     assert 'timings=local_timings,\n                strict=False,' in source
+
+
+def test_resolve_sparse_hits_metric_prefers_lexical_scored() -> None:
+    ns = _load_lookup_contract_helpers()
+    fn = ns["_resolve_sparse_hits_metric"]
+
+    assert fn({"lexical_scored": 3.0, "sparse_hits": 1.0}) == 3.0
+    assert fn({"sparse_hits": 2.0}) == 2.0
+    assert fn({}) == 0.0
+
+
+def test_effective_min_reranked_relaxes_for_lookup_id(monkeypatch) -> None:
+    ns = _load_lookup_contract_helpers()
+    fn = ns["_resolve_effective_min_reranked"]
+
+    intent = type("Intent", (), {"is_id_query": True, "action": "detail", "ids_map": {"pjt_id": ["1711134317"]}, "ids_flat": ["1711134317"]})()
+    monkeypatch.setenv("RAG_MIN_RERANKED_LOOKUP_ID", "1")
+
+    assert fn(intent=intent, mode="lookup", base_route="project", preset_min_reranked=4) == (1, "lookup_id_query")
+
+
+def test_effective_min_reranked_keeps_default_for_non_id_lookup() -> None:
+    ns = _load_lookup_contract_helpers()
+    fn = ns["_resolve_effective_min_reranked"]
+
+    intent = type("Intent", (), {"is_id_query": False, "action": "detail", "ids_map": {}, "ids_flat": []})()
+    assert fn(intent=intent, mode="lookup", base_route="project", preset_min_reranked=4) == (4, "none")
+
+
+def test_effective_min_reranked_clamps_by_hinted_limit_for_lookup_detail_id() -> None:
+    ns = _load_lookup_contract_helpers()
+    resolve_fn = ns["_resolve_effective_min_reranked"]
+
+    intent = type("Intent", (), {"is_id_query": True, "action": "detail", "ids_map": {"pjt_id": ["1711134317"]}, "ids_flat": ["1711134317"]})()
+    effective_min, reason = resolve_fn(
+        intent=intent,
+        mode="lookup",
+        base_route="project",
+        preset_min_reranked=4,
+        hinted_limit=1,
+    )
+    assert effective_min == 1
+    assert reason == "hinted_limit,lookup_id_query"
+
+
+def test_lookup_detail_id_single_hit_does_not_raise_contract_violation(monkeypatch) -> None:
+    ns = _load_lookup_contract_helpers()
+    resolve_fn = ns["_resolve_effective_min_reranked"]
+
+    intent = type("Intent", (), {"is_id_query": True, "action": "detail", "ids_map": {"pjt_id": ["1711134317"]}, "ids_flat": ["1711134317"]})()
+    effective_min, _ = resolve_fn(
+        intent=intent,
+        mode="lookup",
+        base_route="project",
+        preset_min_reranked=4,
+        hinted_limit=1,
+    )
+
+    one_hit = [object()]
+    reason = enforce_reranked_contract(
+        reranked=one_hit,
+        min_reranked=effective_min,
+        min_final_avg=0.0,
+        min_final_max=0.0,
+        score_topn=5,
+        timing_put=lambda *_a, **_k: None,
+    )
+    assert reason is None
+
+
+def test_detail_with_id_query_uses_id_exact_like_preset(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_TOPK_DENSE_ID_EXACT", "8")
+    monkeypatch.setenv("RAG_TOPK_DENSE", "25")
+
+    intent = type(
+        "Intent",
+        (),
+        {
+            "action": "detail",
+            "is_id_query": True,
+            "base_route": "project",
+            "relation": None,
+            "org_terms": [],
+        },
+    )()
+
+    preset = build_search_preset(intent)
+    assert preset.top_k_dense == 8
+    assert preset.stop_if_top1_confident is True

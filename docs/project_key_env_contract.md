@@ -23,3 +23,18 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - `[startup][key-mapping] RAG_KEY_PJT_ID=<...>, RAG_KEY_PJT_NO=<...>`
 
 배포 직후 해당 로그를 통해 실운영 매핑 상태를 점검하세요.
+
+
+## 2026-02-24 운영 보강 사항
+
+- **ID 기반 LOOKUP 상세조회 계약 완화**
+  - `mode=lookup` 이고 명시적 ID(`pjt_id/pjt_no` 등)가 존재하는 경우,
+    reranked 결과 계약의 최소 건수는 `RAG_MIN_RERANKED_LOOKUP_ID`(기본 `1`)로 완화됩니다.
+  - 단, `hinted_limit`/요청 `limit`이 더 작으면 최종 계약값은 해당 limit으로 한 번 더 clamp됩니다.
+- **관측 지표 정규화**
+  - sparse 지표는 `lexical_scored` 우선, 없으면 `sparse_hits`를 사용하도록 통일되었습니다.
+- **로그 가독성 개선**
+  - `coq` 로그는 `coq: <conversation_id> | q: <question>` 형식으로 출력됩니다.
+
+- **스트림 예외 처리 보강**
+  - `RAG_EMPTY_RESULT_CONTRACT`가 LOOKUP/detail+ID 맥락에서 발생하면 스트림은 계약 오류를 사용자 친화 문구로 변환하고 `done` 이벤트로 종료합니다.
