@@ -1716,16 +1716,41 @@ def _default_target_collections() -> list[str]:
     return [COL_PROJECT]
 
 
-def _default_target_collections_for_route(base_route: str) -> list[str]:
+def _has_perf_focus_signal(it: Optional[NormalizedIntent]) -> bool:
+    if it is None:
+        return False
+
+    perf_types = [str(v).strip() for v in (getattr(it, "perf_types", None) or []) if str(v).strip()]
+    if perf_types:
+        return True
+
+    perf_focus_terms = ("논문", "특허", "성과")
+    term_sources = [
+        *(getattr(it, "keywords", None) or []),
+        *(getattr(it, "title", None) or []),
+        str(getattr(it, "retrieval_query", "") or ""),
+    ]
+    for raw in term_sources:
+        text = str(raw or "").strip()
+        if text and any(term in text for term in perf_focus_terms):
+            return True
+    return False
+
+
+def _default_target_collections_for_route(base_route: str, it: Optional[NormalizedIntent] = None) -> list[str]:
+    base_route_norm = str(base_route or "").strip().lower()
     route_defaults = {
         "project": [COL_PROJECT],
         "perf": [COL_PERF],
         "support": [COL_SUPPORT],
-        # people/org 질의는 프로젝트 컬렉션을 기본 엔티티 저장소로 사용
+        # people/org 질의는 project를 우선 사용하되 성과 신호가 있으면 perf를 함께 조회
         "people": [COL_PROJECT],
         "org": [COL_PROJECT],
     }
-    desired = list(route_defaults.get(str(base_route or "").strip().lower(), [COL_PROJECT]))
+    desired = list(route_defaults.get(base_route_norm, [COL_PROJECT]))
+    if base_route_norm in ("people", "org") and _has_perf_focus_signal(it):
+        desired = [COL_PROJECT, COL_PERF]
+
     allow_list = list(RAG_COLLECTION_ALLOWLIST)
     if not allow_list:
         return desired
@@ -2079,7 +2104,7 @@ def _build_plan(
     if rel:
         target_cols = list(relation_target_collections(rel) or _default_target_collections())
     else:
-        target_cols = _default_target_collections_for_route(base_route)
+        target_cols = _default_target_collections_for_route(base_route, it)
 
     return QueryPlan(
         mode=mode,
@@ -2119,6 +2144,17 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], sou
         ),
     )
 
+
+
+
+def _strategy_field_diff(planner: Any, executed: Any, keys: List[str]) -> Dict[str, Dict[str, Any]]:
+    diff: Dict[str, Dict[str, Any]] = {}
+    for key in keys:
+        planner_val = planner.get(key) if isinstance(planner, dict) else None
+        executed_val = executed.get(key) if isinstance(executed, dict) else None
+        if planner_val != executed_val:
+            diff[key] = {"planner": planner_val, "executed": executed_val}
+    return diff
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).strip().lower() in ("1", "true", "yes", "y", "on")
@@ -2714,6 +2750,34 @@ def _run_rag_with_vectors(
         log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
+    planner_snapshot = {
+        "mode": getattr(it, "mode", None),
+        "base_route": getattr(it, "base_route", None),
+        "action": getattr(it, "action", None),
+        "relation": getattr(it, "relation", None),
+        "join_key_mode": getattr(it, "join_key_mode", None),
+        "target_cols": list(getattr(it, "target_cols", []) or []),
+        "keywords": list(getattr(it, "keywords", []) or []),
+        "ids_map": dict(getattr(it, "ids_map", {}) or {}),
+    }
+    ctx_snapshot = {
+        "mode": getattr(ctx, "mode", None),
+        "base_route": getattr(ctx, "base_route", None),
+        "action": getattr(ctx, "action", None),
+        "relation": getattr(ctx, "relation", None),
+        "join_key_mode": getattr(ctx, "join_key_mode", None),
+        "target_cols": list(getattr(ctx, "target_collections", []) or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+        "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+    }
+    log_kv(
+        "RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT",
+        planner=planner_snapshot,
+        context=ctx_snapshot,
+        diff=_strategy_field_diff(planner_snapshot, ctx_snapshot, [
+            "mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "keywords", "ids_map"
+        ]),
+    )
     intent_contract_violations = list(getattr(it, "contract_violations", None) or [])
     if intent_contract_violations:
         raise StrategyViolation(
@@ -3218,6 +3282,32 @@ def _run_rag_with_vectors(
     ctx.ids_map = _validate_project_key_exclusive(ctx.ids_map, plan.mode)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
+    plan_snapshot = {
+        "mode": plan.mode,
+        "action": plan.action,
+        "relation": plan.relation,
+        "join_key_mode": plan.join_key_mode,
+        "target_cols": list(plan.target_collections or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+    }
+    execution_snapshot = {
+        "mode": getattr(ctx, "mode", None),
+        "action": getattr(ctx, "action", None),
+        "relation": getattr(ctx, "relation", None),
+        "join_key_mode": getattr(ctx, "join_key_mode", None),
+        "target_cols": list(getattr(ctx, "target_collections", []) or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+    }
+    log_kv(
+        "RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT",
+        planner=plan_snapshot,
+        execution_context=execution_snapshot,
+        diff=_strategy_field_diff(
+            plan_snapshot,
+            execution_snapshot,
+            ["mode", "action", "relation", "join_key_mode", "target_cols", "keywords"],
+        ),
+    )
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "1")
     planner_mode_locked = str(plan.mode or "").strip().lower()

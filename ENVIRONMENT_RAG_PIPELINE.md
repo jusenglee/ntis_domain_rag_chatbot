@@ -111,3 +111,11 @@ export RAG_FORCE_FALLBACK_CHAT=0
   - `RAG_MAX_CONTEXT_ITEMS`, `RAG_CTX_HARD_LIMIT`, `RAG_CTX_PER_DOC_MAX_CHARS`
 
 > 상세 튜닝은 “검색 정책(preset) 변경”으로 분류되며, 변경 시 `policy_version`(SEARCH_POLICY_VERSION) 증가를 권장합니다.
+
+## people/org 기본 target_collections 정책
+- people/org 기본 검색은 `project`를 우선 사용합니다.
+- 단, 아래 성과 신호가 있으면 `perf`를 함께 조회합니다.
+  - `perf_types`가 비어있지 않은 경우
+  - 질의/키워드/제목에 `논문`, `특허`, `성과`가 포함된 경우
+- planner가 `target_cols`에 `perf`를 명시하면 실행 레이어에서도 그대로 `perf` 검색을 수행합니다.
+
