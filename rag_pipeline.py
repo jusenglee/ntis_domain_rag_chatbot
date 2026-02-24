@@ -444,6 +444,22 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
+_PJT_ID_ALLOWED_RE = re.compile(r"^\d{8,12}$")
+_PJT_NO_ALLOWED_RE = re.compile(os.getenv("RAG_JOIN_PJT_NO_ALLOWED_RE", r"^[A-Za-z0-9_-]{4,40}$"))
+
+
+def _is_valid_join_key(value: str, *, key: str, join_key_mode: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    mode = str(join_key_mode or "instance").strip().lower()
+    if mode == "group" and key == "pjt_no":
+        return bool(_PJT_NO_ALLOWED_RE.fullmatch(text))
+    if mode == "instance" and key == "pjt_id":
+        return bool(_PJT_ID_ALLOWED_RE.fullmatch(text))
+    return True
+
+
 def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "instance") -> Dict[str, int]:
     stats = {
         "total": 0,
@@ -478,18 +494,18 @@ def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "ins
             stats["same_id_no"] += 1
 
         if mode == "instance":
-            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode):
                 stats["invalid_pjt_id"] += 1
-            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode="group"):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, mode="instance")) and _is_valid_join_key(pjt_no, mode="instance"):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode)) and _is_valid_join_key(pjt_no, key="pjt_id", join_key_mode=mode):
                 stats["suspected_swap"] += 1
         elif mode == "group":
-            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode="instance"):
                 stats["invalid_pjt_id"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, mode="group")) and _is_valid_join_key(pjt_id, mode="group"):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode)) and _is_valid_join_key(pjt_id, key="pjt_no", join_key_mode=mode):
                 stats["suspected_swap"] += 1
     return stats
 
