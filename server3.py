@@ -34,6 +34,7 @@ from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from rag_pipeline import run_rag_ab_compare
+from retrieval import ensure_keyword_index
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
@@ -2474,14 +2475,65 @@ def _ensure_boot_payload_indexes(client: Any) -> None:
 async def lifespan(app: FastAPI):
     global kv_store
 
-    validate_project_key_env_or_raise()
-
     rag_resources = build_rag_objects()
 
-    if RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT:
-        _ensure_boot_payload_indexes(rag_resources.qdrant_client)
+    ensure_payload_index_on_boot = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+    if ensure_payload_index_on_boot:
+        index_targets = {
+            "ntis_project": ["pjt_id", "pjt_no"],
+            "ntis_perf": ["pjt_id", "pjt_no"],
+        }
+
+        client = rag_resources.qdrant_client
+        for collection_name, field_names in index_targets.items():
+            for field_name in field_names:
+                try:
+                    collection_info = client.get_collection(collection_name=collection_name)
+                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
+                    field_schema = payload_schema.get(field_name)
+                    schema_type = getattr(field_schema, "data_type", None)
+                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
+
+                    if "KEYWORD" in schema_type_name:
+                        logger.info(
+                            "[startup][payload-index] %s.%s: skip (already exists)",
+                            collection_name,
+                            field_name,
+                        )
+                        continue
+
+                    ensure_keyword_index(client, collection_name, field_name)
+
+                    collection_info = client.get_collection(collection_name=collection_name)
+                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
+                    field_schema = payload_schema.get(field_name)
+                    schema_type = getattr(field_schema, "data_type", None)
+                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
+
+                    if "KEYWORD" in schema_type_name:
+                        logger.info(
+                            "[startup][payload-index] %s.%s: created",
+                            collection_name,
+                            field_name,
+                        )
+                    else:
+                        logger.warning(
+                            "[startup][payload-index] %s.%s: warning (ensure called but not visible)",
+                            collection_name,
+                            field_name,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[startup][payload-index] %s.%s: warning (%s)",
+                        collection_name,
+                        field_name,
+                        e,
+                    )
     else:
-        logger.info("[startup][payload-index] disabled by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT")
+        logger.info("[startup][payload-index] skipped by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=%s", os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT"))
 
     backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
