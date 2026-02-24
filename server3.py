@@ -1180,6 +1180,28 @@ class CustomRAGRetriever(BaseModel):
 
         hits = getattr(res_m, "reranked_hits", []) or []
         fallback_context = getattr(res_m, "context", "")
+        aggregation = getattr(res_m, "aggregation", None) or {}
+
+        rank_items = aggregation.get("rank_items") if isinstance(aggregation, dict) else None
+        if isinstance(rank_items, list) and rank_items:
+            agg_metric = str(aggregation.get("metric") or "project_participation_count")
+            agg_candidate_docs = int(aggregation.get("candidate_docs") or 0)
+            agg_window_years = aggregation.get("window_years") or {}
+            documents = []
+            for idx, item in enumerate(rank_items[:self.top_k], start=1):
+                documents.append({
+                    "title": f"{idx}. {item.get('hm_nm') or item.get('hm_id') or item.get('person_key')}",
+                    "source_index": idx,
+                    "source_type": "aggregation",
+                    "metric": agg_metric,
+                    "window_years": agg_window_years,
+                    "candidate_docs": agg_candidate_docs,
+                    "rank_item": dict(item),
+                })
+            return {
+                "documents": documents,
+                "fallback_context": fallback_context.strip() or None,
+            }
 
         if not hits:
             return {
@@ -2185,6 +2207,25 @@ def refine_documents_rule_based(
     doc_max_tokens = None if relax_limits else MAX_DOC_TOKENS
 
     for doc in docs:
+        if str(doc.get("source_type", "")).strip().lower() == "aggregation":
+            rank_item = doc.get("rank_item") or {}
+            metric = str(doc.get("metric") or "project_participation_count")
+            metric_value = rank_item.get(metric, rank_item.get("score", 0))
+            perf_count = rank_item.get("performance_count", 0)
+            candidate_docs = int(doc.get("candidate_docs") or 0)
+            window_years = doc.get("window_years") or {}
+            year_from = (window_years.get("from") if isinstance(window_years, dict) else None) or "-"
+            year_to = (window_years.get("to") if isinstance(window_years, dict) else None) or "-"
+            person_name = rank_item.get("hm_nm") or rank_item.get("hm_id") or rank_item.get("person_key") or "unknown"
+            context_chunks.append(
+                f"## 출처 {doc.get('source_index')}. {person_name}\n"
+                f"- {metric}: {metric_value}\n"
+                f"- performance_count: {perf_count}\n"
+                f"- candidate_docs: {candidate_docs}\n"
+                f"- window_years: {year_from} ~ {year_to}\n"
+            )
+            continue
+
         mapped_doc = _safe_map_doc(doc, context="refine_documents_rule_based")
         if not mapped_doc:
             continue

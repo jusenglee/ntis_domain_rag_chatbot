@@ -989,6 +989,128 @@ def _build_context_with_output_type(
 # -------------------------
 # Precomputed embedding wrapper
 # -------------------------
+
+
+def _normalize_person_group_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _resolve_people_agg_candidate_limit(*, hinted_limit: int, policy_limit: int, total_docs: int) -> int:
+    hinted = max(0, int(hinted_limit or 0))
+    policy = max(1, int(policy_limit or 1))
+    if hinted > 0:
+        return min(total_docs, hinted)
+    return min(total_docs, policy)
+
+
+def _build_people_superlative_aggregation(
+        *,
+        reranked: List[Any],
+        intent: NormalizedIntent,
+        hinted_limit: int,
+        policy_limit: int,
+) -> Optional[Dict[str, Any]]:
+    if str(getattr(intent, "action", "") or "").strip().lower() != "stats":
+        return None
+    if str(getattr(intent, "base_route", "") or "").strip().lower() != "people":
+        return None
+    if not bool(getattr(intent, "wants_rank", False)):
+        return None
+
+    candidate_docs = _resolve_people_agg_candidate_limit(
+        hinted_limit=hinted_limit,
+        policy_limit=policy_limit,
+        total_docs=len(reranked or []),
+    )
+    if candidate_docs <= 0:
+        return None
+
+    perf_types_filter = {t.strip() for t in (getattr(intent, "perf_types", []) or []) if str(t).strip()}
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for point in (reranked or [])[:candidate_docs]:
+        payload = getattr(point, "payload", None) or {}
+        participants = payload.get("prtcp_mp") or []
+        if not isinstance(participants, list):
+            continue
+
+        pjt_id = _pjt_id(payload) or _payload_get(payload, "meta_basic.pjt_id") or _payload_get(payload, "meta_basic.pjt_no")
+        perf_tag = str(payload.get("tag") or "").strip()
+        tag_family = _classify_tag_family(perf_tag)
+
+        if perf_types_filter and tag_family == "perf":
+            norm_tag = _normalize_tag_value(perf_tag)
+            if norm_tag not in perf_types_filter:
+                tag_family = "other"
+
+        for member in participants:
+            if not isinstance(member, Mapping):
+                continue
+            hm_id = str(member.get("hm_id") or "").strip()
+            hm_nm_raw = str(member.get("hm_nm") or "").strip()
+            hm_nm_norm = _normalize_person_group_key(hm_nm_raw)
+            person_key = hm_id or hm_nm_norm
+            if not person_key:
+                continue
+
+            if person_key not in grouped:
+                grouped[person_key] = {
+                    "person_key": person_key,
+                    "hm_id": hm_id or None,
+                    "hm_nm": hm_nm_raw or (hm_id or "unknown"),
+                    "project_ids": set(),
+                    "performance_count": 0,
+                }
+            item = grouped[person_key]
+            if pjt_id:
+                item["project_ids"].add(str(pjt_id))
+            if tag_family == "perf":
+                item["performance_count"] += 1
+
+    if not grouped:
+        return None
+
+    rank_items: List[Dict[str, Any]] = []
+    for value in grouped.values():
+        project_count = len(value.get("project_ids") or set())
+        performance_count = int(value.get("performance_count", 0))
+        rank_items.append({
+            "person_key": value.get("person_key"),
+            "hm_id": value.get("hm_id"),
+            "hm_nm": value.get("hm_nm"),
+            "project_participation_count": project_count,
+            "performance_count": performance_count,
+            "score": project_count,
+        })
+
+    rank_items.sort(
+        key=lambda x: (
+            -int(x.get("score", 0)),
+            -int(x.get("performance_count", 0)),
+            str(x.get("hm_nm") or ""),
+            str(x.get("hm_id") or ""),
+            str(x.get("person_key") or ""),
+        )
+    )
+
+    top_k = max(1, min(len(rank_items), max(1, int(getattr(intent, "planner_limit", 0) or 10))))
+    window_years = {
+        "from": str(getattr(intent, "year_from", "") or "").strip() or None,
+        "to": str(getattr(intent, "year_to", "") or "").strip() or None,
+        "years": [str(y).strip() for y in (getattr(intent, "years", []) or []) if str(y).strip()],
+    }
+
+    return {
+        "rank_items": rank_items[:top_k],
+        "metric": "project_participation_count",
+        "window_years": window_years,
+        "candidate_docs": candidate_docs,
+    }
+
 class _PrecomputedEmbedding:
     def __init__(self, vec: List[float]):
         self._vec = vec
@@ -5340,6 +5462,16 @@ def _run_rag_with_vectors(
         reranked = reranked[:ctx_hard_limit]
     _timing_put(timings, "phase.final_rerank", time.time() - t0)
 
+    aggregation = _build_people_superlative_aggregation(
+        reranked=reranked,
+        intent=promotion_intent,
+        hinted_limit=hinted_limit,
+        policy_limit=int(getattr(preset, "max_ctx_items", 10) or 10),
+    )
+    if aggregation:
+        _timing_put(timings, "info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
+        _timing_put(timings, "info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
+
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
@@ -5506,6 +5638,7 @@ def _run_rag_with_vectors(
         context=context,
         refs=refs,
         timings=timings,
+        aggregation=aggregation,
     )
 
 # -------------------------
