@@ -169,6 +169,19 @@ def test_soft_title_contains_accepts_each_term() -> None:
     assert fn(payload, ["Construction of NTIS"]) is True
 
 
+def test_soft_title_policy_does_not_hard_filter_merged_pool() -> None:
+    source = Path("rag_pipeline.py").read_text(encoding="utf-8")
+    start = source.index("    # final rerank")
+    end = source.index(
+        "    _timing_put(timings, \"info.title_post_filter_applied\"",
+        start,
+    )
+    block = source[start:end]
+
+    assert "title_post_filter_applied = True" not in block
+    assert "merged_rrf = [" not in block
+
+
 def test_validate_lookup_join_hybrid_metrics_no_raise_when_strict_false() -> None:
     validate_fn, _ = _load_validate_lookup_join_hybrid_metrics()
 
