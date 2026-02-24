@@ -2495,6 +2495,7 @@ def _build_join_hop2_filter(
         people_terms: List[str],
         org_terms: List[str],
         planner_filter_spec: Dict[str, Any],
+        compiled_hop2_spec: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """JOIN Hop2 필터 생성: join_key_mode 단일 소스(strategy/contract)만 사용."""
     join_ids = join_ids or []
@@ -2526,11 +2527,26 @@ def _build_join_hop2_filter(
             filter_spec=planner_filter_spec.get("join_filter"),
         ),
     )
+    planner_hop2_spec = dict(compiled_hop2_spec or {})
+    planner_hop2_col = str(planner_hop2_spec.get("collection") or "").strip()
+    if planner_hop2_col and planner_hop2_col != hop2_col:
+        raise StrategyViolation(
+            error_code="PLANNER_JOIN_HOP2_COLLECTION_MISMATCH",
+            reason=(
+                "planner hop2_spec.collection과 실행 hop2_col 불일치"
+                f"(planner={planner_hop2_col}, executed={hop2_col}, relation={relation})"
+            ),
+        )
+    planner_hop2_filter = planner_hop2_spec.get("qdrant_filter")
+    if planner_hop2_filter is not None:
+        hop2_filter = _and_filter(hop2_filter, planner_hop2_filter)
+
     executed_join_filter_spec = {
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
         "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
         "pjt_nos_count": len(join_pjt_nos),
+        "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
     }
     return hop2_filter, executed_join_filter_spec
 
@@ -4842,6 +4858,7 @@ def _run_rag_with_vectors(
                 people_terms=people_terms,
                 org_terms=org_terms,
                 planner_filter_spec=planner_filter_spec,
+                compiled_hop2_spec=compiled_strategy.hop2_spec,
             )
             if relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and org_filter:
                 hop2_filter = _and_filter(hop2_filter, org_filter)
