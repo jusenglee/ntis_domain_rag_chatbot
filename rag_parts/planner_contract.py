@@ -158,6 +158,9 @@ def validate_planner_contract(
 
 LOOKUP_FILTER_POLICIES = {"hard", "off", "must_one_then_should"}
 LOOKUP_TITLE_FILTER_POLICIES = {"soft", "hard"}
+TITLE_MATCH_MODE_EXACT = "EXACT"
+TITLE_MATCH_MODE_TEXT = "TEXT"
+TITLE_MATCH_MODE_CONTAINS = "CONTAINS"
 
 
 def normalize_lookup_filter_policy(policy: Optional[str]) -> Optional[str]:
@@ -184,6 +187,19 @@ def normalize_lookup_title_filter_policy(policy: Optional[str]) -> Optional[str]
     return value
 
 
+def resolve_lookup_title_match_mode(*, lookup_title_filter_policy: str, index_supports_text: bool) -> str:
+    """lookup title 정책을 실행 가능한 title match mode로 해석한다.
+
+    정책 매핑:
+    - hard: EXACT 또는 TEXT(인덱스 지원 시)
+    - soft: CONTAINS(post-filter + rerank signal)
+    """
+    policy = str(lookup_title_filter_policy or "").strip().lower()
+    if policy == "hard":
+        return TITLE_MATCH_MODE_TEXT if bool(index_supports_text) else TITLE_MATCH_MODE_EXACT
+    return TITLE_MATCH_MODE_CONTAINS
+
+
 @dataclass(frozen=True)
 class StrategyCompileResult:
     target_cols: tuple[str, ...]
@@ -197,6 +213,7 @@ class StrategyCompileResult:
     lookup_filter_enabled: bool
     lookup_filter_policy: str
     lookup_title_filter_policy: str
+    title_match_mode: str
     relation_lookup_enforce: bool
 
 
@@ -218,6 +235,7 @@ class StrategyCompiler:
             lookup_filter_policy_hint: Optional[str],
             lookup_title_filter_policy_hint: Optional[str],
             detail_lookup_request: bool,
+            title_text_match_supported: bool,
     ) -> StrategyCompileResult:
         from rag_parts.filters import compile_filter
 
@@ -232,6 +250,10 @@ class StrategyCompiler:
         lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_hint) or "soft"
         if lookup_title_filter_policy == "hard" and not detail_lookup_request:
             lookup_title_filter_policy = "soft"
+        title_match_mode = resolve_lookup_title_match_mode(
+            lookup_title_filter_policy=lookup_title_filter_policy,
+            index_supports_text=title_text_match_supported,
+        )
 
         search_filter_enabled = bool(mode_norm == "search" and search_filter_signal and search_filter_conf_ok)
         lookup_filter_enabled = bool(
@@ -251,6 +273,7 @@ class StrategyCompiler:
             "relation_lookup_enforce": relation_lookup_enforce,
             "lookup_filter_policy": lookup_filter_policy,
             "lookup_title_filter_policy": lookup_title_filter_policy,
+            "title_match_mode": title_match_mode,
             "filter_signal": bool(search_filter_signal),
             "filter_conf_ok": bool(search_filter_conf_ok),
         }
@@ -280,5 +303,6 @@ class StrategyCompiler:
             lookup_filter_enabled=lookup_filter_enabled,
             lookup_filter_policy=lookup_filter_policy,
             lookup_title_filter_policy=lookup_title_filter_policy,
+            title_match_mode=title_match_mode,
             relation_lookup_enforce=relation_lookup_enforce,
         )
