@@ -428,7 +428,12 @@ class QuestionAnalysisV2(BaseModel):
             filters = dict(self.filters or {})
             name_lookup_keys = (
                 "participant_researcher_name",
+                "participant_researcher_names",
+                "participant_researcher",
+                "participant_researchers",
                 "researcher_name",
+                "researcher_names",
+                "researcher",
                 "people_name",
                 "lead_org_name",
                 "participant_org_name",
@@ -1612,10 +1617,7 @@ async def build_intent_payload(
 
         hint_org_role = filters.get("org_role")
 
-        people_terms_hint = _normalize_hint_terms([
-            *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
-            *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
-        ])
+        people_terms_hint = _collect_researcher_name_terms(filters)
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
@@ -1762,6 +1764,29 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     )
     return patched, True
 
+
+
+def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
+    """planner filters에서 연구자 이름 힌트를 폭넓게 수집한다."""
+    if not isinstance(filters, dict):
+        return []
+
+    researcher_keys = (
+        "participant_researcher_name",
+        "participant_researcher_names",
+        "participant_researcher",
+        "participant_researchers",
+        "researcher_name",
+        "researcher_names",
+        "researcher",
+        "people_name",
+    )
+
+    terms: list[str] = []
+    for key in researcher_keys:
+        terms.extend(_normalize_hint_terms(filters.get(key)))
+    return _normalize_hint_terms(terms)
+
 def _normalize_hint_terms(values: Any) -> list[str]:
     if values is None:
         return []
@@ -1790,10 +1815,7 @@ def _build_researcher_hints_from_question_analysis(qa: Optional["QuestionAnalysi
     filters = dict(getattr(qa, "filters", {}) or {})
     ids_map = dict(getattr(qa, "ids_map", {}) or {})
 
-    names = _normalize_hint_terms([
-        *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
-        *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
-    ])
+    names = _collect_researcher_name_terms(filters)
     affiliations = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
     ids = _normalize_hint_terms(ids_map.get("person_no") or ids_map.get("hm_id"))
 
