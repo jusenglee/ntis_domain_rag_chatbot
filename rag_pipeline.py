@@ -78,6 +78,7 @@ from rag_parts.planner_contract import (
     planner_contract_mode,
     normalize_lookup_filter_policy,
     normalize_lookup_title_filter_policy,
+    resolve_lookup_title_match_mode,
     validate_planner_contract,
     StrategyViolation,
     StrategyCompiler,
@@ -111,7 +112,11 @@ from rag_parts.filters import (
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     make_match_any,
     build_project_id_filter,
-    build_title_filter,
+    build_title_exact_filter,
+    build_title_text_filter,
+    TITLE_MATCH_MODE_EXACT,
+    TITLE_MATCH_MODE_TEXT,
+    TITLE_MATCH_MODE_CONTAINS,
     validate_join_mode_key_inputs,
     JoinFilterInput,
     PeopleFilterInput, OrgFilterInput,
@@ -2893,7 +2898,7 @@ def _run_rag_with_vectors(
         if str(t).strip()
     ]
     ctx.title = title_terms
-    title_filter = build_title_filter(title_terms) if title_terms else None
+    title_filter = None
 
     keyword_terms = [t.strip() for t in (list(ctx.keywords or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
@@ -3443,9 +3448,16 @@ def _run_rag_with_vectors(
             getattr(plan, "output_type", None),
         )
         lookup_title_filter_policy = "soft"
+    title_text_match_supported = bool(getattr(qmodels, "MatchText", None) is not None)
+    title_match_mode = resolve_lookup_title_match_mode(
+        lookup_title_filter_policy=lookup_title_filter_policy,
+        index_supports_text=title_text_match_supported,
+    )
     log_kv(
         "RAG.LOOKUP.TITLE_FILTER_POLICY",
         policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
+        title_text_match_supported=int(title_text_match_supported),
         mode=plan.mode,
         action=action,
         output_type=getattr(plan, "output_type", None),
@@ -3555,6 +3567,7 @@ def _run_rag_with_vectors(
         lookup_filter_policy_hint=lookup_filter_policy,
         lookup_title_filter_policy_hint=lookup_title_filter_policy,
         detail_lookup_request=detail_lookup_request,
+        title_text_match_supported=title_text_match_supported,
     )
     if compiled_strategy.hop1_spec or compiled_strategy.hop2_spec:
         log_kv(
@@ -3567,6 +3580,7 @@ def _run_rag_with_vectors(
     lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
     lookup_filter_policy = compiled_strategy.lookup_filter_policy
     lookup_title_filter_policy = compiled_strategy.lookup_title_filter_policy
+    title_match_mode = compiled_strategy.title_match_mode
     relation_lookup_enforce = bool(compiled_strategy.relation_lookup_enforce)
 
     join_hop1_lookup_filter_enabled = bool(
@@ -3624,11 +3638,17 @@ def _run_rag_with_vectors(
             applied=0,
         )
 
+    title_filter = None
+    if title_terms and title_match_mode == TITLE_MATCH_MODE_EXACT:
+        title_filter = build_title_exact_filter(title_terms)
+    elif title_terms and title_match_mode == TITLE_MATCH_MODE_TEXT:
+        title_filter = build_title_text_filter(title_terms)
+
     title_filter_server_applied = bool(
         title_filter
         and plan.mode == "lookup"
         and lookup_filter_enabled
-        and lookup_title_filter_policy == "hard"
+        and title_match_mode in (TITLE_MATCH_MODE_EXACT, TITLE_MATCH_MODE_TEXT)
         and search_filter_conf_ok
     )
     title_filter_applied_to = "project/perf" if title_filter_server_applied else None
@@ -3645,6 +3665,7 @@ def _run_rag_with_vectors(
     search_filter_server_applied = False
     filter_spec = {
         **dict(compiled_strategy.filter_spec or {}),
+        "title_match_mode": title_match_mode,
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
         "title_filter_server_applied": bool(title_filter_server_applied),
@@ -3691,6 +3712,7 @@ def _run_rag_with_vectors(
         lookup_filter_gate=people_match_mode,
         lookup_filter_promote_one_must=people_promote_one_must,
         lookup_title_filter_policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
         search_filter_server_policy=search_filter_server_policy,
     )
     plan = replace(
@@ -3768,6 +3790,7 @@ def _run_rag_with_vectors(
         keywords=keyword_terms,
         perf_tag_filters=list(ctx.perf_tag_filters or []),
         title_terms=title_terms,
+        title_match_mode=title_match_mode,
         tag_filters=list(ctx.tag_filters or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
@@ -5086,7 +5109,7 @@ def _run_rag_with_vectors(
     title_post_filter_hits = 0
     if (
         plan.mode == "lookup"
-        and lookup_title_filter_policy == "soft"
+        and title_match_mode == TITLE_MATCH_MODE_CONTAINS
         and bool(title_terms)
     ):
         title_post_filter_applied = True
@@ -5101,6 +5124,7 @@ def _run_rag_with_vectors(
             "RAG.TITLE_POST_FILTER",
             applied=int(title_post_filter_applied),
             policy=lookup_title_filter_policy,
+            title_match_mode=title_match_mode,
             topn=title_filter_topn,
             input_count=len(post_filter_pool),
             hits=title_post_filter_hits,
