@@ -1327,7 +1327,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     is_detail = False
 
     # ✅ 2) JOIN이면 detail 우선
-    if qa and qa.mode == "JOIN":
+    if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
         is_detail = True
 
     context_text = (
@@ -2022,7 +2022,7 @@ def _match_prtcp_members(
 def _format_researcher_line(
         matched_members: List[Dict[str, Any]],
         fallback_lines: List[str],
-        *,
+        is_detail: bool = False,
         max_matches: int = 5,
 ) -> str:
     if matched_members:
@@ -2038,12 +2038,20 @@ def _format_researcher_line(
         return f"- 연구자(매칭): {', '.join(names)}"
 
     fallback_names = []
-    for line in fallback_lines[:max_matches]:
-        cleaned = line.lstrip("- ").strip()
-        if cleaned:
-            fallback_names.append(cleaned)
-    if fallback_names:
-        return f"- 연구자: {', '.join(fallback_names)}"
+    if is_detail:
+        for line in fallback_lines:
+            cleaned = line.lstrip("- ").strip()
+            if cleaned:
+                fallback_names.append(cleaned)
+        if fallback_names:
+            return f"- 연구자: {', '.join(fallback_names)}"
+    else:
+        for line in fallback_lines[:max_matches]:
+            cleaned = line.lstrip("- ").strip()
+            if cleaned:
+                fallback_names.append(cleaned)
+        if fallback_names:
+            return f"- 연구자: {', '.join(fallback_names)} 등 생략"
 
     return "- 연구자: 정보 없음"
 
@@ -2143,15 +2151,17 @@ def refine_documents_rule_based(
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
         refined_text = "\n".join(refined_parts)
 
+
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
         matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
         fallback_lines = RagMapper.get_researcher_info(mapped_doc)
         researcher_line = _format_researcher_line(
             matched_members,
             fallback_lines,
-            max_matches=max_matches,
+            is_detail,
+            max_matches=max_matches
         )
-        (researcher_line)
+
         prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
         org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
         matched_orgs = _match_prtcp_orgs(
