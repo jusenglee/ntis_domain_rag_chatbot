@@ -100,6 +100,7 @@ def validate_planner_contract(
     pjt_ids = _as_str_list(normalized_ids_map.get("pjt_id"))
     pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
 
+    # planner 입력(ids_map) 계약: lookup/join에서 pjt_id vs pjt_no 는 XOR만 허용한다.
     if pjt_ids and pjt_nos:
         violations.append(
             PlannerContractViolation(
