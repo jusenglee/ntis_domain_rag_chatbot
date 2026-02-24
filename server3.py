@@ -1610,6 +1610,13 @@ async def build_intent_payload(
 def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
     if qa is None:
         return intent, False
+
+    tracked_fields = (
+        "mode", "base_route", "action", "relation", "join_key_mode", "target_cols",
+        "keywords", "people_terms", "org_terms", "perf_types", "ids_map",
+    )
+
+    before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
     confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
     if confidence < 0.2:
         return intent, False
@@ -1689,6 +1696,21 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         title=planner_title_terms or list(getattr(intent, "title", []) or []),
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
     )
+
+    after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
+    diff = {
+        key: {"before": before_snapshot.get(key), "after": after_snapshot.get(key)}
+        for key in tracked_fields
+        if before_snapshot.get(key) != after_snapshot.get(key)
+    }
+    _logger = globals().get("logger")
+    if _logger is not None:
+        _logger.info(
+            "[PLANNER_V2_DIFF] applied=%s confidence=%.3f diff=%s",
+            int(bool(diff)),
+            confidence,
+            diff,
+        )
     return patched, True
 
 def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
