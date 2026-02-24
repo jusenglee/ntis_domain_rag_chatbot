@@ -3253,12 +3253,14 @@ def _run_rag_with_vectors(
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
     ctx.perf_types = perf_types
+    # 서버단 must에는 명시적으로 정규화된 perf_types만 결합한다(쿼리 기반 추론 태그는 제외).
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
     if perf_types or perf_types_source:
         log_kv(
             "RAG.PERF_TYPES.FINAL",
             source=perf_types_source or "derived",
             values=perf_types,
+            server_must_policy="explicit_perf_types_only",
         )
 
     title_terms = [
@@ -4586,6 +4588,7 @@ def _run_rag_with_vectors(
                 if year_range_filter:
                     hop1_filter = _and_filter(hop1_filter, year_range_filter)
             if hop1_col == COL_PERF and perf_type_filter:
+                # 원칙: 명시적 perf_types만 server-side must로 결합
                 hop1_filter = _and_filter(hop1_filter, perf_type_filter)
             if hop1_strategy == "lookup" and join_key_mode == "group" and seed_join_pjt_nos:
                 hop1_filter = _and_filter(hop1_filter, build_project_id_filter([], seed_join_pjt_nos))
@@ -5009,7 +5012,11 @@ def _run_rag_with_vectors(
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
-        build_perf_filter_by_pjt_id(perf_followup_join_ids, q)
+        build_perf_filter_by_pjt_id(
+            perf_followup_join_ids,
+            q,
+            apply_query_tag_inference=False,
+        )
         if perf_followup_join_ids
         else None
     )
