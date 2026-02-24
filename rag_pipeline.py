@@ -1327,6 +1327,32 @@ def _soft_title_contains(doc_payload: Mapping[str, Any], title_terms: List[str])
                 return True
     return False
 
+
+def _soft_title_match_count(doc_payload: Mapping[str, Any], title_terms: List[str]) -> int:
+    terms: List[str] = []
+    for raw in title_terms or []:
+        term = normalize_for_title_match(raw)
+        if term:
+            terms.append(term.lower())
+    if not terms:
+        return 0
+
+    titles: List[str] = []
+    for field in ("title1", "title2", "title_text"):
+        title_val = normalize_for_title_match(doc_payload.get(field, "")).lower()
+        if title_val:
+            titles.append(title_val)
+    if not titles:
+        return 0
+
+    hit_terms: set[str] = set()
+    for term in terms:
+        for title_val in titles:
+            if term in title_val:
+                hit_terms.add(term)
+                break
+    return len(hit_terms)
+
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
     meta_title = _to_text(meta.get("kor_pjt_nm") or meta.get("eng_pjt_nm") or "")
@@ -1696,6 +1722,8 @@ def _final_rerank(
         keep: int,
         tag_boost: float = 0.0,
         tag_mismatch_penalty: float = 0.0,
+        title_soft_terms: Optional[List[str]] = None,
+        title_soft_boost: float = 0.0,
 ) -> List[Any]:
     if not cands:
         return []
@@ -1740,6 +1768,10 @@ def _final_rerank(
         pl = getattr(p, "payload", None)
         rrf_sc = float(pl.get("_rrf", 0.0)) if isinstance(pl, dict) else 0.0
         kw_sc = _keyword_score(p, kws, lex_w)
+        if title_soft_terms and title_soft_boost > 0:
+            title_hits = _soft_title_match_count(getattr(p, "payload", None) or {}, title_soft_terms)
+            if title_hits > 0:
+                kw_sc += title_soft_boost * float(title_hits)
         exact_hits = _keyword_exact_match_hits(p, kws)
         f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids, mode=mode)
         fam = _family_bonus(p, base_route)
@@ -5140,19 +5172,22 @@ def _run_rag_with_vectors(
     # final rerank
     title_post_filter_applied = False
     title_post_filter_hits = 0
+    title_soft_boost = 0.0
+    title_soft_terms_for_rerank: List[str] = []
     if (
         plan.mode == "lookup"
         and title_match_mode == TITLE_MATCH_MODE_CONTAINS
         and bool(title_terms)
     ):
-        title_post_filter_applied = True
         title_filter_topn = max(1, int(os.getenv("RAG_TITLE_POST_FILTER_TOPN", "80")))
         post_filter_pool = list(merged_rrf[:title_filter_topn])
-        merged_rrf = [
-            p for p in post_filter_pool
+        title_post_filter_hits = sum(
+            1
+            for p in post_filter_pool
             if _soft_title_contains(getattr(p, "payload", None) or {}, title_terms)
-        ]
-        title_post_filter_hits = len(merged_rrf)
+        )
+        title_soft_terms_for_rerank = list(title_terms)
+        title_soft_boost = float(os.getenv("RAG_TITLE_SOFT_BOOST", "8.0"))
         log_kv(
             "RAG.TITLE_POST_FILTER",
             applied=int(title_post_filter_applied),
@@ -5179,6 +5214,8 @@ def _run_rag_with_vectors(
         keep=final_keep,
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+        title_soft_terms=title_soft_terms_for_rerank,
+        title_soft_boost=title_soft_boost,
     )
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
