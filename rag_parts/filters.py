@@ -594,7 +594,7 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
 
 def build_title_exact_filter(terms: List[str]) -> Optional[Any]:
     """문서 제목(과제/성과 공통) EXACT(match-any) 기반 서버단 필터."""
-    keys = ["title_text"]
+    keys = ["title_text", "title1", "title2"]
     return _build_title_filter_with_keys(terms, keys)
 
 
@@ -605,12 +605,14 @@ def build_title_text_filter(terms: List[str]) -> Optional[Any]:
     norm_terms = [str(t).strip() for t in (terms or []) if str(t).strip()]
     if not norm_terms:
         return None
-    keys = ["title_text"]
+    keys = ["title_text", "title1", "title2"]
     should: List[Any] = []
     match_text_cls = getattr(qmodels, "MatchText", None)
     if match_text_cls is None:
         return None
     for key in keys:
+        if not key:
+            continue
         for term in norm_terms:
             should.append(qmodels.FieldCondition(key=key, match=match_text_cls(text=term)))
     if not should:

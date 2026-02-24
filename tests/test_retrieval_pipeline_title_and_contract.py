@@ -96,6 +96,38 @@ def _contains_title_match_any(obj: Any) -> bool:
     return False
 
 
+def _contains_title_match_any_for_keys(obj: Any, keys: set[str]) -> bool:
+    if obj is None:
+        return False
+    if isinstance(obj, dict):
+        if obj.get("key") in keys:
+            match = obj.get("match")
+            if isinstance(match, dict) and ("any" in match or "any_values" in match):
+                return True
+        return any(_contains_title_match_any_for_keys(v, keys) for v in obj.values())
+
+    key = getattr(obj, "key", None)
+    if key in keys:
+        match = getattr(obj, "match", None)
+        if match is not None and (hasattr(match, "any") or hasattr(match, "any_values")):
+            return True
+
+    if hasattr(obj, "model_dump"):
+        try:
+            return _contains_title_match_any_for_keys(obj.model_dump(), keys)
+        except Exception:
+            pass
+
+    for attr in ("must", "should", "must_not", "min_should"):
+        if hasattr(obj, attr) and _contains_title_match_any_for_keys(getattr(obj, attr), keys):
+            return True
+
+    if isinstance(obj, (list, tuple, set)):
+        return any(_contains_title_match_any_for_keys(v, keys) for v in obj)
+
+    return False
+
+
 def test_soft_policy_compiled_filter_excludes_title_match_any() -> None:
     compiled = StrategyCompiler.compile(
         mode="lookup",
@@ -155,6 +187,33 @@ def test_hard_policy_detail_lookup_includes_title_exact_filter(monkeypatch) -> N
     title_filter = filters.build_title_exact_filter(["국가과학기술지식정보서비스"])
     assert title_filter is not None
     assert _contains_title_match_any(title_filter) is True
+
+
+
+
+def test_hard_policy_title_filter_matches_title1_title2_only_payload(monkeypatch) -> None:
+    dummy_qmodels = type("Dummy", (), {
+        "FieldCondition": staticmethod(lambda **kwargs: {"kind": "field", **kwargs}),
+        "MatchAny": staticmethod(lambda **kwargs: {"kind": "match_any", **kwargs}),
+        "MatchValue": staticmethod(lambda **kwargs: {"kind": "match_value", **kwargs}),
+        "Filter": staticmethod(lambda **kwargs: {"kind": "filter", **kwargs}),
+    })
+    monkeypatch.setattr(filters, "qmodels", dummy_qmodels)
+
+    title_filter = filters.build_title_exact_filter(["NTIS", "지식정보서비스"])
+    assert title_filter is not None
+    min_should = title_filter.get("min_should")
+    assert min_should in (1, {"min_count": 1}, {"count": 1})
+    assert _contains_title_match_any_for_keys(title_filter, {"title_text", "title1", "title2"}) is True
+
+    should = title_filter.get("should") or []
+    keys = {cond.get("key") for cond in should if isinstance(cond, dict)}
+    assert {"title_text", "title1", "title2"}.issubset(keys)
+
+    payload = {"title1": "국가과학기술", "title2": "지식정보서비스"}
+    terms = {"NTIS", "지식정보서비스"}
+    payload_values = {str(payload.get("title1", "")).strip(), str(payload.get("title2", "")).strip()}
+    assert terms.intersection(payload_values)
 
 
 def test_soft_title_contains_accepts_each_term() -> None:
