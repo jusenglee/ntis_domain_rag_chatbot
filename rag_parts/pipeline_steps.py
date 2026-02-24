@@ -11,6 +11,7 @@ from .constants import (
     TAG_PJT_INFO,
     normalize_perf_types,
 )
+from .planner_contract import normalize_stats_policy_value
 from .query_intent import (
     QueryIntent,
     classify_query as _classify_query,
@@ -122,6 +123,11 @@ class NormalizedIntent:
     lookup_filter_policy_hint: Optional[str] = None
     target_cols: List[str] = field(default_factory=list)
     wants_rank: bool = False
+    stats_metric: str = "project_participation_count"
+    window_years: int = 3
+    candidate_n: int = 50
+    top_k: int = 1
+    tie_break: str = "performance_count_desc_name_asc"
 
 @dataclass(frozen=True)
 class FilterBundle:
@@ -255,6 +261,14 @@ def normalize_intent(
         list(getattr(intent, "contract_violations", None) or []) + join_contract_violations
     )
 
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(intent, "stats_metric", None),
+        window_years=getattr(intent, "window_years", None),
+        candidate_n=getattr(intent, "candidate_n", None),
+        top_k=getattr(intent, "top_k", None),
+        tie_break=getattr(intent, "tie_break", None),
+    )
+
     return NormalizedIntent(
         mode=str(getattr(intent, "mode", "") or "").strip().lower() or None,
         action=action,
@@ -293,6 +307,11 @@ def normalize_intent(
         lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
         wants_rank=wants_rank,
+        stats_metric=stats_policy["stats_metric"],
+        window_years=stats_policy["window_years"],
+        candidate_n=stats_policy["candidate_n"],
+        top_k=stats_policy["top_k"],
+        tie_break=stats_policy["tie_break"],
     )
 
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:
