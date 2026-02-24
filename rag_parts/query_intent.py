@@ -69,7 +69,7 @@ _PJT_NO_LABEL_RE = re.compile(
 _PJT_NO_TOKEN_RE = re.compile(r"\bPJT[-_/]?[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+){1,}\b", re.IGNORECASE)
 
 # 사람 이름 후보: 한글 2~4자 (단독으로는 오탐이 많아서 '연구자/연구원/참여인력' 등 주변 신호와 결합)
-_NAME_NEAR_CUE_RE = re.compile(r"([가-힣]{2,4})\s*(?:연구자|연구원|교수|박사|PI|책임자|연구책임자|참여연구원|참여인력)")
+_NAME_NEAR_CUE_RE = re.compile(r"(?<![가-힣])([가-힣]{2,4})\s+(?:연구자|연구원|교수|박사|PI|책임자|연구책임자|참여연구원|참여인력)")
 _NAME_LABEL_RE = re.compile(r"(?:인물명|연구자명|성명|이름)\s*[:：]\s*([가-힣]{2,4})")
 
 # 기관명 후보 (suffix 기반 + 라벨 기반)
@@ -837,10 +837,15 @@ def pick_org_role(q: str) -> Optional[str]:
 def _extract_people_terms_for_affiliation(q: str) -> List[str]:
     text = (q or "")
     out: List[str] = []
-    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE, re.compile(r"([가-힣]{2,4})\s*(?:의)?\s*소속")):
+    noisy_tokens = ("소속", "연구원", "연구자", "기관", "대학", "연구소")
+    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE):
         for match in pattern.finditer(text):
             name = (match.group(1) or "").strip()
-            if name and name not in out:
+            if not name:
+                continue
+            if any(token in name for token in noisy_tokens):
+                continue
+            if name not in out:
                 out.append(name)
     return out
 
@@ -858,14 +863,17 @@ def _apply_affiliation_intent(
         return people_terms, org_terms, relation
 
     tl = (q or "").lower()
+    has_name_signal = bool(_NAME_NEAR_CUE_RE.search(q or "")) or bool(_NAME_LABEL_RE.search(q or ""))
     has_people_signal = (
             bool(people_terms)
             or bool(ids_map.get("person_no"))
-            or bool(_NAME_NEAR_CUE_RE.search(q or ""))
-            or bool(_NAME_LABEL_RE.search(q or ""))
+            or has_name_signal
             or _has_any_cue(tl, PEOPLE_CUES)
     )
     if not has_people_signal:
+        return people_terms, org_terms, relation
+
+    if not people_terms and not bool(ids_map.get("person_no")) and not has_name_signal:
         return people_terms, org_terms, relation
 
     if not people_terms:
@@ -1354,7 +1362,9 @@ def _classify_query_heuristic(
     participant_org_terms: List[str] = []
     people_affiliation_org_terms: List[str] = []
     if org_role == "affiliation":
-        people_terms = _extract_people_terms_for_affiliation(q)
+        has_name_signal = bool(_NAME_NEAR_CUE_RE.search(q or "")) or bool(_NAME_LABEL_RE.search(q or ""))
+        if has_name_signal:
+            people_terms = _extract_people_terms_for_affiliation(q)
         people_affiliation_org_terms = list(org_terms)
     elif org_role in ("lead", "performer", "performing"):
         lead_org_terms = list(org_terms)
@@ -1608,8 +1618,6 @@ def classify_query(
         year_from = years[0]
     if not year_to and years:
         year_to = years[-1]
-    if org_role == "affiliation" and not people_terms:
-        people_terms = _extract_people_terms_for_affiliation(q)
     if org_role in ("lead", "performer", "performing") and not lead_org_terms:
         lead_org_terms = list(org_terms)
     if org_role == "participant" and not participant_org_terms:
