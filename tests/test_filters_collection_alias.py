@@ -8,12 +8,14 @@ import rag_parts.filters as filters
 def test_build_collection_join_filter_uses_perf_filter_for_aliases(monkeypatch):
     calls = []
 
-    def _fake_perf_by_id(join_ids, query=""):
+    def _fake_perf_by_id(join_ids, query="", **kwargs):
         calls.append(("id", list(join_ids), query))
+        assert kwargs.get("apply_query_tag_inference") is False
         return "perf-by-id"
 
-    def _fake_perf_group_resolved(pjt_nos, pjt_ids, strategy="or_both", query=""):
+    def _fake_perf_group_resolved(pjt_nos, pjt_ids, strategy="or_both", query="", **kwargs):
         calls.append(("group", list(pjt_nos), list(pjt_ids), strategy, query))
+        assert kwargs.get("apply_query_tag_inference") is False
         return "perf-group-resolved"
 
     monkeypatch.setattr(filters, "build_perf_filter_by_pjt_id", _fake_perf_by_id)

@@ -869,8 +869,9 @@ def build_collection_join_filter(
                 resolved_pjt_ids,
                 strategy=perf_group_strategy,
                 query=query,
+                apply_query_tag_inference=False,
             )
-        return build_perf_filter_by_pjt_id(join_ids, query)
+        return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
 
     if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
@@ -974,7 +975,13 @@ def _dedupe_non_empty(values: List[str]) -> List[str]:
     return list(dict.fromkeys(str(v).strip() for v in (values or []) if str(v).strip()))
 
 
-def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], query: str = "") -> "qmodels.Filter":
+def _build_perf_filter_for_keys(
+        join_values: List[str],
+        key_cands: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for perf filter build")
 
@@ -995,23 +1002,43 @@ def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], qu
         )
         must.append(join_any)
 
-    tag_filters = pick_perf_tag_filters(query)
+    tag_filters = pick_perf_tag_filters(query) if apply_query_tag_inference else []
     if tag_filters:
         must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
 
     return qmodels.Filter(must=must, must_not=[])
 
 
-def build_perf_filter_by_pjt_id(pjt_ids: List[str], query: str = "") -> "qmodels.Filter":
+def build_perf_filter_by_pjt_id(
+        pjt_ids: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """PJT_ID 키 계열만 사용해서 perf 필터를 생성한다."""
     _log_project_key_policy_once()
-    return _build_perf_filter_for_keys(pjt_ids, _project_key_candidates("pjt_id"), query)
+    return _build_perf_filter_for_keys(
+        pjt_ids,
+        _project_key_candidates("pjt_id"),
+        query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )
 
 
-def build_perf_filter_by_pjt_no(pjt_nos: List[str], query: str = "") -> "qmodels.Filter":
+def build_perf_filter_by_pjt_no(
+        pjt_nos: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """PJT_NO 키 계열만 사용해서 perf 필터를 생성한다."""
     _log_project_key_policy_once()
-    return _build_perf_filter_for_keys(pjt_nos, _project_key_candidates("pjt_no"), query)
+    return _build_perf_filter_for_keys(
+        pjt_nos,
+        _project_key_candidates("pjt_no"),
+        query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )
 
 
 def build_perf_filter_group_resolved(
@@ -1019,6 +1046,8 @@ def build_perf_filter_group_resolved(
         pjt_ids: List[str],
         strategy: str = "or_both",
         query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
 ) -> "qmodels.Filter":
     """group 모드(perf)에서 pjt_no/pjt_id를 OR 결합(min_should=1)해 필터를 생성한다."""
     if qmodels is None:
@@ -1058,18 +1087,27 @@ def build_perf_filter_group_resolved(
     if should:
         must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
 
-    tag_filters = pick_perf_tag_filters(query)
+    tag_filters = pick_perf_tag_filters(query) if apply_query_tag_inference else []
     if tag_filters:
         must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
 
     return qmodels.Filter(must=must, must_not=[])
 
 
-def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
+def build_perf_filter(
+        spec: PerfFilterInput,
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """(호환용) join_ids 타입을 검증해 pjt_id/pjt_no 전용 API로 위임한다."""
     join_ids = _dedupe_non_empty(spec.join_ids)
     if not join_ids:
-        return _build_perf_filter_for_keys([], [], spec.query)
+        return _build_perf_filter_for_keys(
+            [],
+            [],
+            spec.query,
+            apply_query_tag_inference=apply_query_tag_inference,
+        )
 
     has_pjt_id = any(_PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
     has_pjt_no = any(not _PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
@@ -1077,5 +1115,13 @@ def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
         raise ValueError("PerfFilterInput.join_ids는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
 
     if has_pjt_id:
-        return build_perf_filter_by_pjt_id(join_ids, spec.query)
-    return build_perf_filter_by_pjt_no(join_ids, spec.query)
+        return build_perf_filter_by_pjt_id(
+            join_ids,
+            spec.query,
+            apply_query_tag_inference=apply_query_tag_inference,
+        )
+    return build_perf_filter_by_pjt_no(
+        join_ids,
+        spec.query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )
