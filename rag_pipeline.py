@@ -2505,6 +2505,7 @@ def _build_join_hop2_filter(
         join_key_mode=join_key_mode,
         join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
         pjt_nos=join_pjt_nos,
+        resolved_pjt_ids=join_pjt_ids,
         query=q,
         fallback_spec=JoinFilterInput(
             join_ids=join_pjt_ids,

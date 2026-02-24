@@ -827,6 +827,8 @@ def build_collection_join_filter(
         join_key_mode: str,
         join_ids: List[str],
         pjt_nos: List[str],
+        resolved_pjt_ids: Optional[List[str]] = None,
+        perf_group_strategy: str = "or_both",
         query: str = "",
         fallback_spec: Optional[JoinFilterInput] = None,
 ) -> "qmodels.Filter":
@@ -841,6 +843,7 @@ def build_collection_join_filter(
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
 
     validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+    resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
 
     col_norm = str(hop2_col or "").strip().lower()
 
@@ -861,7 +864,12 @@ def build_collection_join_filter(
     col_canonical = _canonical_collection(col_norm)
     if col_canonical == "ntis_perf":
         if mode == "group":
-            return build_perf_filter_by_pjt_no(pjt_nos, query)
+            return build_perf_filter_group_resolved(
+                pjt_nos,
+                resolved_pjt_ids,
+                strategy=perf_group_strategy,
+                query=query,
+            )
         return build_perf_filter_by_pjt_id(join_ids, query)
 
     if col_canonical == "ntis_project":
@@ -965,6 +973,57 @@ def build_perf_filter_by_pjt_no(pjt_nos: List[str], query: str = "") -> "qmodels
     """PJT_NO 키 계열만 사용해서 perf 필터를 생성한다."""
     _log_project_key_policy_once()
     return _build_perf_filter_for_keys(pjt_nos, _project_key_candidates("pjt_no"), query)
+
+
+def build_perf_filter_group_resolved(
+        pjt_nos: List[str],
+        pjt_ids: List[str],
+        strategy: str = "or_both",
+        query: str = "",
+) -> "qmodels.Filter":
+    """group 모드(perf)에서 pjt_no/pjt_id를 OR 결합(min_should=1)해 필터를 생성한다."""
+    if qmodels is None:
+        raise RuntimeError("qdrant_client is required for perf filter build")
+
+    _log_project_key_policy_once()
+    pjt_no_values = _dedupe_non_empty(pjt_nos)
+    pjt_id_values = _dedupe_non_empty(pjt_ids)
+
+    strategy_norm = str(strategy or "or_both").strip().lower()
+    if strategy_norm not in {"prefer_pjt_no", "prefer_pjt_id", "or_both"}:
+        raise ValueError(f"지원하지 않는 perf group strategy 입니다: {strategy}")
+
+    should: List[Any] = []
+    primary_pjt_no = _project_key_candidates("pjt_no")[0]
+    primary_pjt_id = _project_key_candidates("pjt_id")[0]
+    pjt_no_cond = qmodels.FieldCondition(key=primary_pjt_no, match=make_match_any(pjt_no_values)) if pjt_no_values else None
+    pjt_id_cond = qmodels.FieldCondition(key=primary_pjt_id, match=make_match_any(pjt_id_values)) if pjt_id_values else None
+
+    if strategy_norm == "prefer_pjt_no":
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+    elif strategy_norm == "prefer_pjt_id":
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+    else:
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+
+    must: List[Any] = []
+    if should:
+        must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
+
+    tag_filters = pick_perf_tag_filters(query)
+    if tag_filters:
+        must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
+
+    return qmodels.Filter(must=must, must_not=[])
 
 
 def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
