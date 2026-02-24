@@ -87,6 +87,49 @@ def _load_retriever_class() -> Any:
     return namespace["CustomRAGRetriever"]
 
 
+def _load_refine_documents_rule_based() -> Any:
+    source = Path("server3.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="server3.py")
+
+    target = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "refine_documents_rule_based"
+    )
+
+    module = ast.Module(body=[target], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    namespace: Dict[str, Any] = {
+        "Any": Any,
+        "List": list,
+        "Optional": Optional,
+        "Dict": Dict,
+        "Document": dict,
+        "MAX_FIELD_SENTENCES": 10,
+        "MAX_FIELD_TOKENS": 200,
+        "MAX_DOC_SENTENCES": 20,
+        "MAX_DOC_TOKENS": 500,
+        "_safe_map_doc": lambda doc, context=None: dict(doc),
+        "_apply_title_preference": lambda mapped_doc: None,
+        "format_metadata": lambda *args, **kwargs: "",
+        "_match_prtcp_members": lambda *args, **kwargs: [],
+        "RagMapper": SimpleNamespace(get_researcher_info=lambda _doc: []),
+        "_format_researcher_line": lambda *args, **kwargs: "",
+        "_collect_org_hints": lambda *args, **kwargs: ([], [], None),
+        "_match_prtcp_orgs": lambda prtcp_orgs, *args, **kwargs: prtcp_orgs,
+        "_format_org_line": lambda matched_orgs, *_args, **_kwargs: (
+            "참여기관: " + ", ".join(
+                str(org.get("org_nm") or org.get("name") or "")
+                for org in (matched_orgs or [])
+                if isinstance(org, dict)
+            )
+        ).strip(),
+        "_limit_text_by_sentences_and_tokens": lambda text, **kwargs: text,
+        "_split_sentences": lambda text: [line for line in text.splitlines() if line.strip()],
+    }
+    exec(compile(module, filename="server3.py", mode="exec"), namespace)
+    return namespace["refine_documents_rule_based"]
+
+
 def test_short_query_exception_patterns_allow():
     ns = _load_precheck_helpers()
     helper = ns["_is_short_query_exception"]
@@ -134,3 +177,20 @@ def test_retriever_infers_tag_from_collection_and_keeps_tagless_doc():
 
     assert len(out["documents"]) == 1
     assert out["documents"][0]["tag"] == "IRD_NAI_PJT_INFO"
+
+
+def test_refine_documents_rule_based_exposes_participant_organization_line():
+    refine_documents_rule_based = _load_refine_documents_rule_based()
+
+    docs = [
+        {
+            "source_index": 1,
+            "title": "테스트 과제",
+            "prtcp_org": [{"org_nm": "한국전자통신연구원"}],
+        }
+    ]
+
+    output = refine_documents_rule_based(docs)
+
+    assert "참여기관" in output
+    assert "한국전자통신연구원" in output
