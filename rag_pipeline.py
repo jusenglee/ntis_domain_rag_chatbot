@@ -5194,6 +5194,7 @@ def _run_rag_with_vectors(
         requested_limit = max(
             0,
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
+            _coerce_int(hinted_limit, 0),
         )
         hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
         reranked_for_hydrate = reranked[:hydrate_upper]
@@ -5201,7 +5202,7 @@ def _run_rag_with_vectors(
         _hydrate_points_payload(qdr, reranked_for_hydrate)
         _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
 
-        check_top_k = min(len(reranked), max(1, requested_limit or max_items))
+        check_top_k = min(len(reranked), max(1, requested_limit))
         missing_kor = []
         for rank, p in enumerate(reranked[:check_top_k], start=1):
             pl = getattr(p, "payload", {}) or {}
