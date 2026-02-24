@@ -2288,11 +2288,11 @@ def refine_documents_rule_based(
             prtcp_orgs,
             max_matches=max_matches,
         )
-        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-                    f"matched_members: {matched_members}\n"
-                    f"fallback_lines: {fallback_lines}\n"
-                    f"matched_orgs: {matched_orgs}"
-                    f"researcher_line: {researcher_line}")
+        # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+        #             f"matched_members: {matched_members}\n"
+        #             f"fallback_lines: {fallback_lines}\n"
+        #             f"matched_orgs: {matched_orgs}"
+        #             f"researcher_line: {researcher_line}")
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
