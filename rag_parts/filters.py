@@ -842,8 +842,8 @@ def build_collection_join_filter(
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
 
-    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
     resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
     col_norm = str(hop2_col or "").strip().lower()
 
@@ -864,14 +864,25 @@ def build_collection_join_filter(
     col_canonical = _canonical_collection(col_norm)
     if col_canonical == "ntis_perf":
         if mode == "group":
+            # runtime(Hop2) 검증: Hop1 결과가 pjt_id-only 여도 허용
+            validate_group_join_runtime_keys(pjt_nos=pjt_nos_norm, pjt_ids=resolved_pjt_ids)
+            if not pjt_nos_norm:
+                return build_perf_filter_by_pjt_id(
+                    resolved_pjt_ids,
+                    query,
+                    apply_query_tag_inference=False,
+                )
             return build_perf_filter_group_resolved(
-                pjt_nos,
+                pjt_nos_norm,
                 resolved_pjt_ids,
                 strategy=perf_group_strategy,
                 query=query,
                 apply_query_tag_inference=False,
             )
+        validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos_norm, pjt_ids=join_ids)
         return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
+
+    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos_norm, pjt_ids=join_ids)
 
     if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
@@ -933,7 +944,7 @@ def validate_planner_join_keys(mode: str, ids_map: Any) -> Dict[str, List[str]]:
 
 
 def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str]) -> None:
-    """Hop1 확장 후 Hop2 직전의 resolved join key 계약을 검증한다."""
+    """Executor semantic 계약(입력 join key 모드)을 검증한다."""
     mode_norm = str(mode or "").strip().lower()
     pjt_ids_norm = _dedupe_non_empty(pjt_ids)
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
@@ -951,6 +962,20 @@ def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str
         return
 
     raise ValueError(f"EXECUTOR_JOIN_KEY_MODE_INVALID: 지원하지 않는 join_key_mode 입니다: {mode}")
+
+
+def validate_group_join_runtime_keys(*, pjt_nos: List[str], pjt_ids: List[str]) -> None:
+    """group 모드 Hop2 실행 직전의 runtime key 계약을 검증한다.
+
+    Hop1 확장 결과는 pjt_no / pjt_id 중 하나 이상만 존재해도 실행 가능해야 한다.
+    """
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+    pjt_ids_norm = _dedupe_non_empty(pjt_ids)
+    if pjt_nos_norm or pjt_ids_norm:
+        return
+    raise ValueError(
+        "EXECUTOR_GROUP_RUNTIME_KEY_REQUIRED: group Hop2 실행에는 pjt_nos 또는 pjt_ids 중 최소 1개가 필요합니다."
+    )
 
 
 def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
