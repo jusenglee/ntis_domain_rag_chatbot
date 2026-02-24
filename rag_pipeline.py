@@ -118,7 +118,8 @@ from rag_parts.filters import (
     TITLE_MATCH_MODE_EXACT,
     TITLE_MATCH_MODE_TEXT,
     TITLE_MATCH_MODE_CONTAINS,
-    validate_join_mode_key_inputs,
+    validate_planner_join_keys,
+    validate_resolved_join_keys,
     JoinFilterInput,
     PeopleFilterInput, OrgFilterInput,
 )
@@ -217,20 +218,17 @@ def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
 
 
 def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[str, List[str]]:
-    """pjt_id/pjt_no 혼합 여부를 mode 정책으로 검증하고 정규화 ids_map을 반환한다."""
-    normalized_ids_map = _normalize_ids_map(ids_map)
+    """planner 입력(ids_map)의 project key XOR 계약을 검증하고 정규화 결과를 반환한다."""
     mode_norm = str(mode or "").strip().lower()
-
-    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
-    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
-    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
-        error_code = "PLANNER_MIXED_PROJECT_KEYS" if mode_norm == "lookup" else "PLANNER_JOIN_MIXED_PROJECT_KEYS"
-        raise StrategyViolation(
-            error_code=error_code,
-            reason=f"ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})",
-        )
-
-    return normalized_ids_map
+    try:
+        return validate_planner_join_keys(mode=mode_norm, ids_map=ids_map)
+    except ValueError as exc:
+        msg = str(exc)
+        error_code, _, reason = msg.partition(": ")
+        if not error_code.startswith("PLANNER_"):
+            error_code = "PLANNER_MIXED_PROJECT_KEYS"
+            reason = msg
+        raise StrategyViolation(error_code=error_code, reason=reason or msg) from exc
 
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
@@ -4796,11 +4794,19 @@ def _run_rag_with_vectors(
                     ),
                 )
 
-            validate_join_mode_key_inputs(
-                mode=planner_join_key_mode,
-                join_ids=join_pjt_ids,
-                pjt_nos=join_pjt_nos,
-            )
+            try:
+                validate_resolved_join_keys(
+                    mode=planner_join_key_mode,
+                    pjt_ids=join_pjt_ids,
+                    pjt_nos=join_pjt_nos,
+                )
+            except ValueError as exc:
+                msg = str(exc)
+                error_code, _, reason = msg.partition(": ")
+                raise StrategyViolation(
+                    error_code=error_code if error_code.startswith("EXECUTOR_") else "EXECUTOR_JOIN_KEYS_INVALID",
+                    reason=reason or msg,
+                ) from exc
 
             # Hop2는 relation/project|org->perf 여부와 무관하게 planner 계약 키를 그대로 사용한다.
             hop2_join_key_mode = planner_join_key_mode

@@ -804,7 +804,7 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {spec.join_key_mode}")
 
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
 
     _log_project_key_policy_once()
     primary_id = _project_key_candidates("pjt_id")[0]
@@ -842,7 +842,7 @@ def build_collection_join_filter(
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
 
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
     resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
 
     col_norm = str(hop2_col or "").strip().lower()
@@ -895,27 +895,66 @@ def _is_pjt_no_key(key: str) -> bool:
     return bool(k) and (k == "pjt_no" or k.endswith(".pjt_no"))
 
 
-def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
-    """join_key_mode와 실제 join key 입력의 정합성을 검증한다."""
+
+
+def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
+    """ids_map 입력을 {key: [str, ...]} 형태로 정규화한다."""
+    if not isinstance(ids_map, dict):
+        return {}
+
+    normalized: Dict[str, List[str]] = {}
+    for key, values in ids_map.items():
+        seq = values if isinstance(values, (list, tuple, set)) else [values]
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for value in seq:
+            text = str(value).strip()
+            if not text or text.lower() == "none" or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+        if cleaned:
+            normalized[str(key)] = cleaned
+
+    return normalized
+
+def validate_planner_join_keys(mode: str, ids_map: Any) -> Dict[str, List[str]]:
+    """Planner 입력(ids_map)의 project key 계약(XOR)을 검증한다."""
     mode_norm = str(mode or "").strip().lower()
-    join_ids_norm = _dedupe_non_empty(join_ids)
+    normalized_ids_map = _normalize_ids_map(ids_map)
+
+    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
+    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
+        raise ValueError(f"PLANNER_MIXED_PROJECT_KEYS: ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})")
+
+    return normalized_ids_map
+
+
+def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str]) -> None:
+    """Hop1 확장 후 Hop2 직전의 resolved join key 계약을 검증한다."""
+    mode_norm = str(mode or "").strip().lower()
+    pjt_ids_norm = _dedupe_non_empty(pjt_ids)
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
     if mode_norm == "group":
         if not pjt_nos_norm:
-            raise ValueError("join_key_mode=group 에서는 pjt_nos 가 반드시 필요합니다.")
-        if join_ids_norm:
-            raise ValueError("join_key_mode=group 에서는 pjt_no 계열 key만 허용합니다.")
+            raise ValueError("EXECUTOR_GROUP_PJT_NO_REQUIRED: join_key_mode=group 에서는 pjt_nos 가 반드시 필요합니다.")
         return
 
     if mode_norm == "instance":
-        if not join_ids_norm:
-            raise ValueError("join_key_mode=instance 에서는 join_ids(pjt_id) 가 반드시 필요합니다.")
+        if not pjt_ids_norm:
+            raise ValueError("EXECUTOR_INSTANCE_PJT_ID_REQUIRED: join_key_mode=instance 에서는 pjt_ids(pjt_id) 가 반드시 필요합니다.")
         if pjt_nos_norm:
-            raise ValueError("join_key_mode=instance 에서는 pjt_id 계열 key만 허용합니다.")
+            raise ValueError("EXECUTOR_INSTANCE_PJT_NO_FORBIDDEN: join_key_mode=instance 에서는 pjt_no 계열 key를 허용하지 않습니다.")
         return
 
-    raise ValueError(f"지원하지 않는 join_key_mode 입니다: {mode}")
+    raise ValueError(f"EXECUTOR_JOIN_KEY_MODE_INVALID: 지원하지 않는 join_key_mode 입니다: {mode}")
+
+
+def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
+    """하위호환: resolved 단계 검증으로 위임한다."""
+    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
 
 
 def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> None:
