@@ -953,18 +953,28 @@ def _build_context_with_output_type(
         *,
         action: str,
         base_route: str,
+        mode: str,
         output_type: Optional[str],
         max_items: int,
         query_text: str,
         people_terms: Optional[List[str]] = None,
         person_ids: Optional[List[str]] = None,
+        org_terms: Optional[List[str]] = None,
         org_role: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
     fieldset = _resolve_output_fieldset(output_type)
+    context_kind = base_route
+    mode_norm = str(mode or "").strip().lower()
+    if mode_norm == "lookup" and base_route == "project":
+        if bool((people_terms or [])) or bool((person_ids or [])):
+            context_kind = "people"
+        elif bool((org_terms or [])) or bool(str(org_role or "").strip()):
+            context_kind = "org"
+
     if _should_use_list_context(action=action, base_route=base_route, output_type=output_type):
         context, refs = build_context_list_light(
             points,
-            kind=base_route,
+            kind=context_kind,
             max_items=max_items,
             query_text=query_text,
             people_terms=people_terms,
@@ -3388,11 +3398,14 @@ def _run_rag_with_vectors(
             mode_value: Optional[str],
             join_key_mode: Optional[str],
             ids_map_obj: Dict[str, List[str]],
+            relation_value: Optional[Tuple[str, str]] = None,
             *,
             allow_missing_instance_ids: bool = True,
     ) -> None:
         mode_norm = str(mode_value or "").strip().lower()
         join_norm = str(join_key_mode or "").strip().lower() or None
+        join_relation = tuple(relation_value) if isinstance(relation_value, (list, tuple)) and len(relation_value) == 2 else None
+        allowed_join_relations = {("project", "perf"), ("perf", "project")}
 
         normalized_ids_map = _validate_project_key_exclusive(ids_map_obj, mode_norm)
         has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
@@ -3404,6 +3417,9 @@ def _run_rag_with_vectors(
                     error_code="PLANNER_JOIN_KEY_MODE_INVALID",
                     reason="join_key_mode must be null when mode is not JOIN",
                 )
+            return
+
+        if join_relation and join_relation not in allowed_join_relations:
             return
 
         if join_norm not in ("instance", "group"):
@@ -3678,6 +3694,7 @@ def _run_rag_with_vectors(
         strategy_snapshot.mode,
         resolved_join_key_mode,
         dict(ctx.ids_map or {}),
+        planner_strategy_relation,
     )
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
@@ -5113,6 +5130,7 @@ def _run_rag_with_vectors(
             mode,
             resolved_join_key_mode if mode == "join" else None,
             ids_map,
+            relation,
             allow_missing_instance_ids=True,
         )
         pjt_ids = _ensure_iterable_list(ids_map.get("pjt_id"))
@@ -5701,10 +5719,12 @@ def _run_rag_with_vectors(
             action=action,
             base_route=base_route,
             output_type=plan.output_type,
+            mode=mode,
             max_items=max_items,
             query_text=q,
             people_terms=people_terms,
             person_ids=people_ids,
+            org_terms=org_terms,
             org_role=org_role,
         )
     else:

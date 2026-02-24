@@ -745,7 +745,11 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if has_project and any(x in tl for x in ("소속기관", "소속 기관")):
         return "project"
 
-    # 사람/기관 + 과제/성과 요청이면 head로 승격(조인 플로우를 타기 쉬움)
+    # project 의도가 명확하면 people/org 신호가 있어도 project 우선
+    if has_project and (has_people or has_org):
+        return "project"
+
+    # 사람/기관 단독 의도는 head로 유지
     if has_people and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
         return "people"
     if has_org and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
@@ -1286,26 +1290,6 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop1_tag_filters=[TAG_PJT_INFO],
         hop2_tag_filters=None,
         hop2_label="성과(논문/특허/보고서 등) 목록",
-    ),
-    ("project", "people"): RelationRoute(
-        relation=("project", "people"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="project",
-        hop2_kind="people",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여인력 목록",
-    ),
-    ("project", "org"): RelationRoute(
-        relation=("project", "org"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="project",
-        hop2_kind="org",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여기관 목록",
     ),
     ("perf", "project"): RelationRoute(
         relation=("perf", "project"),
