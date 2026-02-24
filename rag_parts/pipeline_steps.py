@@ -121,6 +121,7 @@ class NormalizedIntent:
     lookup_filter_policy: Optional[str] = None
     lookup_filter_policy_hint: Optional[str] = None
     target_cols: List[str] = field(default_factory=list)
+    wants_rank: bool = False
 
 @dataclass(frozen=True)
 class FilterBundle:
@@ -197,13 +198,18 @@ def normalize_intent(
 
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
+    if action == "rank":
+        action = "stats"
     relation = getattr(intent, "relation", None)
     wants_count = bool(getattr(intent, "wants_count", False))
     wants_list = bool(getattr(intent, "wants_list", False))
     wants_detail = bool(getattr(intent, "wants_detail", False))
+    wants_rank = bool(getattr(intent, "wants_rank", False))
     output_type = str(getattr(intent, "output_type", "") or "").strip().lower() or None
+    if output_type == "rank":
+        output_type = "stats"
     if output_type not in ("stats", "list", "detail", "relation", "summary"):
-        if wants_count:
+        if wants_count or wants_rank:
             output_type = "stats"
         elif wants_list:
             output_type = "list"
@@ -286,6 +292,7 @@ def normalize_intent(
         lookup_filter_policy=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
+        wants_rank=wants_rank,
     )
 
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:
