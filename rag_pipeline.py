@@ -1087,6 +1087,7 @@ def _validate_lookup_join_hybrid_metrics(
         mode: str,
         contract_scope: str,
         timings: Mapping[str, Any],
+        strict: bool = True,
 ) -> None:
     if str(mode).strip().lower() not in ("lookup", "join"):
         return
@@ -1109,6 +1110,8 @@ def _validate_lookup_join_hybrid_metrics(
         return
 
     if dense_queries == 0:
+        if not strict:
+            return
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
             reason=(
@@ -1118,6 +1121,8 @@ def _validate_lookup_join_hybrid_metrics(
         )
 
     if sparse_hits == 0:
+        if not strict:
+            return
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
             reason=(
