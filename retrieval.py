@@ -39,6 +39,28 @@ _SPARSE_ENCODERS: dict[str, Any] = {}
 _SPARSE_LOCK = threading.Lock()
 
 
+def _is_debug_logging_enabled() -> bool:
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_query_preview(text: str, *, max_len: int = 80) -> str:
+    q = str(text or "").strip()
+    if not q:
+        return ""
+    return q[:max_len] + ("...(truncated)" if len(q) > max_len else "")
+
+
+def _resolve_fastembed_cache_dir() -> Optional[str]:
+    raw = str(os.getenv("RAG_FASTEMBED_CACHE_DIR", "")).strip()
+    cache_dir = raw or "../../Models/hub/"
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+    except Exception as e:
+        logger.warning("[retrieval] fastembed cache dir unavailable (%s): %s", cache_dir, e)
+        return None
+
+
 # logger는 기존 그대로 쓴다고 가정
 # logger = logging.getLogger("RAG_Retrieval")
 
@@ -81,9 +103,12 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
     with _SPARSE_LOCK:
         enc = _SPARSE_ENCODERS.get(model_id)
         if enc is None:
+            cache_dir = _resolve_fastembed_cache_dir()
+            if not cache_dir:
+                return None
             enc = SparseTextEmbedding(
                 model_name=model_id,
-                cache_dir="../../Models/hub/",
+                cache_dir=cache_dir,
             )
             _SPARSE_ENCODERS[model_id] = enc
         return enc
@@ -102,6 +127,9 @@ def _encode_sparse_query(text: str, *, model_id: str) -> Optional[models.SparseV
 
     try:
         enc = _get_sparse_encoder(model_id)
+        if enc is None:
+            logger.info("[retrieval] sparse encoder disabled (cache dir/config issue)")
+            return None
         # fastembed expects list[str] and yields SparseEmbedding (indices/values)
         emb = next(enc.embed([text]))
         idx = emb.indices.tolist() if hasattr(emb.indices, "tolist") else list(emb.indices)
@@ -201,13 +229,21 @@ def _qdrant_sparse_search(
             sparse_vector_name,
         )
         return []
-    logger.info(
-        "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
-        model_id,
-        len(query_text or ""),
-        len(getattr(sv, "indices", []) or []),
-        (query_text or "")[:80],
-    )
+    if _is_debug_logging_enabled():
+        logger.info(
+            "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
+            model_id,
+            len(query_text or ""),
+            len(getattr(sv, "indices", []) or []),
+            _safe_query_preview(query_text),
+        )
+    else:
+        logger.info(
+            "[SPARSE.ENC] model=%s len=%d nnz=%d",
+            model_id,
+            len(query_text or ""),
+            len(getattr(sv, "indices", []) or []),
+        )
 
     return _qdrant_query_points_sparse(
         client,
@@ -308,7 +344,10 @@ def _qdrant_hybrid_query_once(
     fusion = _get_fusion_rrf()
     if fusion is None:
         return None
-    logger.warning(f"[retrieval] hybrid query_points query_text: {query_text}")
+    if _is_debug_logging_enabled():
+        logger.info("[retrieval] hybrid query_points q_len=%d q=%r", len(query_text or ""), _safe_query_preview(query_text))
+    else:
+        logger.info("[retrieval] hybrid query_points q_len=%d", len(query_text or ""))
     supports_using = _prefetch_supports_using()
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")

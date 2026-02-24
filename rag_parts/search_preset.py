@@ -16,10 +16,13 @@ Search preset builder
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .query_intent import QueryIntent
+
+logger = logging.getLogger(__name__)
 
 PEOPLE_ORG_FIELDS = [
     "prtcp_mp[].hm_nm",
@@ -224,6 +227,9 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     default_content_w = _f("RAG_W_CONTENT", 3.0)
     default_keyword_w = _f("RAG_W_KEYWORD_TEXT", 3.0)
     default_flat_w = _f("RAG_W_FLAT_TEXT", 2.0)
+    legacy_category_raw = os.getenv("RAG_W_CETEGORY")
+    if legacy_category_raw is not None and os.getenv("RAG_W_CATEGORY") is None:
+        logger.warning("RAG_W_CETEGORY is deprecated. Use RAG_W_CATEGORY instead.")
     default_category_w = _f("RAG_W_CATEGORY", _f("RAG_W_CETEGORY", 5.0))
     default_pjt_no_w = _f("RAG_W_PJT_NO", default_title_w)
     default_prtcp_person_w = max(_f("RAG_W_PRTCP_PERSON", default_title_w), default_title_w)

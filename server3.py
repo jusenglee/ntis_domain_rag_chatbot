@@ -87,6 +87,7 @@ def setup_file_logging(log_path="logs/server3.log"):
 setup_file_logging()
 
 templates = Jinja2Templates(directory="templates")
+TEMPLATE_INDEX_PATH = Path("templates/index.html")
 
 # --- Configuration ---
 kv_store: Optional[KVStore] = None
@@ -150,6 +151,18 @@ def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> 
     if limit > 0 and len(text) > limit:
         return text[:limit] + "..."
     return text
+
+
+def _is_debug_logging_enabled() -> bool:
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mask_query_for_log(query: str, *, max_len: int = 80) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    clipped = text[:max_len]
+    return clipped + ("...(truncated)" if len(text) > max_len else "")
 
 def _safe_json_loads(raw: Optional[str]) -> Any:
     if not raw:
@@ -1456,8 +1469,9 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     cid = state.conversation_id
 
-    new_turn = state.messages[-2:]  # [Human, AI]
-    full_history = state.chat_history + new_turn
+    # state.chat_history는 loaded_history + [current_human] 형태라 AI만 추가 저장한다.
+    ai_turn = state.messages[-1:]  # [AI]
+    full_history = state.chat_history + ai_turn
     trimmed_history = full_history[-MAX_HISTORY_TURNS:]
 
     serialized_hist = _serialize_history(trimmed_history)
@@ -1469,19 +1483,21 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
             ex=REDIS_TTL,
         )
 
-    if state.context:
-        await kv_store.set(
-            f"conversation:{cid}:last_context",
-            json.dumps(state.context, ensure_ascii=False),
-            ex=REDIS_TTL,
-        )
+        if state.context:
+            await kv_store.set(
+                f"conversation:{cid}:last_context",
+                json.dumps(state.context, ensure_ascii=False),
+                ex=REDIS_TTL,
+            )
 
-    if state.fallback_context:
-        await kv_store.set(
-            f"conversation:{cid}:last_fallback_context",
-            state.fallback_context,
-            ex=REDIS_TTL,
-        )
+        if state.fallback_context:
+            await kv_store.set(
+                f"conversation:{cid}:last_fallback_context",
+                state.fallback_context,
+                ex=REDIS_TTL,
+            )
+    else:
+        logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
@@ -2653,6 +2669,11 @@ app = FastAPI(lifespan=lifespan)
 # --- Endpoints ---
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    if not TEMPLATE_INDEX_PATH.exists():
+        return HTMLResponse(
+            content="<html><body><h3>NTIS RAG Chatbot</h3><p>index template unavailable.</p></body></html>",
+            status_code=200,
+        )
     return templates.TemplateResponse("index.html", {"request": request})
 
 class QueryRequest(BaseModel):
@@ -2687,7 +2708,13 @@ async def query_stream(payload: QueryRequest):
             "question_analysis": question_analysis,
         }
 
-        log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
+        if _is_debug_logging_enabled():
+            log_section(
+                "REQUEST START",
+                f"ID: {conversation_id}\nQ(len={len(question)}): {_mask_query_for_log(question)}",
+            )
+        else:
+            log_section("REQUEST START", f"ID: {conversation_id}\nQ_len: {len(question)}")
 
         documents_used = []
 
@@ -2805,12 +2832,14 @@ async def query_debug(payload: QueryRequest):
 
 @app.get("/health")
 async def health_check():
+    memory_backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower() or "memory"
     ok = False
     if kv_store:
         ok = await kv_store.ping()
     return {
         "status": "healthy",
-        "memory_backend": os.getenv("MEMORY_BACKEND", "redis"),
+        "memory_backend": memory_backend,
+        "memory_backend_effective": type(kv_store).__name__ if kv_store else "none",
         "kv": "connected" if ok else "disconnected",
         "graph": "compiled" if hasattr(app.state, "graph") else "not_ready"
     }
