@@ -23,7 +23,7 @@ def _load_history_functions() -> Dict[str, Any]:
 
     targets: List[ast.AST] = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "_serialize_history":
+        if isinstance(node, ast.FunctionDef) and node.name in ("_serialize_history", "_format_coq"):
             targets.append(node)
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "node_save_history":
             node.decorator_list = []
@@ -104,3 +104,9 @@ def test_node_save_history_skips_when_kv_store_unavailable():
 
     asyncio.run(ns["node_save_history"](state))
     assert len(ns["logger"].debug_calls) >= 1
+
+
+def test_format_coq_contains_separator_and_question():
+    ns = _load_history_functions()
+    out = ns["_format_coq"]("cid-3", "질문 내용")
+    assert out == "coq: cid-3 | q: 질문 내용"

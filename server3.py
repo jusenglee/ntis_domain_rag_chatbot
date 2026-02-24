@@ -542,6 +542,11 @@ def measure_latency(node_name: str):
         return wrapper
     return decorator
 
+
+
+def _format_coq(conversation_id: str, question: str) -> str:
+    return f"coq: {conversation_id} | q: {question}"
+
 # --- Node 1: Load Memory ---
 @measure_latency("load_memory")
 async def node_load_memory(state: AgentState) -> Dict[str, Any]:
@@ -551,7 +556,7 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
-                f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
+                f"{_format_coq(cid, state.messages[-1].content)}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
         "chat_history": current_full_history,
@@ -908,7 +913,7 @@ async def _run_question_analysis(
                 )
             log_section(
                 "QUESTION ANALYSIS",
-                f"coq: {conversation_id}{question}\n"
+                f"{_format_coq(conversation_id, question)}\n"
                 f"StrategyVersion: {result.strategy_version}\n"
                 f"Mode: {result.mode}\n"
                 f"Head: {result.head}\n"
@@ -1000,7 +1005,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1015,7 +1020,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1080,7 +1085,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         })
 
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1276,7 +1281,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             )
 
         log_section("RAG SEARCH",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Query: {search_query}\n"
                     f"Found: {len(docs)} docs\n")
         log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
@@ -1449,7 +1454,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
-                f"coq: {state.conversation_id}{state.question}\n"
+                f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
                 f"GPT: {gpt_preview}")
@@ -1502,7 +1507,7 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
     log_section("PERFORMANCE REPORT",
-                f"coq: {state.conversation_id}{state.question}\nTotal: {total_time:.3f}s\n{latency_report}")
+                f"{_format_coq(state.conversation_id, state.question)}\nTotal: {total_time:.3f}s\n{latency_report}")
 
     return {}
 
@@ -2757,7 +2762,7 @@ async def query_stream(payload: QueryRequest):
                     continue
                 ref_docs.append(RagMapper.get_references(d))
 
-            # log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
+            # log_section("REF PUSH", f"{_format_coq(conversation_id, question)}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
