@@ -121,20 +121,6 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
 }
 
 
-def validate_project_key_env_or_raise() -> None:
-    """JOIN/LOOKUP용 프로젝트 키 환경변수 계약을 검증한다."""
-    if RAG_KEY_PJT_ID == RAG_KEY_PJT_NO:
-        raise RuntimeError(
-            "환경변수 계약 위반: RAG_KEY_PJT_ID와 RAG_KEY_PJT_NO는 동일하면 안 됩니다. "
-            f"(current='{RAG_KEY_PJT_ID}')"
-        )
-
-    logger.info(
-        "[startup][key-mapping] RAG_KEY_PJT_ID=%s, RAG_KEY_PJT_NO=%s",
-        RAG_KEY_PJT_ID,
-        RAG_KEY_PJT_NO,
-    )
-
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
         return None
@@ -1230,11 +1216,6 @@ class CustomRAGRetriever(BaseModel):
 def _is_hit_source(doc: Dict[str, Any]) -> bool:
     return doc.get("source_type", "hit") == "hit"
 
-
-def _filter_hit_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [doc for doc in docs if isinstance(doc, dict) and _is_hit_source(doc)]
-
-
 def _friendly_strategy_violation_message(
         *,
         error_code: str,
@@ -1335,97 +1316,30 @@ async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
 
-
-def _is_low_quality_context_text(context_text: str) -> bool:
-    text = (context_text or "").strip()
-    if not text:
-        return True
-
-    if len(text) < 20:
-        return True
-
-    missing_info_phrases = ("정보 없음", "해당 없음", "미상")
-    missing_info_hits = sum(text.count(phrase) for phrase in missing_info_phrases)
-    if missing_info_hits >= 2:
-        return True
-
-    has_source_header = "## 출처" in text
-    has_core_field = any(
-        token in text
-        for token in (
-            "과제명",
-            "주관기관",
-            "참여기관",
-            "연구책임자",
-            "총연구기간",
-            "연구목표",
-        )
-    )
-    if not has_source_header or not has_core_field:
-        return True
-
-    return False
-
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = TritonChatModel(model_name=model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-
-
-
     # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
-    docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
-    fallback_context = state.fallback_context if state.context else None
+    docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
 
     # ✅ 2) JOIN이면 detail 우선
     if qa and qa.mode == "JOIN":
         is_detail = True
 
-    researcher_hints = _build_researcher_hints_from_question_analysis(qa)
-
-    replaced_with_fallback = False
-    low_quality_reason = None
-    context_source = "none"
-
-    if docs_for_ctx:
-        refined_context_text = refine_documents_rule_based(
+    context_text = (
+        refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
-            researchers=researcher_hints,
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
         )
-        if _is_low_quality_context_text(refined_context_text):
-            low_quality_reason = "low_quality_refined_context"
-            if fallback_context:
-                context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
-                replaced_with_fallback = True
-                context_source = "fallback"
-            else:
-                context_text = refined_context_text
-                context_source = "docs"
-        else:
-            context_text = refined_context_text
-            context_source = "docs"
-    elif fallback_context:
-        context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
-        context_source = "fallback"
-    else:
-        context_text = "없음"
-        context_source = "none"
-
-    logger.info(
-        "[CTX.SELECT] event=context_selection docs_count=%s fallback_present=%s context_source=%s replaced_with_fallback=%s low_quality_reason=%s context_chars=%s",
-        len(docs_for_ctx or []),
-        bool(fallback_context),
-        context_source,
-        replaced_with_fallback,
-        low_quality_reason or "",
-        len(context_text),
+        if docs_for_ctx
+        else "없음"
     )
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
@@ -1693,24 +1607,6 @@ async def build_intent_payload(
 
     return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
 
-
-
-
-def _build_planner_override_request(analysis: QuestionAnalysis, intent: Any) -> Optional[Dict[str, Any]]:
-    requested_mode = str(getattr(analysis, "mode", "") or "").strip().lower()
-    current_action = str(getattr(intent, "action", "") or "").strip().lower()
-    if not requested_mode or not current_action:
-        return None
-
-    lookup_actions = {"list", "detail", "stats", "download", "id_exact", "id_fuzzy", "relation"}
-    if requested_mode == "lookup" and current_action not in lookup_actions:
-        return {
-            "requested_mode": requested_mode,
-            "current_action": current_action,
-        }
-    return None
-
-
 def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
     if qa is None:
         return intent, False
@@ -1764,8 +1660,6 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     )
     return patched, True
 
-
-
 def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
     """planner filters에서 연구자 이름 힌트를 폭넓게 수집한다."""
     if not isinstance(filters, dict):
@@ -1805,43 +1699,6 @@ def _normalize_hint_terms(values: Any) -> list[str]:
         seen.add(s)
         out.append(s)
     return out
-
-
-def _build_researcher_hints_from_question_analysis(qa: Optional["QuestionAnalysis"]) -> list[dict[str, str]]:
-    """최종 프롬프트 직전 researcher 객체 매칭에 사용할 힌트를 구성한다."""
-    if not qa:
-        return []
-
-    filters = dict(getattr(qa, "filters", {}) or {})
-    ids_map = dict(getattr(qa, "ids_map", {}) or {})
-
-    names = _collect_researcher_name_terms(filters)
-    affiliations = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
-    ids = _normalize_hint_terms(ids_map.get("person_no") or ids_map.get("hm_id"))
-
-    if not names and not ids:
-        return []
-
-    default_affiliation = affiliations[0] if len(affiliations) == 1 else ""
-    hints: list[dict[str, str]] = []
-
-    for idx, name in enumerate(names):
-        affiliation = affiliations[idx] if idx < len(affiliations) else default_affiliation
-        researcher_id = ids[idx] if idx < len(ids) else ""
-        hints.append(
-            {
-                "name": str(name).strip(),
-                "affiliation": str(affiliation).strip(),
-                "researcher_id": str(researcher_id).strip(),
-            }
-        )
-
-    if not hints and ids:
-        for researcher_id in ids:
-            hints.append({"name": "", "affiliation": default_affiliation, "researcher_id": str(researcher_id).strip()})
-
-    return hints
-
 
 # --- Graph Construction ---
 def build_advanced_workflow():
@@ -2231,58 +2088,6 @@ def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def summarize_documents_headlines(
-        docs: List[Document],
-        *,
-        researchers: Optional[List[Any]] = None,
-        organizations: Optional[List[Any]] = None,
-        org_filters: Optional[Dict[str, Any]] = None,
-        ids_map: Optional[Dict[str, Any]] = None,
-        max_matches: int = 5,
-) -> str:
-    headlines: List[str] = []
-
-    for doc in docs:
-        mapped_doc = _safe_map_doc(doc, context="summarize_documents_headlines")
-        if not mapped_doc:
-            continue
-        _apply_title_preference(mapped_doc)
-        source_idx = doc.get("source_index")
-        title = mapped_doc.get("title", "제목 없음")
-
-        prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
-        matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
-        fallback_lines = RagMapper.get_researcher_info(mapped_doc)
-        researcher_line = _format_researcher_line(
-            matched_members,
-            fallback_lines,
-            max_matches=max_matches,
-        )
-
-        prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
-        org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
-        matched_orgs = _match_prtcp_orgs(
-            prtcp_orgs,
-            org_terms,
-            org_ids,
-            role_hint,
-            max_matches=max_matches,
-        )
-        org_line = _format_org_line(
-            matched_orgs,
-            prtcp_orgs,
-            max_matches=max_matches,
-        )
-
-        headlines.append(
-            f"## 출처 {source_idx}. {title}\n"
-            f"{researcher_line}\n"
-            f"{org_line}\n"
-        )
-
-    return "\n\n".join(headlines)
-
-
 def refine_documents_rule_based(
         docs: List[Document],
         is_detail: bool = False,
@@ -2346,6 +2151,7 @@ def refine_documents_rule_based(
             fallback_lines,
             max_matches=max_matches,
         )
+        (researcher_line)
         prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
         org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
         matched_orgs = _match_prtcp_orgs(
@@ -2360,10 +2166,11 @@ def refine_documents_rule_based(
             prtcp_orgs,
             max_matches=max_matches,
         )
-        # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
-        #             f"matched_members: {matched_members}\n"
-        #             f"fallback_lines: {fallback_lines}\n"
-        #             f"matched_orgs: {matched_orgs}")
+        log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
+                    f"matched_members: {matched_members}\n"
+                    f"fallback_lines: {fallback_lines}\n"
+                    f"matched_orgs: {matched_orgs}"
+                    f"researcher_line: {researcher_line}")
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
@@ -2567,29 +2374,6 @@ def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bo
     if not isinstance(payload_schema, dict):
         return False
     return field_name in payload_schema
-
-
-def _ensure_boot_payload_indexes(client: Any) -> None:
-    targets = [
-        ("ntis_project", "pjt_id"),
-        ("ntis_project", "pjt_no"),
-        ("ntis_perf", "pjt_id"),
-        ("ntis_perf", "pjt_no"),
-    ]
-
-    for collection_name, field_name in targets:
-        if _has_payload_index(client, collection_name, field_name):
-            logger.info("[startup][payload-index] %s.%s -> skip(already_exists)", collection_name, field_name)
-            continue
-
-        try:
-            ensure_keyword_index(client, collection_name, field_name, wait=True)
-            if _has_payload_index(client, collection_name, field_name):
-                logger.info("[startup][payload-index] %s.%s -> ensured", collection_name, field_name)
-            else:
-                logger.warning("[startup][payload-index] %s.%s -> warning(not_confirmed)", collection_name, field_name)
-        except Exception as e:
-            logger.warning("[startup][payload-index] %s.%s -> warning(%s)", collection_name, field_name, e)
 
 # --- Lifespan & App Setup ---
 @asynccontextmanager
