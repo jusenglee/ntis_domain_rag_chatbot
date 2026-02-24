@@ -2451,7 +2451,7 @@ def _build_join_hop2_filter(
         join_key_mode: str,
         join_pjt_ids: List[str],
         join_pjt_nos: List[str],
-        join_ids: List[str],
+        join_ids: Optional[List[str]] = None,
         q: str,
         hop2_tag_filters: Optional[List[str]],
         people_terms: List[str],
@@ -2459,6 +2459,10 @@ def _build_join_hop2_filter(
         planner_filter_spec: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any]]:
     """JOIN Hop2 필터 생성: join_key_mode 단일 소스(strategy/contract)만 사용."""
+    join_ids = join_ids or []
+    if str(join_key_mode or "instance").strip().lower() == "group":
+        join_ids = []
+
     relation_matrix = {
         "relation": relation,
         "hop2_col": hop2_col,
@@ -2469,7 +2473,7 @@ def _build_join_hop2_filter(
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
         join_key_mode=join_key_mode,
-        join_ids=(join_pjt_ids or join_ids),
+        join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
         pjt_nos=join_pjt_nos,
         query=q,
         fallback_spec=JoinFilterInput(
@@ -2486,7 +2490,7 @@ def _build_join_hop2_filter(
     executed_join_filter_spec = {
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
-        "join_ids_count": len(join_pjt_ids or join_ids),
+        "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
         "pjt_nos_count": len(join_pjt_nos),
     }
     return hop2_filter, executed_join_filter_spec
@@ -4770,6 +4774,7 @@ def _run_rag_with_vectors(
                 join_key_mode=hop2_join_key_mode,
                 join_pjt_ids=join_pjt_ids,
                 join_pjt_nos=join_pjt_nos,
+                join_ids=(join_pjt_ids if hop2_join_key_mode == "instance" else []),
                 q=q,
                 hop2_tag_filters=hop2_tag_filters,
                 people_terms=people_terms,
