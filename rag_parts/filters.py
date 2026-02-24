@@ -1062,10 +1062,32 @@ def build_perf_filter_group_resolved(
         raise ValueError(f"지원하지 않는 perf group strategy 입니다: {strategy}")
 
     should: List[Any] = []
-    primary_pjt_no = _project_key_candidates("pjt_no")[0]
-    primary_pjt_id = _project_key_candidates("pjt_id")[0]
-    pjt_no_cond = qmodels.FieldCondition(key=primary_pjt_no, match=make_match_any(pjt_no_values)) if pjt_no_values else None
-    pjt_id_cond = qmodels.FieldCondition(key=primary_pjt_id, match=make_match_any(pjt_id_values)) if pjt_id_values else None
+
+    pjt_no_cond = None
+    if pjt_no_values:
+        pjt_no_should = [
+            qmodels.FieldCondition(key=key, match=make_match_any(pjt_no_values))
+            for key in _project_key_candidates("pjt_no")
+        ]
+        pjt_no_cond = _build_filter(
+            must=None,
+            should=pjt_no_should,
+            must_not=None,
+            min_should=1,
+        )
+
+    pjt_id_cond = None
+    if pjt_id_values:
+        pjt_id_should = [
+            qmodels.FieldCondition(key=key, match=make_match_any(pjt_id_values))
+            for key in _project_key_candidates("pjt_id")
+        ]
+        pjt_id_cond = _build_filter(
+            must=None,
+            should=pjt_id_should,
+            must_not=None,
+            min_should=1,
+        )
 
     if strategy_norm == "prefer_pjt_no":
         if pjt_no_cond:
