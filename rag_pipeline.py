@@ -2722,7 +2722,7 @@ def _run_rag_with_vectors(
         )
     planner_keywords = _normalize_hint_terms(ctx.keywords)
 
-    planner_mode = str(getattr(ctx, "mode", "") or "").strip().lower() or None
+    planner_mode = str(ctx.mode or "").strip().lower() or None
     planner_action = str(getattr(ctx, "action", "") or "").strip().lower() or None
     planner_head = str(getattr(ctx, "base_route", "") or "").strip().lower() or None
     planner_relation = _normalize_relation_hint(getattr(ctx, "relation", None))

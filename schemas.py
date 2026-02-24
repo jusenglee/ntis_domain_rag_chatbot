@@ -53,6 +53,7 @@ class ExecutionContext:
     intent: Any
     base_route: str
     action: str
+    mode: Optional[str]
     relation: Optional[Tuple[str, str]]
     join_key_mode: Optional[str]
     is_id_query: bool
@@ -93,6 +94,7 @@ class ExecutionContext:
             intent=intent,
             base_route=intent.base_route,
             action=intent.action,
+            mode=getattr(intent, "mode", None),
             relation=intent.relation,
             join_key_mode=getattr(intent, "join_key_mode", None),
             is_id_query=intent.is_id_query,
@@ -132,6 +134,7 @@ class ExecutionContext:
             self.intent,
             base_route=self.base_route,
             action=self.action,
+            mode=self.mode,
             relation=self.relation,
             join_key_mode=self.join_key_mode,
             is_id_query=self.is_id_query,

@@ -1636,19 +1636,48 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
 
     planner_perf_types = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
     planner_title_terms = _normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
+    planner_keywords = _normalize_hint_terms(filters.get("keywords"))
+    planner_people_terms = _collect_researcher_name_terms(filters)
+    planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
+    planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
+
+    def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
+        merged: dict[str, list[str]] = {}
+
+        def _ingest(source: Any, *, overwrite: bool = False) -> None:
+            if not isinstance(source, dict):
+                return
+            for key, raw_values in source.items():
+                values = _normalize_hint_terms(raw_values)
+                if not values:
+                    continue
+                if overwrite or key not in merged:
+                    merged[key] = list(values)
+                else:
+                    merged[key] = _normalize_hint_terms([*merged[key], *values])
+
+        _ingest(base_ids)
+        _ingest(planner_ids, overwrite=True)
+        return merged
+
+    if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
+        # 기관 소속 전체 연구자 질의는 사람명 슬롯을 비워 org slot만 사용한다.
+        planner_people_terms = []
 
     patched = replace(
         intent,
         base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
         action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        mode=str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
-        ids_map=dict(getattr(qa, "ids_map", {}) or {}),
+        ids_map=_merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),
         planner_confidence=confidence,
-        org_role=str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None,
+        org_role=planner_org_role,
         org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        people_terms=planner_people_terms if planner_people_terms else list(getattr(intent, "people_terms", []) or []),
         lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
         participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
         people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
@@ -1656,7 +1685,9 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         year_to=planner_year_to or getattr(intent, "year_to", None),
         years=planner_years or list(getattr(intent, "years", []) or []),
         perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
         title=planner_title_terms or list(getattr(intent, "title", []) or []),
+        target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
     )
     return patched, True
 

@@ -274,7 +274,7 @@ def normalize_intent(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         perf_types=perf_types,
-        keywords=_normalize_terms(getattr(intent, "keywords", None) or []),
+        keywords=_normalize_terms(getattr(intent, "keywords", None) or keywords or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),
         tag_filters=_normalize_terms(getattr(intent, "tag_filters", None) or []),
