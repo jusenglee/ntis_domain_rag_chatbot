@@ -372,6 +372,24 @@ class QuestionAnalysisV2(BaseModel):
         elif not isinstance(tc, list):
             d["target_cols"] = []
 
+        # project 중심 people/org LOOKUP은 target_cols를 project로 정규화
+        mode_norm = str(d.get("mode") or "").strip().upper()
+        head_norm = str(d.get("head") or "").strip().lower()
+        filters = d.get("filters") if isinstance(d.get("filters"), dict) else {}
+        has_people_org_filters = any(
+            bool(filters.get(k))
+            for k in (
+                "participant_researcher_name",
+                "participant_researcher_id",
+                "lead_org_name",
+                "participant_org_name",
+                "people_affiliation_org_name",
+                "org_name",
+            )
+        )
+        if mode_norm == "LOOKUP" and (head_norm == "project" or (head_norm in ("people", "org") and has_people_org_filters)):
+            d["target_cols"] = ["ntis_project_v1"]
+
         # --- limit/confidence coercion (파싱 실패 방지) ---
         if "limit" in d and not isinstance(d.get("limit"), int):
             try:
@@ -718,7 +736,8 @@ async def _run_question_analysis(
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
-        - 사람 이름/기관명 기반 질의(예: "신동구 참여과제", "김재수 논문", "삼성 참여 과제")는 mode="LOOKUP"을 우선합니다.
+        - 사람 이름/기관명 기반 질의(예: "신동구 참여과제", "김재수 논문", "삼성 참여 과제")는 반드시 mode="LOOKUP"을 우선합니다.
+        - 특히 project를 목적 엔티티로 판단 가능한 people/org->project 질의는 JOIN 금지, LOOKUP 고정으로 계획합니다.
         - people/org 식별 Hop1(2-hop)은 기본 비활성입니다. (동명이인/식별자 요구 등 예외에서만 사용)
         
         ====================
@@ -750,6 +769,7 @@ async def _run_question_analysis(
         - "ntis_project_v1" / "ntis_perf_v1" 중 선택
         - LOOKUP/JOIN은 필요한 컬렉션만 최소로 선택합니다.
           * "신동구 참여과제" => ["ntis_project_v1"]
+          * project 기반 people/org 필터 질의는 target_cols를 project 중심으로 정규화합니다(기본: ["ntis_project_v1"]).
           * "OO기관 성과" => ["ntis_perf_v1"]
           * project↔perf JOIN => ["ntis_project_v1","ntis_perf_v1"]
         - SEARCH는 기본적으로 두 컬렉션 모두 가능하나, head가 명확하면 1개만 선택 가능합니다.
