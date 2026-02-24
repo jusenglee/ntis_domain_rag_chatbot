@@ -197,6 +197,21 @@ def test_validate_lookup_join_hybrid_metrics_no_raise_when_strict_false() -> Non
     )
 
 
+def test_validate_lookup_join_hybrid_metrics_no_raise_when_paths_active_but_zero_hits() -> None:
+    validate_fn, _ = _load_validate_lookup_join_hybrid_metrics()
+
+    validate_fn(
+        mode="join",
+        contract_scope="join:ntis_project_v1",
+        timings={
+            "dense_queries": 0.0,
+            "lexical_scored": 0.0,
+            "hybrid_once_hits": 0.0,
+        },
+        strict=True,
+    )
+
+
 def test_zero_hit_contract_returns_reason_meta_without_raise(monkeypatch) -> None:
     monkeypatch.setenv("RAG_FORCE_FALLBACK_CHAT", "1")
 
@@ -215,3 +230,16 @@ def test_zero_hit_contract_returns_reason_meta_without_raise(monkeypatch) -> Non
     assert meta.get("info.contract_fail_reason") == "no_reranked"
 
     monkeypatch.delenv("RAG_FORCE_FALLBACK_CHAT", raising=False)
+
+
+def test_lookup_join_validation_calls_use_explicit_non_strict_policy() -> None:
+    source = Path("rag_pipeline.py").read_text(encoding="utf-8")
+
+    assert 'contract_scope=f"join_hop1:{hop1_col}",' in source
+    assert 'timings=local_timings_h1,\n                strict=False,' in source
+
+    assert 'contract_scope=f"join_hop2:{hop2_col}",' in source
+    assert 'timings=local_timings_h2,\n                strict=False,' in source
+
+    assert 'contract_scope=f"{plan.mode}:{col}",' in source
+    assert 'timings=local_timings,\n                strict=False,' in source
