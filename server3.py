@@ -1296,6 +1296,37 @@ async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
 
+
+def _is_low_quality_context_text(context_text: str) -> bool:
+    text = (context_text or "").strip()
+    if not text:
+        return True
+
+    if len(text) < 20:
+        return True
+
+    missing_info_phrases = ("정보 없음", "해당 없음", "미상")
+    missing_info_hits = sum(text.count(phrase) for phrase in missing_info_phrases)
+    if missing_info_hits >= 2:
+        return True
+
+    has_source_header = "## 출처" in text
+    has_core_field = any(
+        token in text
+        for token in (
+            "과제명",
+            "주관기관",
+            "참여기관",
+            "연구책임자",
+            "총연구기간",
+            "연구목표",
+        )
+    )
+    if not has_source_header or not has_core_field:
+        return True
+
+    return False
+
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = TritonChatModel(model_name=model_name)
 
@@ -1316,8 +1347,12 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     researcher_hints = _build_researcher_hints_from_question_analysis(qa)
 
+    replaced_with_fallback = False
+    low_quality_reason = None
+    context_source = "none"
+
     if docs_for_ctx:
-        context_text = refine_documents_rule_based(
+        refined_context_text = refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
             researchers=researcher_hints,
@@ -1325,10 +1360,34 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             ids_map=(qa.ids_map if qa else None),
             relax_limits=True,
         )
+        if _is_low_quality_context_text(refined_context_text):
+            low_quality_reason = "low_quality_refined_context"
+            if fallback_context:
+                context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
+                replaced_with_fallback = True
+                context_source = "fallback"
+            else:
+                context_text = refined_context_text
+                context_source = "docs"
+        else:
+            context_text = refined_context_text
+            context_source = "docs"
     elif fallback_context:
         context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
+        context_source = "fallback"
     else:
         context_text = "없음"
+        context_source = "none"
+
+    logger.info(
+        "[CTX.SELECT] event=context_selection docs_count=%s fallback_present=%s context_source=%s replaced_with_fallback=%s low_quality_reason=%s context_chars=%s",
+        len(docs_for_ctx or []),
+        bool(fallback_context),
+        context_source,
+        replaced_with_fallback,
+        low_quality_reason or "",
+        len(context_text),
+    )
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
