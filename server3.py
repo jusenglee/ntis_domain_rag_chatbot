@@ -1133,6 +1133,8 @@ class CustomRAGRetriever(BaseModel):
             hit_data.get("content"),
             hit_data.get("meta_basic"),
             hit_data.get("meta_detail"),
+            hit_data.get("prtcp_mp"),
+            hit_data.get("prtcp_org"),
         ]
         for val in candidates:
             if val is None:
@@ -1190,6 +1192,7 @@ class CustomRAGRetriever(BaseModel):
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
                 "prtcp_mp" : hit_data.get("prtcp_mp", []),
+                "prtcp_org": hit_data.get("prtcp_org", []) or [],
             }
 
             if inferred_tag is not None or self._has_minimum_document_fields(hit_data):
