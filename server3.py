@@ -296,7 +296,14 @@ class QuestionAnalysisV2(BaseModel):
             d["action"] = action_alias.get(act_norm, act_norm)
 
         relation = d.get("relation")
-        if isinstance(relation, str):
+        if isinstance(relation, (list, tuple)) and len(relation) == 2:
+            lhs = str(relation[0]).strip().lower()
+            rhs = str(relation[1]).strip().lower()
+            if lhs and rhs:
+                d["relation"] = f"{lhs}_{rhs}"
+            else:
+                d["relation"] = None
+        elif isinstance(relation, str):
             rel = relation.strip().lower()
             d["relation"] = rel or None
 
@@ -671,6 +678,11 @@ async def _run_question_analysis(
         ====================
         [Mode 결정 규칙(우선순위)]
         ====================
+        선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
+        - relation은 ["project","perf"](= "project_perf")로 확정
+        - head는 반드시 "perf"로 확정
+        - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
+
         A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
            - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
         B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
@@ -681,6 +693,12 @@ async def _run_question_analysis(
         예시:
         - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
         - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
+
+        [관계형 성과 키워드 사전]
+        - 핵심 키워드(예시): "파생 성과", "성과", "논문", "특허", "산출물"
+        - 패턴 예시: "과제 + (성과|논문|특허|산출물)", "~에서 나온 성과", "~의 파생 성과"
+        - 위 패턴이 감지되면 planner는 처음부터 JOIN 전략을 출력해야 하며,
+          실행단에서 mode/relation 보정이 필요하지 않도록 합니다.
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
@@ -799,8 +817,11 @@ async def _run_question_analysis(
           * join_key_mode="group" => ids_map.pjt_no만 허용
         
         1) relation="project_perf"
-          - join_key_mode="instance": Hop2(perf)에서 pjt_id == PJT_ID must
-          - join_key_mode="group": Hop2(perf)에서 pjt_no == PJT_NO must
+          - head="perf"를 기본으로 사용
+          - hop1(project): project 후보에서 pjt_id(또는 group이면 pjt_no) 확보
+          - hop2(perf): hop1에서 얻은 키 집합을 하드필터로 적용
+            * join_key_mode="instance": pjt_id IN (...) must
+            * join_key_mode="group": pjt_no IN (...) must
         
         2) relation="perf_project"
           - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
