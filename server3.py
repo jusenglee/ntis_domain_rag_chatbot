@@ -38,6 +38,7 @@ from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
 from schemas import IntentPayloadV2
+from retrieval import ensure_keyword_index
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -90,13 +91,18 @@ templates = Jinja2Templates(directory="templates")
 kv_store: Optional[KVStore] = None
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
-SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
-FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
+SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "2048"))
+FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "4096"))
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+RAG_KEY_PJT_ID = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+RAG_KEY_PJT_NO = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -111,6 +117,21 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "retrieval_query",
     "confidence",
 }
+
+
+def validate_project_key_env_or_raise() -> None:
+    """JOIN/LOOKUP용 프로젝트 키 환경변수 계약을 검증한다."""
+    if RAG_KEY_PJT_ID == RAG_KEY_PJT_NO:
+        raise RuntimeError(
+            "환경변수 계약 위반: RAG_KEY_PJT_ID와 RAG_KEY_PJT_NO는 동일하면 안 됩니다. "
+            f"(current='{RAG_KEY_PJT_ID}')"
+        )
+
+    logger.info(
+        "[startup][key-mapping] RAG_KEY_PJT_ID=%s, RAG_KEY_PJT_NO=%s",
+        RAG_KEY_PJT_ID,
+        RAG_KEY_PJT_NO,
+    )
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -275,7 +296,14 @@ class QuestionAnalysisV2(BaseModel):
             d["action"] = action_alias.get(act_norm, act_norm)
 
         relation = d.get("relation")
-        if isinstance(relation, str):
+        if isinstance(relation, (list, tuple)) and len(relation) == 2:
+            lhs = str(relation[0]).strip().lower()
+            rhs = str(relation[1]).strip().lower()
+            if lhs and rhs:
+                d["relation"] = f"{lhs}_{rhs}"
+            else:
+                d["relation"] = None
+        elif isinstance(relation, str):
             rel = relation.strip().lower()
             d["relation"] = rel or None
 
@@ -650,6 +678,11 @@ async def _run_question_analysis(
         ====================
         [Mode 결정 규칙(우선순위)]
         ====================
+        선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
+        - relation은 ["project","perf"](= "project_perf")로 확정
+        - head는 반드시 "perf"로 확정
+        - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
+
         A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
            - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
         B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
@@ -660,6 +693,12 @@ async def _run_question_analysis(
         예시:
         - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
         - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
+
+        [관계형 성과 키워드 사전]
+        - 핵심 키워드(예시): "파생 성과", "성과", "논문", "특허", "산출물"
+        - 패턴 예시: "과제 + (성과|논문|특허|산출물)", "~에서 나온 성과", "~의 파생 성과"
+        - 위 패턴이 감지되면 planner는 처음부터 JOIN 전략을 출력해야 하며,
+          실행단에서 mode/relation 보정이 필요하지 않도록 합니다.
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
@@ -778,8 +817,11 @@ async def _run_question_analysis(
           * join_key_mode="group" => ids_map.pjt_no만 허용
         
         1) relation="project_perf"
-          - join_key_mode="instance": Hop2(perf)에서 pjt_id == PJT_ID must
-          - join_key_mode="group": Hop2(perf)에서 pjt_no == PJT_NO must
+          - head="perf"를 기본으로 사용
+          - hop1(project): project 후보에서 pjt_id(또는 group이면 pjt_no) 확보
+          - hop2(perf): hop1에서 얻은 키 집합을 하드필터로 적용
+            * join_key_mode="instance": pjt_id IN (...) must
+            * join_key_mode="group": pjt_no IN (...) must
         
         2) relation="perf_project"
           - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
@@ -2392,12 +2434,54 @@ def sanitize_llm_json(msg) -> str:
     )
     raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
+
+def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bool:
+    try:
+        collection_info = client.get_collection(collection_name=collection_name)
+    except Exception:
+        return False
+
+    payload_schema = getattr(collection_info, "payload_schema", None)
+    if not isinstance(payload_schema, dict):
+        return False
+    return field_name in payload_schema
+
+
+def _ensure_boot_payload_indexes(client: Any) -> None:
+    targets = [
+        ("ntis_project", "pjt_id"),
+        ("ntis_project", "pjt_no"),
+        ("ntis_perf", "pjt_id"),
+        ("ntis_perf", "pjt_no"),
+    ]
+
+    for collection_name, field_name in targets:
+        if _has_payload_index(client, collection_name, field_name):
+            logger.info("[startup][payload-index] %s.%s -> skip(already_exists)", collection_name, field_name)
+            continue
+
+        try:
+            ensure_keyword_index(client, collection_name, field_name, wait=True)
+            if _has_payload_index(client, collection_name, field_name):
+                logger.info("[startup][payload-index] %s.%s -> ensured", collection_name, field_name)
+            else:
+                logger.warning("[startup][payload-index] %s.%s -> warning(not_confirmed)", collection_name, field_name)
+        except Exception as e:
+            logger.warning("[startup][payload-index] %s.%s -> warning(%s)", collection_name, field_name, e)
+
 # --- Lifespan & App Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global kv_store
 
-    build_rag_objects()
+    validate_project_key_env_or_raise()
+
+    rag_resources = build_rag_objects()
+
+    if RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT:
+        _ensure_boot_payload_indexes(rag_resources.qdrant_client)
+    else:
+        logger.info("[startup][payload-index] disabled by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT")
 
     backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
