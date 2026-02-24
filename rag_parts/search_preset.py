@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .query_intent import QueryIntent
-from .search_strategy import resolve_preset_key
 
 PEOPLE_ORG_FIELDS = [
     "prtcp_mp[].hm_nm",
@@ -249,7 +248,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     # ---- action presets ----
     action = intent.action
 
-    strategy_key = resolve_preset_key(action)
 
     # 1) Support (QnA/Manual)
     if action == "support":
@@ -271,7 +269,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_SUPPORT", _i("RAG_MAX_CONTEXT_ITEMS", 12)),
             tag_boost=_f("RAG_TAG_BOOST_SUPPORT", _f("RAG_TAG_BOOST", 0.4)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_SUPPORT", _f("RAG_TAG_MISMATCH_PENALTY", 0.0)),
-            strategy_key=strategy_key,
         )
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
@@ -296,7 +293,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_REL", 12),
             tag_boost=_f("RAG_TAG_BOOST_REL", _f("RAG_TAG_BOOST", 1.0)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_REL", _f("RAG_TAG_MISMATCH_PENALTY", 0.2)),
-            strategy_key=strategy_key,
         )
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
@@ -322,7 +318,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             stop_if_top1_confident=True,
             tag_boost=_f("RAG_TAG_BOOST_ID_EXACT", _f("RAG_TAG_BOOST", 1.2)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID_EXACT", _f("RAG_TAG_MISMATCH_PENALTY", 0.3)),
-            strategy_key=strategy_key,
         )
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
@@ -347,7 +342,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_ID", 6),
             tag_boost=_f("RAG_TAG_BOOST_ID", _f("RAG_TAG_BOOST", 0.9)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_ID", _f("RAG_TAG_MISMATCH_PENALTY", 0.2)),
-            strategy_key=strategy_key,
         )
         preset = _ensure_pjt_no_fields(preset, default_weights=weights)
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
@@ -372,7 +366,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_FILTER", 10),
             tag_boost=_f("RAG_TAG_BOOST_FILTER", _f("RAG_TAG_BOOST", 1.0)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_FILTER", _f("RAG_TAG_MISMATCH_PENALTY", 0.25)),
-            strategy_key=strategy_key,
         )
         if intent.base_route == "people":
             preset.top_k_lex_cand = max(preset.top_k_lex_cand, _i("RAG_TOPK_LEX_CAND_PEOPLE", 1200))
@@ -404,7 +397,6 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
             max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_TOPIC", 12),
             tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.6)),
             tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.1)),
-            strategy_key=strategy_key,
         )
         return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)
 
@@ -427,6 +419,5 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
         max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS", 30),
         tag_boost=_f("RAG_TAG_BOOST", 0.6),
         tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.1),
-        strategy_key=strategy_key,
     )
     return _prioritize_people_org_fields(preset, intent=intent, default_weights=weights)

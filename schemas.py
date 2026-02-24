@@ -31,6 +31,7 @@ class StrategySpec:
     lookup_filter_gate: Optional[str] = None
     lookup_filter_promote_one_must: bool = False
     lookup_title_filter_policy: Optional[str] = None
+    title_match_mode: Optional[str] = None
     search_filter_server_policy: Optional[str] = None
 
 

@@ -62,6 +62,8 @@ def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids:
         }
     """
     mode_norm = str(mode or "instance").strip().lower()
+    if mode_norm not in {"instance", "group"}:
+        raise ValueError(f"unsupported join key mode: {mode_norm}")
     target_key = "pjt_no" if mode_norm == "group" else "pjt_id"
     other_key = "pjt_id" if target_key == "pjt_no" else "pjt_no"
 

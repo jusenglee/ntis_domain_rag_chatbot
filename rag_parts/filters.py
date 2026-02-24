@@ -90,6 +90,12 @@ Nested = getattr(qmodels, "Nested", None) if qmodels else None
 logger = logging.getLogger(__name__)
 _PROJECT_KEY_POLICY_LOGGED = False
 
+TITLE_MATCH_MODE_EXACT = "EXACT"
+TITLE_MATCH_MODE_TEXT = "TEXT"
+TITLE_MATCH_MODE_CONTAINS = "CONTAINS"
+TITLE_MATCH_MODES = {TITLE_MATCH_MODE_EXACT, TITLE_MATCH_MODE_TEXT, TITLE_MATCH_MODE_CONTAINS}
+
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = str(os.getenv(name, str(default))).strip().lower()
@@ -586,10 +592,30 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
     return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
-def build_title_filter(terms: List[str]) -> Optional[Any]:
-    """문서 제목(과제/성과 공통) 기반 서버단 필터."""
+def build_title_exact_filter(terms: List[str]) -> Optional[Any]:
+    """문서 제목(과제/성과 공통) EXACT(match-any) 기반 서버단 필터."""
     keys = ["title_text"]
     return _build_title_filter_with_keys(terms, keys)
+
+
+def build_title_text_filter(terms: List[str]) -> Optional[Any]:
+    """문서 제목(과제/성과 공통) TEXT(match-text) 기반 서버단 필터."""
+    if qmodels is None:
+        return None
+    norm_terms = [str(t).strip() for t in (terms or []) if str(t).strip()]
+    if not norm_terms:
+        return None
+    keys = ["title_text"]
+    should: List[Any] = []
+    match_text_cls = getattr(qmodels, "MatchText", None)
+    if match_text_cls is None:
+        return None
+    for key in keys:
+        for term in norm_terms:
+            should.append(qmodels.FieldCondition(key=key, match=match_text_cls(text=term)))
+    if not should:
+        return None
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 # -----------------------------

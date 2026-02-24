@@ -21,6 +21,7 @@ import re
 import time
 import inspect
 import json
+import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -77,6 +78,7 @@ from rag_parts.planner_contract import (
     planner_contract_mode,
     normalize_lookup_filter_policy,
     normalize_lookup_title_filter_policy,
+    resolve_lookup_title_match_mode,
     validate_planner_contract,
     StrategyViolation,
     StrategyCompiler,
@@ -110,7 +112,11 @@ from rag_parts.filters import (
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     make_match_any,
     build_project_id_filter,
-    build_title_filter,
+    build_title_exact_filter,
+    build_title_text_filter,
+    TITLE_MATCH_MODE_EXACT,
+    TITLE_MATCH_MODE_TEXT,
+    TITLE_MATCH_MODE_CONTAINS,
     validate_join_mode_key_inputs,
     JoinFilterInput,
     PeopleFilterInput, OrgFilterInput,
@@ -438,6 +444,22 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
+_PJT_ID_ALLOWED_RE = re.compile(r"^\d{8,12}$")
+_PJT_NO_ALLOWED_RE = re.compile(os.getenv("RAG_JOIN_PJT_NO_ALLOWED_RE", r"^[A-Za-z0-9_-]{4,40}$"))
+
+
+def _is_valid_join_key(value: str, *, key: str, join_key_mode: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    mode = str(join_key_mode or "instance").strip().lower()
+    if mode == "group" and key == "pjt_no":
+        return bool(_PJT_NO_ALLOWED_RE.fullmatch(text))
+    if mode == "instance" and key == "pjt_id":
+        return bool(_PJT_ID_ALLOWED_RE.fullmatch(text))
+    return True
+
+
 def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "instance") -> Dict[str, int]:
     stats = {
         "total": 0,
@@ -472,18 +494,18 @@ def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "ins
             stats["same_id_no"] += 1
 
         if mode == "instance":
-            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode):
                 stats["invalid_pjt_id"] += 1
-            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode="group"):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, mode="instance")) and _is_valid_join_key(pjt_no, mode="instance"):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode=mode)) and _is_valid_join_key(pjt_no, key="pjt_id", join_key_mode=mode):
                 stats["suspected_swap"] += 1
         elif mode == "group":
-            if pjt_no and not _is_valid_join_key(pjt_no, mode="group"):
+            if pjt_no and not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode):
                 stats["invalid_pjt_no"] += 1
-            if pjt_id and not _is_valid_join_key(pjt_id, mode="instance"):
+            if pjt_id and not _is_valid_join_key(pjt_id, key="pjt_id", join_key_mode="instance"):
                 stats["invalid_pjt_id"] += 1
-            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, mode="group")) and _is_valid_join_key(pjt_id, mode="group"):
+            if pjt_id and pjt_no and (not _is_valid_join_key(pjt_no, key="pjt_no", join_key_mode=mode)) and _is_valid_join_key(pjt_id, key="pjt_no", join_key_mode=mode):
                 stats["suspected_swap"] += 1
     return stats
 
@@ -1081,6 +1103,7 @@ def _validate_lookup_join_hybrid_metrics(
         mode: str,
         contract_scope: str,
         timings: Mapping[str, Any],
+        strict: bool = True,
 ) -> None:
     if str(mode).strip().lower() not in ("lookup", "join"):
         return
@@ -1103,6 +1126,8 @@ def _validate_lookup_join_hybrid_metrics(
         return
 
     if dense_queries == 0:
+        if not strict:
+            return
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
             reason=(
@@ -1112,6 +1137,8 @@ def _validate_lookup_join_hybrid_metrics(
         )
 
     if sparse_hits == 0:
+        if not strict:
+            return
         raise StrategyViolation(
             error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
             reason=(
@@ -1259,6 +1286,46 @@ def _to_text(v: object) -> str:
         return ""
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_for_title_match(text: object) -> str:
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(text))
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"[\u2000-\u200B\u202F\u205F\u3000]", " ", s)
+    s = re.sub(r"[\[\]{}()<>《》〈〉「」『』【】]", " ", s)
+    s = re.sub(r"[\"'`´]+", "", s)
+    s = re.sub(r"[·•ㆍ]", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _soft_title_contains(doc_payload: Mapping[str, Any], title_terms: List[str]) -> bool:
+    if not isinstance(doc_payload, Mapping):
+        return False
+
+    normalized_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for raw in title_terms or []:
+        term = normalize_for_title_match(raw)
+        if len(term) <= 2:
+            continue
+        term_key = term.lower()
+        if term_key and term_key not in seen_terms:
+            seen_terms.add(term_key)
+            normalized_terms.append(term_key)
+    if not normalized_terms:
+        return False
+
+    for field in ("title1", "title2", "title_text"):
+        title_val = normalize_for_title_match(doc_payload.get(field, "")).lower()
+        if not title_val:
+            continue
+        for term in normalized_terms:
+            if term in title_val:
+                return True
+    return False
 
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
@@ -2852,7 +2919,7 @@ def _run_rag_with_vectors(
         if str(t).strip()
     ]
     ctx.title = title_terms
-    title_filter = build_title_filter(title_terms) if title_terms else None
+    title_filter = None
 
     keyword_terms = [t.strip() for t in (list(ctx.keywords or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
@@ -3402,9 +3469,16 @@ def _run_rag_with_vectors(
             getattr(plan, "output_type", None),
         )
         lookup_title_filter_policy = "soft"
+    title_text_match_supported = bool(getattr(qmodels, "MatchText", None) is not None)
+    title_match_mode = resolve_lookup_title_match_mode(
+        lookup_title_filter_policy=lookup_title_filter_policy,
+        index_supports_text=title_text_match_supported,
+    )
     log_kv(
         "RAG.LOOKUP.TITLE_FILTER_POLICY",
         policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
+        title_text_match_supported=int(title_text_match_supported),
         mode=plan.mode,
         action=action,
         output_type=getattr(plan, "output_type", None),
@@ -3443,7 +3517,8 @@ def _run_rag_with_vectors(
             else None
         )
 
-    if relation and plan.mode in ("search", "lookup"):
+    relation_mode_conflict = bool(relation and plan.mode in ("search", "lookup"))
+    if relation_mode_conflict:
         logger.warning(
             "[RAG] relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
             plan.mode,
@@ -3458,6 +3533,17 @@ def _run_rag_with_vectors(
             payload_mode=planner_mode,
             base_route=base_route,
             action=action,
+        )
+    else:
+        log_kv(
+            "RAG.PLAN.MODE_CONFLICT",
+            level="info",
+            mode=plan.mode,
+            relation=relation,
+            payload_mode=planner_mode,
+            base_route=base_route,
+            action=action,
+            conflict=0,
         )
 
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
@@ -3514,6 +3600,7 @@ def _run_rag_with_vectors(
         lookup_filter_policy_hint=lookup_filter_policy,
         lookup_title_filter_policy_hint=lookup_title_filter_policy,
         detail_lookup_request=detail_lookup_request,
+        title_text_match_supported=title_text_match_supported,
     )
     if compiled_strategy.hop1_spec or compiled_strategy.hop2_spec:
         log_kv(
@@ -3526,6 +3613,7 @@ def _run_rag_with_vectors(
     lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
     lookup_filter_policy = compiled_strategy.lookup_filter_policy
     lookup_title_filter_policy = compiled_strategy.lookup_title_filter_policy
+    title_match_mode = compiled_strategy.title_match_mode
     relation_lookup_enforce = bool(compiled_strategy.relation_lookup_enforce)
 
     join_hop1_lookup_filter_enabled = bool(
@@ -3583,9 +3671,20 @@ def _run_rag_with_vectors(
             applied=0,
         )
 
-    title_filter_applied_to = None
-    if title_filter and plan.mode == "lookup":
-        title_filter_applied_to = "project/perf"
+    title_filter = None
+    if title_terms and title_match_mode == TITLE_MATCH_MODE_EXACT:
+        title_filter = build_title_exact_filter(title_terms)
+    elif title_terms and title_match_mode == TITLE_MATCH_MODE_TEXT:
+        title_filter = build_title_text_filter(title_terms)
+
+    title_filter_server_applied = bool(
+        title_filter
+        and plan.mode == "lookup"
+        and lookup_filter_enabled
+        and title_match_mode in (TITLE_MATCH_MODE_EXACT, TITLE_MATCH_MODE_TEXT)
+        and search_filter_conf_ok
+    )
+    title_filter_applied_to = "project/perf" if title_filter_server_applied else None
     tag_filter_applied_to = None
     if (project_tag_filter or perf_tag_filter) and plan.mode == "lookup":
         tag_targets: list[str] = []
@@ -3599,8 +3698,10 @@ def _run_rag_with_vectors(
     search_filter_server_applied = False
     filter_spec = {
         **dict(compiled_strategy.filter_spec or {}),
+        "title_match_mode": title_match_mode,
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
+        "title_filter_server_applied": bool(title_filter_server_applied),
     }
 
     topk_spec = dict(compiled_strategy.topk_spec or {})
@@ -3644,6 +3745,7 @@ def _run_rag_with_vectors(
         lookup_filter_gate=people_match_mode,
         lookup_filter_promote_one_must=people_promote_one_must,
         lookup_title_filter_policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
         search_filter_server_policy=search_filter_server_policy,
     )
     plan = replace(
@@ -3721,6 +3823,7 @@ def _run_rag_with_vectors(
         keywords=keyword_terms,
         perf_tag_filters=list(ctx.perf_tag_filters or []),
         title_terms=title_terms,
+        title_match_mode=title_match_mode,
         tag_filters=list(ctx.tag_filters or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
@@ -3732,6 +3835,7 @@ def _run_rag_with_vectors(
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
+        title_filter_server_applied=int(title_filter_server_applied),
         tag_filter_applied_to=tag_filter_applied_to,
         search_filter_server_policy=search_filter_server_policy,
         search_filter_server_applied=int(search_filter_server_applied),
@@ -4225,20 +4329,25 @@ def _run_rag_with_vectors(
                 join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_nos = []
 
-            if int(join_key_result.get("suspected_swap_count", 0) or 0) > 0:
+            invalid_values = [str(x).strip() for x in (join_key_result.get("invalid_values") or []) if str(x).strip()]
+            suspected_swap_count = int(join_key_result.get("suspected_swap_count", 0) or 0)
+            if invalid_values or suspected_swap_count > 0:
                 log_kv(
-                    "RAG.JOIN_KEYS.SUSPECTED_SWAP",
+                    "RAG.JOIN_KEYS.INVALID",
                     level="error",
                     scope=f"join_hop1:{hop1_col}:extract",
                     join_key_mode=join_key_mode,
-                    suspected_swap_count=int(join_key_result.get("suspected_swap_count", 0) or 0),
-                    suspected_swaps=join_key_result.get("suspected_swaps", [])[:10],
+                    invalid_count=len(invalid_values),
+                    invalid_values=invalid_values[:10],
+                    suspected_swap_count=suspected_swap_count,
+                    suspected_swaps=(join_key_result.get("suspected_swaps") or [])[:10],
                 )
                 raise StrategyViolation(
                     error_code="JOIN_KEYS_INVALID",
                     reason=(
-                        f"[join_hop1:{hop1_col}:extract] suspected join key swap detected "
-                        f"(join_key_mode={join_key_mode}, count={int(join_key_result.get('suspected_swap_count', 0) or 0)})"
+                        f"[join_hop1:{hop1_col}:extract] invalid join keys detected "
+                        f"(join_key_mode={join_key_mode}, invalid_count={len(invalid_values)}, "
+                        f"suspected_swap_count={suspected_swap_count})"
                     ),
                 )
 
@@ -4571,7 +4680,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -4583,7 +4692,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and mode in ("lookup", "join") and search_filter_conf_ok:
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
@@ -4735,6 +4844,7 @@ def _run_rag_with_vectors(
             search_filter_enabled=search_filter_enabled,
             search_filter_signal=search_filter_signal,
             search_filter_conf_ok=search_filter_conf_ok,
+            title_filter_server_applied=int(title_filter_server_applied),
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,
@@ -4742,7 +4852,10 @@ def _run_rag_with_vectors(
             sparse_topk=int(sparse_topk_eff),
             sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
-            executed_filter_spec_json=_serialize_filter_for_log(qfilter),
+            executed_filter_spec_json={
+                "qfilter": _serialize_filter_for_log(qfilter),
+                "title_filter_server_applied": bool(title_filter_server_applied and col in (COL_PROJECT, COL_PERF)),
+            },
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
         )
@@ -5025,6 +5138,35 @@ def _run_rag_with_vectors(
             return promoted_result
 
     # final rerank
+    title_post_filter_applied = False
+    title_post_filter_hits = 0
+    if (
+        plan.mode == "lookup"
+        and title_match_mode == TITLE_MATCH_MODE_CONTAINS
+        and bool(title_terms)
+    ):
+        title_post_filter_applied = True
+        title_filter_topn = max(1, int(os.getenv("RAG_TITLE_POST_FILTER_TOPN", "80")))
+        post_filter_pool = list(merged_rrf[:title_filter_topn])
+        merged_rrf = [
+            p for p in post_filter_pool
+            if _soft_title_contains(getattr(p, "payload", None) or {}, title_terms)
+        ]
+        title_post_filter_hits = len(merged_rrf)
+        log_kv(
+            "RAG.TITLE_POST_FILTER",
+            applied=int(title_post_filter_applied),
+            policy=lookup_title_filter_policy,
+            title_match_mode=title_match_mode,
+            topn=title_filter_topn,
+            input_count=len(post_filter_pool),
+            hits=title_post_filter_hits,
+            title_terms=title_terms[:6],
+        )
+
+    _timing_put(timings, "info.title_post_filter_applied", int(title_post_filter_applied))
+    _timing_put(timings, "info.title_post_filter_hits", int(title_post_filter_hits))
+
     t0 = time.time()
     final_keep = int((rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
@@ -5068,6 +5210,7 @@ def _run_rag_with_vectors(
         requested_limit = max(
             0,
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
+            _coerce_int(hinted_limit, 0),
         )
         hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
         reranked_for_hydrate = reranked[:hydrate_upper]
@@ -5075,7 +5218,7 @@ def _run_rag_with_vectors(
         _hydrate_points_payload(qdr, reranked_for_hydrate)
         _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
 
-        check_top_k = min(len(reranked), max(1, requested_limit or max_items))
+        check_top_k = min(len(reranked), max(1, requested_limit))
         missing_kor = []
         for rank, p in enumerate(reranked[:check_top_k], start=1):
             pl = getattr(p, "payload", {}) or {}
