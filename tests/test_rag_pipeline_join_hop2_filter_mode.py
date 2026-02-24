@@ -30,6 +30,7 @@ def test_join_hop2_filter_group_mode_clears_join_ids(monkeypatch) -> None:
 
     assert captured["join_ids"] == []
     assert captured["pjt_nos"] == ["PNO-1"]
+    assert captured["resolved_pjt_ids"] == ["202300001234"]
     assert executed_spec["join_ids_count"] == 0
     assert executed_spec["pjt_nos_count"] == 1
 
@@ -58,5 +59,6 @@ def test_join_hop2_filter_instance_mode_uses_join_pjt_ids(monkeypatch) -> None:
     )
 
     assert captured["join_ids"] == ["202300001234"]
+    assert captured["resolved_pjt_ids"] == ["202300001234"]
     assert executed_spec["join_ids_count"] == 1
     assert executed_spec["pjt_nos_count"] == 0
