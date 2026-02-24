@@ -37,7 +37,7 @@ from rag_pipeline import run_rag_ab_compare
 from retrieval import ensure_keyword_index
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
-from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms
+from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
 from schemas import IntentPayloadV2
 from retrieval import ensure_keyword_index
 from settings import (
@@ -105,6 +105,12 @@ RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT",
 }
 RAG_KEY_PJT_ID = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
 RAG_KEY_PJT_NO = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+
+
+def _has_superlative_cue(text: str) -> bool:
+    query = (text or "").strip().lower()
+    return any(cue in query for cue in SUPERLATIVE_CUES)
+
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -1506,6 +1512,7 @@ async def build_intent_payload(
     hint_year_to: str | None = None
     hint_perf_types: List[str] = []
     hint_org_role = None
+    hint_wants_rank = False
 
     if question_analysis and isinstance(question_analysis.filters, dict):
         filters = dict(question_analysis.filters or {})
@@ -1530,6 +1537,7 @@ async def build_intent_payload(
             kws = list(dict.fromkeys([*kws, *perf_types_hint]))
 
         hint_org_role = filters.get("org_role")
+        hint_wants_rank = bool(filters.get("wants_rank", False))
 
         people_terms_hint = _collect_researcher_name_terms(filters)
         if people_terms_hint:
@@ -1562,6 +1570,8 @@ async def build_intent_payload(
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
 
+    hint_wants_rank = hint_wants_rank or _has_superlative_cue(question)
+
     planner_hint = {
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
@@ -1573,6 +1583,7 @@ async def build_intent_payload(
         "lead_org_terms": hint_lead_org_terms,
         "participant_org_terms": hint_participant_org_terms,
         "people_affiliation_org_terms": hint_people_affiliation_org_terms,
+        "wants_rank": hint_wants_rank,
     }
 
     raw_intent = classify_query_intent(
@@ -1648,6 +1659,12 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
     planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
 
+    planner_wants_rank = bool(getattr(qa, "wants_rank", False))
+    if not planner_wants_rank:
+        planner_wants_rank = str(getattr(qa, "action", "") or "").strip().lower() in {"rank", "stats"}
+    planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
+    planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
+
     def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
         merged: dict[str, list[str]] = {}
 
@@ -1673,8 +1690,8 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
 
     patched = replace(
         intent,
-        base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
-        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        base_route=planner_head,
+        action=("stats" if planner_wants_rank else str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower()),
         mode=str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
@@ -1695,6 +1712,7 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
         title=planner_title_terms or list(getattr(intent, "title", []) or []),
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
+        wants_rank=planner_wants_rank or bool(getattr(intent, "wants_rank", False)),
     )
 
     after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}

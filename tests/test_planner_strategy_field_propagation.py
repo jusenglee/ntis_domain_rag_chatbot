@@ -60,6 +60,7 @@ class _IntentStub:
     keywords: list[str] = None
     title: list[str] = None
     target_cols: list[str] = None
+    wants_rank: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "ids_map", self.ids_map or {})

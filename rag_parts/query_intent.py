@@ -307,6 +307,7 @@ TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", 
 COUNT_CUES = ["건수", "몇건", "통계", "count", "총 몇", "총몇", "몇 개", "몇개"]
 DETAIL_CUES = ["상세", "세부", "자세히", "정보", "내용", "설명", "프로필"]
 LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘", "이력", "내역"]
+SUPERLATIVE_CUES = ["가장", "최다", "top", "상위", "1위", "best", "most"]
 
 _REQUEST_LIMIT_RE = re.compile(r"(\d{1,2})\s*(개년|개|건|명)")
 _REQUEST_LIMIT_POSITIVE_CUES = ["목록", "리스트", "보여", "보여줘", "조회", "상위", "대표", "과제", "성과", "최대"]
@@ -337,6 +338,11 @@ def _extract_requested_limit(q: str) -> Optional[int]:
         return limit
 
     return None
+
+
+def _has_superlative_cue(text: str) -> bool:
+    tl = (text or "").lower()
+    return any(cue in tl for cue in SUPERLATIVE_CUES)
 
 
 def pick_perf_tag_filters(q: str) -> List[str]:
@@ -920,12 +926,15 @@ def _resolve_action(
         wants_count: bool,
         wants_list: bool,
         wants_detail: bool,
+        wants_rank: bool,
         intent: str,
         ids_map: Dict[str, List[str]],
         is_id_query: bool,
 ) -> str:
     if base_route == "support":
         return "support"
+    if base_route in ("people", "org") and wants_rank:
+        return "stats"
     if relation is not None:
         if wants_count and not wants_list:
             return "stats"
@@ -993,6 +1002,7 @@ class QueryIntent:
     wants_count: bool = False
     wants_list: bool = False
     wants_detail: bool = False
+    wants_rank: bool = False
     output_type: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
     parsing_warnings: List[str] = field(default_factory=list)
@@ -1038,6 +1048,7 @@ class QueryIntent:
             "wants_count": self.wants_count,
             "wants_list": self.wants_list,
             "wants_detail": self.wants_detail,
+            "wants_rank": self.wants_rank,
             "output_type": self.output_type,
             "categories": self.categories,
             "planner_limit": self.planner_limit,
@@ -1241,6 +1252,7 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "wants_count": _get_attr(hint, "wants_count"),
         "wants_list": _get_attr(hint, "wants_list"),
         "wants_detail": _get_attr(hint, "wants_detail"),
+        "wants_rank": _get_attr(hint, "wants_rank"),
         "output_type": _get_attr(hint, "output_type"),
         "limit": _get_attr(hint, "limit"),
         "retrieval_query": _get_attr(hint, "retrieval_query"),
@@ -1373,8 +1385,10 @@ def _classify_query_heuristic(
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
-    has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
-    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
+    has_org_cue = _has_any_cue(tl, ORG_CUES)
+    has_people_cue = _has_any_cue(tl, PEOPLE_CUES)
+    has_org = bool(org_terms) or has_org_cue or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    has_people = bool(people_terms) or bool(ids_map.get("person_no")) or has_people_cue
 
     base_route = pick_base_route(
         q, kws, ids_map,
@@ -1386,6 +1400,7 @@ def _classify_query_heuristic(
     wants_count = any(c in tl for c in COUNT_CUES)
     wants_list = any(c in tl for c in LIST_CUES)
     wants_detail = any(c in tl for c in DETAIL_CUES)
+    wants_rank = (base_route in ("people", "org") or has_people or has_org or has_people_cue or has_org_cue) and _has_superlative_cue(tl)
 
     base_route = _normalize_base_route_for_people_org_project_perf(
         base_route=base_route,
@@ -1427,6 +1442,7 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         intent=intent,
         ids_map=ids_map,
         is_id_query=is_id_query,
@@ -1474,6 +1490,7 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         planner_limit=requested_limit,
         join_key_mode=join_key_mode,
         parsing_warnings=parsing_warnings,
@@ -1571,15 +1588,22 @@ def classify_query(
     wants_count = bool(plan.get("wants_count", False))
     wants_list = bool(plan.get("wants_list", False))
     wants_detail = bool(plan.get("wants_detail", False))
+    wants_rank = bool(plan.get("wants_rank", False))
     if not (wants_count or wants_list or wants_detail):
         wants_count = any(c in tl for c in COUNT_CUES)
         wants_list = any(c in tl for c in LIST_CUES)
         wants_detail = any(c in tl for c in DETAIL_CUES)
+    if not wants_rank:
+        wants_rank = _has_superlative_cue(tl)
     output_type = str(plan.get("output_type") or "").strip().lower() or None
+    if output_type == "rank":
+        output_type = "stats"
     if output_type not in ("stats", "list", "detail", "relation", "summary"):
         output_type = None
 
     action = str(plan.get("action") or "").strip().lower()
+    if action == "rank":
+        action = "stats"
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
         action = ""
 
@@ -1625,8 +1649,11 @@ def classify_query(
     if org_role == "affiliation" and not people_affiliation_org_terms:
         people_affiliation_org_terms = list(org_terms)
 
-    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
-    has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    has_people_cue = _has_any_cue(tl, PEOPLE_CUES)
+    has_org_cue = _has_any_cue(tl, ORG_CUES)
+    has_people = bool(people_terms) or bool(ids_map.get("person_no")) or has_people_cue
+    has_org = bool(org_terms) or has_org_cue or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    wants_rank = wants_rank and (base_route in ("people", "org") or has_people or has_org or has_people_cue or has_org_cue)
 
     if people_terms:
         if any(keyword in tl for keyword in ("과제", "프로젝트", "project")):
@@ -1683,6 +1710,7 @@ def classify_query(
             wants_count=wants_count,
             wants_list=wants_list,
             wants_detail=wants_detail,
+            wants_rank=wants_rank,
             intent=intent,
             ids_map=ids_map,
             is_id_query=bool(ids_flat),
@@ -1727,6 +1755,7 @@ def classify_query(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         output_type=output_type,
         categories=categories,
         planner_limit=limit,
