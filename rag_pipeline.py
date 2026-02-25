@@ -4524,12 +4524,17 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
+        join_key_source = "hop1"
+        hop2_key_strategy = "pjt_id_in" if resolved_join_key_mode == "instance" else "pjt_no"
+        join_keys_used_count = 0
         join_key_mode = resolved_join_key_mode
         pjt_ids = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_id")) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_no")) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
         seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
+        if seed_join_ids:
+            join_key_source = "ids_map"
 
         has_people_org_gate = bool(people_terms or people_ids or org_terms)
         join_execution_policy = _resolve_join_execution_policy(
@@ -4587,6 +4592,8 @@ def _run_rag_with_vectors(
             join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
             hop1_filter = None
+            if hop1_strategy == "skip" and seed_join_ids:
+                join_key_source = "ids_map"
 
             # 1) Hop1 전략 적용: skip | lookup | search
             has_seed_join_keys = bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids)
@@ -4602,8 +4609,10 @@ def _run_rag_with_vectors(
             )
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
+                join_key_source = "ids_map"
             elif join_key_mode == "instance" and seed_join_pjt_ids:
                 join_pjt_ids = seed_join_pjt_ids[:]
+                join_key_source = "ids_map"
 
             local_timings_h1: Dict[str, float] = {}
             hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
@@ -4826,6 +4835,8 @@ def _run_rag_with_vectors(
                 join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
                 join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
                 join_pjt_nos = []
+            if hop1_top:
+                join_key_source = "hop1"
 
             invalid_values = [str(x).strip() for x in (join_key_result.get("invalid_values") or []) if str(x).strip()]
             suspected_swap_count = int(join_key_result.get("suspected_swap_count", 0) or 0)
@@ -5109,6 +5120,27 @@ def _run_rag_with_vectors(
             _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
             _timing_put(timings, "phase.total", time.time() - t_all0)
             hits = (hop1_top or []) + (hop2_top or [])
+            join_keys_used_count = len(join_pjt_ids) if join_key_mode == "instance" else len(join_pjt_nos)
+            hop2_key_strategy = "pjt_id_in" if join_key_mode == "instance" else "pjt_no"
+            strategy = replace(
+                strategy,
+                join_key_source=join_key_source,
+                hop1_mode=hop1_strategy,
+                hop2_key_strategy=hop2_key_strategy,
+                join_keys_used_count=join_keys_used_count,
+            )
+            ctx.strategy = strategy
+            debug_meta = {
+                "join": {
+                    "join_key_mode": join_key_mode,
+                    "join_key_source": join_key_source,
+                    "hop1_mode": hop1_strategy,
+                    "hop2_key_strategy": hop2_key_strategy,
+                    "join_keys_used_count": join_keys_used_count,
+                    "seed_key_source": join_execution_policy.get("seed_key_source"),
+                    "seed_key_count": int(join_execution_policy.get("seed_key_count") or 0),
+                }
+            }
             return RagResult(
                 stack=stack,
                 keywords=kws,
@@ -5117,6 +5149,7 @@ def _run_rag_with_vectors(
                 context=context,
                 refs=refs,
                 timings=timings,
+                debug_meta=debug_meta,
             )
 
     # -------------------------
@@ -5127,6 +5160,15 @@ def _run_rag_with_vectors(
     # collection list
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
+    if perf_followup_join_ids:
+        strategy = replace(
+            strategy,
+            join_key_source="followup",
+            hop1_mode="lookup",
+            hop2_key_strategy="pjt_id_in",
+            join_keys_used_count=len(perf_followup_join_ids),
+        )
+        ctx.strategy = strategy
     perf_followup_filter = (
         build_perf_filter_by_pjt_id(
             perf_followup_join_ids,

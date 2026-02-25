@@ -22,6 +22,10 @@ class StrategySpec:
     relation: Optional[Tuple[str, str]]
     # planner 출력/정규화 단계에서 값이 흔들릴 수 있으므로 Optional[str]로 완화
     join_key_mode: Optional[str] = None
+    join_key_source: Optional[str] = None
+    hop1_mode: Optional[str] = None
+    hop2_key_strategy: Optional[str] = None
+    join_keys_used_count: Optional[int] = None
     people_terms: Tuple[str, ...] = field(default_factory=tuple)
     target_collections: Tuple[str, ...] = field(default_factory=tuple)
     search_filter_enabled: bool = False
@@ -201,3 +205,91 @@ class ExecutionContext:
             top_k=self.top_k,
             tie_break=self.tie_break,
         )
+
+
+def to_strategy_spec(raw: Any) -> StrategySpec:
+    """dict/객체 형태의 strategy를 StrategySpec으로 정규화한다."""
+
+    if isinstance(raw, StrategySpec):
+        return raw
+    data: Dict[str, Any]
+    if isinstance(raw, dict):
+        data = dict(raw)
+    else:
+        data = {
+            "mode": getattr(raw, "mode", ""),
+            "action": getattr(raw, "action", ""),
+            "relation": getattr(raw, "relation", None),
+            "join_key_mode": getattr(raw, "join_key_mode", None),
+            "join_key_source": getattr(raw, "join_key_source", None),
+            "hop1_mode": getattr(raw, "hop1_mode", None),
+            "hop2_key_strategy": getattr(raw, "hop2_key_strategy", None),
+            "join_keys_used_count": getattr(raw, "join_keys_used_count", None),
+            "people_terms": getattr(raw, "people_terms", tuple()),
+            "target_collections": getattr(raw, "target_collections", tuple()),
+            "search_filter_enabled": getattr(raw, "search_filter_enabled", False),
+            "lookup_filter_enabled": getattr(raw, "lookup_filter_enabled", False),
+            "relation_lookup_enforce": getattr(raw, "relation_lookup_enforce", False),
+            "lookup_filter_policy": getattr(raw, "lookup_filter_policy", None),
+            "lookup_filter_min_should": getattr(raw, "lookup_filter_min_should", None),
+            "lookup_filter_gate": getattr(raw, "lookup_filter_gate", None),
+            "lookup_filter_promote_one_must": getattr(raw, "lookup_filter_promote_one_must", False),
+            "lookup_title_filter_policy": getattr(raw, "lookup_title_filter_policy", None),
+            "title_match_mode": getattr(raw, "title_match_mode", None),
+            "search_filter_server_policy": getattr(raw, "search_filter_server_policy", None),
+        }
+
+    relation = data.get("relation")
+    if isinstance(relation, list):
+        relation = tuple(relation)
+
+    return StrategySpec(
+        mode=str(data.get("mode") or "").strip().lower(),
+        action=str(data.get("action") or "").strip().lower(),
+        relation=tuple(relation) if isinstance(relation, tuple) and len(relation) == 2 else None,
+        join_key_mode=(str(data.get("join_key_mode")).strip().lower() or None) if data.get("join_key_mode") is not None else None,
+        join_key_source=(str(data.get("join_key_source")).strip().lower() or None) if data.get("join_key_source") is not None else None,
+        hop1_mode=(str(data.get("hop1_mode")).strip().lower() or None) if data.get("hop1_mode") is not None else None,
+        hop2_key_strategy=(str(data.get("hop2_key_strategy")).strip().lower() or None) if data.get("hop2_key_strategy") is not None else None,
+        join_keys_used_count=(int(data.get("join_keys_used_count")) if data.get("join_keys_used_count") is not None else None),
+        people_terms=tuple(data.get("people_terms") or tuple()),
+        target_collections=tuple(data.get("target_collections") or tuple()),
+        search_filter_enabled=bool(data.get("search_filter_enabled", False)),
+        lookup_filter_enabled=bool(data.get("lookup_filter_enabled", False)),
+        relation_lookup_enforce=bool(data.get("relation_lookup_enforce", False)),
+        lookup_filter_policy=data.get("lookup_filter_policy"),
+        lookup_filter_min_should=data.get("lookup_filter_min_should"),
+        lookup_filter_gate=data.get("lookup_filter_gate"),
+        lookup_filter_promote_one_must=bool(data.get("lookup_filter_promote_one_must", False)),
+        lookup_title_filter_policy=data.get("lookup_title_filter_policy"),
+        title_match_mode=data.get("title_match_mode"),
+        search_filter_server_policy=data.get("search_filter_server_policy"),
+    )
+
+
+def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any]:
+    if strategy is None:
+        return {}
+    spec = to_strategy_spec(strategy)
+    return {
+        "mode": spec.mode,
+        "action": spec.action,
+        "relation": list(spec.relation) if spec.relation else None,
+        "join_key_mode": spec.join_key_mode,
+        "join_key_source": spec.join_key_source,
+        "hop1_mode": spec.hop1_mode,
+        "hop2_key_strategy": spec.hop2_key_strategy,
+        "join_keys_used_count": spec.join_keys_used_count,
+        "people_terms": list(spec.people_terms),
+        "target_collections": list(spec.target_collections),
+        "search_filter_enabled": bool(spec.search_filter_enabled),
+        "lookup_filter_enabled": bool(spec.lookup_filter_enabled),
+        "relation_lookup_enforce": bool(spec.relation_lookup_enforce),
+        "lookup_filter_policy": spec.lookup_filter_policy,
+        "lookup_filter_min_should": spec.lookup_filter_min_should,
+        "lookup_filter_gate": spec.lookup_filter_gate,
+        "lookup_filter_promote_one_must": bool(spec.lookup_filter_promote_one_must),
+        "lookup_title_filter_policy": spec.lookup_title_filter_policy,
+        "title_match_mode": spec.title_match_mode,
+        "search_filter_server_policy": spec.search_filter_server_policy,
+    }

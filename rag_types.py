@@ -12,3 +12,4 @@ class RagResult:
     timings: Dict[str, float]
     aggregation: Optional[Dict[str, Any]] = None
     llm_answer: Optional[str] = None
+    debug_meta: Optional[Dict[str, Any]] = None
