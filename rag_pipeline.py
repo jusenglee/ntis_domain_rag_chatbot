@@ -2482,6 +2482,54 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
     return True
 
 
+def _normalize_join_collection_name(
+        collection: str,
+        *,
+        relation: Optional[Tuple[str, str]] = None,
+) -> str:
+    raw = str(collection or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered == "project":
+        return COL_PROJECT
+    if lowered == "perf":
+        return COL_PERF
+    return raw
+
+
+def _build_join_hop1_filter(
+        *,
+        relation: Optional[Tuple[str, str]],
+        hop1_col: str,
+        hop1_filter: Any,
+        compiled_hop1_spec: Optional[Dict[str, Any]] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    planner_hop1_spec = dict(compiled_hop1_spec or {})
+    planner_hop1_col = _normalize_join_collection_name(
+        str(planner_hop1_spec.get("collection") or ""),
+        relation=relation,
+    )
+    if planner_hop1_col and planner_hop1_col != hop1_col:
+        raise StrategyViolation(
+            error_code="PLANNER_JOIN_HOP1_COLLECTION_MISMATCH",
+            reason=(
+                "planner hop1_spec.collection과 실행 hop1_col 불일치"
+                f"(planner={planner_hop1_col}, executed={hop1_col}, relation={relation})"
+            ),
+        )
+
+    planner_hop1_filter = planner_hop1_spec.get("qdrant_filter")
+    if planner_hop1_filter is not None:
+        hop1_filter = _and_filter(hop1_filter, planner_hop1_filter)
+
+    executed_hop1_filter_spec = {
+        "hop1_col": hop1_col,
+        "planner_hop1_filter_applied": int(planner_hop1_filter is not None),
+    }
+    return hop1_filter, executed_hop1_filter_spec
+
+
 def _build_join_hop2_filter(
         *,
         relation: Optional[Tuple[str, str]],
@@ -2528,7 +2576,10 @@ def _build_join_hop2_filter(
         ),
     )
     planner_hop2_spec = dict(compiled_hop2_spec or {})
-    planner_hop2_col = str(planner_hop2_spec.get("collection") or "").strip()
+    planner_hop2_col = _normalize_join_collection_name(
+        str(planner_hop2_spec.get("collection") or ""),
+        relation=relation,
+    )
     if planner_hop2_col and planner_hop2_col != hop2_col:
         raise StrategyViolation(
             error_code="PLANNER_JOIN_HOP2_COLLECTION_MISMATCH",
@@ -4623,6 +4674,37 @@ def _run_rag_with_vectors(
             if hop1_col == COL_PERF and perf_type_filter:
                 # 원칙: 명시적 perf_types만 server-side must로 결합
                 hop1_filter = _and_filter(hop1_filter, perf_type_filter)
+
+            hop1_filter, executed_hop1_filter_spec = _build_join_hop1_filter(
+                relation=relation,
+                hop1_col=hop1_col,
+                hop1_filter=hop1_filter,
+                compiled_hop1_spec=compiled_strategy.hop1_spec,
+            )
+            planner_join_hop1_filter_spec = dict((planner_filter_spec or {}).get("join_hop1_filter") or {})
+            join_hop1_filter_diff = _diff_filter_spec(
+                planner_filter_spec=planner_join_hop1_filter_spec,
+                executed_filter_spec=executed_hop1_filter_spec,
+            )
+            join_hop1_filter_diff_changed = join_hop1_filter_diff.get("changed", {})
+            log_kv(
+                "RAG.JOIN.HOP1.FILTER_SPEC.DIFF",
+                level="error" if join_hop1_filter_diff_changed else "info",
+                planner_filter_keys=join_hop1_filter_diff.get("planner_keys", []),
+                changed=join_hop1_filter_diff_changed,
+                changed_count=len(join_hop1_filter_diff_changed),
+                planner_join_hop1_filter_spec=planner_join_hop1_filter_spec,
+                executed_join_hop1_filter_spec=executed_hop1_filter_spec,
+            )
+            if join_hop1_filter_diff_changed:
+                raise StrategyViolation(
+                    error_code="STRATEGY_MISMATCH",
+                    reason=(
+                        "join Hop1 filter_spec mismatch between planner and executed "
+                        f"(changed_keys={list(join_hop1_filter_diff_changed.keys())})"
+                    ),
+                )
+
             if hop1_strategy == "lookup" and join_key_mode == "group" and seed_join_pjt_nos:
                 hop1_filter = _and_filter(hop1_filter, build_project_id_filter([], seed_join_pjt_nos))
             if hop1_strategy == "skip" and join_key_mode == "instance" and seed_join_pjt_ids:
