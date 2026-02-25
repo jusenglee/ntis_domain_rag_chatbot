@@ -31,8 +31,8 @@ def test_join_hop2_filter_group_mode_clears_join_ids(monkeypatch) -> None:
     assert captured["join_ids"] == []
     assert captured["pjt_nos"] == ["PNO-1"]
     assert captured["resolved_pjt_ids"] == ["202300001234"]
-    assert executed_spec["join_ids_count"] == 0
-    assert executed_spec["pjt_nos_count"] == 1
+    assert executed_spec["_meta"]["join_ids_count"] == 0
+    assert executed_spec["_meta"]["pjt_nos_count"] == 1
 
 
 def test_join_hop2_filter_instance_mode_uses_join_pjt_ids(monkeypatch) -> None:
@@ -60,8 +60,8 @@ def test_join_hop2_filter_instance_mode_uses_join_pjt_ids(monkeypatch) -> None:
 
     assert captured["join_ids"] == ["202300001234"]
     assert captured["resolved_pjt_ids"] == ["202300001234"]
-    assert executed_spec["join_ids_count"] == 1
-    assert executed_spec["pjt_nos_count"] == 0
+    assert executed_spec["_meta"]["join_ids_count"] == 1
+    assert executed_spec["_meta"]["pjt_nos_count"] == 0
 
 
 def test_join_hop2_filter_applies_compiled_spec_filter(monkeypatch) -> None:
@@ -88,7 +88,7 @@ def test_join_hop2_filter_applies_compiled_spec_filter(monkeypatch) -> None:
         compiled_hop2_spec={"collection": "ntis_perf", "qdrant_filter": {"must": ["planner"]}},
     )
 
-    assert executed_spec["planner_hop2_filter_applied"] == 1
+    assert executed_spec["_meta"]["planner_hop2_filter_applied"] == 1
     assert hop2_filter == {"must": ["base", "planner"]}
 
 
@@ -117,3 +117,33 @@ def test_join_hop2_filter_raises_on_compiled_spec_collection_mismatch(monkeypatc
         assert exc.error_code == "PLANNER_JOIN_HOP2_COLLECTION_MISMATCH"
     else:
         raise AssertionError("expected StrategyViolation")
+
+
+def test_diff_filter_spec_semantic_subset_allows_executed_meta_on_join_filter() -> None:
+    planner_filter_spec = {
+        "join_filter": {
+            "must": [
+                {"key": "pjt_id", "match": {"any": ["202300001234"]}},
+            ]
+        }
+    }
+    executed_filter_spec = {
+        "join_filter": {
+            "must": [
+                {"key": "pjt_id", "match": {"any": ["202300001234"]}},
+            ],
+            "should": [],
+            "_meta": {
+                "join_key_mode": "instance",
+                "join_ids_count": 1,
+            },
+        }
+    }
+
+    diff = rag_pipeline._diff_filter_spec(
+        planner_filter_spec=planner_filter_spec,
+        executed_filter_spec=executed_filter_spec,
+    )
+
+    assert diff["planner_keys"] == ["join_filter"]
+    assert diff["changed"] == {}
