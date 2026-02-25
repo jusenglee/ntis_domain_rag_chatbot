@@ -2401,6 +2401,18 @@ def _normalize_strategy_target_cols(cols: Any) -> List[str]:
     return out
 
 
+def _derive_planner_locks(plan: QueryPlan) -> tuple[str, Optional[tuple[str, str]], List[str]]:
+    """planner 스냅샷(mode/relation/target_cols)을 단일 규칙으로 고정한다.
+
+    주의: fallback으로 plan이 교체될 수 있으므로, 실행 전 검증에 사용하는
+    planner lock 값은 항상 최신 plan으로 재동기화해야 한다.
+    """
+    planner_mode_locked = str(getattr(plan, "mode", "") or "").strip().lower()
+    planner_relation_locked = getattr(plan, "relation", None)
+    planner_target_cols_locked = _normalize_strategy_target_cols(getattr(plan, "target_collections", None))
+    return planner_mode_locked, planner_relation_locked, planner_target_cols_locked
+
+
 def _strategy_consistency_or_violation(
         *,
         strict: bool,
@@ -3648,9 +3660,7 @@ def _run_rag_with_vectors(
     )
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "1")
-    planner_mode_locked = str(plan.mode or "").strip().lower()
-    planner_relation_locked = plan.relation
-    planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
+    planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
     _assert_allowlist_only(
         target_cols=planner_target_cols_locked,
         allow_cols=effective_allow,
@@ -3758,6 +3768,7 @@ def _run_rag_with_vectors(
             plan = fallback_plan
             ctx.plan = plan
             ctx.target_collections = list(plan.target_collections)
+            planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
             planner_strategy_mode = plan.mode
             planner_strategy_action = plan.action
             planner_strategy_relation = plan.relation
@@ -3844,6 +3855,7 @@ def _run_rag_with_vectors(
             plan = fallback_plan
             ctx.plan = plan
             ctx.target_collections = list(plan.target_collections)
+            planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
             planner_strategy_mode = plan.mode
             planner_strategy_action = plan.action
             planner_strategy_relation = plan.relation
@@ -4221,6 +4233,8 @@ def _run_rag_with_vectors(
     )
     ctx.plan = plan
     ctx.strategy = strategy
+
+    planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
 
     mode_raw = (strategy.mode or plan.mode or "").strip().lower()
     if mode_raw not in ("search", "lookup", "join"):
