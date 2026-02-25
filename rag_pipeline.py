@@ -2451,13 +2451,35 @@ def _diff_filter_spec(
         planner_filter_spec: Dict[str, Any],
         executed_filter_spec: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """planner가 명시한 filter 계약 키 기준으로 실행 스펙 diff를 계산한다."""
+    """planner가 명시한 subset key 기준으로 실행 filter 스펙 diff를 계산한다."""
+
+    def _semantic_subset_equal(planner_val: Any, exec_val: Any) -> bool:
+        # planner가 명시한 key/subtree만 비교하고, 실행 측의 메타/추가 필드는 허용한다.
+        if isinstance(planner_val, Mapping):
+            if not isinstance(exec_val, Mapping):
+                return False
+            for sub_key, sub_planner_val in planner_val.items():
+                if sub_key not in exec_val:
+                    return False
+                if not _semantic_subset_equal(sub_planner_val, exec_val.get(sub_key)):
+                    return False
+            return True
+
+        if isinstance(planner_val, list):
+            if not isinstance(exec_val, list):
+                return False
+            if len(planner_val) != len(exec_val):
+                return False
+            return all(_semantic_subset_equal(p, e) for p, e in zip(planner_val, exec_val))
+
+        return planner_val == exec_val
+
     planner_keys = sorted(str(k) for k in (planner_filter_spec or {}).keys())
     changed: Dict[str, Dict[str, Any]] = {}
     for key in planner_keys:
         planner_val = planner_filter_spec.get(key)
         exec_val = executed_filter_spec.get(key)
-        if planner_val != exec_val:
+        if not _semantic_subset_equal(planner_val, exec_val):
             changed[key] = {"planner": planner_val, "executed": exec_val}
     return {
         "planner_keys": planner_keys,
@@ -2592,13 +2614,17 @@ def _build_join_hop2_filter(
     if planner_hop2_filter is not None:
         hop2_filter = _and_filter(hop2_filter, planner_hop2_filter)
 
-    executed_join_filter_spec = {
-        "hop2_col": hop2_col,
-        "join_key_mode": join_key_mode,
-        "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
-        "pjt_nos_count": len(join_pjt_nos),
-        "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
-    }
+    executed_join_filter_spec = dict(_serialize_filter_for_log(hop2_filter) or {})
+    executed_join_filter_spec.setdefault("_meta", {})
+    if isinstance(executed_join_filter_spec.get("_meta"), Mapping):
+        executed_join_filter_spec["_meta"] = {
+            **dict(executed_join_filter_spec.get("_meta") or {}),
+            "hop2_col": hop2_col,
+            "join_key_mode": join_key_mode,
+            "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
+            "pjt_nos_count": len(join_pjt_nos),
+            "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
+        }
     return hop2_filter, executed_join_filter_spec
 
 
