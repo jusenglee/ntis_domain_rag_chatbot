@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from rag_parts.planner_contract import StrategyViolation
 from rag_parts.filters import (
     validate_group_join_runtime_keys,
     validate_join_filter_must_keys,
+    validate_join_mode_key_inputs,
     validate_planner_join_keys,
     validate_resolved_join_keys,
 )
@@ -52,3 +54,23 @@ def test_must_key_mismatch_rejected_by_mode():
 
     with pytest.raises(ValueError):
         validate_join_filter_must_keys(mode="instance", must_conditions=[_Cond("pjt_no")])
+
+
+@pytest.mark.parametrize(
+    "mode,join_ids,pjt_nos,ok,reason",
+    [
+        ("instance", ["202300001234"], [], True, None),
+        ("instance", [], [], False, "instance requires pjt_id and forbids pjt_no"),
+        ("instance", ["202300001234"], ["PNO-1"], False, "instance requires pjt_id and forbids pjt_no"),
+        ("group", [], ["PNO-1"], True, None),
+        ("group", [], [], False, "group requires pjt_no and forbids pjt_id"),
+        ("group", ["202300001234"], ["PNO-1"], False, "group requires pjt_no and forbids pjt_id"),
+    ],
+)
+def test_validate_join_mode_key_inputs_matrix(mode, join_ids, pjt_nos, ok, reason):
+    if ok:
+        validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+        return
+
+    with pytest.raises(StrategyViolation, match=reason):
+        validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
