@@ -11,20 +11,22 @@ from .constants import (
     TAG_PJT_INFO,
     normalize_perf_types,
 )
+from .planner_contract import normalize_stats_policy_value
 from .query_intent import (
     QueryIntent,
     classify_query as _classify_query,
     normalize_categories,
     normalize_join_key_mode,
+    normalize_org_terms,
 )
 
 
 def classify_query_compat(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str],
-    hint: Optional[Dict[str, Any]] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str],
+        hint: Optional[Dict[str, Any]] = None,
 ) -> QueryIntent:
     """query_intent.classify_query signature 호환 래퍼."""
     sig = inspect.signature(_classify_query)
@@ -120,6 +122,12 @@ class NormalizedIntent:
     lookup_filter_policy: Optional[str] = None
     lookup_filter_policy_hint: Optional[str] = None
     target_cols: List[str] = field(default_factory=list)
+    wants_rank: bool = False
+    stats_metric: str = "project_participation_count"
+    window_years: int = 3
+    candidate_n: int = 50
+    top_k: int = 1
+    tie_break: str = "performance_count_desc_name_asc"
 
 @dataclass(frozen=True)
 class FilterBundle:
@@ -147,25 +155,25 @@ class JoinHopPlan:
 
 
 def normalize_intent(
-    intent: QueryIntent,
-    *,
-    query: str,
-    keywords: List[str],
-    hint_people_terms: Optional[List[str]] = None,
-    hint_org_terms: Optional[List[str]] = None,
-    hint_org_role: Optional[str] = None,
-    hint_lead_org_terms: Optional[List[str]] = None,
-    hint_participant_org_terms: Optional[List[str]] = None,
-    hint_people_affiliation_org_terms: Optional[List[str]] = None,
+        intent: QueryIntent,
+        *,
+        query: str,
+        keywords: List[str],
+        hint_people_terms: Optional[List[str]] = None,
+        hint_org_terms: Optional[List[str]] = None,
+        hint_org_role: Optional[str] = None,
+        hint_lead_org_terms: Optional[List[str]] = None,
+        hint_participant_org_terms: Optional[List[str]] = None,
+        hint_people_affiliation_org_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
     ids_map = _normalize_ids_map(getattr(intent, "ids_map", None) or getattr(intent, "ids", None) or {})
     ids_flat = _normalize_terms(getattr(intent, "ids_flat", None) or [])
     if not ids_flat:
         ids_flat = _flatten_ids(ids_map)
 
-    org_terms = _normalize_terms(getattr(intent, "org_terms", None) or [])
+    org_terms = normalize_org_terms(_normalize_terms(getattr(intent, "org_terms", None) or []))
     if hint_org_terms:
-        org_terms = _normalize_terms(list(hint_org_terms))
+        org_terms = normalize_org_terms(list(hint_org_terms))
 
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])
 
@@ -177,23 +185,37 @@ def normalize_intent(
 
     org_role = (hint_org_role or getattr(intent, "org_role", None) or "").strip().lower() or None
 
-    lead_org_terms = _normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or [])
-    participant_org_terms = _normalize_terms(
+    lead_org_terms = normalize_org_terms(_normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or []))
+    participant_org_terms = normalize_org_terms(_normalize_terms(
         hint_participant_org_terms or getattr(intent, "participant_org_terms", None) or []
-    )
-    people_affiliation_org_terms = _normalize_terms(
+    ))
+    people_affiliation_org_terms = normalize_org_terms(_normalize_terms(
         hint_people_affiliation_org_terms or getattr(intent, "people_affiliation_org_terms", None) or []
-    )
+    ))
+
+    if not org_terms and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
+        org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
+    if org_role in ("lead", "performer", "performing") and not lead_org_terms and org_terms:
+        lead_org_terms = list(org_terms)
+    if org_role == "participant" and not participant_org_terms and org_terms:
+        participant_org_terms = list(org_terms)
+    if org_role == "affiliation" and not people_affiliation_org_terms and org_terms:
+        people_affiliation_org_terms = list(org_terms)
 
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
+    if action == "rank":
+        action = "stats"
     relation = getattr(intent, "relation", None)
     wants_count = bool(getattr(intent, "wants_count", False))
     wants_list = bool(getattr(intent, "wants_list", False))
     wants_detail = bool(getattr(intent, "wants_detail", False))
+    wants_rank = bool(getattr(intent, "wants_rank", False))
     output_type = str(getattr(intent, "output_type", "") or "").strip().lower() or None
+    if output_type == "rank":
+        output_type = "stats"
     if output_type not in ("stats", "list", "detail", "relation", "summary"):
-        if wants_count:
+        if wants_count or wants_rank:
             output_type = "stats"
         elif wants_list:
             output_type = "list"
@@ -239,6 +261,14 @@ def normalize_intent(
         list(getattr(intent, "contract_violations", None) or []) + join_contract_violations
     )
 
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(intent, "stats_metric", None),
+        window_years=getattr(intent, "window_years", None),
+        candidate_n=getattr(intent, "candidate_n", None),
+        top_k=getattr(intent, "top_k", None),
+        tie_break=getattr(intent, "tie_break", None),
+    )
+
     return NormalizedIntent(
         mode=str(getattr(intent, "mode", "") or "").strip().lower() or None,
         action=action,
@@ -264,7 +294,7 @@ def normalize_intent(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         perf_types=perf_types,
-        keywords=_normalize_terms(getattr(intent, "keywords", None) or []),
+        keywords=_normalize_terms(getattr(intent, "keywords", None) or keywords or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),
         tag_filters=_normalize_terms(getattr(intent, "tag_filters", None) or []),
@@ -276,6 +306,12 @@ def normalize_intent(
         lookup_filter_policy=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
+        wants_rank=wants_rank,
+        stats_metric=stats_policy["stats_metric"],
+        window_years=stats_policy["window_years"],
+        candidate_n=stats_policy["candidate_n"],
+        top_k=stats_policy["top_k"],
+        tie_break=stats_policy["tie_break"],
     )
 
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:

@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .query_intent import normalize_org_terms
+
 from .constants import (
+    COL_PERF,
+    COL_PROJECT,
     PERF_TAGS,
     TAG_RI_PAPER,
     TAG_RI_IPR,
@@ -27,6 +32,7 @@ from .constants import (
     TAG_RI_ORGSM_INFO,
     TAG_RI_ORGSM_RES,
 )
+from .planner_contract import StrategyViolation
 
 # qdrant filter models (optional import)
 try:
@@ -81,6 +87,56 @@ _PJT_ID_VALUE_RE = re.compile(r"^\d{8,12}$")
 # -----------------------------
 NestedCondition = getattr(qmodels, "NestedCondition", None) if qmodels else None
 Nested = getattr(qmodels, "Nested", None) if qmodels else None
+
+logger = logging.getLogger(__name__)
+_PROJECT_KEY_POLICY_LOGGED = False
+
+TITLE_MATCH_MODE_EXACT = "EXACT"
+TITLE_MATCH_MODE_TEXT = "TEXT"
+TITLE_MATCH_MODE_CONTAINS = "CONTAINS"
+TITLE_MATCH_MODES = {TITLE_MATCH_MODE_EXACT, TITLE_MATCH_MODE_TEXT, TITLE_MATCH_MODE_CONTAINS}
+
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    if raw in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return bool(default)
+
+
+def _allow_legacy_meta_keys() -> bool:
+    return _env_bool("RAG_ALLOW_LEGACY_META_KEYS", default=False)
+
+
+def _log_project_key_policy_once() -> None:
+    global _PROJECT_KEY_POLICY_LOGGED
+    if _PROJECT_KEY_POLICY_LOGGED:
+        return
+    _PROJECT_KEY_POLICY_LOGGED = True
+    mode = "legacy-enabled" if _allow_legacy_meta_keys() else "top-level-only"
+    logger.info("project key policy mode=%s (RAG_ALLOW_LEGACY_META_KEYS)", mode)
+
+
+def _project_key_candidates(kind: str) -> List[str]:
+    if kind == "pjt_id":
+        primary = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+        legacy = "meta_basic.pjt_id"
+    else:
+        primary = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+        legacy = "meta_basic.pjt_no"
+
+    key_cands: List[str] = []
+    for key in (primary, kind):
+        if key and key not in key_cands:
+            key_cands.append(key)
+
+    if _allow_legacy_meta_keys() and legacy not in key_cands:
+        key_cands.append(legacy)
+
+    return key_cands
 
 
 def make_match_any(values: List[str]):
@@ -376,14 +432,15 @@ def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
 
 def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
     """참여기관/참여인력소속기관을 nested로 매칭."""
-    if qmodels is None or not spec.terms:
+    terms_norm = normalize_org_terms(spec.terms)
+    if qmodels is None or not terms_norm:
         return None
 
     nested_conditions: List[Any] = []
 
     # prtcp_org[] -> org_nm
     should_org: List[Any] = [
-        qmodels.FieldCondition(key="org_nm", match=make_match_any(spec.terms))
+        qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm))
     ]
     nested_filter_org = _build_filter(must=None, should=should_org, must_not=None, min_should=1)
     nested_org = _make_nested_condition("prtcp_org", nested_filter_org)
@@ -391,7 +448,7 @@ def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
         nested_conditions.append(nested_org)
 
     # prtcp_mp[] -> blng_org_nm
-    nested_mp_org = _build_prtcp_mp_org_nested_filter(spec.terms)
+    nested_mp_org = _build_prtcp_mp_org_nested_filter(terms_norm)
     if nested_mp_org is not None:
         nested_conditions.append(nested_mp_org)
 
@@ -408,7 +465,8 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     - participant: prtcp_org/prtcp_mp nested 중심
     - None: (최상위 org_nm) OR (nested 참여기관/참여인력소속기관)
     """
-    if qmodels is None or not spec.terms:
+    terms_norm = normalize_org_terms(spec.terms)
+    if qmodels is None or not terms_norm:
         return None
 
     role = (spec.role or "").strip().lower() or None
@@ -418,7 +476,7 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     should: List[Any] = []
 
     # 최상위 기관명
-    should.append(qmodels.FieldCondition(key="org_nm", match=make_match_any(spec.terms)))
+    should.append(qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm)))
 
     # role=None 이면 nested도 함께 OR
     if role is None:
@@ -532,13 +590,35 @@ def _build_title_filter_with_keys(terms: List[str], keys: List[str]) -> Optional
         should.append(qmodels.FieldCondition(key=key, match=make_match_any(norm_terms)))
     if not should:
         return None
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
-def build_title_filter(terms: List[str]) -> Optional[Any]:
-    """문서 제목(과제/성과 공통) 기반 서버단 필터."""
-    keys = ["title_text"]
+def build_title_exact_filter(terms: List[str]) -> Optional[Any]:
+    """문서 제목(과제/성과 공통) EXACT(match-any) 기반 서버단 필터."""
+    keys = ["title_text", "title1", "title2"]
     return _build_title_filter_with_keys(terms, keys)
+
+
+def build_title_text_filter(terms: List[str]) -> Optional[Any]:
+    """문서 제목(과제/성과 공통) TEXT(match-text) 기반 서버단 필터."""
+    if qmodels is None:
+        return None
+    norm_terms = [str(t).strip() for t in (terms or []) if str(t).strip()]
+    if not norm_terms:
+        return None
+    keys = ["title_text", "title1", "title2"]
+    should: List[Any] = []
+    match_text_cls = getattr(qmodels, "MatchText", None)
+    if match_text_cls is None:
+        return None
+    for key in keys:
+        if not key:
+            continue
+        for term in norm_terms:
+            should.append(qmodels.FieldCondition(key=key, match=match_text_cls(text=term)))
+    if not should:
+        return None
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 # -----------------------------
@@ -560,7 +640,7 @@ def _build_prtcp_mp_people_nested_filter(
     people_terms = [str(x).strip() for x in (people_terms or []) if str(x).strip()]
     person_ids = [str(x).strip() for x in (person_ids or []) if str(x).strip()]
     gender_terms = [str(x).strip() for x in (gender_terms or []) if str(x).strip()]
-    org_terms = [str(x).strip() for x in (org_terms or []) if str(x).strip()]
+    org_terms = normalize_org_terms([str(x).strip() for x in (org_terms or []) if str(x).strip()])
 
     force_one_must = bool(promote_one_must and not person_ids and len(people_terms) == 1)
 
@@ -693,18 +773,9 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if pjt_id_values and pjt_no_values:
         raise ValueError("build_project_id_filter는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
 
-    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-
-    id_key_cands: List[str] = []
-    for k in [primary_id, "meta_basic.pjt_id", "pjt_id"]:
-        if k and k not in id_key_cands:
-            id_key_cands.append(k)
-
-    no_key_cands: List[str] = []
-    for k in [primary_no, "meta_basic.pjt_no", "pjt_no"]:
-        if k and k not in no_key_cands:
-            no_key_cands.append(k)
+    _log_project_key_policy_once()
+    id_key_cands = _project_key_candidates("pjt_id")
+    no_key_cands = _project_key_candidates("pjt_no")
 
     should: List[Any] = []
     if pjt_id_values:
@@ -712,7 +783,7 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
     if pjt_no_values:
         should.extend(qmodels.FieldCondition(key=k, match=make_match_any(pjt_no_values)) for k in no_key_cands)
 
-    return qmodels.Filter(should=should)
+    return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
 
 # -----------------------------
@@ -736,8 +807,9 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
     validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
 
-    primary_id = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    primary_no = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
+    _log_project_key_policy_once()
+    primary_id = _project_key_candidates("pjt_id")[0]
+    primary_no = _project_key_candidates("pjt_no")[0]
 
     must: List[Any] = []
     if mode == "group":
@@ -751,13 +823,15 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
 
 
 def build_collection_join_filter(
-    *,
-    hop2_col: str,
-    join_key_mode: str,
-    join_ids: List[str],
-    pjt_nos: List[str],
-    query: str = "",
-    fallback_spec: Optional[JoinFilterInput] = None,
+        *,
+        hop2_col: str,
+        join_key_mode: str,
+        join_ids: List[str],
+        pjt_nos: List[str],
+        resolved_pjt_ids: Optional[List[str]] = None,
+        perf_group_strategy: str = "or_both",
+        query: str = "",
+        fallback_spec: Optional[JoinFilterInput] = None,
 ) -> "qmodels.Filter":
     """Hop2 컬렉션 기준으로 JOIN 필터를 생성한다.
 
@@ -769,15 +843,51 @@ def build_collection_join_filter(
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
 
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+    resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
     col_norm = str(hop2_col or "").strip().lower()
-    if col_norm == "ntis_perf":
-        if mode == "group":
-            return build_perf_filter_by_pjt_no(pjt_nos, query)
-        return build_perf_filter_by_pjt_id(join_ids, query)
 
-    if col_norm == "ntis_project":
+    def _canonical_collection(name: str) -> str:
+        norm = str(name or "").strip().lower()
+        if not norm:
+            return ""
+
+        perf_aliases = {"ntis_perf", str(COL_PERF or "").strip().lower()}
+        project_aliases = {"ntis_project", str(COL_PROJECT or "").strip().lower()}
+
+        if norm in perf_aliases or norm.startswith("ntis_perf"):
+            return "ntis_perf"
+        if norm in project_aliases or norm.startswith("ntis_project"):
+            return "ntis_project"
+        return norm
+
+    col_canonical = _canonical_collection(col_norm)
+    if col_canonical == "ntis_perf":
+        if mode == "group":
+            # group 기본 키는 pjt_no 이지만, perf 인덱스/페이로드에서 pjt_no 가용성이 낮은 경우
+            # Hop1에서 수집한 pjt_id 목록으로 fallback 해야 하므로 runtime 키 기준으로 검증한다.
+            # runtime(Hop2) 검증: Hop1 결과가 pjt_id-only 여도 허용
+            validate_group_join_runtime_keys(pjt_nos=pjt_nos_norm, pjt_ids=resolved_pjt_ids)
+            if not pjt_nos_norm:
+                return build_perf_filter_by_pjt_id(
+                    resolved_pjt_ids,
+                    query,
+                    apply_query_tag_inference=False,
+                )
+            return build_perf_filter_group_resolved(
+                pjt_nos_norm,
+                resolved_pjt_ids,
+                strategy=perf_group_strategy,
+                query=query,
+                apply_query_tag_inference=False,
+            )
+        return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
+
+    # non-perf 경로는 planner 계약(join_key_mode)의 입력 규칙을 그대로 적용한다.
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm)
+
+    if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
         return pjt_filter or qmodels.Filter(must=[])
 
@@ -800,27 +910,107 @@ def _is_pjt_no_key(key: str) -> bool:
     return bool(k) and (k == "pjt_no" or k.endswith(".pjt_no"))
 
 
-def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
-    """join_key_mode와 실제 join key 입력의 정합성을 검증한다."""
+
+
+def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
+    """ids_map 입력을 {key: [str, ...]} 형태로 정규화한다."""
+    if not isinstance(ids_map, dict):
+        return {}
+
+    normalized: Dict[str, List[str]] = {}
+    for key, values in ids_map.items():
+        seq = values if isinstance(values, (list, tuple, set)) else [values]
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for value in seq:
+            text = str(value).strip()
+            if not text or text.lower() == "none" or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+        if cleaned:
+            normalized[str(key)] = cleaned
+
+    return normalized
+
+def validate_planner_join_keys(mode: str, ids_map: Any) -> Dict[str, List[str]]:
+    """Planner 입력(ids_map)의 project key 계약(XOR)을 검증한다."""
     mode_norm = str(mode or "").strip().lower()
-    join_ids_norm = _dedupe_non_empty(join_ids)
+    normalized_ids_map = _normalize_ids_map(ids_map)
+
+    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
+    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
+    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
+        raise ValueError(f"PLANNER_MIXED_PROJECT_KEYS: ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})")
+
+    return normalized_ids_map
+
+
+def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str]) -> None:
+    """Executor semantic 계약(입력 join key 모드)을 검증한다."""
+    mode_norm = str(mode or "").strip().lower()
+    pjt_ids_norm = _dedupe_non_empty(pjt_ids)
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
     if mode_norm == "group":
         if not pjt_nos_norm:
-            raise ValueError("join_key_mode=group 에서는 pjt_nos 가 반드시 필요합니다.")
-        if join_ids_norm:
-            raise ValueError("join_key_mode=group 에서는 pjt_no 계열 key만 허용합니다.")
+            raise ValueError("EXECUTOR_GROUP_PJT_NO_REQUIRED: join_key_mode=group 에서는 pjt_nos 가 반드시 필요합니다.")
         return
 
     if mode_norm == "instance":
-        if not join_ids_norm:
-            raise ValueError("join_key_mode=instance 에서는 join_ids(pjt_id) 가 반드시 필요합니다.")
+        if not pjt_ids_norm:
+            raise ValueError("EXECUTOR_INSTANCE_PJT_ID_REQUIRED: join_key_mode=instance 에서는 pjt_ids(pjt_id) 가 반드시 필요합니다.")
         if pjt_nos_norm:
-            raise ValueError("join_key_mode=instance 에서는 pjt_id 계열 key만 허용합니다.")
+            raise ValueError("EXECUTOR_INSTANCE_PJT_NO_FORBIDDEN: join_key_mode=instance 에서는 pjt_no 계열 key를 허용하지 않습니다.")
         return
 
-    raise ValueError(f"지원하지 않는 join_key_mode 입니다: {mode}")
+    raise ValueError(f"EXECUTOR_JOIN_KEY_MODE_INVALID: 지원하지 않는 join_key_mode 입니다: {mode}")
+
+
+def validate_group_join_runtime_keys(*, pjt_nos: List[str], pjt_ids: List[str]) -> None:
+    """group 모드 Hop2 실행 직전의 runtime key 계약을 검증한다.
+
+    Hop1 확장 결과는 pjt_no / pjt_id 중 하나 이상만 존재해도 실행 가능해야 한다.
+    """
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+    pjt_ids_norm = _dedupe_non_empty(pjt_ids)
+    if pjt_nos_norm or pjt_ids_norm:
+        return
+    raise ValueError(
+        "EXECUTOR_GROUP_RUNTIME_KEY_REQUIRED: group Hop2 실행에는 pjt_nos 또는 pjt_ids 중 최소 1개가 필요합니다."
+    )
+
+
+def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
+    """JOIN key 입력 계약을 단일 지점에서 검증한다.
+
+    - instance: pjt_id(join_ids) 필수, pjt_no 금지
+    - group: pjt_no 필수, pjt_id(join_ids) 금지
+    """
+    mode_norm = str(mode or "").strip().lower()
+    join_ids_norm = _dedupe_non_empty(join_ids)
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+
+    if mode_norm == "instance":
+        if join_ids_norm and not pjt_nos_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="instance requires pjt_id and forbids pjt_no",
+        )
+
+    if mode_norm == "group":
+        if pjt_nos_norm and not join_ids_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="group requires pjt_no and forbids pjt_id",
+        )
+
+    raise StrategyViolation(
+        error_code="EXECUTOR_JOIN_KEY_MODE_INVALID",
+        reason=f"unsupported join_key_mode: {mode}",
+    )
 
 
 def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> None:
@@ -840,56 +1030,161 @@ def _dedupe_non_empty(values: List[str]) -> List[str]:
     return list(dict.fromkeys(str(v).strip() for v in (values or []) if str(v).strip()))
 
 
-def _build_perf_filter_for_keys(join_values: List[str], key_cands: List[str], query: str = "") -> "qmodels.Filter":
+def _build_perf_filter_for_keys(
+        join_values: List[str],
+        key_cands: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for perf filter build")
 
     must: List[Any] = []
     join_values_norm = _dedupe_non_empty(join_values)
     if join_values_norm:
-        join_any = qmodels.Filter(
+        join_any = _build_filter(
+            must=None,
             should=[
                 qmodels.FieldCondition(
                     key=k,
                     match=make_match_any(join_values_norm),
                 )
                 for k in key_cands
-            ]
+            ],
+            must_not=None,
+            min_should=1,
         )
         must.append(join_any)
 
-    tag_filters = pick_perf_tag_filters(query)
-    if tag_filters:
-        must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
+    # JOIN Hop2 must 정책: join key(pjt_id/pjt_no) 전용 필터만 구성한다.
+    # query 기반 perf tag 추론은 server-side must에 결합하지 않는다.
+    _ = (query, apply_query_tag_inference)
 
     return qmodels.Filter(must=must, must_not=[])
 
 
-def build_perf_filter_by_pjt_id(pjt_ids: List[str], query: str = "") -> "qmodels.Filter":
+def build_perf_filter_by_pjt_id(
+        pjt_ids: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """PJT_ID 키 계열만 사용해서 perf 필터를 생성한다."""
-    primary = os.getenv("RAG_KEY_PJT_ID", "pjt_id")
-    key_cands: List[str] = []
-    for k in [primary, "meta_basic.pjt_id", "pjt_id"]:
-        if k and k not in key_cands:
-            key_cands.append(k)
-    return _build_perf_filter_for_keys(pjt_ids, key_cands, query)
+    _log_project_key_policy_once()
+    return _build_perf_filter_for_keys(
+        pjt_ids,
+        _project_key_candidates("pjt_id"),
+        query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )
 
 
-def build_perf_filter_by_pjt_no(pjt_nos: List[str], query: str = "") -> "qmodels.Filter":
+def build_perf_filter_by_pjt_no(
+        pjt_nos: List[str],
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """PJT_NO 키 계열만 사용해서 perf 필터를 생성한다."""
-    primary = os.getenv("RAG_KEY_PJT_NO", "pjt_no")
-    key_cands: List[str] = []
-    for k in [primary, "meta_basic.pjt_no", "pjt_no"]:
-        if k and k not in key_cands:
-            key_cands.append(k)
-    return _build_perf_filter_for_keys(pjt_nos, key_cands, query)
+    _log_project_key_policy_once()
+    return _build_perf_filter_for_keys(
+        pjt_nos,
+        _project_key_candidates("pjt_no"),
+        query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )
 
 
-def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
+def build_perf_filter_group_resolved(
+        pjt_nos: List[str],
+        pjt_ids: List[str],
+        strategy: str = "or_both",
+        query: str = "",
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
+    """group 모드(perf)에서 pjt_no/pjt_id를 OR 결합(min_should=1)해 필터를 생성한다."""
+    if qmodels is None:
+        raise RuntimeError("qdrant_client is required for perf filter build")
+
+    _log_project_key_policy_once()
+    pjt_no_values = _dedupe_non_empty(pjt_nos)
+    pjt_id_values = _dedupe_non_empty(pjt_ids)
+
+    strategy_norm = str(strategy or "or_both").strip().lower()
+    if strategy_norm not in {"prefer_pjt_no", "prefer_pjt_id", "or_both"}:
+        raise ValueError(f"지원하지 않는 perf group strategy 입니다: {strategy}")
+
+    should: List[Any] = []
+
+    pjt_no_cond = None
+    if pjt_no_values:
+        pjt_no_should = [
+            qmodels.FieldCondition(key=key, match=make_match_any(pjt_no_values))
+            for key in _project_key_candidates("pjt_no")
+        ]
+        pjt_no_cond = _build_filter(
+            must=None,
+            should=pjt_no_should,
+            must_not=None,
+            min_should=1,
+        )
+
+    pjt_id_cond = None
+    if pjt_id_values:
+        pjt_id_should = [
+            qmodels.FieldCondition(key=key, match=make_match_any(pjt_id_values))
+            for key in _project_key_candidates("pjt_id")
+        ]
+        pjt_id_cond = _build_filter(
+            must=None,
+            should=pjt_id_should,
+            must_not=None,
+            min_should=1,
+        )
+
+    if strategy_norm == "prefer_pjt_no":
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+    elif strategy_norm == "prefer_pjt_id":
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+    else:
+        if pjt_no_cond:
+            should.append(pjt_no_cond)
+        if pjt_id_cond:
+            should.append(pjt_id_cond)
+
+    must: List[Any] = []
+    if should:
+        must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
+
+    # JOIN Hop2 must 정책: group 모드 역시 join key 전용 필터만 구성한다.
+    # query 기반 perf tag 추론은 server-side must에 결합하지 않는다.
+    _ = (query, apply_query_tag_inference)
+
+    return qmodels.Filter(must=must, must_not=[])
+
+
+def build_perf_filter(
+        spec: PerfFilterInput,
+        *,
+        apply_query_tag_inference: bool = False,
+) -> "qmodels.Filter":
     """(호환용) join_ids 타입을 검증해 pjt_id/pjt_no 전용 API로 위임한다."""
     join_ids = _dedupe_non_empty(spec.join_ids)
     if not join_ids:
-        return _build_perf_filter_for_keys([], [], spec.query)
+        return _build_perf_filter_for_keys(
+            [],
+            [],
+            spec.query,
+            apply_query_tag_inference=apply_query_tag_inference,
+        )
 
     has_pjt_id = any(_PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
     has_pjt_no = any(not _PJT_ID_VALUE_RE.fullmatch(v or "") for v in join_ids)
@@ -897,5 +1192,13 @@ def build_perf_filter(spec: PerfFilterInput) -> "qmodels.Filter":
         raise ValueError("PerfFilterInput.join_ids는 pjt_id 또는 pjt_no 단일 타입만 허용합니다.")
 
     if has_pjt_id:
-        return build_perf_filter_by_pjt_id(join_ids, spec.query)
-    return build_perf_filter_by_pjt_no(join_ids, spec.query)
+        return build_perf_filter_by_pjt_id(
+            join_ids,
+            spec.query,
+            apply_query_tag_inference=apply_query_tag_inference,
+        )
+    return build_perf_filter_by_pjt_no(
+        join_ids,
+        spec.query,
+        apply_query_tag_inference=apply_query_tag_inference,
+    )

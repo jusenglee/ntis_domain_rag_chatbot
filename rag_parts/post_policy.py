@@ -15,11 +15,11 @@ def _normalize_tag_value(tag: object) -> str:
     return t[4:] if t.startswith("IRD_") else t
 
 def tag_match_bonus(
-    p: Any,
-    *,
-    tag_filters: Optional[Iterable[str]],
-    boost: float,
-    mismatch_penalty: float = 0.0,
+        p: Any,
+        *,
+        tag_filters: Optional[Iterable[str]],
+        boost: float,
+        mismatch_penalty: float = 0.0,
 ) -> float:
     if not tag_filters:
         return 0.0

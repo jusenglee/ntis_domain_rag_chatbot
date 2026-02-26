@@ -5,8 +5,6 @@ import json
 import time
 import os
 import re
-import hashlib
-from functools import lru_cache
 from typing import Annotated, Optional, List, Dict, Any, Literal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,7 +20,7 @@ from dataclasses import replace
 import redis.asyncio as redis
 
 # LangChain & LangGraph
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain_core.tools import Tool
@@ -37,10 +35,12 @@ from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
 from rag_pipeline import run_rag_ab_compare
+from retrieval import ensure_keyword_index
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
-from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck
+from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
 from schemas import IntentPayloadV2
+from retrieval import ensure_keyword_index
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -91,6 +91,7 @@ def setup_file_logging(log_path="logs/server3.log"):
 setup_file_logging()
 
 templates = Jinja2Templates(directory="templates")
+TEMPLATE_INDEX_PATH = Path("templates/index.html")
 
 # --- Configuration ---
 kv_store: Optional[KVStore] = None
@@ -118,6 +119,17 @@ RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+RAG_KEY_PJT_ID = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+RAG_KEY_PJT_NO = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+
+
+def _has_superlative_cue(text: str) -> bool:
+    query = (text or "").strip().lower()
+    return any(cue in query for cue in SUPERLATIVE_CUES)
+
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -132,6 +144,7 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "retrieval_query",
     "confidence",
 }
+
 
 def _select_max_tokens_hint(qa: Optional["QuestionAnalysis"]) -> Optional[int]:
     if not qa:
@@ -150,6 +163,18 @@ def _truncate_text(value: Optional[str], limit: int = HISTORY_PREVIEW_LIMIT) -> 
         return text[:limit] + "..."
     return text
 
+
+def _is_debug_logging_enabled() -> bool:
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mask_query_for_log(query: str, *, max_len: int = 80) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    clipped = text[:max_len]
+    return clipped + ("...(truncated)" if len(text) > max_len else "")
+
 def _safe_json_loads(raw: Optional[str]) -> Any:
     if not raw:
         return None
@@ -158,90 +183,6 @@ def _safe_json_loads(raw: Optional[str]) -> Any:
     except json.JSONDecodeError:
         logger.warning("JSON decode failed for redis payload: %s", _truncate_text(raw))
         return None
-
-
-def _as_nonempty_text(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _latency_ms(latencies: Dict[str, float], key: str) -> Optional[int]:
-    value = latencies.get(key)
-    if value is None:
-        return None
-    try:
-        return int(float(value) * 1000)
-    except (TypeError, ValueError):
-        return None
-
-
-def _select_final_answer(
-    state: "AgentState",
-    *,
-    policy: Optional[str] = None,
-    solar_deadline_ms: Optional[int] = None,
-) -> Dict[str, Any]:
-    resolved_policy = (policy or DUAL_MODEL_MERGE_POLICY or "solar_first").strip().lower()
-    if resolved_policy not in {"solar_first", "gemma_first"}:
-        logger.warning("Unknown DUAL_MODEL_MERGE_POLICY=%s, fallback to solar_first", resolved_policy)
-        resolved_policy = "solar_first"
-
-    deadline_ms = SOLAR_DEADLINE_MS if solar_deadline_ms is None else solar_deadline_ms
-
-    solar_text = _as_nonempty_text(state.answer_solar)
-    gemma_text = _as_nonempty_text(state.answer_gemma)
-    solar_dt_ms = _latency_ms(state.latencies, "generate_answer_solar")
-    gemma_dt_ms = _latency_ms(state.latencies, "generate_answer_gemma")
-
-    solar_within_deadline = solar_text is not None and (solar_dt_ms is None or solar_dt_ms <= deadline_ms)
-    solar_abnormal = (solar_text is None) or (solar_dt_ms is not None and solar_dt_ms > deadline_ms)
-    gemma_normal = gemma_text is not None
-
-    if resolved_policy == "gemma_first":
-        if gemma_normal:
-            return {
-                "answer": gemma_text,
-                "chosen_model": "gemma",
-                "reason": "policy_gemma_first",
-                "solar_dt_ms": solar_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-        if solar_within_deadline:
-            return {
-                "answer": solar_text,
-                "chosen_model": "solar",
-                "reason": "policy_gemma_first_fallback_to_solar",
-                "solar_dt_ms": solar_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-    else:
-        if solar_within_deadline:
-            return {
-                "answer": solar_text,
-                "chosen_model": "solar",
-                "reason": "solar_ok_within_deadline",
-                "solar_dt_ms": solar_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-        if solar_abnormal and gemma_normal:
-            return {
-                "answer": gemma_text,
-                "chosen_model": "gemma",
-                "reason": "solar_timeout_or_empty_use_gemma",
-                "solar_dt_ms": solar_dt_ms,
-                "gemma_dt_ms": gemma_dt_ms,
-            }
-
-    return {
-        "answer": DUAL_MODEL_FALLBACK_MESSAGE,
-        "chosen_model": "fallback",
-        "reason": "both_models_abnormal",
-        "solar_dt_ms": solar_dt_ms,
-        "gemma_dt_ms": gemma_dt_ms,
-    }
-
 
 def _serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
@@ -291,93 +232,6 @@ def _apply_title_preference(mapped_doc: Dict[str, Any]) -> None:
     preferred_title = _resolve_title_from_payload(mapped_doc)
     if preferred_title:
         mapped_doc["title"] = preferred_title
-
-
-def _truncate_with_suffix(value: Any, max_chars: int) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars] + "..."
-    return text
-
-
-def _extract_allowed_render_fields(
-    hit_data: Dict[str, Any],
-    *,
-    allowed_fields: tuple[str, ...] = RAG_RENDER_TEXT_FIELDS,
-    max_chars_per_field: int = RAG_RENDER_TEXT_MAX_CHARS,
-    max_chars_total: int = RAG_RENDER_TEXT_TOTAL_MAX_CHARS,
-) -> Dict[str, str]:
-    """렌더링에 의미 있는 텍스트 필드만 allowlist 기반으로 안전 추출한다."""
-    render_fields: Dict[str, str] = {}
-    total_len = 0
-    for field_name in allowed_fields:
-        if field_name not in hit_data:
-            continue
-        raw = hit_data.get(field_name)
-        if raw is None:
-            continue
-        text = _truncate_with_suffix(raw, max_chars_per_field)
-        if not text:
-            continue
-        if max_chars_total > 0:
-            remaining = max_chars_total - total_len
-            if remaining <= 0:
-                break
-            if len(text) > remaining:
-                text = _truncate_with_suffix(text, remaining)
-        if text:
-            render_fields[field_name] = text
-            total_len += len(text)
-    return render_fields
-
-
-def _build_refine_sample_preview(docs: List[Dict[str, Any]], is_detail: bool) -> Dict[str, Any]:
-    if not docs:
-        return {"sample_size": 0, "before_nonempty": 0, "after_nonempty": 0, "delta": 0}
-
-    sample_docs = docs[:max(RAG_RENDER_SAMPLE_SIZE, 1)]
-    before_nonempty = 0
-    after_nonempty = 0
-
-    for doc in sample_docs:
-        mapped_doc = _safe_map_doc(doc, context="rag_preview_compare")
-        if not mapped_doc:
-            continue
-        _apply_title_preference(mapped_doc)
-        before = format_metadata(
-            mapped_doc.get("meta_basic", {}),
-            max_sentences=MAX_FIELD_SENTENCES,
-            max_tokens=MAX_FIELD_TOKENS,
-        )
-        if is_detail:
-            detail = format_metadata(
-                mapped_doc.get("meta_detail", {}),
-                max_sentences=MAX_FIELD_SENTENCES,
-                max_tokens=MAX_FIELD_TOKENS,
-            )
-            before = "\n".join(part for part in [before, detail] if part)
-        after = format_metadata(
-            {
-                "meta_basic": mapped_doc.get("meta_basic", {}),
-                "meta_detail": mapped_doc.get("meta_detail", {}),
-                "render_text": {k: mapped_doc.get(k) for k in RAG_RENDER_TEXT_FIELDS if mapped_doc.get(k)},
-            },
-            max_sentences=MAX_FIELD_SENTENCES,
-            max_tokens=MAX_FIELD_TOKENS,
-        )
-        if before.strip():
-            before_nonempty += 1
-        if after.strip():
-            after_nonempty += 1
-
-    return {
-        "sample_size": len(sample_docs),
-        "before_nonempty": before_nonempty,
-        "after_nonempty": after_nonempty,
-        "delta": after_nonempty - before_nonempty,
-    }
 
 Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
@@ -467,7 +321,14 @@ class QuestionAnalysisV2(BaseModel):
             d["action"] = action_alias.get(act_norm, act_norm)
 
         relation = d.get("relation")
-        if isinstance(relation, str):
+        if isinstance(relation, (list, tuple)) and len(relation) == 2:
+            lhs = str(relation[0]).strip().lower()
+            rhs = str(relation[1]).strip().lower()
+            if lhs and rhs:
+                d["relation"] = f"{lhs}_{rhs}"
+            else:
+                d["relation"] = None
+        elif isinstance(relation, str):
             rel = relation.strip().lower()
             d["relation"] = rel or None
 
@@ -530,6 +391,24 @@ class QuestionAnalysisV2(BaseModel):
         elif not isinstance(tc, list):
             d["target_cols"] = []
 
+        # project 중심 people/org LOOKUP은 target_cols를 project로 정규화
+        mode_norm = str(d.get("mode") or "").strip().upper()
+        head_norm = str(d.get("head") or "").strip().lower()
+        filters = d.get("filters") if isinstance(d.get("filters"), dict) else {}
+        has_people_org_filters = any(
+            bool(filters.get(k))
+            for k in (
+                "participant_researcher_name",
+                "participant_researcher_id",
+                "lead_org_name",
+                "participant_org_name",
+                "people_affiliation_org_name",
+                "org_name",
+            )
+        )
+        if mode_norm == "LOOKUP" and (head_norm == "project" or (head_norm in ("people", "org") and has_people_org_filters)):
+            d["target_cols"] = ["ntis_project_v1"]
+
         # --- limit/confidence coercion (파싱 실패 방지) ---
         if "limit" in d and not isinstance(d.get("limit"), int):
             try:
@@ -564,6 +443,7 @@ class QuestionAnalysisV2(BaseModel):
         (실행 직전 validate_planner_contract에서 수집/차단)
 
         단, 모드가 JOIN이 아닐 때 join_key_mode가 들어오면 실행 혼선을 막기 위해 null로 정규화한다.
+        또한 사람/기관 이름 기반 질의는 SEARCH 오염 방지를 위해 LOOKUP 우선으로 정규화한다.
         """
         if self.mode != "JOIN":
             # 파싱 단계에서는 실패시키지 않고 정규화만 한다.
@@ -572,6 +452,41 @@ class QuestionAnalysisV2(BaseModel):
             except Exception:
                 # Pydantic config가 frozen인 경우 등
                 pass
+
+        if self.mode == "SEARCH":
+            filters = dict(self.filters or {})
+            name_lookup_keys = (
+                "participant_researcher_name",
+                "participant_researcher_names",
+                "participant_researcher",
+                "participant_researchers",
+                "researcher_name",
+                "researcher_names",
+                "researcher",
+                "people_name",
+                "lead_org_name",
+                "participant_org_name",
+                "people_affiliation_org_name",
+                "org_name",
+                "org",
+            )
+
+            def _has_non_empty(v: Any) -> bool:
+                if v is None:
+                    return False
+                if isinstance(v, str):
+                    return bool(v.strip())
+                if isinstance(v, (list, tuple, set)):
+                    return any(str(x).strip() for x in v if x is not None)
+                return bool(str(v).strip())
+
+            has_name_lookup_signal = any(_has_non_empty(filters.get(k)) for k in name_lookup_keys)
+            if has_name_lookup_signal:
+                try:
+                    object.__setattr__(self, "mode", "LOOKUP")
+                except Exception:
+                    pass
+
         return self
 
 
@@ -619,7 +534,6 @@ class AgentState(BaseModel):
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
-    prepared_context_text: Optional[str] = None
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -662,6 +576,11 @@ def measure_latency(node_name: str):
         return wrapper
     return decorator
 
+
+
+def _format_coq(conversation_id: str, question: str) -> str:
+    return f"coq: {conversation_id} | q: {question}"
+
 # --- Node 1: Load Memory ---
 @measure_latency("load_memory")
 async def node_load_memory(state: AgentState) -> Dict[str, Any]:
@@ -671,7 +590,7 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     current_full_history = loaded_history + [state.messages[-1]]
 
     log_section("LOAD MEMORY",
-                f"coq: {cid}{state.messages[-1].content}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
+                f"{_format_coq(cid, state.messages[-1].content)}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
     return {
         "question": state.messages[-1].content,
         "chat_history": current_full_history,
@@ -680,10 +599,25 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     }
 
 # --- Node 2: Rule-based Precheck ---
+def _is_short_query_exception(raw_query: str) -> bool:
+    """짧은 질의라도 약어/코드/ID 패턴이면 검색 플로우를 허용한다."""
+    text = str(raw_query or "").strip()
+    if not text:
+        return False
+
+    compact = re.sub(r"[\s\-_/]", "", text)
+    if re.fullmatch(r"\d{6,}", compact):
+        return True
+    if re.fullmatch(r"[A-Z]{3,}", compact):
+        return True
+    return False
+
+
 @measure_latency("rule_precheck")
 async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
     """규칙 기반 빠른 판단"""
-    user_msg = state.messages[-1].content.strip().lower()
+    raw_user_msg = state.messages[-1].content.strip()
+    user_msg = raw_user_msg.lower()
 
     greetings = ["안녕", "hello", "hi", "헬로", "반가워", "ㅎㅇ"]
     if any(g in user_msg for g in greetings) and len(user_msg) < 10:
@@ -695,7 +629,7 @@ async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
             )
         }
 
-    if len(user_msg) < 5:
+    if len(raw_user_msg) < 5 and not _is_short_query_exception(raw_user_msg):
         return {
             "rule_decision": RuleDecision(
                 action="direct_answer",
@@ -792,11 +726,17 @@ async def _run_question_analysis(
         ====================
         - SEARCH: 탐색형(누락 방지 최우선). server-side must 필터로 후보를 먼저 자르지 않습니다.
         - LOOKUP: 정확형(필터/ID 기반). server-side 하드필터로 정답집합 근처를 강제합니다.
-        - JOIN: 2-hop 관계형(project↔perf). Hop1에서 키를 확보하고 Hop2에서 하드필터로 강제합니다.
+        - JOIN: 2-hop 관계형(project↔perf). join_key_mode+ids_map+people/org 게이트를 먼저 판정해
+          Hop1(skip/lookup/search)을 선택하고, Hop2에서 하드필터로 강제합니다.
         
         ====================
         [Mode 결정 규칙(우선순위)]
         ====================
+        선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
+        - relation은 ["project","perf"](= "project_perf")로 확정
+        - head는 반드시 "perf"로 확정
+        - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
+
         A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
            - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
         B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
@@ -807,9 +747,17 @@ async def _run_question_analysis(
         예시:
         - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
         - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
+
+        [관계형 성과 키워드 사전]
+        - 핵심 키워드(예시): "파생 성과", "성과", "논문", "특허", "산출물"
+        - 패턴 예시: "과제 + (성과|논문|특허|산출물)", "~에서 나온 성과", "~의 파생 성과"
+        - 위 패턴이 감지되면 planner는 처음부터 JOIN 전략을 출력해야 하며,
+          실행단에서 mode/relation 보정이 필요하지 않도록 합니다.
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
+        - 사람 이름/기관명 기반 질의(예: "신동구 참여과제", "김재수 논문", "삼성 참여 과제")는 반드시 mode="LOOKUP"을 우선합니다.
+        - 특히 project를 목적 엔티티로 판단 가능한 people/org->project 질의는 JOIN 금지, LOOKUP 고정으로 계획합니다.
         - people/org 식별 Hop1(2-hop)은 기본 비활성입니다. (동명이인/식별자 요구 등 예외에서만 사용)
         
         ====================
@@ -841,6 +789,7 @@ async def _run_question_analysis(
         - "ntis_project_v1" / "ntis_perf_v1" 중 선택
         - LOOKUP/JOIN은 필요한 컬렉션만 최소로 선택합니다.
           * "신동구 참여과제" => ["ntis_project_v1"]
+          * project 기반 people/org 필터 질의는 target_cols를 project 중심으로 정규화합니다(기본: ["ntis_project_v1"]).
           * "OO기관 성과" => ["ntis_perf_v1"]
           * project↔perf JOIN => ["ntis_project_v1","ntis_perf_v1"]
         - SEARCH는 기본적으로 두 컬렉션 모두 가능하나, head가 명확하면 1개만 선택 가능합니다.
@@ -881,7 +830,15 @@ async def _run_question_analysis(
         - lead_org_name (배열)               : org_nm (수행기관)
         - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
         - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
-        - org_role (문자열, 선택): "lead" | "participant" | null
+        - year_from / year_to (문자열): 예) "2021" ~ "2023", "2020" 이후는 year_from만
+        - perf_types (배열): ["논문", "특허", "보고서", ...] 성과유형
+        - title_terms (배열): 타이틀 키워드
+        - org_role (문자열, 선택): "lead" | "participant" | "affiliation" | null
+        - 기관 슬롯은 역할별로 엄격 분리합니다(혼용 금지):
+          * "ETRI 수행 과제" -> lead_org_name=["ETRI"]
+          * "ETRI 참여 과제" -> participant_org_name=["ETRI"]
+          * "ETRI 소속 연구자 과제" -> people_affiliation_org_name=["ETRI"]
+          * 역할이 명확하면 해당 슬롯 외 나머지 두 슬롯은 반드시 []
         
         사람/기관 필터 강도 규칙(중요):
         - ID가 있으면 must 수준(LOOKUP 하드필터)로 가정
@@ -916,8 +873,15 @@ async def _run_question_analysis(
           * join_key_mode="group" => ids_map.pjt_no만 허용
         
         1) relation="project_perf"
-          - join_key_mode="instance": Hop2(perf)에서 pjt_id == PJT_ID must
-          - join_key_mode="group": Hop2(perf)에서 pjt_no == PJT_NO must
+          - head="perf"를 기본으로 사용
+          - Hop1 전략 우선순위(항상 SEARCH 아님):
+            * instance + ids_map.pjt_id 존재 => 기본 Hop1 skip (옵션 플래그일 때만 최소 보강 lookup 허용)
+            * group + ids_map.pjt_no 존재 => Hop1 search 금지, lookup(pjt_no must) 강제
+            * seed key가 없고 people/org 조건 존재 => Hop1 lookup(people/org gate)
+            * seed key도 people/org gate도 없을 때만 => Hop1 search
+          - hop2(perf): hop1/seed에서 확보한 키 집합을 하드필터로 적용
+            * join_key_mode="instance": pjt_id IN (...) must
+            * join_key_mode="group": pjt_no IN (...) must
         
         2) relation="perf_project"
           - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
@@ -987,10 +951,10 @@ async def _run_question_analysis(
                 attempt,
                 attempt - 1,
                 0,
-            )
+                )
             log_section(
                 "QUESTION ANALYSIS",
-                f"coq: {conversation_id}{question}\n"
+                f"{_format_coq(conversation_id, question)}\n"
                 f"StrategyVersion: {result.strategy_version}\n"
                 f"Mode: {result.mode}\n"
                 f"Head: {result.head}\n"
@@ -1034,7 +998,7 @@ async def _run_question_analysis(
         max_attempts - 1,
         type(last_error).__name__ if last_error else "unknown",
         last_error,
-    )
+        )
     raise StrategyViolation(
         error_code="PLANNER_PARSE_FINAL_FAILED",
         reason=str(last_error or "planner parse failed"),
@@ -1082,7 +1046,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1097,7 +1061,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1162,7 +1126,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         })
 
         log_section("KNOWLEDGE SUFFICIENCY",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Requires New: {result.requires_new_knowledge}\n"
                     f"Search Intent: {result.search_intent}\n"
                     f"Query: {result.retrieval_query}\n"
@@ -1195,6 +1159,51 @@ class CustomRAGRetriever(BaseModel):
     intent_payload: Optional[IntentPayloadV2] = None
 
     @staticmethod
+    def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV2] = None) -> Optional[str]:
+        tag = hit_data.get("tag")
+        if tag:
+            return str(tag)
+
+        collection = str(hit_data.get("_collection") or "").strip().lower()
+        if collection.startswith("ntis_project"):
+            return "IRD_NAI_PJT_INFO"
+        if collection.startswith("ntis_perf"):
+            # 성과 컬렉션에서 태그가 누락된 경우 기본 성과 스키마로 보정
+            return "IRD_NAI_RI_PAPER"
+
+        normalized_intent = getattr(intent_payload, "normalized_intent", None)
+        target_cols = getattr(normalized_intent, "target_cols", None) if normalized_intent else None
+        if isinstance(target_cols, list):
+            lowered = [str(c).strip().lower() for c in target_cols]
+            if any(c.startswith("ntis_project") for c in lowered):
+                return "IRD_NAI_PJT_INFO"
+            if any(c.startswith("ntis_perf") for c in lowered):
+                return "IRD_NAI_RI_PAPER"
+
+        return None
+
+    @staticmethod
+    def _has_minimum_document_fields(hit_data: Dict[str, Any]) -> bool:
+        candidates = [
+            hit_data.get("doc_id"),
+            hit_data.get("title"),
+            hit_data.get("title_text"),
+            hit_data.get("title1"),
+            hit_data.get("content"),
+            hit_data.get("meta_basic"),
+            hit_data.get("meta_detail"),
+            hit_data.get("prtcp_mp"),
+            hit_data.get("prtcp_org"),
+        ]
+        for val in candidates:
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            return True
+        return False
+
+    @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV2]) -> Optional[Dict[str, Any]]:
         """RAG intent_payload.v2 송신 계약: normalized_intent 단일 필드만 전달."""
         if intent_payload is None:
@@ -1215,6 +1224,28 @@ class CustomRAGRetriever(BaseModel):
 
         hits = getattr(res_m, "reranked_hits", []) or []
         fallback_context = getattr(res_m, "context", "")
+        aggregation = getattr(res_m, "aggregation", None) or {}
+
+        rank_items = aggregation.get("rank_items") if isinstance(aggregation, dict) else None
+        if isinstance(rank_items, list) and rank_items:
+            agg_metric = str(aggregation.get("metric") or "project_participation_count")
+            agg_candidate_docs = int(aggregation.get("candidate_docs") or 0)
+            agg_window_years = aggregation.get("window_years") or {}
+            documents = []
+            for idx, item in enumerate(rank_items[:self.top_k], start=1):
+                documents.append({
+                    "title": f"{idx}. {item.get('hm_nm') or item.get('hm_id') or item.get('person_key')}",
+                    "source_index": idx,
+                    "source_type": "aggregation",
+                    "metric": agg_metric,
+                    "window_years": agg_window_years,
+                    "candidate_docs": agg_candidate_docs,
+                    "rank_item": dict(item),
+                })
+            return {
+                "documents": documents,
+                "fallback_context": fallback_context.strip() or None,
+            }
 
         if not hits:
             return {
@@ -1231,24 +1262,21 @@ class CustomRAGRetriever(BaseModel):
             else:
                 hit_data = getattr(hit, "__dict__", {})
 
-            safe_render_fields = _extract_allowed_render_fields(hit_data)
-
+            inferred_tag = self._infer_tag_from_hit_data(hit_data, self.intent_payload)
             rag_data = {
                 "title": _resolve_title_from_payload(hit_data),
-                "title_text": hit_data.get("title_text"),
-                "title1": hit_data.get("title1"),
-                "title2": hit_data.get("title2"),
                 "source_index" : idx,
                 "source_type": "hit",
-                "tag" : hit_data.get("tag"),
+                "tag" : inferred_tag,
+                "doc_id": hit_data.get("doc_id"),
+                "_collection": hit_data.get("_collection"),
                 "meta_basic" : hit_data.get("meta_basic", {}),
                 "meta_detail" : hit_data.get("meta_detail", {}),
-                "prtcp_mp" : hit_data.get("prtcp_mp", [])
+                "prtcp_mp" : hit_data.get("prtcp_mp", []),
+                "prtcp_org": hit_data.get("prtcp_org", []) or [],
             }
 
-            rag_data.update(safe_render_fields)
-
-            if hit_data.get("tag") is not None:
+            if inferred_tag is not None or self._has_minimum_document_fields(hit_data):
                 documents.append(rag_data)
 
         return {
@@ -1260,14 +1288,25 @@ class CustomRAGRetriever(BaseModel):
 def _is_hit_source(doc: Dict[str, Any]) -> bool:
     return doc.get("source_type", "hit") == "hit"
 
+def _friendly_strategy_violation_message(
+        *,
+        error_code: str,
+        reason: str,
+        question_analysis: Optional[QuestionAnalysis],
+) -> str:
+    mode = str(getattr(question_analysis, "mode", "") or "").strip().upper()
+    action = str(getattr(question_analysis, "action", "") or "").strip().lower()
+    ids_map = getattr(question_analysis, "ids_map", None) or {}
+    has_explicit_id = isinstance(ids_map, dict) and any(bool(v) for v in ids_map.values())
 
-def _filter_hit_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [doc for doc in docs if isinstance(doc, dict) and _is_hit_source(doc)]
+    if error_code == "RAG_EMPTY_RESULT_CONTRACT" and mode == "LOOKUP" and (action == "detail" or has_explicit_id):
+        return "요청하신 식별자(ID)에 해당하는 상세 정보를 찾지 못했습니다. ID를 다시 확인해 주세요."
+    return "요청을 처리하는 중 검색 전략 계약 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
 def _resolve_rag_queries(
-    state: AgentState,
-    qa: Optional[QuestionAnalysis],
-    ks: Optional[KnowledgeSufficiency],
+        state: AgentState,
+        qa: Optional[QuestionAnalysis],
+        ks: Optional[KnowledgeSufficiency],
 ) -> tuple[str, str, str, float]:
     raw_query = state.question
     hint_query = (ks.retrieval_query if ks else None) or (qa.retrieval_query if qa else None) or raw_query
@@ -1316,7 +1355,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
             )
 
         log_section("RAG SEARCH",
-                    f"coq: {state.conversation_id}{state.question}\n"
+                    f"{_format_coq(state.conversation_id, state.question)}\n"
                     f"Query: {search_query}\n"
                     f"Found: {len(docs)} docs\n")
         log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
@@ -1326,7 +1365,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
     except StrategyViolation:
         raise
     except Exception as e:
-        logger.exception(f"❌ RAG Error: {e}")
+        logger.error(f"❌ RAG Error: {e}")
         return {"context": []}
 
 
@@ -1353,287 +1392,62 @@ def _build_llm(model_name: str):
         )
     return TritonChatModel(model_name=model_name)
 
-@lru_cache(maxsize=1)
-def _read_system_prompt_cached(path_str: str) -> str:
-    return Path(path_str).read_text(encoding="utf-8")
-
+import aiofiles
 
 async def load_system_prompt(path: Path) -> str:
-    return await asyncio.to_thread(_read_system_prompt_cached, str(path.resolve()))
-
-
-@measure_latency("prepare_answer_context")
-async def node_prepare_answer_context(state: AgentState) -> Dict[str, Any]:
-    """모델 공통 답변 컨텍스트를 1회 생성해 병렬 노드에서 재사용"""
-    qa = state.question_analysis
-
-    docs_for_ctx = _filter_hit_documents(state.context) or _filter_hit_documents(state.prev_context)
-    fallback_context = state.fallback_context if state.context else None
-    is_detail = bool(qa and qa.mode == "JOIN")
-    researcher_hints = _build_researcher_hints_from_question_analysis(qa)
-
-    if docs_for_ctx:
-        preview_stats = _build_refine_sample_preview(docs_for_ctx, is_detail)
-        logger.info(
-            "[RAG_TEXT_PREVIEW] sample=%s before_nonempty=%s after_nonempty=%s delta=%s",
-            preview_stats.get("sample_size", 0),
-            preview_stats.get("before_nonempty", 0),
-            preview_stats.get("after_nonempty", 0),
-            preview_stats.get("delta", 0),
-        )
-        context_text = refine_documents_rule_based(
-            docs_for_ctx,
-            is_detail,
-            researchers=researcher_hints,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
-            relax_limits=True,
-        )
-    elif fallback_context:
-        context_text = f"[참고 문맥(근거 아님)]\n{fallback_context}"
-    else:
-        context_text = "없음"
-
-    return {"prepared_context_text": context_text}
-
-
-def _build_answer_prompt_inputs(state: AgentState, context_text: str) -> Dict[str, str]:
-    history_text = "\n".join(
-        f"{('사용자' if isinstance(msg, HumanMessage) else '어시스턴트')}: {msg.content}"
-        for msg in state.messages[:-1]
-    ) or "없음"
-    return {
-        "history": history_text,
-        "prev_context": context_text,
-        "question": state.messages[-1].content,
-    }
-
-
-def _format_prompt_for_logging(prompt: ChatPromptTemplate, prompt_inputs: Dict[str, str]) -> str:
-    rendered = prompt.format_prompt(**prompt_inputs).to_messages()
-    lines = []
-    for msg in rendered:
-        role = type(msg).__name__.replace("Message", "").upper()
-        lines.append(f"[{role}]\n{msg.content}")
-    return "\n\n".join(lines)
-
-
-def _apply_response_char_limit(text: str, max_chars: int) -> tuple[str, bool]:
-    cleaned = (text or "").replace("<eos>", "").strip()
-    if max_chars <= 0:
-        return cleaned, False
-    if len(cleaned) <= max_chars:
-        return cleaned, False
-    return cleaned[:max_chars].rstrip() + "…", True
+    async with aiofiles.open(path, encoding="utf-8") as f:
+        return await f.read()
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    llm = _build_llm(model_name)
+    llm = TritonChatModel(model_name=model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
+    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
+    docs_for_ctx = state.context or state.prev_context or []
+    is_detail = False
 
+    # ✅ 2) JOIN이면 detail 우선
+    if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
+        is_detail = True
 
-
-    context_text = state.prepared_context_text or "없음"
+    context_text = (
+        refine_documents_rule_based(
+            docs_for_ctx,
+            is_detail,
+            org_filters=(qa.filters if qa else None),
+            ids_map=(qa.ids_map if qa else None),
+            relax_limits=True,
+        )
+        if docs_for_ctx
+        else "없음"
+    )
     # log_section("context_text - 페이로드 평탄화 후 데이터",
     #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human",
-         "[대화 이력]\n{history}\n\n"
-         "[참고 문서]\n{prev_context}\n\n"
-         "[현재 질문]\n{question}")
-    ])
-    chain = prompt | llm
-    prompt_inputs = _build_answer_prompt_inputs(state, context_text)
-    prompt_log_text = _format_prompt_for_logging(prompt, prompt_inputs)
-    prompt_fingerprint = hashlib.sha1(prompt_log_text.encode("utf-8")).hexdigest()[:12]
+    human_prompt = (
+        f"[제공된 정보]\n{context_text}\n\n"
+        f"[원본 질문]\n{state.messages[-1].content}"
+    )
 
     log_section(
         f"FINAL PROMPT ({model_name})",
-        f"prompt_fingerprint={prompt_fingerprint}\n{prompt_log_text}",
+        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
     )
 
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    effective_max_tokens = max_tokens_hint
-    if model_name == "solar_vllm_0" and effective_max_tokens is None:
-        effective_max_tokens = SOLAR_RESPONSE_MAX_TOKENS_HINT
-    llm_request_id = f"{state.conversation_id}-{uuid.uuid4().hex[:8]}"
-    t0 = time.monotonic()
-    fallback_message = DUAL_MODEL_FALLBACK_MESSAGE
-    chunk_count = 0
-    resp_chars = 0
-    truncated = False
-    stream_char_limit = SOLAR_STREAM_MAX_CHARS
-
-    try:
-        if model_name == "solar_vllm_0":
-            chunks: List[str] = []
-            stream_chars = 0
-            async for chunk in chain.astream(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
-            ):
-                chunk_text = str(getattr(chunk, "content", "") or "")
-                if chunk_text:
-                    chunk_len = len(chunk_text)
-                    if stream_char_limit > 0 and stream_chars + chunk_len > stream_char_limit:
-                        remaining = max(stream_char_limit - stream_chars, 0)
-                        if remaining > 0:
-                            chunks.append(chunk_text[:remaining])
-                            stream_chars += remaining
-                        truncated = True
-                        break
-                    chunks.append(chunk_text)
-                    stream_chars += chunk_len
-            chunk_count = len(chunks)
-            response_content = "".join(chunks).strip()
-            if not response_content:
-                response = await chain.ainvoke(
-                    prompt_inputs,
-                    max_tokens_hint=effective_max_tokens,
-                    request_id=llm_request_id,
-                )
-                response_content, truncated = _apply_response_char_limit(
-                    str(getattr(response, "content", "") or ""),
-                    stream_char_limit,
-                )
-            else:
-                response_content, post_truncated = _apply_response_char_limit(response_content, stream_char_limit)
-                truncated = truncated or post_truncated
-            resp_chars = len(response_content)
-            final_answer = response_content
-        else:
-            response = await chain.ainvoke(prompt_inputs, max_tokens_hint=effective_max_tokens)
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(response, "content", "") or ""),
-                stream_char_limit,
-            )
-    except EmptyStreamContentError as e:
-        log_section(
-            "GENERATE ANSWER FALLBACK",
-            f"reason=stream_empty\n"
-            f"conversation_id={state.conversation_id}\n"
-            f"model_name={model_name}\n"
-            f"max_tokens_hint={max_tokens_hint}\n"
-            f"effective_max_tokens={effective_max_tokens}\n"
-            f"prompt_fingerprint={prompt_fingerprint}\n"
-            f"error_type={type(e).__name__}\n"
-            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
-        )
-
-        try:
-            fallback_response = await chain.ainvoke(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
-            )
-
-            if not str(getattr(fallback_response, "content", "") or "").strip():
-                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
-                if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-                else:
-                    fallback_response = await llm.ainvoke(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(fallback_response, "content", "") or ""),
-                stream_char_limit,
-            )
-            resp_chars = len(final_answer)
-            if not final_answer:
-                final_answer = fallback_message
-        except Exception as fallback_error:
-            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
-            final_answer = fallback_message
-    except ValueError as e:
-        if "No generations found in stream" not in str(e):
-            raise
-
-        log_section(
-            "GENERATE ANSWER FALLBACK",
-            f"reason=stream_empty_legacy\n"
-            f"conversation_id={state.conversation_id}\n"
-            f"model_name={model_name}\n"
-            f"max_tokens_hint={max_tokens_hint}\n"
-            f"effective_max_tokens={effective_max_tokens}\n"
-            f"prompt_fingerprint={prompt_fingerprint}\n"
-            f"error_type={type(e).__name__}\n"
-            f"prompt_match_with_final={prompt_fingerprint == hashlib.sha1(prompt_log_text.encode('utf-8')).hexdigest()[:12]}",
-        )
-
-        try:
-            fallback_response = await chain.ainvoke(
-                prompt_inputs,
-                max_tokens_hint=effective_max_tokens,
-                request_id=llm_request_id,
-            )
-
-            if not str(getattr(fallback_response, "content", "") or "").strip():
-                formatted_messages = prompt.format_prompt(**prompt_inputs).to_messages()
-                if hasattr(llm, "ainvoke_non_stream"):
-                    fallback_response = await llm.ainvoke_non_stream(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-                else:
-                    fallback_response = await llm.ainvoke(
-                        formatted_messages,
-                        max_tokens_hint=effective_max_tokens,
-                        request_id=llm_request_id,
-                    )
-
-            final_answer, truncated = _apply_response_char_limit(
-                str(getattr(fallback_response, "content", "") or ""),
-                stream_char_limit,
-            )
-            resp_chars = len(final_answer)
-            if not final_answer:
-                final_answer = fallback_message
-        except Exception as fallback_error:
-            logger.exception("LLM non-stream fallback failed: %s", fallback_error)
-            final_answer = fallback_message
-
-    if resp_chars == 0 and final_answer:
-        resp_chars = len(final_answer)
-
-    dt_ms = int((time.monotonic() - t0) * 1000)
-    log_section(
-        "VLLM CALL SUMMARY",
-        f"request_id={llm_request_id}\n"
-        f"dt_ms={dt_ms}\n"
-        f"chunks={chunk_count}\n"
-        f"resp_chars={resp_chars}\n"
-        f"truncated={str(truncated).lower()}\n"
-        f"stream_char_limit={stream_char_limit}\n"
-        f"chunk_count={chunk_count}\n"
-        f"effective_max_tokens={effective_max_tokens}\n"
-        f"prompt_fingerprint={prompt_fingerprint}",
-    )
-
-    if not final_answer:
-        final_answer = fallback_message
+    response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+    final_answer = response.content.replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
                 f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
                 f"ctx_chars={len(context_text)}\n"
                 f"{final_answer[:100]}")
-    return {final_field: str(final_answer)}
-
+    return {final_field: final_answer}
 
 
 # --- Node 8: Direct Answer (Rule-based) ---
@@ -1654,24 +1468,20 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     strategy = ks.requires_new_knowledge if ks else "unknown"
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
     solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
-    decision = _select_final_answer(state)
 
+    # messages에는 gemma 답변을 기본으로 추가
     log_section("MERGE ANSWERS",
-                f"coq: {state.conversation_id}{state.question}\n"
+                f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"solar: {solar_preview}\n"
-                f"chosen_model: {decision['chosen_model']}\n"
-                f"reason: {decision['reason']}\n"
-                f"solar_dt_ms: {decision['solar_dt_ms']}\n"
-                f"gemma_dt_ms: {decision['gemma_dt_ms']}")
+                f"SOLAR: {solar_preview}")
 
     return {
-        "messages": [AIMessage(content=decision["answer"])],
+        "messages": [AIMessage(content=state.answer_solar)],
         "answer_gemma": state.answer_gemma,
         "answer_solar": state.answer_solar,
-        "context": state.context,
-        "fallback_context": state.fallback_context,
+        "context" : state.context,
+        "fallback_context": state.fallback_context
     }
 
 # --- Node 10: Save History ---
@@ -1681,8 +1491,9 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
 
     cid = state.conversation_id
 
-    new_turn = state.messages[-2:]  # [Human, AI]
-    full_history = state.chat_history + new_turn
+    # state.chat_history는 loaded_history + [current_human] 형태라 AI만 추가 저장한다.
+    ai_turn = state.messages[-1:]  # [AI]
+    full_history = state.chat_history + ai_turn
     trimmed_history = full_history[-MAX_HISTORY_TURNS:]
 
     serialized_hist = _serialize_history(trimmed_history)
@@ -1694,24 +1505,26 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
             ex=REDIS_TTL,
         )
 
-    if state.context:
-        await kv_store.set(
-            f"conversation:{cid}:last_context",
-            json.dumps(state.context, ensure_ascii=False),
-            ex=REDIS_TTL,
-        )
+        if state.context:
+            await kv_store.set(
+                f"conversation:{cid}:last_context",
+                json.dumps(state.context, ensure_ascii=False),
+                ex=REDIS_TTL,
+            )
 
-    if state.fallback_context:
-        await kv_store.set(
-            f"conversation:{cid}:last_fallback_context",
-            state.fallback_context,
-            ex=REDIS_TTL,
-        )
+        if state.fallback_context:
+            await kv_store.set(
+                f"conversation:{cid}:last_fallback_context",
+                state.fallback_context,
+                ex=REDIS_TTL,
+            )
+    else:
+        logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
     total_time = sum(state.latencies.values())
     latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
     log_section("PERFORMANCE REPORT",
-                f"coq: {state.conversation_id}{state.question}\nTotal: {total_time:.3f}s\n{latency_report}")
+                f"{_format_coq(state.conversation_id, state.question)}\nTotal: {total_time:.3f}s\n{latency_report}")
 
     return {}
 
@@ -1747,10 +1560,10 @@ async def load_conversation_memory(conversation_id: str) -> tuple[List[BaseMessa
     return loaded_history, ctx_list, fallback_context
 
 async def build_intent_payload(
-    question: str,
-    conversation_id: str,
-    chat_history: List[BaseMessage],
-    prev_context: List[Dict[str, Any]],
+        question: str,
+        conversation_id: str,
+        chat_history: List[BaseMessage],
+        prev_context: List[Dict[str, Any]],
 ) -> tuple[IntentPayloadV2, Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
     question_analysis = None
@@ -1771,7 +1584,11 @@ async def build_intent_payload(
     hint_participant_org_terms: List[str] = []
     hint_people_affiliation_org_terms: List[str] = []
     hint_title_terms: List[str] = []
+    hint_year_from: str | None = None
+    hint_year_to: str | None = None
+    hint_perf_types: List[str] = []
     hint_org_role = None
+    hint_wants_rank = False
 
     if question_analysis and isinstance(question_analysis.filters, dict):
         filters = dict(question_analysis.filters or {})
@@ -1788,21 +1605,26 @@ async def build_intent_payload(
             hint_title_terms = _normalize_hint_terms([*hint_title_terms, *title_terms])
             kws = list(dict.fromkeys([*kws, *title_terms]))
 
-        hint_org_role = filters.get("org_role")
+        hint_year_from = str(filters.get("year_from") or "").strip() or hint_year_from
+        hint_year_to = str(filters.get("year_to") or "").strip() or hint_year_to
+        perf_types_hint = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+        if perf_types_hint:
+            hint_perf_types = _normalize_hint_terms([*hint_perf_types, *perf_types_hint])
+            kws = list(dict.fromkeys([*kws, *perf_types_hint]))
 
-        people_terms_hint = _normalize_hint_terms([
-            *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
-            *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
-        ])
+        hint_org_role = filters.get("org_role")
+        hint_wants_rank = bool(filters.get("wants_rank", False))
+
+        people_terms_hint = _collect_researcher_name_terms(filters)
         if people_terms_hint:
             hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
 
-        lead_org_terms_hint = _normalize_hint_terms(
+        lead_org_terms_hint = normalize_org_terms(_normalize_hint_terms(
             filters.get("lead_org_name") or filters.get("performing_org_name")
-        )
-        participant_org_terms_hint = _normalize_hint_terms(filters.get("participant_org_name"))
-        people_affiliation_org_terms_hint = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
-        generic_org_terms_hint = _normalize_hint_terms(filters.get("org_name") or filters.get("org"))
+        ))
+        participant_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("participant_org_name")))
+        people_affiliation_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("people_affiliation_org_name")))
+        generic_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("org_name") or filters.get("org")))
 
         if lead_org_terms_hint:
             hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
@@ -1815,7 +1637,7 @@ async def build_intent_payload(
                 [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
             )
 
-        org_terms_hint = _normalize_hint_terms([
+        org_terms_hint = normalize_org_terms([
             *generic_org_terms_hint,
             *lead_org_terms_hint,
             *participant_org_terms_hint,
@@ -1824,14 +1646,20 @@ async def build_intent_payload(
         if org_terms_hint:
             hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
 
+    hint_wants_rank = hint_wants_rank or _has_superlative_cue(question)
+
     planner_hint = {
         "people_terms": hint_people_terms,
         "org_terms": hint_org_terms,
         "title_terms": hint_title_terms,
+        "year_from": hint_year_from,
+        "year_to": hint_year_to,
+        "perf_types": hint_perf_types,
         "org_role": hint_org_role,
         "lead_org_terms": hint_lead_org_terms,
         "participant_org_terms": hint_participant_org_terms,
         "people_affiliation_org_terms": hint_people_affiliation_org_terms,
+        "wants_rank": hint_wants_rank,
     }
 
     raw_intent = classify_query_intent(
@@ -1866,27 +1694,16 @@ async def build_intent_payload(
 
     return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
 
-
-
-
-def _build_planner_override_request(analysis: QuestionAnalysis, intent: Any) -> Optional[Dict[str, Any]]:
-    requested_mode = str(getattr(analysis, "mode", "") or "").strip().lower()
-    current_action = str(getattr(intent, "action", "") or "").strip().lower()
-    if not requested_mode or not current_action:
-        return None
-
-    lookup_actions = {"list", "detail", "stats", "download", "id_exact", "id_fuzzy", "relation"}
-    if requested_mode == "lookup" and current_action not in lookup_actions:
-        return {
-            "requested_mode": requested_mode,
-            "current_action": current_action,
-        }
-    return None
-
-
 def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
     if qa is None:
         return intent, False
+
+    tracked_fields = (
+        "mode", "base_route", "action", "relation", "join_key_mode", "target_cols",
+        "keywords", "people_terms", "org_terms", "perf_types", "ids_map",
+    )
+
+    before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
     confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
     if confidence < 0.2:
         return intent, False
@@ -1897,18 +1714,119 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     }
     relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
 
+    filters = dict(getattr(qa, "filters", {}) or {})
+    lead_org_terms = normalize_org_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+    participant_org_terms = normalize_org_terms(filters.get("participant_org_name"))
+    people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
+    org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms, *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else [])])
+
+    planner_year_from = str(filters.get("year_from") or "").strip() or None
+    planner_year_to = str(filters.get("year_to") or "").strip() or None
+    planner_years = _normalize_hint_terms(filters.get("years"))
+    if not planner_year_from and planner_years:
+        planner_year_from = planner_years[0]
+    if not planner_year_to and planner_years:
+        planner_year_to = planner_years[-1]
+
+    planner_perf_types = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+    planner_title_terms = _normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
+    planner_keywords = _normalize_hint_terms(filters.get("keywords"))
+    planner_people_terms = _collect_researcher_name_terms(filters)
+    planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
+    planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
+
+    planner_wants_rank = bool(getattr(qa, "wants_rank", False))
+    if not planner_wants_rank:
+        planner_wants_rank = str(getattr(qa, "action", "") or "").strip().lower() in {"rank", "stats"}
+    planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
+    planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
+
+    def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
+        merged: dict[str, list[str]] = {}
+
+        def _ingest(source: Any, *, overwrite: bool = False) -> None:
+            if not isinstance(source, dict):
+                return
+            for key, raw_values in source.items():
+                values = _normalize_hint_terms(raw_values)
+                if not values:
+                    continue
+                if overwrite or key not in merged:
+                    merged[key] = list(values)
+                else:
+                    merged[key] = _normalize_hint_terms([*merged[key], *values])
+
+        _ingest(base_ids)
+        _ingest(planner_ids, overwrite=True)
+        return merged
+
+    if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
+        # 기관 소속 전체 연구자 질의는 사람명 슬롯을 비워 org slot만 사용한다.
+        planner_people_terms = []
+
     patched = replace(
         intent,
-        base_route=str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower(),
-        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        base_route=planner_head,
+        action=("stats" if planner_wants_rank else str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower()),
+        mode=str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
-        ids_map=dict(getattr(qa, "ids_map", {}) or {}),
+        ids_map=_merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),
         planner_confidence=confidence,
+        org_role=planner_org_role,
+        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        people_terms=planner_people_terms if planner_people_terms else list(getattr(intent, "people_terms", []) or []),
+        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
+        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
+        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
+        year_from=planner_year_from or getattr(intent, "year_from", None),
+        year_to=planner_year_to or getattr(intent, "year_to", None),
+        years=planner_years or list(getattr(intent, "years", []) or []),
+        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
+        title=planner_title_terms or list(getattr(intent, "title", []) or []),
+        target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
+        wants_rank=planner_wants_rank or bool(getattr(intent, "wants_rank", False)),
     )
+
+    after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
+    diff = {
+        key: {"before": before_snapshot.get(key), "after": after_snapshot.get(key)}
+        for key in tracked_fields
+        if before_snapshot.get(key) != after_snapshot.get(key)
+    }
+    _logger = globals().get("logger")
+    if _logger is not None:
+        _logger.info(
+            "[PLANNER_V2_DIFF] applied=%s confidence=%.3f diff=%s",
+            int(bool(diff)),
+            confidence,
+            diff,
+        )
     return patched, True
+
+def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
+    """planner filters에서 연구자 이름 힌트를 폭넓게 수집한다."""
+    if not isinstance(filters, dict):
+        return []
+
+    researcher_keys = (
+        "participant_researcher_name",
+        "participant_researcher_names",
+        "participant_researcher",
+        "participant_researchers",
+        "researcher_name",
+        "researcher_names",
+        "researcher",
+        "people_name",
+    )
+
+    terms: list[str] = []
+    for key in researcher_keys:
+        terms.extend(_normalize_hint_terms(filters.get(key)))
+    return _normalize_hint_terms(terms)
 
 def _normalize_hint_terms(values: Any) -> list[str]:
     if values is None:
@@ -1929,46 +1847,6 @@ def _normalize_hint_terms(values: Any) -> list[str]:
         out.append(s)
     return out
 
-
-def _build_researcher_hints_from_question_analysis(qa: Optional["QuestionAnalysis"]) -> list[dict[str, str]]:
-    """최종 프롬프트 직전 researcher 객체 매칭에 사용할 힌트를 구성한다."""
-    if not qa:
-        return []
-
-    filters = dict(getattr(qa, "filters", {}) or {})
-    ids_map = dict(getattr(qa, "ids_map", {}) or {})
-
-    names = _normalize_hint_terms([
-        *(_normalize_hint_terms(filters.get("participant_researcher_name"))),
-        *(_normalize_hint_terms(filters.get("researcher_name") or filters.get("people_name"))),
-    ])
-    affiliations = _normalize_hint_terms(filters.get("people_affiliation_org_name"))
-    ids = _normalize_hint_terms(ids_map.get("person_no") or ids_map.get("hm_id"))
-
-    if not names and not ids:
-        return []
-
-    default_affiliation = affiliations[0] if len(affiliations) == 1 else ""
-    hints: list[dict[str, str]] = []
-
-    for idx, name in enumerate(names):
-        affiliation = affiliations[idx] if idx < len(affiliations) else default_affiliation
-        researcher_id = ids[idx] if idx < len(ids) else ""
-        hints.append(
-            {
-                "name": str(name).strip(),
-                "affiliation": str(affiliation).strip(),
-                "researcher_id": str(researcher_id).strip(),
-            }
-        )
-
-    if not hints and ids:
-        for researcher_id in ids:
-            hints.append({"name": "", "affiliation": default_affiliation, "researcher_id": str(researcher_id).strip()})
-
-    return hints
-
-
 # --- Graph Construction ---
 def build_advanced_workflow():
     workflow = StateGraph(AgentState)
@@ -1988,7 +1866,6 @@ def build_advanced_workflow():
     workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
     workflow.add_node("generate_answer_solar", node_generate_answer_solar)
     workflow.add_node("join_answers", node_join_answers)
-    workflow.add_node("prepare_answer_context", node_prepare_answer_context)
 
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
@@ -2020,7 +1897,7 @@ def build_advanced_workflow():
         ks = state.knowledge_sufficiency
 
         if ks.requires_new_knowledge == "low" and state.prev_context:
-            return "prepare_answer_context"
+            return ["generate_answer_solar", "generate_answer_gemma"]
 
         return "rag_search"
 
@@ -2028,17 +1905,16 @@ def build_advanced_workflow():
         "join_analysis",
         route_after_join_analysis,
         {
-            "prepare_answer_context": "prepare_answer_context",
+            "generate_answer_solar": "generate_answer_solar",
+            "generate_answer_gemma": "generate_answer_gemma",
             "rag_search": "rag_search"
         }
     )
 
 
-    # RAG 검색 완료 후 컨텍스트 1회 준비 뒤 두 모델로 Refine
-    workflow.add_edge("rag_search", "prepare_answer_context")
-
-    workflow.add_edge("prepare_answer_context", "generate_answer_gemma")
-    workflow.add_edge("prepare_answer_context", "generate_answer_solar")
+    # RAG 검색 완료 후 두 모델로 Refine
+    workflow.add_edge("rag_search", "generate_answer_gemma")
+    workflow.add_edge("rag_search", "generate_answer_solar")
 
     # Refined Answer 완료 후 join
     workflow.add_edge("generate_answer_gemma", "join_answers")
@@ -2085,19 +1961,19 @@ def _extract_org_fields(org: Any) -> tuple[str, str, str]:
     if isinstance(org, dict):
         name = org.get("org_nm") or org.get("org_name") or org.get("name")
         org_id = (
-            org.get("org_id")
-            or org.get("org_cd")
-            or org.get("org_code")
-            or org.get("org_no")
+                org.get("org_id")
+                or org.get("org_cd")
+                or org.get("org_code")
+                or org.get("org_no")
         )
         role = org.get("org_slct_nm") or org.get("role") or org.get("org_role")
     else:
         name = getattr(org, "org_nm", None) or getattr(org, "name", None)
         org_id = (
-            getattr(org, "org_id", None)
-            or getattr(org, "org_cd", None)
-            or getattr(org, "org_code", None)
-            or getattr(org, "org_no", None)
+                getattr(org, "org_id", None)
+                or getattr(org, "org_cd", None)
+                or getattr(org, "org_code", None)
+                or getattr(org, "org_no", None)
         )
         role = getattr(org, "org_slct_nm", None) or getattr(org, "role", None)
     return (
@@ -2108,9 +1984,9 @@ def _extract_org_fields(org: Any) -> tuple[str, str, str]:
 
 
 def _collect_org_hints(
-    organizations: Optional[List[Any]],
-    filters: Optional[Dict[str, Any]],
-    ids_map: Optional[Dict[str, Any]],
+        organizations: Optional[List[Any]],
+        filters: Optional[Dict[str, Any]],
+        ids_map: Optional[Dict[str, Any]],
 ) -> tuple[list[str], list[str], Optional[str]]:
     org_terms: list[str] = []
     org_ids: list[str] = []
@@ -2141,12 +2017,12 @@ def _collect_org_hints(
 
 
 def _match_prtcp_orgs(
-    prtcp_orgs: List[Dict[str, Any]],
-    org_terms: list[str],
-    org_ids: list[str],
-    role_hint: Optional[str],
-    *,
-    max_matches: int = 5,
+        prtcp_orgs: List[Dict[str, Any]],
+        org_terms: list[str],
+        org_ids: list[str],
+        role_hint: Optional[str],
+        *,
+        max_matches: int = 5,
 ) -> List[Dict[str, Any]]:
     if not prtcp_orgs or (not org_terms and not org_ids):
         return []
@@ -2222,10 +2098,10 @@ def _format_org_entry(org_nm: str, role: str, role_confirmed: bool) -> str:
 
 
 def _match_prtcp_members(
-    prtcp_members: List[Dict[str, Any]],
-    researchers: Optional[List[Any]],
-    *,
-    max_matches: int = 5,
+        prtcp_members: List[Dict[str, Any]],
+        researchers: Optional[List[Any]],
+        *,
+        max_matches: int = 5,
 ) -> List[Dict[str, Any]]:
     if not prtcp_members or not researchers:
         return []
@@ -2291,10 +2167,10 @@ def _match_prtcp_members(
 
 
 def _format_researcher_line(
-    matched_members: List[Dict[str, Any]],
-    fallback_lines: List[str],
-    *,
-    max_matches: int = 5,
+        matched_members: List[Dict[str, Any]],
+        fallback_lines: List[str],
+        is_detail: bool = False,
+        max_matches: int = 5,
 ) -> str:
     if matched_members:
         names = []
@@ -2309,21 +2185,29 @@ def _format_researcher_line(
         return f"- 연구자(매칭): {', '.join(names)}"
 
     fallback_names = []
-    for line in fallback_lines[:max_matches]:
-        cleaned = line.lstrip("- ").strip()
-        if cleaned:
-            fallback_names.append(cleaned)
-    if fallback_names:
-        return f"- 연구자: {', '.join(fallback_names)}"
+    if is_detail:
+        for line in fallback_lines:
+            cleaned = line.lstrip("- ").strip()
+            if cleaned:
+                fallback_names.append(cleaned)
+        if fallback_names:
+            return f"- 연구자: {', '.join(fallback_names)}"
+    else:
+        for line in fallback_lines[:max_matches]:
+            cleaned = line.lstrip("- ").strip()
+            if cleaned:
+                fallback_names.append(cleaned)
+        if fallback_names:
+            return f"- 연구자: {', '.join(fallback_names)} 등 생략"
 
     return "- 연구자: 정보 없음"
 
 
 def _format_org_line(
-    matched_orgs: List[Dict[str, Any]],
-    prtcp_orgs: List[Dict[str, Any]],
-    *,
-    max_matches: int = 5,
+        matched_orgs: List[Dict[str, Any]],
+        prtcp_orgs: List[Dict[str, Any]],
+        *,
+        max_matches: int = 5,
 ) -> str:
     if matched_orgs:
         entries = []
@@ -2359,68 +2243,16 @@ def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def summarize_documents_headlines(
-    docs: List[Document],
-    *,
-    researchers: Optional[List[Any]] = None,
-    organizations: Optional[List[Any]] = None,
-    org_filters: Optional[Dict[str, Any]] = None,
-    ids_map: Optional[Dict[str, Any]] = None,
-    max_matches: int = 5,
-) -> str:
-    headlines: List[str] = []
-
-    for doc in docs:
-        mapped_doc = _safe_map_doc(doc, context="summarize_documents_headlines")
-        if not mapped_doc:
-            continue
-        _apply_title_preference(mapped_doc)
-        source_idx = doc.get("source_index")
-        title = mapped_doc.get("title", "제목 없음")
-
-        prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
-        matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
-        fallback_lines = RagMapper.get_researcher_info(mapped_doc)
-        researcher_line = _format_researcher_line(
-            matched_members,
-            fallback_lines,
-            max_matches=max_matches,
-        )
-
-        prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
-        org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
-        matched_orgs = _match_prtcp_orgs(
-            prtcp_orgs,
-            org_terms,
-            org_ids,
-            role_hint,
-            max_matches=max_matches,
-        )
-        org_line = _format_org_line(
-            matched_orgs,
-            prtcp_orgs,
-            max_matches=max_matches,
-        )
-
-        headlines.append(
-            f"## 출처 {source_idx}. {title}\n"
-            f"{researcher_line}\n"
-            f"{org_line}\n"
-        )
-
-    return "\n\n".join(headlines)
-
-
 def refine_documents_rule_based(
-    docs: List[Document],
-    is_detail: bool = False,
-    *,
-    researchers: Optional[List[Any]] = None,
-    organizations: Optional[List[Any]] = None,
-    org_filters: Optional[Dict[str, Any]] = None,
-    ids_map: Optional[Dict[str, Any]] = None,
-    max_matches: int = 5,
-    relax_limits: bool = False,
+        docs: List[Document],
+        is_detail: bool = False,
+        *,
+        researchers: Optional[List[Any]] = None,
+        organizations: Optional[List[Any]] = None,
+        org_filters: Optional[Dict[str, Any]] = None,
+        ids_map: Optional[Dict[str, Any]] = None,
+        max_matches: int = 5,
+        relax_limits: bool = False,
 ) -> str:
     context_chunks: List[str] = []
     field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
@@ -2429,6 +2261,25 @@ def refine_documents_rule_based(
     doc_max_tokens = None if relax_limits else MAX_DOC_TOKENS
 
     for doc in docs:
+        if str(doc.get("source_type", "")).strip().lower() == "aggregation":
+            rank_item = doc.get("rank_item") or {}
+            metric = str(doc.get("metric") or "project_participation_count")
+            metric_value = rank_item.get(metric, rank_item.get("score", 0))
+            perf_count = rank_item.get("performance_count", 0)
+            candidate_docs = int(doc.get("candidate_docs") or 0)
+            window_years = doc.get("window_years") or {}
+            year_from = (window_years.get("from") if isinstance(window_years, dict) else None) or "-"
+            year_to = (window_years.get("to") if isinstance(window_years, dict) else None) or "-"
+            person_name = rank_item.get("hm_nm") or rank_item.get("hm_id") or rank_item.get("person_key") or "unknown"
+            context_chunks.append(
+                f"## 출처 {doc.get('source_index')}. {person_name}\n"
+                f"- {metric}: {metric_value}\n"
+                f"- performance_count: {perf_count}\n"
+                f"- candidate_docs: {candidate_docs}\n"
+                f"- window_years: {year_from} ~ {year_to}\n"
+            )
+            continue
+
         mapped_doc = _safe_map_doc(doc, context="refine_documents_rule_based")
         if not mapped_doc:
             continue
@@ -2464,16 +2315,8 @@ def refine_documents_rule_based(
             )
 
         refined_parts = [text for text in [meta_basic_text, meta_detail_text] if text]
-
-        render_text_parts = [
-            f"{field_name}: {mapped_doc.get(field_name)}"
-            for field_name in RAG_RENDER_TEXT_FIELDS
-            if mapped_doc.get(field_name)
-        ]
-        if render_text_parts:
-            refined_parts.append("\n".join(render_text_parts))
-
         refined_text = "\n".join(refined_parts)
+
 
         prtcp_members = mapped_doc.get("prtcp_mp", []) if isinstance(mapped_doc, dict) else []
         matched_members = _match_prtcp_members(prtcp_members, researchers, max_matches=max_matches)
@@ -2481,8 +2324,10 @@ def refine_documents_rule_based(
         researcher_line = _format_researcher_line(
             matched_members,
             fallback_lines,
-            max_matches=max_matches,
+            is_detail,
+            max_matches=max_matches
         )
+
         prtcp_orgs = mapped_doc.get("prtcp_org", []) if isinstance(mapped_doc, dict) else []
         org_terms, org_ids, role_hint = _collect_org_hints(organizations, org_filters, ids_map)
         matched_orgs = _match_prtcp_orgs(
@@ -2500,7 +2345,8 @@ def refine_documents_rule_based(
         # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
         #             f"matched_members: {matched_members}\n"
         #             f"fallback_lines: {fallback_lines}\n"
-        #             f"matched_orgs: {matched_orgs}")
+        #             f"matched_orgs: {matched_orgs}"
+        #             f"researcher_line: {researcher_line}")
 
         limited_body = _limit_text_by_sentences_and_tokens(
             refined_text,
@@ -2517,8 +2363,8 @@ def refine_documents_rule_based(
 
         if not relax_limits:
             while body_sentences and (
-                len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
-                or body_token_count + extra_token_count > MAX_DOC_TOKENS
+                    len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
+                    or body_token_count + extra_token_count > MAX_DOC_TOKENS
             ):
                 body_token_count -= body_token_counts.pop()
                 body_sentences.pop()
@@ -2550,10 +2396,10 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _limit_text_by_sentences_and_tokens(
-    text: str,
-    *,
-    max_sentences: Optional[int],
-    max_tokens: Optional[int],
+        text: str,
+        *,
+        max_sentences: Optional[int],
+        max_tokens: Optional[int],
 ) -> str:
     if not text:
         return ""
@@ -2575,10 +2421,10 @@ def _limit_text_by_sentences_and_tokens(
 
 
 def format_metadata(
-    metadata: Dict[str, Any],
-    *,
-    max_sentences: Optional[int] = None,
-    max_tokens: Optional[int] = None,
+        metadata: Dict[str, Any],
+        *,
+        max_sentences: Optional[int] = None,
+        max_tokens: Optional[int] = None,
 ) -> str:
     """metadata dict → bullet list 텍스트 변환"""
     lines = []
@@ -2693,14 +2539,84 @@ def sanitize_llm_json(msg) -> str:
     )
     raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
 
+
+def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bool:
+    try:
+        collection_info = client.get_collection(collection_name=collection_name)
+    except Exception:
+        return False
+
+    payload_schema = getattr(collection_info, "payload_schema", None)
+    if not isinstance(payload_schema, dict):
+        return False
+    return field_name in payload_schema
+
 # --- Lifespan & App Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global kv_store
 
-    build_rag_objects()
+    rag_resources = build_rag_objects()
 
-    backend = os.getenv("MEMORY_BACKEND", "redis").strip().lower()
+    ensure_payload_index_on_boot = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+    if ensure_payload_index_on_boot:
+        index_targets = {
+            "ntis_project": ["pjt_id", "pjt_no"],
+            "ntis_perf": ["pjt_id", "pjt_no"],
+        }
+
+        client = rag_resources.qdrant_client
+        for collection_name, field_names in index_targets.items():
+            for field_name in field_names:
+                try:
+                    collection_info = client.get_collection(collection_name=collection_name)
+                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
+                    field_schema = payload_schema.get(field_name)
+                    schema_type = getattr(field_schema, "data_type", None)
+                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
+
+                    if "KEYWORD" in schema_type_name:
+                        logger.info(
+                            "[startup][payload-index] %s.%s: skip (already exists)",
+                            collection_name,
+                            field_name,
+                        )
+                        continue
+
+                    ensure_keyword_index(client, collection_name, field_name)
+
+                    collection_info = client.get_collection(collection_name=collection_name)
+                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
+                    field_schema = payload_schema.get(field_name)
+                    schema_type = getattr(field_schema, "data_type", None)
+                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
+
+                    if "KEYWORD" in schema_type_name:
+                        logger.info(
+                            "[startup][payload-index] %s.%s: created",
+                            collection_name,
+                            field_name,
+                        )
+                    else:
+                        logger.warning(
+                            "[startup][payload-index] %s.%s: warning (ensure called but not visible)",
+                            collection_name,
+                            field_name,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[startup][payload-index] %s.%s: warning (%s)",
+                        collection_name,
+                        field_name,
+                        e,
+                    )
+    else:
+        logger.info("[startup][payload-index] skipped by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=%s", os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT"))
+
+    backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file
 
     if backend == "redis":
@@ -2756,81 +2672,16 @@ app = FastAPI(lifespan=lifespan)
 # --- Endpoints ---
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    if not TEMPLATE_INDEX_PATH.exists():
+        return HTMLResponse(
+            content="<html><body><h3>NTIS RAG Chatbot</h3><p>index template unavailable.</p></body></html>",
+            status_code=200,
+        )
     return templates.TemplateResponse("index.html", {"request": request})
 
 class QueryRequest(BaseModel):
     question: str
     conversation_id: Optional[str] = None
-
-
-def _normalize_message_content(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        normalized_parts: List[str] = []
-        for item in value:
-            normalized_item = _normalize_message_content(item)
-            if normalized_item:
-                normalized_parts.append(normalized_item)
-        return "".join(normalized_parts)
-    if isinstance(value, dict):
-        if isinstance(value.get("text"), str):
-            return value["text"]
-        if isinstance(value.get("content"), str):
-            return value["content"]
-        return ""
-    return str(value)
-
-
-def _extract_stream_text(chunk) -> str:
-    if chunk is None:
-        return ""
-
-    content = getattr(chunk, "content", None)
-    normalized_content = _normalize_message_content(content)
-    if normalized_content:
-        return normalized_content
-
-    message = getattr(chunk, "message", None)
-    message_content = getattr(message, "content", None)
-    normalized_message_content = _normalize_message_content(message_content)
-    if normalized_message_content:
-        return normalized_message_content
-
-    return ""
-
-
-def _extract_final_answer(output: Any, answer_key: Optional[str]) -> Optional[str]:
-    if output is None:
-        return None
-
-    if isinstance(output, dict):
-        if answer_key:
-            candidate = output.get(answer_key)
-            normalized_candidate = _normalize_message_content(candidate)
-            if normalized_candidate:
-                return normalized_candidate
-        return _normalize_message_content(output)
-
-    if isinstance(output, AIMessage):
-        normalized_message = _normalize_message_content(output.content)
-        return normalized_message or None
-
-    content = getattr(output, "content", None)
-    normalized_content = _normalize_message_content(content)
-    if normalized_content:
-        return normalized_content
-
-    if answer_key:
-        nested = getattr(output, answer_key, None)
-        normalized_nested = _normalize_message_content(nested)
-        if normalized_nested:
-            return normalized_nested
-
-    fallback = _normalize_message_content(output)
-    return fallback or None
 
 @app.post("/query/stream")
 async def query_stream(payload: QueryRequest):
@@ -2860,49 +2711,40 @@ async def query_stream(payload: QueryRequest):
             "question_analysis": question_analysis,
         }
 
-        log_section("REQUEST START", f"ID: {conversation_id}\nQ: {question}")
+        if _is_debug_logging_enabled():
+            log_section(
+                "REQUEST START",
+                f"ID: {conversation_id}\nQ(len={len(question)}): {_mask_query_for_log(question)}",
+            )
+        else:
+            log_section("REQUEST START", f"ID: {conversation_id}\nQ_len: {len(question)}")
 
         documents_used = []
-        stream_emitted = {"SOLAR": False, "GEMMA": False}
-        stream_model_by_node = {
-            "generate_answer_solar": "SOLAR",
-            "generate_answer_gemma": "GEMMA",
-        }
-        answer_key_by_model = {
-            "SOLAR": "answer_solar",
-            "GEMMA": "answer_gemma",
-        }
 
         try:
             async for event in graph.astream_events(inputs, version="v2"):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-
-                model = stream_model_by_node.get(node)
-
-                if kind == "on_chat_model_stream" and model:
+                # Answer 스트리밍 - SOLAR
+                if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
-                    chunk_text = _extract_stream_text(chunk)
-                    if chunk_text:
-                        stream_emitted[model] = True
-                        yield f"data: {json.dumps({'model': model, 'content': chunk_text}, ensure_ascii=False)}\n\n"
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
-                # 스트림 청크가 없더라도 최종 답변은 반드시 전달
-                elif kind == "on_chain_end" and model:
-                    output = data.get("output", {})
-                    answer_key = answer_key_by_model.get(model)
-                    answer = _extract_final_answer(output, answer_key)
-                    if answer and not stream_emitted[model]:
-                        yield f"data: {json.dumps({'model': model, 'content': answer}, ensure_ascii=False)}\n\n"
+                # Answer 스트리밍 - Gemma
+                elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
+                    chunk = data.get("chunk")
+                    if hasattr(chunk, "content") and chunk.content:
+                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model': 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'model': 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
                     yield f"data: {json.dumps({'status': 'retrieve'}, ensure_ascii=False)}\n\n"
@@ -2918,7 +2760,7 @@ async def query_stream(payload: QueryRequest):
                     continue
                 ref_docs.append(RagMapper.get_references(d))
 
-            # log_section("REF PUSH", f"coq: {conversation_id}{question}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
+            # log_section("REF PUSH", f"{_format_coq(conversation_id, question)}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
@@ -2929,28 +2771,16 @@ async def query_stream(payload: QueryRequest):
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
-            category = "internal_error"
-            retryable = False
-            user_message = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-
-            if isinstance(e, EmptyStreamContentError) or "No generations found in stream" in str(e):
-                category = "llm_empty_stream"
-                retryable = True
-                user_message = "응답 생성이 지연되고 있습니다. 다시 시도해 주세요."
-            elif "retriev" in str(error_code).lower() or "retriev" in str(reason).lower() or "retriev" in str(e).lower():
-                category = "retrieval_error"
-                retryable = True
-                user_message = "자료 검색 중 문제가 발생했습니다. 다시 시도해 주세요."
-
-            error_payload = {
-                "error": str(e),
-                "error_code": error_code,
-                "reason": reason,
-                "retryable": retryable,
-                "category": category,
-                "user_message": user_message,
-            }
-            yield f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+            if isinstance(e, StrategyViolation):
+                user_message = _friendly_strategy_violation_message(
+                    error_code=error_code,
+                    reason=reason,
+                    question_analysis=question_analysis,
+                )
+                yield f"data: {json.dumps({'answer': user_message, 'error_code': error_code, 'reason': reason, 'degraded': True}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'status': 'done', 'degraded': True}, ensure_ascii=False)}\n\n"
+                return
+            yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -2989,13 +2819,11 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
-        answer_solar = final_state.get("answer_solar")
-
         return {
             "success": True,
             "conversation_id": conversation_id,
             "answer_gemma": final_state.get("answer_gemma"),
-            "answer_solar": answer_solar,
+            "answer_solar": final_state.get("answer_solar"),
             "output_message": final_state["messages"][-1].content,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
@@ -3016,12 +2844,14 @@ async def query_debug(payload: QueryRequest):
 
 @app.get("/health")
 async def health_check():
+    memory_backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower() or "memory"
     ok = False
     if kv_store:
         ok = await kv_store.ping()
     return {
         "status": "healthy",
-        "memory_backend": os.getenv("MEMORY_BACKEND", "redis"),
+        "memory_backend": memory_backend,
+        "memory_backend_effective": type(kv_store).__name__ if kv_store else "none",
         "kv": "connected" if ok else "disconnected",
         "graph": "compiled" if hasattr(app.state, "graph") else "not_ready"
     }

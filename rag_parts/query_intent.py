@@ -69,7 +69,7 @@ _PJT_NO_LABEL_RE = re.compile(
 _PJT_NO_TOKEN_RE = re.compile(r"\bPJT[-_/]?[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+){1,}\b", re.IGNORECASE)
 
 # 사람 이름 후보: 한글 2~4자 (단독으로는 오탐이 많아서 '연구자/연구원/참여인력' 등 주변 신호와 결합)
-_NAME_NEAR_CUE_RE = re.compile(r"([가-힣]{2,4})\s*(?:연구자|연구원|교수|박사|PI|책임자|연구책임자|참여연구원|참여인력)")
+_NAME_NEAR_CUE_RE = re.compile(r"(?<![가-힣])([가-힣]{2,4})\s+(?:연구자|연구원|교수|박사|PI|책임자|연구책임자|참여연구원|참여인력)")
 _NAME_LABEL_RE = re.compile(r"(?:인물명|연구자명|성명|이름)\s*[:：]\s*([가-힣]{2,4})")
 
 # 기관명 후보 (suffix 기반 + 라벨 기반)
@@ -108,8 +108,77 @@ _ORG_TERM_STOPWORDS = {
 }
 
 
+_ORG_ALIAS_GROUPS = [
+    ["etri", "한국전자통신연구원"],
+    ["kist", "한국과학기술연구원"],
+    ["kaist", "한국과학기술원"],
+]
+
+_ORG_LEGAL_PREFIX_RE = re.compile(r"^(?:\(주\)|㈜|주식회사|\(재\)|재단법인)\s*")
+_ORG_PAREN_RE = re.compile(r"[\(\[\{<].*?[\)\]\}>]")
+_ORG_SUFFIX_TRIM_RE = re.compile(r"(?:대학교|대학|연구원|연구소)$")
+
+
 def _normalize_org_term(term: str) -> str:
-    return re.sub(r"\s+", " ", (term or "")).strip()
+    text = re.sub(r"\s+", " ", (term or "")).strip()
+    if not text:
+        return ""
+    text = _ORG_LEGAL_PREFIX_RE.sub("", text)
+    text = _ORG_PAREN_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip(" .,-")
+    return text
+
+
+def normalize_org_terms(values: Any, *, with_alias: bool = True) -> List[str]:
+    if values is None:
+        seq: List[Any] = []
+    elif isinstance(values, str):
+        seq = [values]
+    elif isinstance(values, (list, tuple, set)):
+        seq = list(values)
+    else:
+        seq = [values]
+
+    base_terms: List[str] = []
+    seen_base: set[str] = set()
+    for raw in seq:
+        term = _normalize_org_term(str(raw))
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen_base:
+            continue
+        seen_base.add(key)
+        base_terms.append(term)
+
+    if not with_alias:
+        return base_terms
+
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _push(term: str) -> None:
+        t = _normalize_org_term(term)
+        if not t:
+            return
+        k = t.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(t)
+
+    for term in base_terms:
+        _push(term)
+        trimmed = _ORG_SUFFIX_TRIM_RE.sub("", term).strip()
+        if trimmed and len(trimmed) >= 2:
+            _push(trimmed)
+        tl = term.lower()
+        for group in _ORG_ALIAS_GROUPS:
+            if any(alias in tl for alias in group):
+                for alias in group:
+                    _push(alias)
+
+    return out
 
 
 def _is_rare_token(tok: str) -> bool:
@@ -208,7 +277,7 @@ ORG_ROLE_AFFILIATION_CUES = [
     "소속", "소속기관", "소속 기관", "재직", "근무",
 ]
 ORG_ROLE_PARTICIPANT_CUES = [
-    "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
+    "참여", "참여기관", "참여 기관", "참여연구기관", "참여 연구기관", "공동기관", "협력기관",
     "공동", "협력", "컨소시엄",
 ]
 ORG_ROLE_PERFORMER_CUES = [
@@ -238,6 +307,7 @@ TOPIC_CUES = ["주제", "관련", "분야", "키워드", "동향", "트렌드", 
 COUNT_CUES = ["건수", "몇건", "통계", "count", "총 몇", "총몇", "몇 개", "몇개"]
 DETAIL_CUES = ["상세", "세부", "자세히", "정보", "내용", "설명", "프로필"]
 LIST_CUES = ["목록", "리스트", "현황", "조회", "보여", "찾아줘", "이력", "내역"]
+SUPERLATIVE_CUES = ["가장", "최다", "top", "상위", "1위", "best", "most"]
 
 _REQUEST_LIMIT_RE = re.compile(r"(\d{1,2})\s*(개년|개|건|명)")
 _REQUEST_LIMIT_POSITIVE_CUES = ["목록", "리스트", "보여", "보여줘", "조회", "상위", "대표", "과제", "성과", "최대"]
@@ -268,6 +338,11 @@ def _extract_requested_limit(q: str) -> Optional[int]:
         return limit
 
     return None
+
+
+def _has_superlative_cue(text: str) -> bool:
+    tl = (text or "").lower()
+    return any(cue in tl for cue in SUPERLATIVE_CUES)
 
 
 def pick_perf_tag_filters(q: str) -> List[str]:
@@ -427,13 +502,13 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
         if norm in _ORG_TERM_STOPWORDS:
             return
         if any(sw in norm for sw in ("과제", "성과", "목록", "조회", "정보")) and not any(
-            sf.lower() in norm for sf in _ORG_SUFFIXES
+                sf.lower() in norm for sf in _ORG_SUFFIXES
         ):
             return
         if not (
-            _ORG_ACRONYM_RE.fullmatch(term)
-            or any(sf in term for sf in _ORG_SUFFIXES)
-            or re.search(r"[가-힣]{2,}(?:대학|대학교|연구원|연구소|센터|공단|청)", term)
+                _ORG_ACRONYM_RE.fullmatch(term)
+                or any(sf in term for sf in _ORG_SUFFIXES)
+                or re.search(r"[가-힣]{2,}(?:대학|대학교|연구원|연구소|센터|공단|청)", term)
         ):
             return
 
@@ -587,10 +662,10 @@ def _choose_project_key_type(q: str, ids_map: Dict[str, List[str]], *, prefer: O
 
 
 def normalize_ids_map_for_strategy(
-    q: str,
-    ids_map: Dict[str, List[str]],
-    *,
-    prefer_project_key: Optional[str] = None,
+        q: str,
+        ids_map: Dict[str, List[str]],
+        *,
+        prefer_project_key: Optional[str] = None,
 ) -> tuple[Dict[str, List[str]], Optional[str]]:
     """extract 단계 후보 ids_map을 normalize/plan 단계용으로 정규화한다."""
     normalized = {k: _normalize_str_list(v) for k, v in (ids_map or {}).items()}
@@ -670,7 +745,11 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if has_project and any(x in tl for x in ("소속기관", "소속 기관")):
         return "project"
 
-    # 사람/기관 + 과제/성과 요청이면 head로 승격(조인 플로우를 타기 쉬움)
+    # project 의도가 명확하면 people/org 신호가 있어도 project 우선
+    if has_project and (has_people or has_org):
+        return "project"
+
+    # 사람/기관 단독 의도는 head로 유지
     if has_people and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
         return "people"
     if has_org and (has_project or "과제" in tl or "pjt" in tl or "참여" in tl):
@@ -768,35 +847,43 @@ def pick_org_role(q: str) -> Optional[str]:
 def _extract_people_terms_for_affiliation(q: str) -> List[str]:
     text = (q or "")
     out: List[str] = []
-    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE, re.compile(r"([가-힣]{2,4})\s*(?:의)?\s*소속")):
+    noisy_tokens = ("소속", "연구원", "연구자", "기관", "대학", "연구소")
+    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE):
         for match in pattern.finditer(text):
             name = (match.group(1) or "").strip()
-            if name and name not in out:
+            if not name:
+                continue
+            if any(token in name for token in noisy_tokens):
+                continue
+            if name not in out:
                 out.append(name)
     return out
 
 
 def _apply_affiliation_intent(
-    q: str,
-    *,
-    org_role: Optional[str],
-    people_terms: List[str],
-    org_terms: List[str],
-    ids_map: Dict[str, List[str]],
-    relation: Optional[Tuple[str, str]],
+        q: str,
+        *,
+        org_role: Optional[str],
+        people_terms: List[str],
+        org_terms: List[str],
+        ids_map: Dict[str, List[str]],
+        relation: Optional[Tuple[str, str]],
 ) -> Tuple[List[str], List[str], Optional[Tuple[str, str]]]:
     if org_role != "affiliation":
         return people_terms, org_terms, relation
 
     tl = (q or "").lower()
+    has_name_signal = bool(_NAME_NEAR_CUE_RE.search(q or "")) or bool(_NAME_LABEL_RE.search(q or ""))
     has_people_signal = (
-        bool(people_terms)
-        or bool(ids_map.get("person_no"))
-        or bool(_NAME_NEAR_CUE_RE.search(q or ""))
-        or bool(_NAME_LABEL_RE.search(q or ""))
-        or _has_any_cue(tl, PEOPLE_CUES)
+            bool(people_terms)
+            or bool(ids_map.get("person_no"))
+            or has_name_signal
+            or _has_any_cue(tl, PEOPLE_CUES)
     )
     if not has_people_signal:
+        return people_terms, org_terms, relation
+
+    if not people_terms and not bool(ids_map.get("person_no")) and not has_name_signal:
         return people_terms, org_terms, relation
 
     if not people_terms:
@@ -814,13 +901,13 @@ def _strip_non_join_relation(relation: Optional[Tuple[str, str]]) -> Optional[Tu
 
 
 def _normalize_base_route_for_people_org_project_perf(
-    *,
-    base_route: str,
-    has_people: bool,
-    has_org: bool,
-    has_project: bool,
-    has_perf: bool,
-    wants_list: bool,
+        *,
+        base_route: str,
+        has_people: bool,
+        has_org: bool,
+        has_project: bool,
+        has_perf: bool,
+        wants_list: bool,
 ) -> str:
     """
     사람/기관 + 과제 + 성과 신호가 동시에 있으면 head를 project/perf로 정규화한다.
@@ -837,18 +924,21 @@ def _normalize_base_route_for_people_org_project_perf(
 
 
 def _resolve_action(
-    *,
-    base_route: str,
-    relation: Optional[Tuple[str, str]],
-    wants_count: bool,
-    wants_list: bool,
-    wants_detail: bool,
-    intent: str,
-    ids_map: Dict[str, List[str]],
-    is_id_query: bool,
+        *,
+        base_route: str,
+        relation: Optional[Tuple[str, str]],
+        wants_count: bool,
+        wants_list: bool,
+        wants_detail: bool,
+        wants_rank: bool,
+        intent: str,
+        ids_map: Dict[str, List[str]],
+        is_id_query: bool,
 ) -> str:
     if base_route == "support":
         return "support"
+    if base_route in ("people", "org") and wants_rank:
+        return "stats"
     if relation is not None:
         if wants_count and not wants_list:
             return "stats"
@@ -898,7 +988,14 @@ class QueryIntent:
     gender_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
     org_role: Optional[str] = None
+    lead_org_terms: List[str] = field(default_factory=list)
+    participant_org_terms: List[str] = field(default_factory=list)
+    people_affiliation_org_terms: List[str] = field(default_factory=list)
     years: List[str] = field(default_factory=list)
+    year_from: Optional[str] = None
+    year_to: Optional[str] = None
+    perf_types: List[str] = field(default_factory=list)
+    title: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
     # tag filters
@@ -909,6 +1006,7 @@ class QueryIntent:
     wants_count: bool = False
     wants_list: bool = False
     wants_detail: bool = False
+    wants_rank: bool = False
     output_type: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
     parsing_warnings: List[str] = field(default_factory=list)
@@ -938,7 +1036,14 @@ class QueryIntent:
             "gender_terms": self.gender_terms,
             "org_terms": self.org_terms,
             "org_role": self.org_role,
+            "lead_org_terms": self.lead_org_terms,
+            "participant_org_terms": self.participant_org_terms,
+            "people_affiliation_org_terms": self.people_affiliation_org_terms,
             "years": self.years,
+            "year_from": self.year_from,
+            "year_to": self.year_to,
+            "perf_types": self.perf_types,
+            "title": self.title,
             "ids_map": self.ids_map,
             "ids_flat": self.ids_flat,
             "project_tag_filters": self.project_tag_filters,
@@ -947,6 +1052,7 @@ class QueryIntent:
             "wants_count": self.wants_count,
             "wants_list": self.wants_list,
             "wants_detail": self.wants_detail,
+            "wants_rank": self.wants_rank,
             "output_type": self.output_type,
             "categories": self.categories,
             "planner_limit": self.planner_limit,
@@ -959,8 +1065,8 @@ class QueryIntent:
 
 
 def normalize_join_key_mode(
-    join_key_mode: Optional[str],
-    ids_map: Optional[Dict[str, List[str]]],
+        join_key_mode: Optional[str],
+        ids_map: Optional[Dict[str, List[str]]],
 ) -> tuple[Optional[Literal["instance", "group"]], list[str], list[str]]:
     """JOIN key mode와 ids_map 정합성을 정규화한다."""
     ids_map = ids_map if isinstance(ids_map, dict) else {}
@@ -1137,12 +1243,20 @@ def _plan_from_hint(hint: Any) -> Dict[str, Any]:
         "people_terms": _get_attr(hint, "people_terms"),
         "org_terms": _get_attr(hint, "organizations") or _get_attr(hint, "org_terms"),
         "org_role": _get_attr(hint, "org_role"),
+        "lead_org_terms": _get_attr(hint, "lead_org_name") or _get_attr(hint, "lead_org_terms"),
+        "participant_org_terms": _get_attr(hint, "participant_org_name") or _get_attr(hint, "participant_org_terms"),
+        "people_affiliation_org_terms": _get_attr(hint, "people_affiliation_org_name") or _get_attr(hint, "people_affiliation_org_terms"),
         "years": _get_attr(hint, "years"),
+        "year_from": _get_attr(hint, "year_from"),
+        "year_to": _get_attr(hint, "year_to"),
+        "perf_types": _get_attr(hint, "perf_types"),
+        "title": _get_attr(hint, "title") or _get_attr(hint, "title_terms"),
         "project_tag_filters": _get_attr(hint, "project_tag_filters"),
         "perf_tag_filters": _get_attr(hint, "perf_tag_filters"),
         "wants_count": _get_attr(hint, "wants_count"),
         "wants_list": _get_attr(hint, "wants_list"),
         "wants_detail": _get_attr(hint, "wants_detail"),
+        "wants_rank": _get_attr(hint, "wants_rank"),
         "output_type": _get_attr(hint, "output_type"),
         "limit": _get_attr(hint, "limit"),
         "retrieval_query": _get_attr(hint, "retrieval_query"),
@@ -1177,26 +1291,6 @@ RELATION_ROUTE_TABLES: Dict[Tuple[str, str], RelationRoute] = {
         hop2_tag_filters=None,
         hop2_label="성과(논문/특허/보고서 등) 목록",
     ),
-    ("project", "people"): RelationRoute(
-        relation=("project", "people"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="project",
-        hop2_kind="people",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여인력 목록",
-    ),
-    ("project", "org"): RelationRoute(
-        relation=("project", "org"),
-        hop1_col=COL_PROJECT,
-        hop2_col=COL_PROJECT,
-        hop1_kind="project",
-        hop2_kind="org",
-        hop1_tag_filters=[TAG_PJT_INFO],
-        hop2_tag_filters=[TAG_PJT_INFO],
-        hop2_label="참여기관 목록",
-    ),
     ("perf", "project"): RelationRoute(
         relation=("perf", "project"),
         hop1_col=COL_PERF,
@@ -1222,11 +1316,11 @@ def relation_target_collections(relation: Optional[Tuple[str, str]]) -> List[str
 
 
 def _classify_query_heuristic(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str] = None,
-    ids_map: Optional[Dict[str, List[str]]] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str] = None,
+        ids_map: Optional[Dict[str, List[str]]] = None,
 ) -> QueryIntent:
     q = (q or "").strip()
     tl = q.lower()
@@ -1242,31 +1336,43 @@ def _classify_query_heuristic(
     rare_ratio = len(rare_kws) / max(1, len(kws or []))
 
     is_id_query = (
-        len(rare_kws) >= 2
-        or bool(_RST_ID_RE.search(q))
-        or bool(_DOI_RE.search(q))
-        or bool(_ISSN_RE.search(q))
-        or bool(_PATENT_REG_NO_RE.search(q))
-        or bool(_PJT_ID_NUM_RE.search(q))
-        or bool(_PJT_NO_LABEL_RE.search(q))
-        or _has_any_cue(tl, ID_QUERY_CUES)
-        or any(bool(v) for v in (ids_map or {}).values())
+            len(rare_kws) >= 2
+            or bool(_RST_ID_RE.search(q))
+            or bool(_DOI_RE.search(q))
+            or bool(_ISSN_RE.search(q))
+            or bool(_PATENT_REG_NO_RE.search(q))
+            or bool(_PJT_ID_NUM_RE.search(q))
+            or bool(_PJT_NO_LABEL_RE.search(q))
+            or _has_any_cue(tl, ID_QUERY_CUES)
+            or any(bool(v) for v in (ids_map or {}).values())
     )
     long_query = (len(q.split()) >= 12) or (len(q) >= 40)
 
     # entities
     people_terms: List[str] = []
     gender_terms = extract_gender_terms(q, kws)
-    org_terms = extract_org_terms(q, kws)
+    org_terms = normalize_org_terms(extract_org_terms(q, kws))
     org_role = extract_org_role(q)
     years = extract_years(q)
+    lead_org_terms: List[str] = []
+    participant_org_terms: List[str] = []
+    people_affiliation_org_terms: List[str] = []
     if org_role == "affiliation":
-        people_terms = _extract_people_terms_for_affiliation(q)
+        has_name_signal = bool(_NAME_NEAR_CUE_RE.search(q or "")) or bool(_NAME_LABEL_RE.search(q or ""))
+        if has_name_signal:
+            people_terms = _extract_people_terms_for_affiliation(q)
+        people_affiliation_org_terms = list(org_terms)
+    elif org_role in ("lead", "performer", "performing"):
+        lead_org_terms = list(org_terms)
+    elif org_role == "participant":
+        participant_org_terms = list(org_terms)
 
     has_project = _has_any_cue(tl, PROJECT_CUES) or bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
     has_perf = _has_any_cue(tl, PERF_CUES) or bool(ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id") or ids_map.get("patent_reg_no"))
-    has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
-    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
+    has_org_cue = _has_any_cue(tl, ORG_CUES)
+    has_people_cue = _has_any_cue(tl, PEOPLE_CUES)
+    has_org = bool(org_terms) or has_org_cue or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    has_people = bool(people_terms) or bool(ids_map.get("person_no")) or has_people_cue
 
     base_route = pick_base_route(
         q, kws, ids_map,
@@ -1278,6 +1384,7 @@ def _classify_query_heuristic(
     wants_count = any(c in tl for c in COUNT_CUES)
     wants_list = any(c in tl for c in LIST_CUES)
     wants_detail = any(c in tl for c in DETAIL_CUES)
+    wants_rank = (base_route in ("people", "org") or has_people or has_org or has_people_cue or has_org_cue) and _has_superlative_cue(tl)
 
     base_route = _normalize_base_route_for_people_org_project_perf(
         base_route=base_route,
@@ -1319,6 +1426,7 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         intent=intent,
         ids_map=ids_map,
         is_id_query=is_id_query,
@@ -1350,7 +1458,14 @@ def _classify_query_heuristic(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        lead_org_terms=lead_org_terms,
+        participant_org_terms=participant_org_terms,
+        people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
@@ -1359,6 +1474,7 @@ def _classify_query_heuristic(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         planner_limit=requested_limit,
         join_key_mode=join_key_mode,
         parsing_warnings=parsing_warnings,
@@ -1370,11 +1486,11 @@ def _classify_query_heuristic(
 
 
 def classify_query(
-    q: str,
-    kws: List[str],
-    *,
-    domain_hint: Optional[str] = None,
-    hint: Optional[Any] = None,
+        q: str,
+        kws: List[str],
+        *,
+        domain_hint: Optional[str] = None,
+        hint: Optional[Any] = None,
 ) -> QueryIntent:
     q = (q or "").strip()
     tl = q.lower()
@@ -1456,23 +1572,49 @@ def classify_query(
     wants_count = bool(plan.get("wants_count", False))
     wants_list = bool(plan.get("wants_list", False))
     wants_detail = bool(plan.get("wants_detail", False))
+    wants_rank = bool(plan.get("wants_rank", False))
     if not (wants_count or wants_list or wants_detail):
         wants_count = any(c in tl for c in COUNT_CUES)
         wants_list = any(c in tl for c in LIST_CUES)
         wants_detail = any(c in tl for c in DETAIL_CUES)
+    if not wants_rank:
+        wants_rank = _has_superlative_cue(tl)
     output_type = str(plan.get("output_type") or "").strip().lower() or None
+    if output_type == "rank":
+        output_type = "stats"
     if output_type not in ("stats", "list", "detail", "relation", "summary"):
         output_type = None
 
     action = str(plan.get("action") or "").strip().lower()
+    if action == "rank":
+        action = "stats"
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
         action = ""
 
     people_terms = _normalize_str_list(plan.get("people_terms") or plan.get("researchers"))
     gender_terms = _normalize_str_list(plan.get("gender_terms"))
-    org_terms = _normalize_str_list(plan.get("org_terms") or plan.get("organizations"))
+    plan_filters = plan.get("filters") if isinstance(plan.get("filters"), dict) else {}
+    org_terms = normalize_org_terms(_normalize_str_list(plan.get("org_terms") or plan.get("organizations")))
+    lead_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("lead_org_terms")
+        or (plan_filters.get("lead_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    participant_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("participant_org_terms")
+        or (plan_filters.get("participant_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    people_affiliation_org_terms = normalize_org_terms(_normalize_str_list(
+        plan.get("people_affiliation_org_terms")
+        or (plan_filters.get("people_affiliation_org_name") if isinstance(plan_filters, dict) else None)
+    ))
+    if not org_terms:
+        org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
     org_role = str(plan.get("org_role") or "").strip().lower() or None
     years = _normalize_str_list(plan.get("years"))
+    year_from = str(plan.get("year_from") or "").strip() or None
+    year_to = str(plan.get("year_to") or "").strip() or None
+    perf_types = _normalize_str_list(plan.get("perf_types"))
+    title_terms = _normalize_str_list(plan.get("title") or plan.get("title_terms"))
 
     if not gender_terms:
         gender_terms = extract_gender_terms(q, kws)
@@ -1480,11 +1622,22 @@ def classify_query(
         org_role = extract_org_role(q)
     if not years:
         years = extract_years(q)
-    if org_role == "affiliation" and not people_terms:
-        people_terms = _extract_people_terms_for_affiliation(q)
+    if not year_from and years:
+        year_from = years[0]
+    if not year_to and years:
+        year_to = years[-1]
+    if org_role in ("lead", "performer", "performing") and not lead_org_terms:
+        lead_org_terms = list(org_terms)
+    if org_role == "participant" and not participant_org_terms:
+        participant_org_terms = list(org_terms)
+    if org_role == "affiliation" and not people_affiliation_org_terms:
+        people_affiliation_org_terms = list(org_terms)
 
-    has_people = bool(people_terms) or bool(ids_map.get("person_no"))
-    has_org = bool(org_terms) or _has_any_cue(tl, ORG_CUES) or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    has_people_cue = _has_any_cue(tl, PEOPLE_CUES)
+    has_org_cue = _has_any_cue(tl, ORG_CUES)
+    has_people = bool(people_terms) or bool(ids_map.get("person_no")) or has_people_cue
+    has_org = bool(org_terms) or has_org_cue or bool(ids_map.get("biz_no") or ids_map.get("org_code"))
+    wants_rank = wants_rank and (base_route in ("people", "org") or has_people or has_org or has_people_cue or has_org_cue)
 
     if people_terms:
         if any(keyword in tl for keyword in ("과제", "프로젝트", "project")):
@@ -1541,6 +1694,7 @@ def classify_query(
             wants_count=wants_count,
             wants_list=wants_list,
             wants_detail=wants_detail,
+            wants_rank=wants_rank,
             intent=intent,
             ids_map=ids_map,
             is_id_query=bool(ids_flat),
@@ -1569,7 +1723,14 @@ def classify_query(
         gender_terms=gender_terms,
         org_terms=org_terms,
         org_role=org_role,
+        lead_org_terms=lead_org_terms,
+        participant_org_terms=participant_org_terms,
+        people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
+        year_from=None,
+        year_to=None,
+        perf_types=[],
+        title=[],
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
@@ -1578,6 +1739,7 @@ def classify_query(
         wants_count=wants_count,
         wants_list=wants_list,
         wants_detail=wants_detail,
+        wants_rank=wants_rank,
         output_type=output_type,
         categories=categories,
         planner_limit=limit,

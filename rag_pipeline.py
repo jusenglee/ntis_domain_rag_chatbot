@@ -6,7 +6,8 @@ rag_pipeline.py (redesigned)
 - SEARCH / LOOKUP / JOIN 을 모드로 분리해 "필터의 역할"을 설계로 고정한다.
 - SEARCH: 모든 컬렉션에서 얇고 넓게 후보 탐색 -> (약한 RRF) + (강한 키워드/소프트필터)로 최종 랭킹
 - LOOKUP(list/stats/download, id query 등): 서버단 필터로 후보군을 먼저 좁힘 -> 소프트 랭킹으로 마무리
-- JOIN(2-hop): Hop1=SEARCH로 join-key 확보 -> Hop2=JOIN 필터로 강제 제한 + 소프트 랭킹
+- JOIN(2-hop): join_key_mode+ids_map+people/org 게이트를 먼저 판정해 Hop1(skip/lookup/search)을 결정,
+  Hop2=JOIN 필터로 강제 제한 + 소프트 랭킹
 
 의존
 - build_rag_objects(): qdr/emb 2종
@@ -21,6 +22,7 @@ import re
 import time
 import inspect
 import json
+import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -60,6 +62,8 @@ from rag_parts.query_intent import (
     get_relation_route,
     relation_target_collections,
     normalize_categories,
+    normalize_org_terms,
+    pick_perf_tag_filters,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -76,8 +80,11 @@ from rag_parts.planner_contract import (
     planner_contract_mode,
     normalize_lookup_filter_policy,
     normalize_lookup_title_filter_policy,
+    resolve_lookup_title_match_mode,
     validate_planner_contract,
+    normalize_stats_policy_value,
     StrategyViolation,
+    StrategyCompiler,
 )
 from rag_parts.vecsets import named_vectors_in_collection as _named_vectors_in_collection
 from rag_parts.post_policy import (
@@ -91,8 +98,12 @@ from rag_parts.rank_merge import (
     rrf_merge as _rrf_merge,
 )
 from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
+from rag_parts.promotion import (
+    promote_mode_from_search_hits as _promote_mode_from_search_hits,
+)
 from rag_parts.join import (
-    extract_pjt_ids as _extract_pjt_ids,
+    JoinKeyExtractionResult,
+    extract_join_keys as _extract_join_keys,
     normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.filters import (
@@ -104,8 +115,13 @@ from rag_parts.filters import (
     and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
     make_match_any,
     build_project_id_filter,
-    build_title_filter,
-    validate_join_mode_key_inputs,
+    build_title_exact_filter,
+    build_title_text_filter,
+    TITLE_MATCH_MODE_EXACT,
+    TITLE_MATCH_MODE_TEXT,
+    TITLE_MATCH_MODE_CONTAINS,
+    validate_planner_join_keys,
+    validate_resolved_join_keys,
     JoinFilterInput,
     PeopleFilterInput, OrgFilterInput,
 )
@@ -204,20 +220,17 @@ def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
 
 
 def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[str, List[str]]:
-    """pjt_id/pjt_no 혼합 여부를 mode 정책으로 검증하고 정규화 ids_map을 반환한다."""
-    normalized_ids_map = _normalize_ids_map(ids_map)
+    """planner 입력(ids_map)의 project key XOR 계약을 검증하고 정규화 결과를 반환한다."""
     mode_norm = str(mode or "").strip().lower()
-
-    has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
-    has_pjt_no = bool(normalized_ids_map.get("pjt_no"))
-    if has_pjt_id and has_pjt_no and mode_norm in ("lookup", "join"):
-        error_code = "PLANNER_MIXED_PROJECT_KEYS" if mode_norm == "lookup" else "PLANNER_JOIN_MIXED_PROJECT_KEYS"
-        raise StrategyViolation(
-            error_code=error_code,
-            reason=f"ids_map.pjt_id/pjt_no 혼합 입력은 허용되지 않음(mode={mode_norm})",
-        )
-
-    return normalized_ids_map
+    try:
+        return validate_planner_join_keys(mode=mode_norm, ids_map=ids_map)
+    except ValueError as exc:
+        msg = str(exc)
+        error_code, _, reason = msg.partition(": ")
+        if not error_code.startswith("PLANNER_"):
+            error_code = "PLANNER_MIXED_PROJECT_KEYS"
+            reason = msg
+        raise StrategyViolation(error_code=error_code, reason=reason or msg) from exc
 
 # =====================================================================
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
@@ -395,11 +408,11 @@ def _timing_put(timings: Dict[str, Any], key: str, value: Any) -> None:
     timings[key] = value
 
 def _record_col_timings(
-    timings: Dict[str, Any],
-    col: str,
-    *,
-    stats: Dict[str, float],
-    local_timings: Dict[str, float],
+        timings: Dict[str, Any],
+        col: str,
+        *,
+        stats: Dict[str, float],
+        local_timings: Dict[str, float],
 ) -> None:
     prefix = f"col.{col}"
     for k, v in (stats or {}).items():
@@ -432,18 +445,25 @@ def _get_meta(pl: dict) -> dict:
             merged.update(v)
     return merged
 
-def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
+def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "instance") -> Dict[str, int]:
     stats = {
         "total": 0,
         "missing_pjt_id": 0,
         "missing_pjt_no": 0,
         "missing_tag": 0,
         "missing_pjt_any": 0,
+        "invalid_pjt_id": 0,
+        "invalid_pjt_no": 0,
+        "suspected_swap": 0,
+        "same_id_no": 0,
     }
+    mode = str(join_key_mode or "instance").strip().lower()
+    payload_points: List[Any] = []
     for p in points or []:
         payload = getattr(p, "payload", None) or {}
         if not isinstance(payload, dict):
             continue
+        payload_points.append(p)
         stats["total"] += 1
         pjt_id = str(payload.get("pjt_id") or "").strip()
         pjt_no = str(payload.get("pjt_no") or "").strip()
@@ -456,13 +476,21 @@ def _count_missing_join_keys(points: Iterable[Any]) -> Dict[str, int]:
             stats["missing_tag"] += 1
         if not pjt_id and not pjt_no:
             stats["missing_pjt_any"] += 1
+        if pjt_id and pjt_no and pjt_id == pjt_no:
+            stats["same_id_no"] += 1
+
+    instance_keys = _extract_join_keys(payload_points, mode="instance", max_ids=max(1, len(payload_points)))
+    group_keys = _extract_join_keys(payload_points, mode="group", max_ids=max(1, len(payload_points)))
+    stats["invalid_pjt_id"] = len(instance_keys.invalid_values)
+    stats["invalid_pjt_no"] = len(group_keys.invalid_values)
+    stats["suspected_swap"] = instance_keys.suspected_swap_count if mode == "instance" else group_keys.suspected_swap_count
     return stats
 
 def _ensure_join_keys_in_payload(
-    points: Iterable[Any],
-    *,
-    force_from_meta: bool = False,
-    force_tag_from_tags: bool = True,
+        points: Iterable[Any],
+        *,
+        force_from_meta: bool = False,
+        force_tag_from_tags: bool = True,
 ) -> Dict[str, int]:
     stats = {
         "total": 0,
@@ -508,35 +536,23 @@ def _debug_force_join_keys_enabled() -> bool:
     return bool(_TEST_ONLY_FORCE_JOIN_KEYS_FROM_META)
 
 def _raise_on_missing_join_keys(
-    points: Iterable[Any],
-    *,
-    scope: str,
+        points: Iterable[Any],
+        *,
+        scope: str,
+        join_key_mode: str = "instance",
 ) -> Dict[str, int]:
-    missing = _count_missing_join_keys(points)
-    if not (missing.get("missing_pjt_any") or missing.get("missing_tag")):
+    missing = _count_missing_join_keys(points, join_key_mode=join_key_mode)
+    has_missing = bool(missing.get("missing_pjt_any") or missing.get("missing_tag"))
+    has_invalid = bool(missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no"))
+    if not (has_missing or has_invalid):
         return missing
 
-    log_kv(
-        "RAG.JOIN_KEYS.MISSING",
-        level="error",
-        scope=scope,
-        missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
-        missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
-        missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
-        missing_tag=int(missing.get("missing_tag", 0) or 0),
-        total=int(missing.get("total", 0) or 0),
-    )
-
-    if _debug_force_join_keys_enabled():
-        forced = _ensure_join_keys_in_payload(points)
-        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced)
-        missing = _count_missing_join_keys(points)
-        if not (missing.get("missing_pjt_any") or missing.get("missing_tag")):
-            return missing
+    if has_missing:
         log_kv(
-            "RAG.JOIN_KEYS.DEBUG_FORCE_FAILED",
+            "RAG.JOIN_KEYS.MISSING",
             level="error",
             scope=scope,
+            join_key_mode=join_key_mode,
             missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
             missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
             missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
@@ -544,44 +560,65 @@ def _raise_on_missing_join_keys(
             total=int(missing.get("total", 0) or 0),
         )
 
+    if has_invalid:
+        log_kv(
+            "RAG.JOIN_KEYS.INVALID",
+            level="error",
+            scope=scope,
+            join_key_mode=join_key_mode,
+            invalid_pjt_id=int(missing.get("invalid_pjt_id", 0) or 0),
+            invalid_pjt_no=int(missing.get("invalid_pjt_no", 0) or 0),
+            suspected_swap=int(missing.get("suspected_swap", 0) or 0),
+            same_id_no=int(missing.get("same_id_no", 0) or 0),
+            total=int(missing.get("total", 0) or 0),
+        )
+
+    if has_missing and _debug_force_join_keys_enabled():
+        forced = _ensure_join_keys_in_payload(points)
+        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced)
+        missing = _count_missing_join_keys(points, join_key_mode=join_key_mode)
+        has_missing = bool(missing.get("missing_pjt_any") or missing.get("missing_tag"))
+        has_invalid = bool(missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no"))
+        if not (has_missing or has_invalid):
+            return missing
+        if has_missing:
+            log_kv(
+                "RAG.JOIN_KEYS.DEBUG_FORCE_FAILED",
+                level="error",
+                scope=scope,
+                missing_pjt_id=int(missing.get("missing_pjt_id", 0) or 0),
+                missing_pjt_no=int(missing.get("missing_pjt_no", 0) or 0),
+                missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
+                missing_tag=int(missing.get("missing_tag", 0) or 0),
+                total=int(missing.get("total", 0) or 0),
+            )
+
+    error_code = "JOIN_KEYS_INVALID" if has_invalid else "JOIN_KEYS_MISSING"
+
     raise StrategyViolation(
-        error_code="JOIN_KEYS_MISSING",
+        error_code=error_code,
         reason=(
-            f"[{scope}] missing join keys in hop1 payload: "
+            f"[{scope}] invalid/missing join keys in hop1 payload: "
             f"missing_pjt_id={missing.get('missing_pjt_id', 0)}, "
             f"missing_pjt_no={missing.get('missing_pjt_no', 0)}, "
             f"missing_pjt_any={missing.get('missing_pjt_any', 0)}, "
             f"missing_tag={missing.get('missing_tag', 0)}, "
+            f"invalid_pjt_id={missing.get('invalid_pjt_id', 0)}, "
+            f"invalid_pjt_no={missing.get('invalid_pjt_no', 0)}, "
+            f"suspected_swap={missing.get('suspected_swap', 0)}, "
+            f"same_id_no={missing.get('same_id_no', 0)}, "
             f"total={missing.get('total', 0)}"
         ),
     )
 
-def _extract_pjt_nos(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    pjt_nos: List[str] = []
-    seen: set[str] = set()
-    for p in points or []:
-        payload = getattr(p, "payload", None) or {}
-        if not isinstance(payload, dict):
-            continue
-        # pjt_no 추출은 group join 전용이며 pjt_id를 대체키로 사용하지 않는다.
-        pjt_no = _pick_first(payload.get("pjt_no"))
-        if not pjt_no or pjt_no in seen:
-            continue
-        seen.add(pjt_no)
-        pjt_nos.append(pjt_no)
-        if len(pjt_nos) >= max_ids:
-            break
-    return pjt_nos
-
-
 def _ensure_join_mode_has_keys(
-    *,
-    has_join_keys: bool,
-    join_key_mode: str,
-    hop1_top: List[Any],
-    hop1_col: str,
-    join_pjt_ids_count: int = 0,
-    join_pjt_nos_count: int = 0,
+        *,
+        has_join_keys: bool,
+        join_key_mode: str,
+        hop1_top: List[Any],
+        hop1_col: str,
+        join_pjt_ids_count: int = 0,
+        join_pjt_nos_count: int = 0,
 ) -> None:
     """
     mode=join 계약:
@@ -600,11 +637,12 @@ def _ensure_join_mode_has_keys(
         return
 
     if hop1_top:
-        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys")
+        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys", join_key_mode=join_key_mode)
 
     join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
+    error_code = "JOIN_GROUP_KEYS_UNRESOLVED" if str(join_key_mode or "").strip().lower() == "group" else "JOIN_KEYS_MISSING"
     raise StrategyViolation(
-        error_code="JOIN_KEYS_MISSING",
+        error_code=error_code,
         reason=(
             "mode=join requires Hop2 execution, but join keys were not extracted "
             f"from Hop1 ({join_key_label} missing; "
@@ -671,10 +709,10 @@ def _ensure_iterable_list(value: Any) -> List[Any]:
 
 
 def _pick_matching_prtcp_mp(
-    pl: Dict[str, Any],
-    *,
-    people_terms: Optional[List[str]] = None,
-    person_ids: Optional[List[str]] = None,
+        pl: Dict[str, Any],
+        *,
+        people_terms: Optional[List[str]] = None,
+        person_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     members = pl.get("prtcp_mp")
     if not isinstance(members, list):
@@ -878,10 +916,10 @@ def _resolve_output_fieldset(output_type: Optional[str]) -> Tuple[str, ...]:
 
 
 def _should_use_list_context(
-    *,
-    action: str,
-    base_route: str,
-    output_type: Optional[str],
+        *,
+        action: str,
+        base_route: str,
+        output_type: Optional[str],
 ) -> bool:
     ot = _normalize_output_type(output_type)
     if ot in ("list", "stats"):
@@ -890,22 +928,32 @@ def _should_use_list_context(
 
 
 def _build_context_with_output_type(
-    points: List[Any],
-    *,
-    action: str,
-    base_route: str,
-    output_type: Optional[str],
-    max_items: int,
-    query_text: str,
-    people_terms: Optional[List[str]] = None,
-    person_ids: Optional[List[str]] = None,
-    org_role: Optional[str] = None,
+        points: List[Any],
+        *,
+        action: str,
+        base_route: str,
+        mode: str,
+        output_type: Optional[str],
+        max_items: int,
+        query_text: str,
+        people_terms: Optional[List[str]] = None,
+        person_ids: Optional[List[str]] = None,
+        org_terms: Optional[List[str]] = None,
+        org_role: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
     fieldset = _resolve_output_fieldset(output_type)
+    context_kind = base_route
+    mode_norm = str(mode or "").strip().lower()
+    if mode_norm == "lookup" and base_route == "project":
+        if bool((people_terms or [])) or bool((person_ids or [])):
+            context_kind = "people"
+        elif bool((org_terms or [])) or bool(str(org_role or "").strip()):
+            context_kind = "org"
+
     if _should_use_list_context(action=action, base_route=base_route, output_type=output_type):
         context, refs = build_context_list_light(
             points,
-            kind=base_route,
+            kind=context_kind,
             max_items=max_items,
             query_text=query_text,
             people_terms=people_terms,
@@ -929,6 +977,187 @@ def _build_context_with_output_type(
 # -------------------------
 # Precomputed embedding wrapper
 # -------------------------
+
+
+def _normalize_person_group_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _resolve_people_agg_candidate_limit(*, hinted_limit: int, policy_limit: int, total_docs: int) -> int:
+    hinted = max(0, int(hinted_limit or 0))
+    policy = max(1, int(policy_limit or 1))
+    if hinted > 0:
+        return min(total_docs, hinted)
+    return min(total_docs, policy)
+
+
+def _extract_year_from_payload(payload: Dict[str, Any]) -> Optional[int]:
+    candidates: List[str] = []
+    meta_basic = payload.get("meta_basic") if isinstance(payload.get("meta_basic"), Mapping) else {}
+
+    def _append_year_tokens(raw: Any) -> None:
+        if raw is None:
+            return
+        text = str(raw).strip()
+        if not text:
+            return
+        candidates.append(text)
+
+    _append_year_tokens(payload.get("stan_yr"))
+    _append_year_tokens(meta_basic.get("stan_yr") if isinstance(meta_basic, Mapping) else None)
+    _append_year_tokens(payload.get("dt1"))
+    _append_year_tokens(payload.get("dt2"))
+
+    for token in candidates:
+        m = re.search(r"(19|20)\d{2}", token)
+        if m:
+            return int(m.group(0))
+    return None
+
+
+def _build_people_superlative_aggregation(
+        *,
+        reranked: List[Any],
+        intent: NormalizedIntent,
+        hinted_limit: int,
+        policy_limit: int,
+) -> Optional[Dict[str, Any]]:
+    if str(getattr(intent, "action", "") or "").strip().lower() != "stats":
+        return None
+    if str(getattr(intent, "base_route", "") or "").strip().lower() != "people":
+        return None
+    if not bool(getattr(intent, "wants_rank", False)):
+        return None
+
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(intent, "stats_metric", None),
+        window_years=getattr(intent, "window_years", None),
+        candidate_n=getattr(intent, "candidate_n", None),
+        top_k=getattr(intent, "top_k", None),
+        tie_break=getattr(intent, "tie_break", None),
+    )
+
+    candidate_docs = _resolve_people_agg_candidate_limit(
+        hinted_limit=hinted_limit,
+        policy_limit=int(stats_policy["candidate_n"]),
+        total_docs=len(reranked or []),
+    )
+    if candidate_docs <= 0:
+        return None
+
+    perf_types_filter = {t.strip() for t in (getattr(intent, "perf_types", []) or []) if str(t).strip()}
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    now_year = time.gmtime().tm_year
+    fallback_year_from = max(1900, now_year - int(stats_policy["window_years"]) + 1)
+    window_year_from = str(getattr(intent, "year_from", "") or "").strip()
+    window_year_to = str(getattr(intent, "year_to", "") or "").strip()
+    years_raw = [str(y).strip() for y in (getattr(intent, "years", []) or []) if str(y).strip()]
+    if years_raw and not window_year_from:
+        window_year_from = min(years_raw)
+    if years_raw and not window_year_to:
+        window_year_to = max(years_raw)
+
+    y_from = int(window_year_from) if window_year_from.isdigit() else fallback_year_from
+    y_to = int(window_year_to) if window_year_to.isdigit() else now_year
+    if y_from > y_to:
+        y_from, y_to = y_to, y_from
+
+    window_docs = 0
+    for point in (reranked or [])[:candidate_docs]:
+        payload = getattr(point, "payload", None) or {}
+        doc_year = _extract_year_from_payload(payload)
+        if doc_year is None or doc_year < y_from or doc_year > y_to:
+            continue
+        window_docs += 1
+        participants = payload.get("prtcp_mp") or []
+        if not isinstance(participants, list):
+            continue
+
+        pjt_id =  _payload_get(payload, "pjt_id")
+        perf_tag = str(payload.get("tag") or "").strip()
+        tag_family = _classify_tag_family(perf_tag)
+
+        if perf_types_filter and tag_family == "perf":
+            norm_tag = _normalize_tag_value(perf_tag)
+            if norm_tag not in perf_types_filter:
+                tag_family = "other"
+
+        for member in participants:
+            if not isinstance(member, Mapping):
+                continue
+            hm_id = str(member.get("hm_id") or "").strip()
+            hm_nm_raw = str(member.get("hm_nm") or "").strip()
+            hm_nm_norm = _normalize_person_group_key(hm_nm_raw)
+            person_key = hm_id or hm_nm_norm
+            if not person_key:
+                continue
+
+            if person_key not in grouped:
+                grouped[person_key] = {
+                    "person_key": person_key,
+                    "hm_id": hm_id or None,
+                    "hm_nm": hm_nm_raw or (hm_id or "unknown"),
+                    "project_ids": set(),
+                    "performance_count": 0,
+                }
+            item = grouped[person_key]
+            if pjt_id:
+                item["project_ids"].add(str(pjt_id))
+            if tag_family == "perf":
+                item["performance_count"] += 1
+
+    if not grouped:
+        return None
+
+    rank_items: List[Dict[str, Any]] = []
+    metric_key = str(stats_policy["stats_metric"])
+    for value in grouped.values():
+        project_count = len(value.get("project_ids") or set())
+        performance_count = int(value.get("performance_count", 0))
+        score = project_count if metric_key == "project_participation_count" else performance_count
+        rank_items.append({
+            "person_key": value.get("person_key"),
+            "hm_id": value.get("hm_id"),
+            "hm_nm": value.get("hm_nm"),
+            "project_participation_count": project_count,
+            "performance_count": performance_count,
+            "score": score,
+        })
+
+    rank_items.sort(
+        key=lambda x: (
+            -int(x.get("score", 0)),
+            -int(x.get("performance_count", 0)),
+            str(x.get("hm_nm") or ""),
+            str(x.get("hm_id") or ""),
+            str(x.get("person_key") or ""),
+        )
+    )
+
+    top_k = max(1, min(len(rank_items), int(stats_policy["top_k"])))
+
+    return {
+        "rank_items": rank_items[:top_k],
+        "metric": metric_key,
+        "window_years": {"from": str(y_from), "to": str(y_to), "years": years_raw},
+        "candidate_docs": candidate_docs,
+        "window_docs": window_docs,
+        "meta": {
+            "stats": {
+                "metric_applied": metric_key,
+                "window_applied": {"from": str(y_from), "to": str(y_to)},
+                "candidate_n_applied": int(stats_policy["candidate_n"]),
+                "top_k_applied": int(top_k),
+                "tie_break_applied": str(stats_policy["tie_break"]),
+            }
+        },
+    }
+
 class _PrecomputedEmbedding:
     def __init__(self, vec: List[float]):
         self._vec = vec
@@ -1039,15 +1268,16 @@ def _call_dense_retrieve_hybrid_multi(
     )
 
 def _validate_lookup_join_hybrid_metrics(
-    *,
-    mode: str,
-    contract_scope: str,
-    timings: Mapping[str, Any],
+        *,
+        mode: str,
+        contract_scope: str,
+        timings: Mapping[str, Any],
+        strict: bool = True,
 ) -> None:
     if str(mode).strip().lower() not in ("lookup", "join"):
         return
     dense_queries = float(timings.get("dense_queries", 0.0) or 0.0)
-    sparse_hits = float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+    sparse_hits = _resolve_sparse_hits_metric(timings)
     hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
     hybrid_mode_used = hybrid_once_hits > 0
 
@@ -1064,23 +1294,52 @@ def _validate_lookup_join_hybrid_metrics(
     if hybrid_mode_used:
         return
 
-    if dense_queries == 0:
-        raise StrategyViolation(
-            error_code="LOOKUP_JOIN_DENSE_METRIC_ZERO",
-            reason=(
-                f"dense_queries == 0 and hybrid_once_hits == 0 for {contract_scope}; "
-                f"dense_queries={dense_queries}, hybrid_once_hits={hybrid_once_hits}"
-            ),
+    if dense_queries == 0 or sparse_hits == 0:
+        log_kv(
+            "RAG.LOOKUP_JOIN.HYBRID.METRICS.ZERO_HIT",
+            level="warning" if not strict else "info",
+            mode=mode,
+            contract_scope=contract_scope,
+            dense_queries=dense_queries,
+            sparse_hits=sparse_hits,
+            hybrid_once_hits=hybrid_once_hits,
+            strict=int(bool(strict)),
         )
 
-    if sparse_hits == 0:
-        raise StrategyViolation(
-            error_code="LOOKUP_JOIN_SPARSE_METRIC_ZERO",
-            reason=(
-                f"sparse_hits == 0 and hybrid_once_hits == 0 for {contract_scope}; "
-                f"sparse_hits={sparse_hits}, hybrid_once_hits={hybrid_once_hits}"
-            ),
-        )
+
+def _resolve_sparse_hits_metric(timings: Mapping[str, Any]) -> float:
+    if not isinstance(timings, Mapping):
+        return 0.0
+    return float(timings.get("lexical_scored", timings.get("sparse_hits", 0.0)) or 0.0)
+
+
+def _resolve_effective_min_reranked(
+        *,
+        intent: NormalizedIntent,
+        mode: str,
+        base_route: str,
+        preset_min_reranked: int,
+        hinted_limit: int = 0,
+) -> tuple[int, str]:
+    effective_min_reranked = max(0, int(preset_min_reranked or 0))
+    clamp_reasons: list[str] = []
+
+    hinted_limit_val = max(0, int(hinted_limit or 0))
+    if hinted_limit_val > 0:
+        effective_min_reranked = min(effective_min_reranked, hinted_limit_val)
+        clamp_reasons.append("hinted_limit")
+
+    if str(mode).strip().lower() != "lookup":
+        return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
+
+    if str(base_route or "").strip().lower() not in ("", "project", "perf"):
+        return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
+
+    if _has_explicit_identifiers(intent):
+        id_lookup_min_reranked = max(0, int(os.getenv("RAG_MIN_RERANKED_LOOKUP_ID", "1")))
+        effective_min_reranked = min(effective_min_reranked, id_lookup_min_reranked)
+        clamp_reasons.append("lookup_id_query")
+    return effective_min_reranked, ",".join(clamp_reasons) if clamp_reasons else "none"
 
 def _attach_collection(p: Any, col: str) -> Any:
     if p is None or not col:
@@ -1106,15 +1365,15 @@ def _ensure_collection_mark(points: List[Any], col: str) -> None:
         _attach_collection(p, col)
 
 def _apply_dense_threshold(
-    sr: Dict[str, Any],
-    *,
-    use_dense_threshold: bool,
-    min_dense_score: float,
-    log_prefix: str,
-    col: Optional[str] = None,
-    action: Optional[str] = None,
-    base_route: Optional[str] = None,
-    relation: Optional[Tuple[str, str]] = None,
+        sr: Dict[str, Any],
+        *,
+        use_dense_threshold: bool,
+        min_dense_score: float,
+        log_prefix: str,
+        col: Optional[str] = None,
+        action: Optional[str] = None,
+        base_route: Optional[str] = None,
+        relation: Optional[Tuple[str, str]] = None,
 ) -> None:
     dense_map = sr.get("dense")
     if not isinstance(dense_map, dict):
@@ -1221,6 +1480,72 @@ def _to_text(v: object) -> str:
         return ""
     s = str(v).replace("\r", " ").replace("\n", " ")
     return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_for_title_match(text: object) -> str:
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(text))
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"[\u2000-\u200B\u202F\u205F\u3000]", " ", s)
+    s = re.sub(r"[\[\]{}()<>《》〈〉「」『』【】]", " ", s)
+    s = re.sub(r"[\"'`´]+", "", s)
+    s = re.sub(r"[·•ㆍ]", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _soft_title_contains(doc_payload: Mapping[str, Any], title_terms: List[str]) -> bool:
+    if not isinstance(doc_payload, Mapping):
+        return False
+
+    normalized_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for raw in title_terms or []:
+        term = normalize_for_title_match(raw)
+        if len(term) <= 2:
+            continue
+        term_key = term.lower()
+        if term_key and term_key not in seen_terms:
+            seen_terms.add(term_key)
+            normalized_terms.append(term_key)
+    if not normalized_terms:
+        return False
+
+    for field in ("title1", "title2", "title_text"):
+        title_val = normalize_for_title_match(doc_payload.get(field, "")).lower()
+        if not title_val:
+            continue
+        for term in normalized_terms:
+            if term in title_val:
+                return True
+    return False
+
+
+def _soft_title_match_count(doc_payload: Mapping[str, Any], title_terms: List[str]) -> int:
+    terms: List[str] = []
+    for raw in title_terms or []:
+        term = normalize_for_title_match(raw)
+        if term:
+            terms.append(term.lower())
+    if not terms:
+        return 0
+
+    titles: List[str] = []
+    for field in ("title1", "title2", "title_text"):
+        title_val = normalize_for_title_match(doc_payload.get(field, "")).lower()
+        if title_val:
+            titles.append(title_val)
+    if not titles:
+        return 0
+
+    hit_terms: set[str] = set()
+    for term in terms:
+        for title_val in titles:
+            if term in title_val:
+                hit_terms.add(term)
+                break
+    return len(hit_terms)
 
 def _prefer_meta_title(pl: Dict[str, Any], meta: Dict[str, Any]) -> str:
     title = _to_text(pl.get("title_text") or pl.get("title1") or pl.get("title2") or "")
@@ -1388,12 +1713,12 @@ def _flatten_ids_from_intent(it: Any) -> List[str]:
     return out
 
 def _filter_score(
-    p: Any,
-    it: NormalizedIntent,
-    base_route: str,
-    *,
-    strict_ids: bool,
-    mode: str = "search",
+        p: Any,
+        it: NormalizedIntent,
+        base_route: str,
+        *,
+        strict_ids: bool,
+        mode: str = "search",
 ) -> float:
     tb = _payload_text_bundle(p)
     hay = " | ".join([tb["title_text"], tb["flat_text"], tb["meta_kv"], tb["content_text"]]).lower()
@@ -1560,16 +1885,41 @@ def _default_target_collections() -> list[str]:
     return [COL_PROJECT]
 
 
-def _default_target_collections_for_route(base_route: str) -> list[str]:
+def _has_perf_focus_signal(it: Optional[NormalizedIntent]) -> bool:
+    if it is None:
+        return False
+
+    perf_types = [str(v).strip() for v in (getattr(it, "perf_types", None) or []) if str(v).strip()]
+    if perf_types:
+        return True
+
+    perf_focus_terms = ("논문", "특허", "성과")
+    term_sources = [
+        *(getattr(it, "keywords", None) or []),
+        *(getattr(it, "title", None) or []),
+        str(getattr(it, "retrieval_query", "") or ""),
+    ]
+    for raw in term_sources:
+        text = str(raw or "").strip()
+        if text and any(term in text for term in perf_focus_terms):
+            return True
+    return False
+
+
+def _default_target_collections_for_route(base_route: str, it: Optional[NormalizedIntent] = None) -> list[str]:
+    base_route_norm = str(base_route or "").strip().lower()
     route_defaults = {
         "project": [COL_PROJECT],
         "perf": [COL_PERF],
         "support": [COL_SUPPORT],
-        # people/org 질의는 프로젝트 컬렉션을 기본 엔티티 저장소로 사용
+        # people/org 질의는 project를 우선 사용하되 성과 신호가 있으면 perf를 함께 조회
         "people": [COL_PROJECT],
         "org": [COL_PROJECT],
     }
-    desired = list(route_defaults.get(str(base_route or "").strip().lower(), [COL_PROJECT]))
+    desired = list(route_defaults.get(base_route_norm, [COL_PROJECT]))
+    if base_route_norm in ("people", "org") and _has_perf_focus_signal(it):
+        desired = [COL_PROJECT, COL_PERF]
+
     allow_list = list(RAG_COLLECTION_ALLOWLIST)
     if not allow_list:
         return desired
@@ -1591,6 +1941,8 @@ def _final_rerank(
         keep: int,
         tag_boost: float = 0.0,
         tag_mismatch_penalty: float = 0.0,
+        title_soft_terms: Optional[List[str]] = None,
+        title_soft_boost: float = 0.0,
 ) -> List[Any]:
     if not cands:
         return []
@@ -1635,6 +1987,10 @@ def _final_rerank(
         pl = getattr(p, "payload", None)
         rrf_sc = float(pl.get("_rrf", 0.0)) if isinstance(pl, dict) else 0.0
         kw_sc = _keyword_score(p, kws, lex_w)
+        if title_soft_terms and title_soft_boost > 0:
+            title_hits = _soft_title_match_count(getattr(p, "payload", None) or {}, title_soft_terms)
+            if title_hits > 0:
+                kw_sc += title_soft_boost * float(title_hits)
         exact_hits = _keyword_exact_match_hits(p, kws)
         f_sc = _filter_score(p, it, base_route, strict_ids=strict_ids, mode=mode)
         fam = _family_bonus(p, base_route)
@@ -1726,11 +2082,11 @@ def _final_rerank(
         fam = item["fam"]
         tag_sc = item["tag"]
         tot = (
-            (w_rrf * norm_rrf[i])
-            + (w_kw * norm_kw[i])
-            + (w_f * norm_f[i])
-            + (w_fam * norm_fam[i])
-            + (w_tag * norm_tag[i])
+                (w_rrf * norm_rrf[i])
+                + (w_kw * norm_kw[i])
+                + (w_f * norm_f[i])
+                + (w_fam * norm_fam[i])
+                + (w_tag * norm_tag[i])
         )
         legacy_tot = (legacy_w_rrf * rrf_sc) + (legacy_w_kw * kw_sc) + (legacy_w_f * f_sc) + fam + tag_sc
 
@@ -1821,33 +2177,63 @@ def _has_relation_join_ids(it: NormalizedIntent) -> bool:
 
 
 def _resolve_join_execution_policy(
-    *,
-    relation: Optional[Tuple[str, str]],
-    mode: str,
-    action: Optional[str],
-    has_relation_join_ids: bool,
+        *,
+        relation: Optional[Tuple[str, str]],
+        mode: str,
+        action: Optional[str],
+        join_key_mode: Optional[str],
+        seed_join_pjt_ids: Optional[List[str]] = None,
+        seed_join_pjt_nos: Optional[List[str]] = None,
+        has_people_org_gate: bool = False,
 ) -> Dict[str, Any]:
-    """JOIN 경로 실행 정책을 단일화한다.
+    """JOIN 경로 Hop1 실행 정책을 단일화한다.
 
-    정책:
-    - relation && mode=join 이면 ids 유무와 무관하게 Hop1→Hop2 경로를 강제한다.
-    - "skip" 개념을 제거하고 required/executed 신호만 남긴다.
+    우선순위:
+    1) instance + ids_map.pjt_id   -> hop1_strategy="skip" (옵션 시 최소 lookup 보강)
+    2) group + ids_map.pjt_no      -> hop1_strategy="lookup"
+    3) people/org 조건 존재        -> hop1_strategy="lookup"
+    4) 그 외                        -> hop1_strategy="search"
     """
-    is_required = bool(relation and mode == "join")
-    if not is_required:
+    is_join_mode = bool(relation and mode == "join")
+    if not is_join_mode:
         return {
-            "required": False,
+            "hop1_strategy": None,
             "reason": None,
             "action": action,
-            "has_relation_join_ids": bool(has_relation_join_ids),
+            "seed_key_source": None,
+            "seed_key_count": 0,
         }
 
-    reason = "seed_ids_present" if has_relation_join_ids else "hop1_key_extraction_required"
+    seed_join_pjt_ids = [str(x).strip() for x in (seed_join_pjt_ids or []) if str(x).strip()]
+    seed_join_pjt_nos = [str(x).strip() for x in (seed_join_pjt_nos or []) if str(x).strip()]
+
+    if join_key_mode == "instance" and seed_join_pjt_ids:
+        hop1_strategy = "skip"
+        reason = "instance_seed_pjt_id"
+        seed_key_source = "ids_map.pjt_id"
+        seed_key_count = len(seed_join_pjt_ids)
+    elif join_key_mode == "group" and seed_join_pjt_nos:
+        hop1_strategy = "lookup"
+        reason = "group_seed_pjt_no_expand"
+        seed_key_source = "ids_map.pjt_no"
+        seed_key_count = len(seed_join_pjt_nos)
+    elif has_people_org_gate:
+        hop1_strategy = "lookup"
+        reason = "people_org_gate_lookup"
+        seed_key_source = "people_org_conditions"
+        seed_key_count = 0
+    else:
+        hop1_strategy = "search"
+        reason = "default_hop1_search"
+        seed_key_source = None
+        seed_key_count = 0
+
     return {
-        "required": True,
+        "hop1_strategy": hop1_strategy,
         "reason": reason,
         "action": action,
-        "has_relation_join_ids": bool(has_relation_join_ids),
+        "seed_key_source": seed_key_source,
+        "seed_key_count": seed_key_count,
     }
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
@@ -1856,10 +2242,11 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     우선순위(강제):
     0) relation action -> join (ids 유무와 무관)
     1) relation + join ids -> join
-    2) id query 또는 명확한 ids -> lookup
-    3) list/stats/download -> lookup
-    4) topic/search -> search (기본 유지)
-    5) 그 외 -> search
+    2) 사람/기관 이름 기반 질의 -> lookup (SEARCH 오염 방지)
+    3) id query 또는 명확한 ids -> lookup
+    4) list/stats/download -> lookup
+    5) topic/search -> search (기본 유지)
+    6) 그 외 -> search
     """
     action = it.action
     rel = it.relation
@@ -1869,6 +2256,24 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
         return "lookup", "people_project_lookup"
     if rel and _has_relation_join_ids(it):
         return "join", "relation_ids"
+
+    people_terms = [str(t).strip() for t in (getattr(it, "people_terms", None) or []) if str(t).strip()]
+    lead_org_terms = [str(t).strip() for t in (getattr(it, "lead_org_terms", None) or []) if str(t).strip()]
+    participant_org_terms = [str(t).strip() for t in (getattr(it, "participant_org_terms", None) or []) if str(t).strip()]
+    affiliation_org_terms = [str(t).strip() for t in (getattr(it, "people_affiliation_org_terms", None) or []) if str(t).strip()]
+    org_terms = [str(t).strip() for t in (getattr(it, "org_terms", None) or []) if str(t).strip()]
+
+    has_name_lookup_signal = bool(
+        people_terms
+        or lead_org_terms
+        or participant_org_terms
+        or affiliation_org_terms
+        or org_terms
+        or (str(getattr(it, "org_role", "") or "").strip().lower() in ("lead", "performer", "performing", "participant", "affiliation"))
+    )
+    if has_name_lookup_signal and action not in ("support",):
+        return "lookup", "people_org_name_lookup"
+
     if bool(it.is_id_query) or _has_any_ids(it) or action in ("id_exact", "id_fuzzy"):
         return "lookup", "id_or_exact"
     if action in ("list", "stats", "download"):
@@ -1879,15 +2284,22 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
 
 
 def _build_plan(
-    it: NormalizedIntent,
-    *,
-    preferred_mode: Optional[str] = None,
-    preferred_mode_source: Optional[str] = None,
+        it: NormalizedIntent,
+        *,
+        preferred_mode: Optional[str] = None,
+        preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
     action = it.action
     base_route = it.base_route
     rel = it.relation
     output_type = getattr(it, "output_type", None)
+    stats_policy = normalize_stats_policy_value(
+        stats_metric=getattr(it, "stats_metric", None),
+        window_years=getattr(it, "window_years", None),
+        candidate_n=getattr(it, "candidate_n", None),
+        top_k=getattr(it, "top_k", None),
+        tie_break=getattr(it, "tie_break", None),
+    )
 
     if preferred_mode:
         mode = preferred_mode
@@ -1898,7 +2310,7 @@ def _build_plan(
     if rel:
         target_cols = list(relation_target_collections(rel) or _default_target_collections())
     else:
-        target_cols = _default_target_collections_for_route(base_route)
+        target_cols = _default_target_collections_for_route(base_route, it)
 
     return QueryPlan(
         mode=mode,
@@ -1907,6 +2319,11 @@ def _build_plan(
         relation=rel,
         join_key_mode=getattr(it, "join_key_mode", None),
         output_type=output_type,
+        stats_metric=stats_policy["stats_metric"],
+        window_years=stats_policy["window_years"],
+        candidate_n=stats_policy["candidate_n"],
+        top_k=stats_policy["top_k"],
+        tie_break=stats_policy["tie_break"],
         target_collections=tuple(target_cols),
         filters={},
     ), mode_reason
@@ -1939,6 +2356,17 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], sou
     )
 
 
+
+
+def _strategy_field_diff(planner: Any, executed: Any, keys: List[str]) -> Dict[str, Dict[str, Any]]:
+    diff: Dict[str, Dict[str, Any]] = {}
+    for key in keys:
+        planner_val = planner.get(key) if isinstance(planner, dict) else None
+        executed_val = executed.get(key) if isinstance(executed, dict) else None
+        if planner_val != executed_val:
+            diff[key] = {"planner": planner_val, "executed": executed_val}
+    return diff
+
 def _env_flag(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).strip().lower() in ("1", "true", "yes", "y", "on")
 
@@ -1952,13 +2380,25 @@ def _normalize_strategy_target_cols(cols: Any) -> List[str]:
     return out
 
 
+def _derive_planner_locks(plan: QueryPlan) -> tuple[str, Optional[tuple[str, str]], List[str]]:
+    """planner 스냅샷(mode/relation/target_cols)을 단일 규칙으로 고정한다.
+
+    주의: fallback으로 plan이 교체될 수 있으므로, 실행 전 검증에 사용하는
+    planner lock 값은 항상 최신 plan으로 재동기화해야 한다.
+    """
+    planner_mode_locked = str(getattr(plan, "mode", "") or "").strip().lower()
+    planner_relation_locked = getattr(plan, "relation", None)
+    planner_target_cols_locked = _normalize_strategy_target_cols(getattr(plan, "target_collections", None))
+    return planner_mode_locked, planner_relation_locked, planner_target_cols_locked
+
+
 def _strategy_consistency_or_violation(
-    *,
-    strict: bool,
-    mismatch_kind: str,
-    planner_value: Any,
-    executed_value: Any,
-    context: Optional[Dict[str, Any]] = None,
+        *,
+        strict: bool,
+        mismatch_kind: str,
+        planner_value: Any,
+        executed_value: Any,
+        context: Optional[Dict[str, Any]] = None,
 ) -> None:
     if planner_value == executed_value:
         return
@@ -1981,11 +2421,11 @@ def _strategy_consistency_or_violation(
 
 
 def _strategy_must_match_or_violation(
-    *,
-    mismatch_kind: str,
-    planner_value: Any,
-    executed_value: Any,
-    context: Optional[Dict[str, Any]] = None,
+        *,
+        mismatch_kind: str,
+        planner_value: Any,
+        executed_value: Any,
+        context: Optional[Dict[str, Any]] = None,
 ) -> None:
     """planner 계약 불일치 시 즉시 중단한다(환경 strict 토글 무시)."""
     _strategy_consistency_or_violation(
@@ -1998,17 +2438,39 @@ def _strategy_must_match_or_violation(
 
 
 def _diff_filter_spec(
-    *,
-    planner_filter_spec: Dict[str, Any],
-    executed_filter_spec: Dict[str, Any],
+        *,
+        planner_filter_spec: Dict[str, Any],
+        executed_filter_spec: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """planner가 명시한 filter 계약 키 기준으로 실행 스펙 diff를 계산한다."""
+    """planner가 명시한 subset key 기준으로 실행 filter 스펙 diff를 계산한다."""
+
+    def _semantic_subset_equal(planner_val: Any, exec_val: Any) -> bool:
+        # planner가 명시한 key/subtree만 비교하고, 실행 측의 메타/추가 필드는 허용한다.
+        if isinstance(planner_val, Mapping):
+            if not isinstance(exec_val, Mapping):
+                return False
+            for sub_key, sub_planner_val in planner_val.items():
+                if sub_key not in exec_val:
+                    return False
+                if not _semantic_subset_equal(sub_planner_val, exec_val.get(sub_key)):
+                    return False
+            return True
+
+        if isinstance(planner_val, list):
+            if not isinstance(exec_val, list):
+                return False
+            if len(planner_val) != len(exec_val):
+                return False
+            return all(_semantic_subset_equal(p, e) for p, e in zip(planner_val, exec_val))
+
+        return planner_val == exec_val
+
     planner_keys = sorted(str(k) for k in (planner_filter_spec or {}).keys())
     changed: Dict[str, Dict[str, Any]] = {}
     for key in planner_keys:
         planner_val = planner_filter_spec.get(key)
         exec_val = executed_filter_spec.get(key)
-        if planner_val != exec_val:
+        if not _semantic_subset_equal(planner_val, exec_val):
             changed[key] = {"planner": planner_val, "executed": exec_val}
     return {
         "planner_keys": planner_keys,
@@ -2033,6 +2495,54 @@ def _must_contain_terms(p: Any, terms: List[str]) -> bool:
     return True
 
 
+def _normalize_join_collection_name(
+        collection: str,
+        *,
+        relation: Optional[Tuple[str, str]] = None,
+) -> str:
+    raw = str(collection or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered == "project":
+        return COL_PROJECT
+    if lowered == "perf":
+        return COL_PERF
+    return raw
+
+
+def _build_join_hop1_filter(
+        *,
+        relation: Optional[Tuple[str, str]],
+        hop1_col: str,
+        hop1_filter: Any,
+        compiled_hop1_spec: Optional[Dict[str, Any]] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    planner_hop1_spec = dict(compiled_hop1_spec or {})
+    planner_hop1_col = _normalize_join_collection_name(
+        str(planner_hop1_spec.get("collection") or ""),
+        relation=relation,
+    )
+    if planner_hop1_col and planner_hop1_col != hop1_col:
+        raise StrategyViolation(
+            error_code="PLANNER_JOIN_HOP1_COLLECTION_MISMATCH",
+            reason=(
+                "planner hop1_spec.collection과 실행 hop1_col 불일치"
+                f"(planner={planner_hop1_col}, executed={hop1_col}, relation={relation})"
+            ),
+        )
+
+    planner_hop1_filter = planner_hop1_spec.get("qdrant_filter")
+    if planner_hop1_filter is not None:
+        hop1_filter = _and_filter(hop1_filter, planner_hop1_filter)
+
+    executed_hop1_filter_spec = {
+        "hop1_col": hop1_col,
+        "planner_hop1_filter_applied": int(planner_hop1_filter is not None),
+    }
+    return hop1_filter, executed_hop1_filter_spec
+
+
 def _build_join_hop2_filter(
         *,
         relation: Optional[Tuple[str, str]],
@@ -2040,26 +2550,43 @@ def _build_join_hop2_filter(
         join_key_mode: str,
         join_pjt_ids: List[str],
         join_pjt_nos: List[str],
-        join_ids: List[str],
+        join_ids: Optional[List[str]] = None,
         q: str,
         hop2_tag_filters: Optional[List[str]],
         people_terms: List[str],
         org_terms: List[str],
         planner_filter_spec: Dict[str, Any],
+        compiled_hop2_spec: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """JOIN Hop2 필터 생성: join_key_mode 단일 소스(strategy/contract)만 사용."""
+    join_ids = join_ids or []
+    if str(join_key_mode or "instance").strip().lower() == "group":
+        join_ids = []
+
+    join_mode_norm = str(join_key_mode or "instance").strip().lower()
+    join_compile_selection = "planner_contract"
+    effective_perf_join_mode = join_mode_norm
+    if hop2_col == COL_PERF and join_mode_norm == "group" and not join_pjt_nos and join_pjt_ids:
+        effective_perf_join_mode = "instance"
+        join_compile_selection = "group_perf_pjt_id_fallback"
+
     relation_matrix = {
         "relation": relation,
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
+        "effective_perf_join_mode": effective_perf_join_mode,
+        "join_compile_selection": join_compile_selection,
+        "join_pjt_ids_count": len(join_pjt_ids),
+        "join_pjt_nos_count": len(join_pjt_nos),
     }
     log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix)
 
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
-        join_key_mode=join_key_mode,
-        join_ids=(join_pjt_ids or join_ids),
+        join_key_mode=effective_perf_join_mode,
+        join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
         pjt_nos=join_pjt_nos,
+        resolved_pjt_ids=join_pjt_ids,
         query=q,
         fallback_spec=JoinFilterInput(
             join_ids=join_pjt_ids,
@@ -2072,12 +2599,36 @@ def _build_join_hop2_filter(
             filter_spec=planner_filter_spec.get("join_filter"),
         ),
     )
-    executed_join_filter_spec = {
-        "hop2_col": hop2_col,
-        "join_key_mode": join_key_mode,
-        "join_ids_count": len(join_pjt_ids or join_ids),
-        "pjt_nos_count": len(join_pjt_nos),
-    }
+    planner_hop2_spec = dict(compiled_hop2_spec or {})
+    planner_hop2_col = _normalize_join_collection_name(
+        str(planner_hop2_spec.get("collection") or ""),
+        relation=relation,
+    )
+    if planner_hop2_col and planner_hop2_col != hop2_col:
+        raise StrategyViolation(
+            error_code="PLANNER_JOIN_HOP2_COLLECTION_MISMATCH",
+            reason=(
+                "planner hop2_spec.collection과 실행 hop2_col 불일치"
+                f"(planner={planner_hop2_col}, executed={hop2_col}, relation={relation})"
+            ),
+        )
+    planner_hop2_filter = planner_hop2_spec.get("qdrant_filter")
+    if planner_hop2_filter is not None:
+        hop2_filter = _and_filter(hop2_filter, planner_hop2_filter)
+
+    executed_join_filter_spec = dict(_serialize_filter_for_log(hop2_filter) or {})
+    executed_join_filter_spec.setdefault("_meta", {})
+    if isinstance(executed_join_filter_spec.get("_meta"), Mapping):
+        executed_join_filter_spec["_meta"] = {
+            **dict(executed_join_filter_spec.get("_meta") or {}),
+            "hop2_col": hop2_col,
+            "join_key_mode": join_key_mode,
+            "effective_perf_join_mode": effective_perf_join_mode,
+            "join_compile_selection": join_compile_selection,
+            "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
+            "pjt_nos_count": len(join_pjt_nos),
+            "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
+        }
     return hop2_filter, executed_join_filter_spec
 
 
@@ -2092,7 +2643,7 @@ def _hydrate_points_payload(
 ) -> None:
     """
     Always hydrate points with FULL payload from Qdrant (with_payload=True).
-    - 내부 메타(_collection/_rrf/_final_*)는 보존하지 않고 DB payload로 덮어씀
+    - hydration 전 내부 메타(_collection/_rrf/_final_* 등)를 백업 후 merge
     - include_fields는 호환용으로만 두고 무시
     """
     _INTERNAL_KEYS = {
@@ -2186,15 +2737,29 @@ def _hydrate_points_payload(
                 if rid is None:
                     continue
                 rec_payload[str(rid)] = _get(r, "payload", {}) or {}
-            # payload를 "그대로" 덮어씀 (내부 메타 유지 X)
+            # payload hydrate 후 내부 메타 키를 복원해 유지
             for p in chunk:
                 pid = _get(p, "id", None)
                 if pid is None:
                     continue
                 key = str(pid)
-                if key in rec_payload:
-                    _normalize_project_tag(rec_payload[key])
-                    _set(p, "payload", rec_payload[key])
+                if key not in rec_payload:
+                    continue
+
+                prev_payload = _get(p, "payload", {}) or {}
+                if not isinstance(prev_payload, dict):
+                    prev_payload = {}
+                preserved_internal = {
+                    k: v for k, v in prev_payload.items()
+                    if isinstance(k, str) and (k in _INTERNAL_KEYS or k.startswith("_final_"))
+                }
+
+                hydrated_payload = rec_payload[key]
+                if not isinstance(hydrated_payload, dict):
+                    hydrated_payload = {}
+                _normalize_project_tag(hydrated_payload)
+                hydrated_payload.update(preserved_internal)
+                _set(p, "payload", hydrated_payload)
 
 
 def _run_rag_with_vectors(
@@ -2210,6 +2775,7 @@ def _run_rag_with_vectors(
         sparse_topk: Optional[int] = None,
         sparse_weight: Optional[float] = None,
         domain_hint: Optional[str] = None,
+        promotion_depth: int = 0,
 ) -> RagResult:
     t_all0 = time.time()
     timings: Dict[str, Any] = _init_timings()
@@ -2406,17 +2972,17 @@ def _run_rag_with_vectors(
             data["relation"] = _normalize_relation_hint(data.get("relation"))
 
         for key in (
-            "years",
-            "people_terms",
-            "gender_terms",
-            "org_terms",
-            "perf_types",
-            "keywords",
-            "perf_tag_filters",
-            "project_tag_filters",
-            "tag_filters",
-            "ids_flat",
-            "remove_terms_for_head",
+                "years",
+                "people_terms",
+                "gender_terms",
+                "org_terms",
+                "perf_types",
+                "keywords",
+                "perf_tag_filters",
+                "project_tag_filters",
+                "tag_filters",
+                "ids_flat",
+                "remove_terms_for_head",
         ):
             if key in data:
                 data[key] = _normalize_hint_terms(data.get(key))
@@ -2456,10 +3022,10 @@ def _run_rag_with_vectors(
                 "org_terms": [],
             }
 
-        lead_org_terms = _normalize_hint_terms(filters_obj.get("lead_org_name"))
-        participant_org_terms = _normalize_hint_terms(filters_obj.get("participant_org_name"))
-        people_affiliation_org_terms = _normalize_hint_terms(filters_obj.get("people_affiliation_org_name"))
-        generic_org_terms = _normalize_hint_terms(filters_obj.get("org_name"))
+        lead_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("lead_org_name")))
+        participant_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("participant_org_name")))
+        people_affiliation_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("people_affiliation_org_name")))
+        generic_org_terms = normalize_org_terms(_normalize_hint_terms(filters_obj.get("org_name")))
 
         org_terms = _normalize_hint_terms(
             [
@@ -2518,6 +3084,34 @@ def _run_rag_with_vectors(
         log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
 
     ctx = ExecutionContext.from_intent(it)
+    planner_snapshot = {
+        "mode": getattr(it, "mode", None),
+        "base_route": getattr(it, "base_route", None),
+        "action": getattr(it, "action", None),
+        "relation": getattr(it, "relation", None),
+        "join_key_mode": getattr(it, "join_key_mode", None),
+        "target_cols": list(getattr(it, "target_cols", []) or []),
+        "keywords": list(getattr(it, "keywords", []) or []),
+        "ids_map": dict(getattr(it, "ids_map", {}) or {}),
+    }
+    ctx_snapshot = {
+        "mode": getattr(ctx, "mode", None),
+        "base_route": getattr(ctx, "base_route", None),
+        "action": getattr(ctx, "action", None),
+        "relation": getattr(ctx, "relation", None),
+        "join_key_mode": getattr(ctx, "join_key_mode", None),
+        "target_cols": list(getattr(ctx, "target_collections", []) or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+        "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+    }
+    log_kv(
+        "RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT",
+        planner=planner_snapshot,
+        context=ctx_snapshot,
+        diff=_strategy_field_diff(planner_snapshot, ctx_snapshot, [
+            "mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "keywords", "ids_map"
+        ]),
+    )
     intent_contract_violations = list(getattr(it, "contract_violations", None) or [])
     if intent_contract_violations:
         raise StrategyViolation(
@@ -2526,7 +3120,7 @@ def _run_rag_with_vectors(
         )
     planner_keywords = _normalize_hint_terms(ctx.keywords)
 
-    planner_mode = str(getattr(ctx, "mode", "") or "").strip().lower() or None
+    planner_mode = str(ctx.mode or "").strip().lower() or None
     planner_action = str(getattr(ctx, "action", "") or "").strip().lower() or None
     planner_head = str(getattr(ctx, "base_route", "") or "").strip().lower() or None
     planner_relation = _normalize_relation_hint(getattr(ctx, "relation", None))
@@ -2593,18 +3187,18 @@ def _run_rag_with_vectors(
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
     # org terms/filter (필요 시)
-    org_terms = [t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()]
-    lead_org_terms = [t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()]
-    participant_org_terms = [
+    org_terms = normalize_org_terms([t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()])
+    lead_org_terms = normalize_org_terms([t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()])
+    participant_org_terms = normalize_org_terms([
         t.strip() for t in (list(getattr(ctx, "participant_org_terms", []) or []) or []) if str(t).strip()
-    ]
-    people_affiliation_org_terms = [
+    ])
+    people_affiliation_org_terms = normalize_org_terms([
         t.strip()
         for t in (list(getattr(ctx, "people_affiliation_org_terms", []) or []) or [])
         if str(t).strip()
-    ]
+    ])
     if (not org_terms) and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
-        org_terms = _normalize_hint_terms([
+        org_terms = normalize_org_terms([
             *lead_org_terms,
             *participant_org_terms,
             *people_affiliation_org_terms,
@@ -2706,8 +3300,8 @@ def _run_rag_with_vectors(
         include_people_filter_in_gate = bool(
             people_filter is not None
             and (
-                bool(effective_people_affiliation_org_terms)
-                or (org_role == "affiliation")
+                    bool(effective_people_affiliation_org_terms)
+                    or (org_role == "affiliation")
             )
         )
         if participant_org_filter is not None:
@@ -2741,8 +3335,8 @@ def _run_rag_with_vectors(
             include_people_filter_in_gate=bool(
                 people_filter is not None
                 and (
-                    bool(effective_people_affiliation_org_terms)
-                    or (org_role == "affiliation")
+                        bool(effective_people_affiliation_org_terms)
+                        or (org_role == "affiliation")
                 )
             ),
         )
@@ -2766,12 +3360,14 @@ def _run_rag_with_vectors(
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
     ctx.perf_types = perf_types
+    # 서버단 must에는 명시적으로 정규화된 perf_types만 결합한다(쿼리 기반 추론 태그는 제외).
     perf_type_filter = build_perf_type_filter(perf_types) if perf_types else None
     if perf_types or perf_types_source:
         log_kv(
             "RAG.PERF_TYPES.FINAL",
             source=perf_types_source or "derived",
             values=perf_types,
+            server_must_policy="explicit_perf_types_only",
         )
 
     title_terms = [
@@ -2780,7 +3376,7 @@ def _run_rag_with_vectors(
         if str(t).strip()
     ]
     ctx.title = title_terms
-    title_filter = build_title_filter(title_terms) if title_terms else None
+    title_filter = None
 
     keyword_terms = [t.strip() for t in (list(ctx.keywords or []) or []) if str(t).strip()]
     # LLM(Planner) 키워드를 상위로 정렬해 상위 30개/쿼리 생성에서 우선 반영한다.
@@ -2790,20 +3386,34 @@ def _run_rag_with_vectors(
     ctx.keywords = keyword_terms
     kws = keyword_terms
 
-    # perf/project tag filter (필요 시) + generic tag 분리 적용
-    generic_tag_filter_raw = _build_tag_only_filter(list(ctx.tag_filters)) if ctx.tag_filters else None
+    # perf/project tag filter 구성
+    # - explicit(intent_payload)만 server-side must 후보로 사용
+    # - query inferred tag는 rerank/soft gate 전용으로 분리
+    explicit_project_tags = list(ctx.project_tag_filters or [])
+    explicit_perf_tags = list(ctx.perf_tag_filters or [])
+    inferred_perf_tags = pick_perf_tag_filters(q)
+    tag_filter_source = "explicit" if explicit_perf_tags else ("query_inferred" if inferred_perf_tags else "none")
 
-    generic_project_tags, generic_perf_tags, generic_other_tags = _split_tag_filters_by_family(
-        list(ctx.tag_filters or [])
+    project_tag_filter = _build_tag_only_filter(explicit_project_tags) if explicit_project_tags else None
+
+    # perf_types(perf_type_filter)와 같은 의미의 perf tag must 중복 적용 방지
+    perf_types_norm_set = {str(t).strip() for t in perf_types if str(t).strip()}
+    perf_tag_filters_for_col = [
+        t for t in explicit_perf_tags
+        if str(t).strip() and str(t).strip() not in perf_types_norm_set
+    ]
+    perf_tag_filter = _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
+
+    log_kv(
+        "RAG.TAG_FILTER.SOURCE",
+        tag_filter_source=tag_filter_source,
+        explicit_perf_tags=explicit_perf_tags,
+        inferred_perf_tags=inferred_perf_tags,
+        perf_tags_server_must=perf_tag_filters_for_col,
     )
-    project_tag_filters_for_col = list(ctx.project_tag_filters or []) + generic_project_tags + generic_other_tags
-    perf_tag_filters_for_col = list(ctx.perf_tag_filters or []) + generic_perf_tags + generic_other_tags
-    project_tag_filter = (
-        _build_tag_only_filter(project_tag_filters_for_col) if project_tag_filters_for_col else None
-    )
-    perf_tag_filter = (
-        _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
-    )
+    soft_perf_tag_filters = explicit_perf_tags if explicit_perf_tags else inferred_perf_tags
+    ctx.perf_tag_filters = list(soft_perf_tag_filters)
+
 
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
     search_filter_signal = bool(
@@ -2899,11 +3509,14 @@ def _run_rag_with_vectors(
             mode_value: Optional[str],
             join_key_mode: Optional[str],
             ids_map_obj: Dict[str, List[str]],
+            relation_value: Optional[Tuple[str, str]] = None,
             *,
             allow_missing_instance_ids: bool = True,
     ) -> None:
         mode_norm = str(mode_value or "").strip().lower()
         join_norm = str(join_key_mode or "").strip().lower() or None
+        join_relation = tuple(relation_value) if isinstance(relation_value, (list, tuple)) and len(relation_value) == 2 else None
+        allowed_join_relations = {("project", "perf"), ("perf", "project")}
 
         normalized_ids_map = _validate_project_key_exclusive(ids_map_obj, mode_norm)
         has_pjt_id = bool(normalized_ids_map.get("pjt_id"))
@@ -2915,6 +3528,9 @@ def _run_rag_with_vectors(
                     error_code="PLANNER_JOIN_KEY_MODE_INVALID",
                     reason="join_key_mode must be null when mode is not JOIN",
                 )
+            return
+
+        if join_relation and join_relation not in allowed_join_relations:
             return
 
         if join_norm not in ("instance", "group"):
@@ -3022,10 +3638,35 @@ def _run_rag_with_vectors(
     ctx.ids_map = _validate_project_key_exclusive(ctx.ids_map, plan.mode)
     ctx.plan = plan
     ctx.target_collections = list(plan.target_collections)
-    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
-    planner_mode_locked = str(plan.mode or "").strip().lower()
-    planner_relation_locked = plan.relation
-    planner_target_cols_locked = _normalize_strategy_target_cols(plan.target_collections)
+    plan_snapshot = {
+        "mode": plan.mode,
+        "action": plan.action,
+        "relation": plan.relation,
+        "join_key_mode": plan.join_key_mode,
+        "target_cols": list(plan.target_collections or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+    }
+    execution_snapshot = {
+        "mode": getattr(ctx, "mode", None),
+        "action": getattr(ctx, "action", None),
+        "relation": getattr(ctx, "relation", None),
+        "join_key_mode": getattr(ctx, "join_key_mode", None),
+        "target_cols": list(getattr(ctx, "target_collections", []) or []),
+        "keywords": list(getattr(ctx, "keywords", []) or []),
+    }
+    log_kv(
+        "RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT",
+        planner=plan_snapshot,
+        execution_context=execution_snapshot,
+        diff=_strategy_field_diff(
+            plan_snapshot,
+            execution_snapshot,
+            ["mode", "action", "relation", "join_key_mode", "target_cols", "keywords"],
+        ),
+    )
+    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "0")
+    planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "1")
+    planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
     _assert_allowlist_only(
         target_cols=planner_target_cols_locked,
         allow_cols=effective_allow,
@@ -3097,7 +3738,60 @@ def _run_rag_with_vectors(
             errors=strategy_errors,
             planner_confidence=planner_confidence,
         )
-        raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
+        if planner_invalid_fallback:
+            fallback_mode = "lookup" if (_has_any_ids(it) or bool(getattr(it, "is_id_query", False))) else "search"
+            fallback_plan, fallback_policy_reason = _build_plan(
+                intent_view,
+                preferred_mode=fallback_mode,
+                preferred_mode_source="planner_invalid_fallback",
+            )
+            fallback_plan = replace(
+                fallback_plan,
+                relation=None,
+                join_key_mode=None,
+                target_collections=tuple(_default_target_collections_for_route(base_route)),
+            )
+            if pending_strategy_filter_spec:
+                fallback_plan = replace(fallback_plan, filters=pending_strategy_filter_spec)
+            log_kv(
+                "RAG.PLAN.FALLBACK_ON_INVALID_PLANNER",
+                level="warning",
+                fallback_enabled=int(planner_invalid_fallback),
+                error_code="PLANNER_INVALID_STRATEGY",
+                planner_raw={
+                    "mode": planner_strategy_mode,
+                    "action": planner_strategy_action,
+                    "relation": planner_strategy_relation,
+                    "join_key_mode": getattr(ctx, "join_key_mode", None),
+                    "target_cols": list(getattr(ctx, "target_collections", []) or []),
+                    "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+                },
+                fallback_rule="ids_or_id_query=>lookup_else_search",
+                fallback_mode=fallback_mode,
+                fallback_policy_reason=fallback_policy_reason,
+                fallback_target_cols=list(fallback_plan.target_collections),
+            )
+            plan = fallback_plan
+            ctx.plan = plan
+            ctx.target_collections = list(plan.target_collections)
+            planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
+            planner_strategy_mode = plan.mode
+            planner_strategy_action = plan.action
+            planner_strategy_relation = plan.relation
+            strategy_snapshot = StrategySpec(
+                mode=planner_strategy_mode,
+                action=planner_strategy_action,
+                relation=planner_strategy_relation,
+                join_key_mode=None,
+            )
+            strategy_ok, strategy_errors = validate_strategy(strategy_snapshot)
+            planner_recalled = True
+            mode_override_requested = True
+            mode_override_reason = "planner_invalid_fallback"
+            mode_override_from = planner_mode_locked
+            mode_override_to = planner_strategy_mode
+        else:
+            raise StrategyViolation(error_code="PLANNER_INVALID_STRATEGY", reason=f"invalid planner strategy: {planner_mode_error}")
 
     planner_raw_join_key_mode = strategy_snapshot.join_key_mode
     resolved_join_key_mode = str(planner_raw_join_key_mode or "").strip().lower() or None
@@ -3110,6 +3804,7 @@ def _run_rag_with_vectors(
         strategy_snapshot.mode,
         resolved_join_key_mode,
         dict(ctx.ids_map or {}),
+        planner_strategy_relation,
     )
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
@@ -3129,11 +3824,66 @@ def _run_rag_with_vectors(
     )
     if planner_contract_violations:
         first = planner_contract_violations[0]
-        raise StrategyViolation(
-            error_code=first.error_code,
-            reason=first.reason,
-            violations=planner_contract_violations,
-        )
+        if planner_invalid_fallback:
+            fallback_mode = "lookup" if (_has_any_ids(it) or bool(getattr(it, "is_id_query", False))) else "search"
+            fallback_plan, fallback_policy_reason = _build_plan(
+                intent_view,
+                preferred_mode=fallback_mode,
+                preferred_mode_source="planner_contract_fallback",
+            )
+            fallback_plan = replace(
+                fallback_plan,
+                relation=None,
+                join_key_mode=None,
+                target_collections=tuple(_default_target_collections_for_route(base_route)),
+            )
+            if pending_strategy_filter_spec:
+                fallback_plan = replace(fallback_plan, filters=pending_strategy_filter_spec)
+            log_kv(
+                "RAG.PLAN.FALLBACK_ON_CONTRACT_VIOLATION",
+                level="warning",
+                fallback_enabled=int(planner_invalid_fallback),
+                error_code=first.error_code,
+                planner_raw={
+                    "mode": planner_strategy_mode,
+                    "action": planner_strategy_action,
+                    "relation": planner_strategy_relation,
+                    "join_key_mode": join_key_mode_for_contract,
+                    "target_cols": list(getattr(ctx, "target_collections", []) or []),
+                    "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
+                },
+                violation_count=len(planner_contract_violations),
+                fallback_rule="ids_or_id_query=>lookup_else_search",
+                fallback_mode=fallback_mode,
+                fallback_policy_reason=fallback_policy_reason,
+                fallback_target_cols=list(fallback_plan.target_collections),
+            )
+            plan = fallback_plan
+            ctx.plan = plan
+            ctx.target_collections = list(plan.target_collections)
+            planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
+            planner_strategy_mode = plan.mode
+            planner_strategy_action = plan.action
+            planner_strategy_relation = plan.relation
+            resolved_join_key_mode = None
+            join_key_mode_for_contract = None
+            strategy_snapshot = StrategySpec(
+                mode=planner_strategy_mode,
+                action=planner_strategy_action,
+                relation=planner_strategy_relation,
+                join_key_mode=None,
+            )
+            planner_recalled = True
+            mode_override_requested = True
+            mode_override_reason = "planner_contract_fallback"
+            mode_override_from = planner_mode_locked
+            mode_override_to = planner_strategy_mode
+        else:
+            raise StrategyViolation(
+                error_code=first.error_code,
+                reason=first.reason,
+                violations=planner_contract_violations,
+            )
 
     planner_filter_spec = dict(plan.filters or {})
 
@@ -3188,8 +3938,8 @@ def _run_rag_with_vectors(
     search_filter_enabled = bool(plan.mode == "search" and search_filter_signal and search_filter_conf_ok)
 
     lookup_filter_policy_raw = (
-        getattr(ctx, "lookup_filter_policy_hint", None)
-        or os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")
+            getattr(ctx, "lookup_filter_policy_hint", None)
+            or os.getenv("RAG_LOOKUP_FILTER_POLICY", "hard")
     )
     lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_raw)
     if lookup_filter_policy is None:
@@ -3211,8 +3961,8 @@ def _run_rag_with_vectors(
     detail_lookup_request = bool(
         plan.mode == "lookup"
         and (
-            str(action or "").strip().lower() == "detail"
-            or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
+                str(action or "").strip().lower() == "detail"
+                or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
         )
     )
     if lookup_title_filter_policy == "hard" and not detail_lookup_request:
@@ -3223,9 +3973,16 @@ def _run_rag_with_vectors(
             getattr(plan, "output_type", None),
         )
         lookup_title_filter_policy = "soft"
+    title_text_match_supported = bool(getattr(qmodels, "MatchText", None) is not None)
+    title_match_mode = resolve_lookup_title_match_mode(
+        lookup_title_filter_policy=lookup_title_filter_policy,
+        index_supports_text=title_text_match_supported,
+    )
     log_kv(
         "RAG.LOOKUP.TITLE_FILTER_POLICY",
         policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
+        title_text_match_supported=int(title_text_match_supported),
         mode=plan.mode,
         action=action,
         output_type=getattr(plan, "output_type", None),
@@ -3264,7 +4021,8 @@ def _run_rag_with_vectors(
             else None
         )
 
-    if relation and plan.mode in ("search", "lookup"):
+    relation_mode_conflict = bool(relation and plan.mode in ("search", "lookup"))
+    if relation_mode_conflict:
         logger.warning(
             "[RAG] relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
             plan.mode,
@@ -3279,6 +4037,17 @@ def _run_rag_with_vectors(
             payload_mode=planner_mode,
             base_route=base_route,
             action=action,
+        )
+    else:
+        log_kv(
+            "RAG.PLAN.MODE_CONFLICT",
+            level="info",
+            mode=plan.mode,
+            relation=relation,
+            payload_mode=planner_mode,
+            base_route=base_route,
+            action=action,
+            conflict=0,
         )
 
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
@@ -3321,15 +4090,45 @@ def _run_rag_with_vectors(
             source="planner_filter_contract",
         )
 
+
+    compiled_strategy = StrategyCompiler.compile(
+        mode=plan.mode,
+        relation=relation,
+        target_cols=list(ctx.target_collections or []),
+        fallback_target_cols=list(plan.target_collections or []),
+        planner_filter_spec=planner_filter_spec,
+        topk_spec=topk_spec,
+        rerank_spec=rerank_spec,
+        search_filter_signal=search_filter_signal,
+        search_filter_conf_ok=search_filter_conf_ok,
+        lookup_filter_policy_hint=lookup_filter_policy,
+        lookup_title_filter_policy_hint=lookup_title_filter_policy,
+        detail_lookup_request=detail_lookup_request,
+        title_text_match_supported=title_text_match_supported,
+    )
+    if compiled_strategy.hop1_spec or compiled_strategy.hop2_spec:
+        log_kv(
+            "RAG.JOIN.HOP.COMPILED",
+            hop1_spec=compiled_strategy.hop1_spec,
+            hop2_spec=compiled_strategy.hop2_spec,
+        )
+
+    search_filter_enabled = bool(compiled_strategy.search_filter_enabled)
+    lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
+    lookup_filter_policy = compiled_strategy.lookup_filter_policy
+    lookup_title_filter_policy = compiled_strategy.lookup_title_filter_policy
+    title_match_mode = compiled_strategy.title_match_mode
+    relation_lookup_enforce = bool(compiled_strategy.relation_lookup_enforce)
+
     join_hop1_lookup_filter_enabled = bool(
         plan.mode == "join"
         and (
-            relation_lookup_enforce
-            or (
-                base_route == "project"
-                and relation == ("project", "perf")
-                and bool(people_terms)
-            )
+                relation_lookup_enforce
+                or (
+                        base_route == "project"
+                        and relation == ("project", "perf")
+                        and bool(people_terms)
+                )
         )
     )
     if join_hop1_lookup_filter_enabled:
@@ -3340,28 +4139,6 @@ def _run_rag_with_vectors(
             relation=relation,
             people_terms=people_terms[:4],
             relation_lookup_enforce=int(relation_lookup_enforce),
-        )
-    join_execution_policy = _resolve_join_execution_policy(
-        relation=relation,
-        mode=plan.mode,
-        action=action,
-        has_relation_join_ids=has_relation_join_ids,
-    )
-    if join_execution_policy["required"]:
-        logger.warning(
-            "[RAG] join required: relation=%s action=%s has_relation_join_ids=%s reason=%s",
-            relation,
-            action,
-            has_relation_join_ids,
-            join_execution_policy["reason"],
-        )
-        log_kv(
-            "RAG.PLAN.JOIN_REQUIRED",
-            level="warning",
-            relation=relation,
-            action=action,
-            has_relation_join_ids=int(has_relation_join_ids),
-            reason=join_execution_policy["reason"],
         )
 
     # allowlist는 검증 전용: 실행 target_cols를 재결정하지 않는다.
@@ -3376,9 +4153,20 @@ def _run_rag_with_vectors(
             applied=0,
         )
 
-    title_filter_applied_to = None
-    if title_filter and plan.mode == "lookup":
-        title_filter_applied_to = "project/perf"
+    title_filter = None
+    if title_terms and title_match_mode == TITLE_MATCH_MODE_EXACT:
+        title_filter = build_title_exact_filter(title_terms)
+    elif title_terms and title_match_mode == TITLE_MATCH_MODE_TEXT:
+        title_filter = build_title_text_filter(title_terms)
+
+    title_filter_server_applied = bool(
+        title_filter
+        and plan.mode == "lookup"
+        and lookup_filter_enabled
+        and title_match_mode in (TITLE_MATCH_MODE_EXACT, TITLE_MATCH_MODE_TEXT)
+        and search_filter_conf_ok
+    )
+    title_filter_applied_to = "project/perf" if title_filter_server_applied else None
     tag_filter_applied_to = None
     if (project_tag_filter or perf_tag_filter) and plan.mode == "lookup":
         tag_targets: list[str] = []
@@ -3391,17 +4179,18 @@ def _run_rag_with_vectors(
     search_filter_server_policy = "disabled" if plan.mode == "search" else "lookup_only"
     search_filter_server_applied = False
     filter_spec = {
-        **planner_filter_spec,
-        "search_filter_enabled": search_filter_enabled,
-        "lookup_filter_enabled": lookup_filter_enabled,
-        "relation_lookup_enforce": relation_lookup_enforce,
-        "lookup_filter_policy": lookup_filter_policy,
-        "lookup_title_filter_policy": lookup_title_filter_policy,
-        "filter_signal": search_filter_signal,
-        "filter_conf_ok": search_filter_conf_ok,
+        **dict(compiled_strategy.filter_spec or {}),
+        "title_match_mode": title_match_mode,
         "search_filter_server_policy": search_filter_server_policy,
         "search_filter_server_applied": search_filter_server_applied,
+        "title_filter_server_applied": bool(title_filter_server_applied),
     }
+
+    topk_spec = dict(compiled_strategy.topk_spec or {})
+    rerank_spec = dict(compiled_strategy.rerank_spec or {})
+    compiled_qdrant_filter = compiled_strategy.qdrant_filter
+    if compiled_qdrant_filter is not None:
+        log_kv("RAG.FILTER.COMPILED.QDRANT", compiled_filter=_serialize_filter_for_log(compiled_qdrant_filter))
     planner_filter_diff = _diff_filter_spec(
         planner_filter_spec=planner_filter_spec,
         executed_filter_spec=filter_spec,
@@ -3429,7 +4218,7 @@ def _run_rag_with_vectors(
         relation=relation,
         join_key_mode=resolved_join_key_mode,
         people_terms=tuple(people_terms or []),
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         search_filter_enabled=bool(search_filter_enabled),
         lookup_filter_enabled=bool(lookup_filter_enabled),
         relation_lookup_enforce=bool(relation_lookup_enforce),
@@ -3438,17 +4227,20 @@ def _run_rag_with_vectors(
         lookup_filter_gate=people_match_mode,
         lookup_filter_promote_one_must=people_promote_one_must,
         lookup_title_filter_policy=lookup_title_filter_policy,
+        title_match_mode=title_match_mode,
         search_filter_server_policy=search_filter_server_policy,
     )
     plan = replace(
         plan,
         relation=relation,
         join_key_mode=resolved_join_key_mode,
-        target_collections=tuple(ctx.target_collections or []),
+        target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])),
         filters=filter_spec,
     )
     ctx.plan = plan
     ctx.strategy = strategy
+
+    planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
 
     mode_raw = (strategy.mode or plan.mode or "").strip().lower()
     if mode_raw not in ("search", "lookup", "join"):
@@ -3515,6 +4307,7 @@ def _run_rag_with_vectors(
         keywords=keyword_terms,
         perf_tag_filters=list(ctx.perf_tag_filters or []),
         title_terms=title_terms,
+        title_match_mode=title_match_mode,
         tag_filters=list(ctx.tag_filters or []),
         org_filter=str(org_filter) if org_filter is not None else None,
         participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
@@ -3522,10 +4315,11 @@ def _run_rag_with_vectors(
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
         title_filter=str(title_filter) if title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
-        generic_tag_filter=str(generic_tag_filter_raw) if generic_tag_filter_raw is not None else None,
+        tag_filter_source=tag_filter_source,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
+        title_filter_server_applied=int(title_filter_server_applied),
         tag_filter_applied_to=tag_filter_applied_to,
         search_filter_server_policy=search_filter_server_policy,
         search_filter_server_applied=int(search_filter_server_applied),
@@ -3749,18 +4543,19 @@ def _run_rag_with_vectors(
                 ctx_hard_limit,
             )
             _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-            missing = _count_missing_join_keys(hop1_top)
-            if missing.get("missing_pjt_any") or missing.get("missing_tag"):
+            missing = _count_missing_join_keys(hop1_top, join_key_mode="instance")
+            if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
                 if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in (
-                    "1",
-                    "true",
-                    "yes",
-                    "y",
+                        "1",
+                        "true",
+                        "yes",
+                        "y",
                 ):
                     _hydrate_points_payload(qdr, hop1_top)
-                _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup")
+                _raise_on_missing_join_keys(hop1_top, scope="join_hop1_followup", join_key_mode="instance")
 
-        join_ids = _extract_pjt_ids(hop1_top, max_ids=50)
+        join_key_result = _extract_join_keys(hop1_top, mode="instance", max_ids=50)
+        join_ids = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
         join_keys = list(dict.fromkeys(join_ids))
         log_kv(
             "RAG.PERF.FOLLOWUP.JOIN_IDS",
@@ -3776,14 +4571,39 @@ def _run_rag_with_vectors(
     if mode == "join" and relation:
         t_hop0 = time.time()
         ids_map = getattr(it, "ids_map", None) or getattr(it, "ids", None) or {}
+        join_key_source = "hop1"
+        hop2_key_strategy = "pjt_id_in" if resolved_join_key_mode == "instance" else "pjt_no"
+        join_keys_used_count = 0
         join_key_mode = resolved_join_key_mode
         pjt_ids = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_id")) if str(x).strip()]
         pjt_nos = [str(x).strip() for x in _ensure_iterable_list(ids_map.get("pjt_no")) if str(x).strip()]
         seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
         seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
         seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
+        if seed_join_ids:
+            join_key_source = "ids_map"
 
-
+        has_people_org_gate = bool(people_terms or people_ids or org_terms)
+        join_execution_policy = _resolve_join_execution_policy(
+            relation=relation,
+            mode=plan.mode,
+            action=action,
+            join_key_mode=join_key_mode,
+            seed_join_pjt_ids=seed_join_pjt_ids,
+            seed_join_pjt_nos=seed_join_pjt_nos,
+            has_people_org_gate=has_people_org_gate,
+        )
+        hop1_strategy = str(join_execution_policy.get("hop1_strategy") or "search")
+        log_kv(
+            "RAG.JOIN.POLICY",
+            relation=relation,
+            action=action,
+            join_key_mode=join_key_mode,
+            hop1_strategy=hop1_strategy,
+            reason=join_execution_policy.get("reason"),
+            seed_key_source=join_execution_policy.get("seed_key_source"),
+            seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
+        )
 
         # relation mapping
         hop1_col = hop2_col = ""
@@ -3821,8 +4641,10 @@ def _run_rag_with_vectors(
             join_pjt_nos: List[str] = []
             hop1_top: List[Any] = []
             hop1_filter = None
+            if hop1_strategy == "skip" and seed_join_ids:
+                join_key_source = "ids_map"
 
-            # 1) Hop1 (SEARCH): mode=join이면 ids 유무와 무관하게 항상 수행
+            # 1) Hop1 전략 적용: skip | lookup | search
             has_seed_join_keys = bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids)
             log_kv(
                 "RAG.PLAN.JOIN_EXECUTED",
@@ -3830,12 +4652,33 @@ def _run_rag_with_vectors(
                 action=action,
                 join_key_mode=join_key_mode,
                 has_seed_join_keys=int(has_seed_join_keys),
+                hop1_strategy=hop1_strategy,
+                seed_key_source=join_execution_policy.get("seed_key_source"),
+                seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
             )
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
+                join_key_source = "ids_map"
             elif join_key_mode == "instance" and seed_join_pjt_ids:
                 join_pjt_ids = seed_join_pjt_ids[:]
+                join_key_source = "ids_map"
 
+            local_timings_h1: Dict[str, float] = {}
+            allow_skip_min_lookup = str(os.getenv("RAG_JOIN_HOP1_SKIP_MIN_LOOKUP", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "y",
+            )
+            run_hop1 = (
+                hop1_strategy in ("lookup", "search")
+                or (
+                    hop1_strategy == "skip"
+                    and join_key_mode == "instance"
+                    and bool(seed_join_pjt_ids)
+                    and allow_skip_min_lookup
+                )
+            )
             hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
             if  people_filter:
                 hop1_filter = _and_filter(hop1_filter, people_filter)
@@ -3847,10 +4690,10 @@ def _run_rag_with_vectors(
                 join_promote_one_must = bool(
                     people_promote_one_must
                     or (
-                        join_hop1_lookup_filter_enabled
-                        and lookup_filter_policy == "must_one_then_should"
-                        and not people_ids
-                        and len(people_terms) == 1
+                            join_hop1_lookup_filter_enabled
+                            and lookup_filter_policy == "must_one_then_should"
+                            and not people_ids
+                            and len(people_terms) == 1
                     )
                 )
                 final_people_terms = list(ctx.people_terms or people_terms or [])
@@ -3888,7 +4731,7 @@ def _run_rag_with_vectors(
                         hop1_lookup_filter = _and_filter(
                             hop1_lookup_filter,
                             participant_org_filter or org_filter,
-                        )
+                            )
                     if project_tag_filter:
                         hop1_lookup_filter = _and_filter(hop1_lookup_filter, project_tag_filter)
                 elif hop1_col == COL_PERF:
@@ -3902,7 +4745,45 @@ def _run_rag_with_vectors(
                 if year_range_filter:
                     hop1_filter = _and_filter(hop1_filter, year_range_filter)
             if hop1_col == COL_PERF and perf_type_filter:
+                # 원칙: 명시적 perf_types만 server-side must로 결합
                 hop1_filter = _and_filter(hop1_filter, perf_type_filter)
+
+            hop1_filter, executed_hop1_filter_spec = _build_join_hop1_filter(
+                relation=relation,
+                hop1_col=hop1_col,
+                hop1_filter=hop1_filter,
+                compiled_hop1_spec=compiled_strategy.hop1_spec,
+            )
+            planner_join_hop1_filter_spec = dict((planner_filter_spec or {}).get("join_hop1_filter") or {})
+            join_hop1_filter_diff = _diff_filter_spec(
+                planner_filter_spec=planner_join_hop1_filter_spec,
+                executed_filter_spec=executed_hop1_filter_spec,
+            )
+            join_hop1_filter_diff_changed = join_hop1_filter_diff.get("changed", {})
+            log_kv(
+                "RAG.JOIN.HOP1.FILTER_SPEC.DIFF",
+                level="error" if join_hop1_filter_diff_changed else "info",
+                planner_filter_keys=join_hop1_filter_diff.get("planner_keys", []),
+                changed=join_hop1_filter_diff_changed,
+                changed_count=len(join_hop1_filter_diff_changed),
+                planner_join_hop1_filter_spec=planner_join_hop1_filter_spec,
+                executed_join_hop1_filter_spec=executed_hop1_filter_spec,
+            )
+            if join_hop1_filter_diff_changed:
+                raise StrategyViolation(
+                    error_code="STRATEGY_MISMATCH",
+                    reason=(
+                        "join Hop1 filter_spec mismatch between planner and executed "
+                        f"(changed_keys={list(join_hop1_filter_diff_changed.keys())})"
+                    ),
+                )
+
+            if hop1_strategy == "lookup" and join_key_mode == "group" and seed_join_pjt_nos:
+                hop1_filter = _and_filter(hop1_filter, build_project_id_filter([], seed_join_pjt_nos))
+            if hop1_strategy == "skip" and join_key_mode == "instance" and seed_join_pjt_ids:
+                hop1_filter = _and_filter(hop1_filter, build_project_id_filter(seed_join_pjt_ids, []))
+                hop1_k_base = max(10, min(hop1_k_base, 30))
+                hop1_keep = max(1, min(hop1_keep, 1))
 
             log_kv(
                 "RAG.JOIN.HOP1",
@@ -3911,111 +4792,153 @@ def _run_rag_with_vectors(
                 hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
                 hop1_k_base=hop1_k_base,
                 hop1_keep=hop1_keep,
+                hop1_execute=int(run_hop1),
+                reason=join_execution_policy.get("reason"),
+                seed_key_source=join_execution_policy.get("seed_key_source"),
+                seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
             )
+            if run_hop1:
+                vec_avail = _named_vectors_in_collection(qdr, hop1_col)
+                use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+                pre_vecs_h1 = _get_pre_vecs(hop1_q)
+                emb_map_h1: Dict[str, Any] = {}
+                for vname in use_vecs_h1:
+                    pe = pre_vecs_h1.get(vname)
+                    emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
+                emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
 
-            vec_avail = _named_vectors_in_collection(qdr, hop1_col)
-            use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
-            pre_vecs_h1 = _get_pre_vecs(hop1_q)
-            emb_map_h1: Dict[str, Any] = {}
-            for vname in use_vecs_h1:
-                pe = pre_vecs_h1.get(vname)
-                emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
-            emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
+                sr1 = _call_dense_retrieve_hybrid_multi(
+                    qdr=qdr,
+                    emb_map=emb_map_h1,
+                    qtext=hop1_q,
+                    kws=kws,
+                    collection=hop1_col,
+                    lexical_fields=preset.lexical_fields,
+                    sparse_vector_name=sparse_vector_name_eff,
+                    sparse_topk=min(hop1_k_base, 80),
+                    top_k_dense=topk_dense,
+                    top_k_lex_cand=hop1_k_base,
+                    top_k_lex=min(hop1_k_base, 80),
+                    query_filter=hop1_filter,  # ✅ 실제 적용
+                    timings_out=local_timings_h1,
+                    require_hybrid_both_sides=True,
+                    contract_scope="join_hop1",
+                    violation_on_contract=True,
+                )
+                _validate_lookup_join_hybrid_metrics(
+                    mode="join",
+                    contract_scope=f"join_hop1:{hop1_col}",
+                    timings=local_timings_h1,
+                    strict=False,
+                )
+                _apply_dense_threshold(
+                    sr1,
+                    use_dense_threshold=use_dense_threshold_policy,
+                    min_dense_score=min_dense_score_policy,
+                    log_prefix="RAG.DENSE.THRESHOLD.HOP1",
+                    col=hop1_col,
+                    action=action,
+                    base_route=base_route,
+                    relation=relation,
+                )
+                hybrid_points = sr1.get("hybrid") or []
+                if hybrid_points:
+                    _ensure_collection_mark(hybrid_points, hop1_col)
+                    h1_rrf = _dedup_by_doc_id(hybrid_points)
+                else:
+                    _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
+                    for _, lst in (sr1.get("dense") or {}).items():
+                        _ensure_collection_mark(lst or [], hop1_col)
 
-            local_timings_h1: Dict[str, float] = {}
-            sr1 = _call_dense_retrieve_hybrid_multi(
-                qdr=qdr,
-                emb_map=emb_map_h1,
-                qtext=hop1_q,
-                kws=kws,
-                collection=hop1_col,
-                lexical_fields=preset.lexical_fields,
-                sparse_vector_name=sparse_vector_name_eff,
-                sparse_topk=min(hop1_k_base, 80),
-                top_k_dense=topk_dense,
-                top_k_lex_cand=hop1_k_base,
-                top_k_lex=min(hop1_k_base, 80),
-                query_filter=hop1_filter,  # ✅ 실제 적용
-                timings_out=local_timings_h1,
-                require_hybrid_both_sides=True,
-                contract_scope="join_hop1",
-                violation_on_contract=True,
-            )
-            _validate_lookup_join_hybrid_metrics(
-                mode="join",
-                contract_scope=f"join_hop1:{hop1_col}",
-                timings=local_timings_h1,
-            )
-            _apply_dense_threshold(
-                sr1,
-                use_dense_threshold=use_dense_threshold_policy,
-                min_dense_score=min_dense_score_policy,
-                log_prefix="RAG.DENSE.THRESHOLD.HOP1",
-                col=hop1_col,
-                action=action,
-                base_route=base_route,
-                relation=relation,
-            )
-            hybrid_points = sr1.get("hybrid") or []
-            if hybrid_points:
-                _ensure_collection_mark(hybrid_points, hop1_col)
-                h1_rrf = _dedup_by_doc_id(hybrid_points)
+                    # Hop1 RRF merge
+                    sources_h1: List[_RankSource] = []
+                    for vname, lst in (sr1.get("dense") or {}).items():
+                        base_weight = float(w_dense_map.get(vname, 1.0))
+                        score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                        sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+                    sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
+                    h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
+                    h1_rrf = _dedup_by_doc_id(h1_rrf)
+                hop1_reranked = _final_rerank(
+                    h1_rrf,
+                    it=it,
+                    kws=kws,
+                    lex_w=lex_w_eff,
+                    base_route=("perf" if hop1_kind == "perf" else base_route),
+                    mode="search",
+                    keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
+                    tag_boost=float(getattr(preset, "tag_boost", 0.2)),
+                    tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+                )
+
+                if len(hop1_reranked) > ctx_hard_limit:
+                    hop1_reranked = hop1_reranked[:ctx_hard_limit]
+
+                hop1_top = hop1_reranked[: max(1, hop1_keep)]
+                if not hop1_top:
+                    log_kv(
+                        "RAG.JOIN.HOP1.EMPTY",
+                        hop1_kind=hop1_kind,
+                        hop1_tag_filters=hop1_tag_filters,
+                        hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    )
+                else:
+                    # ✅ hop1 결과에 meta_basic 포함 payload 보강
+                    hydrate_keep = min(
+                        max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
+                        ctx_hard_limit,
+                    )
+                    _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
+                    missing = _count_missing_join_keys(hop1_top, join_key_mode=join_key_mode)
+                    if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
+                        if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                            _hydrate_points_payload(qdr, hop1_top)
+                        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode)
+
+                if join_key_mode == "group":
+                    join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
+                    join_pjt_nos = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
+                    join_pjt_ids = []
+                else:
+                    join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
+                    join_pjt_ids = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
+                    join_pjt_nos = []
+                if hop1_top:
+                    join_key_source = "hop1"
             else:
-                _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
-                for _, lst in (sr1.get("dense") or {}).items():
-                    _ensure_collection_mark(lst or [], hop1_col)
-
-                # Hop1 RRF merge
-                sources_h1: List[_RankSource] = []
-                for vname, lst in (sr1.get("dense") or {}).items():
-                    base_weight = float(w_dense_map.get(vname, 1.0))
-                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
-                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
-                h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
-                h1_rrf = _dedup_by_doc_id(h1_rrf)
-            hop1_reranked = _final_rerank(
-                h1_rrf,
-                it=it,
-                kws=kws,
-                lex_w=lex_w_eff,
-                base_route=("perf" if hop1_kind == "perf" else base_route),
-                mode="search",
-                keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
-                tag_boost=float(getattr(preset, "tag_boost", 0.2)),
-                tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
-            )
-
-            if len(hop1_reranked) > ctx_hard_limit:
-                hop1_reranked = hop1_reranked[:ctx_hard_limit]
-
-            hop1_top = hop1_reranked[: max(1, hop1_keep)]
-            if not hop1_top:
+                join_key_result = JoinKeyExtractionResult(keys=[], invalid_values=[], suspected_swaps=[])
                 log_kv(
-                    "RAG.JOIN.HOP1.EMPTY",
-                    hop1_kind=hop1_kind,
-                    hop1_tag_filters=hop1_tag_filters,
-                    hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    "RAG.JOIN.HOP1.SKIPPED",
+                    relation=relation,
+                    hop1_col=hop1_col,
+                    hop1_strategy=hop1_strategy,
+                    reason=join_execution_policy.get("reason"),
+                    seed_key_source=join_execution_policy.get("seed_key_source"),
+                    seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
+                    allow_skip_min_lookup=int(allow_skip_min_lookup),
                 )
-            else:
-                # ✅ hop1 결과에 meta_basic 포함 payload 보강
-                hydrate_keep = min(
-                    max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
-                    ctx_hard_limit,
-                )
-                _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-                missing = _count_missing_join_keys(hop1_top)
-                if missing.get("missing_pjt_any") or missing.get("missing_tag"):
-                    if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
-                        _hydrate_points_payload(qdr, hop1_top)
-                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}")
 
-            if join_key_mode == "group":
-                join_pjt_nos = _extract_pjt_nos(hop1_top[:hop1_keep], max_ids=hop1_keep)
-                join_pjt_ids = []
-            else:
-                join_pjt_ids = _extract_pjt_ids(hop1_top[:hop1_keep], max_ids=hop1_keep)
-                join_pjt_nos = []
+            invalid_values = [str(x).strip() for x in (join_key_result.invalid_values or []) if str(x).strip()]
+            suspected_swap_count = int(join_key_result.suspected_swap_count or 0)
+            if invalid_values or suspected_swap_count > 0:
+                log_kv(
+                    "RAG.JOIN_KEYS.INVALID",
+                    level="error",
+                    scope=f"join_hop1:{hop1_col}:extract",
+                    join_key_mode=join_key_mode,
+                    invalid_count=len(invalid_values),
+                    invalid_values=invalid_values[:10],
+                    suspected_swap_count=suspected_swap_count,
+                    suspected_swaps=join_key_result.to_log_dict().get("suspected_swaps", [])[:10],
+                )
+                raise StrategyViolation(
+                    error_code="JOIN_KEYS_INVALID",
+                    reason=(
+                        f"[join_hop1:{hop1_col}:extract] invalid join keys detected "
+                        f"(join_key_mode={join_key_mode}, invalid_count={len(invalid_values)}, "
+                        f"suspected_swap_count={suspected_swap_count})"
+                    ),
+                )
 
             log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
             if join_key_mode == "group":
@@ -4058,20 +4981,36 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             planner_join_key_mode = resolved_join_key_mode
-            executed_join_key_mode = "group" if join_pjt_nos else "instance"
+            executed_join_key_mode = planner_join_key_mode
+            join_compile_selection = "planner_contract"
+            if planner_join_key_mode == "group" and hop2_col == COL_PERF:
+                if join_pjt_nos:
+                    executed_join_key_mode = "group"
+                elif join_pjt_ids:
+                    executed_join_key_mode = "instance"
+                    join_compile_selection = "group_perf_pjt_id_fallback"
+                else:
+                    raise StrategyViolation(
+                        error_code="JOIN_GROUP_KEYS_UNRESOLVED",
+                        reason=(
+                            "group JOIN Hop2(perf) compile failed: neither pjt_no nor fallback pjt_id is available "
+                            f"(relation={relation}, hop2_col={hop2_col}, join_key_mode={planner_join_key_mode})"
+                        ),
+                    )
             log_kv(
                 "RAG.JOIN.KEY_MODE.CHECK",
                 resolved_join_key_mode=resolved_join_key_mode,
                 planner_raw_join_key_mode=planner_raw_join_key_mode,
                 planner_join_key_mode=planner_join_key_mode,
                 executed_join_key_mode=executed_join_key_mode,
+                join_compile_selection=join_compile_selection,
                 join_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
                 opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)),
                 relation=relation,
                 hop2_col=hop2_col,
             )
-            if planner_join_key_mode != executed_join_key_mode:
+            if planner_join_key_mode != executed_join_key_mode and join_compile_selection == "planner_contract":
                 raise StrategyViolation(
                     error_code="PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH",
                     reason=(
@@ -4080,11 +5019,19 @@ def _run_rag_with_vectors(
                     ),
                 )
 
-            validate_join_mode_key_inputs(
-                mode=planner_join_key_mode,
-                join_ids=join_pjt_ids,
-                pjt_nos=join_pjt_nos,
-            )
+            try:
+                validate_resolved_join_keys(
+                    mode=planner_join_key_mode,
+                    pjt_ids=join_pjt_ids,
+                    pjt_nos=join_pjt_nos,
+                )
+            except ValueError as exc:
+                msg = str(exc)
+                error_code, _, reason = msg.partition(": ")
+                raise StrategyViolation(
+                    error_code=error_code if error_code.startswith("EXECUTOR_") else "EXECUTOR_JOIN_KEYS_INVALID",
+                    reason=reason or msg,
+                ) from exc
 
             # Hop2는 relation/project|org->perf 여부와 무관하게 planner 계약 키를 그대로 사용한다.
             hop2_join_key_mode = planner_join_key_mode
@@ -4094,11 +5041,13 @@ def _run_rag_with_vectors(
                 join_key_mode=hop2_join_key_mode,
                 join_pjt_ids=join_pjt_ids,
                 join_pjt_nos=join_pjt_nos,
+                join_ids=(join_pjt_ids if hop2_join_key_mode == "instance" else []),
                 q=q,
                 hop2_tag_filters=hop2_tag_filters,
                 people_terms=people_terms,
                 org_terms=org_terms,
                 planner_filter_spec=planner_filter_spec,
+                compiled_hop2_spec=compiled_strategy.hop2_spec,
             )
             if relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and org_filter:
                 hop2_filter = _and_filter(hop2_filter, org_filter)
@@ -4132,6 +5081,10 @@ def _run_rag_with_vectors(
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)
             if hop2_col == COL_PERF and perf_type_filter:
                 hop2_filter = _and_filter(hop2_filter, perf_type_filter)
+
+            executed_join_meta = dict((executed_join_filter_spec or {}).get("_meta") or {})
+            effective_join_mode = str(executed_join_meta.get("effective_perf_join_mode") or hop2_join_key_mode)
+            join_compile_selection = str(executed_join_meta.get("join_compile_selection") or join_compile_selection)
 
 
             log_kv(
@@ -4177,6 +5130,7 @@ def _run_rag_with_vectors(
                 mode="join",
                 contract_scope=f"join_hop2:{hop2_col}",
                 timings=local_timings_h2,
+                strict=False,
             )
             _apply_dense_threshold(
                 sr2,
@@ -4244,8 +5198,8 @@ def _run_rag_with_vectors(
                 org_role=org_role,
             )
 
-            join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
-            join_key_preview = join_pjt_nos[:10] if join_key_mode == "group" else join_pjt_ids[:10]
+            join_key_label = "PJT_NO" if effective_join_mode == "group" else "PJT_ID"
+            join_key_preview = join_pjt_nos[:10] if effective_join_mode == "group" else join_pjt_ids[:10]
             context = (
                 f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
                 f"### [Hop2] {hop2_label}\n"
@@ -4266,6 +5220,28 @@ def _run_rag_with_vectors(
             _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
             _timing_put(timings, "phase.total", time.time() - t_all0)
             hits = (hop1_top or []) + (hop2_top or [])
+            join_keys_used_count = len(join_pjt_ids) if effective_join_mode == "instance" else len(join_pjt_nos)
+            hop2_key_strategy = "pjt_id_in" if effective_join_mode == "instance" else "pjt_no"
+            strategy = replace(
+                strategy,
+                join_key_source=join_key_source,
+                hop1_mode=hop1_strategy,
+                hop2_key_strategy=hop2_key_strategy,
+                join_keys_used_count=join_keys_used_count,
+            )
+            ctx.strategy = strategy
+            debug_meta = {
+                "join": {
+                    "join_key_mode": join_key_mode,
+                    "join_key_source": join_key_source,
+                    "hop1_mode": hop1_strategy,
+                    "hop2_key_strategy": hop2_key_strategy,
+                    "join_compile_selection": join_compile_selection,
+                    "join_keys_used_count": join_keys_used_count,
+                    "seed_key_source": join_execution_policy.get("seed_key_source"),
+                    "seed_key_count": int(join_execution_policy.get("seed_key_count") or 0),
+                }
+            }
             return RagResult(
                 stack=stack,
                 keywords=kws,
@@ -4274,6 +5250,7 @@ def _run_rag_with_vectors(
                 context=context,
                 refs=refs,
                 timings=timings,
+                debug_meta=debug_meta,
             )
 
     # -------------------------
@@ -4284,8 +5261,21 @@ def _run_rag_with_vectors(
     # collection list
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
+    if perf_followup_join_ids:
+        strategy = replace(
+            strategy,
+            join_key_source="followup",
+            hop1_mode="lookup",
+            hop2_key_strategy="pjt_id_in",
+            join_keys_used_count=len(perf_followup_join_ids),
+        )
+        ctx.strategy = strategy
     perf_followup_filter = (
-        build_perf_filter_by_pjt_id(perf_followup_join_ids, q)
+        build_perf_filter_by_pjt_id(
+            perf_followup_join_ids,
+            q,
+            apply_query_tag_inference=False,
+        )
         if perf_followup_join_ids
         else None
     )
@@ -4346,7 +5336,7 @@ def _run_rag_with_vectors(
         def _build_soft_filter_for_col(col_name: str, apply_name_filters: bool) -> Any:
             base_filter = None
             if col_name == COL_PROJECT:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if apply_name_filters and (people_filter or participant_org_filter or org_filter):
                     tag_filter_local = _build_tag_only_filter([TAG_PJT_INFO])
@@ -4358,7 +5348,7 @@ def _run_rag_with_vectors(
                 if project_tag_filter:
                     base_filter = _and_filter(base_filter, project_tag_filter)
             elif col_name == COL_PERF:
-                if title_filter and (mode == "search" and search_filter_conf_ok):
+                if title_filter_server_applied:
                     base_filter = _and_filter(base_filter, title_filter)
                 if base_route == "perf" and people_filter and apply_name_filters:
                     base_filter = _and_filter(base_filter, people_filter)
@@ -4382,6 +5372,7 @@ def _run_rag_with_vectors(
             mode,
             resolved_join_key_mode if mode == "join" else None,
             ids_map,
+            relation,
             allow_missing_instance_ids=True,
         )
         pjt_ids = _ensure_iterable_list(ids_map.get("pjt_id"))
@@ -4510,6 +5501,7 @@ def _run_rag_with_vectors(
             search_filter_enabled=search_filter_enabled,
             search_filter_signal=search_filter_signal,
             search_filter_conf_ok=search_filter_conf_ok,
+            title_filter_server_applied=int(title_filter_server_applied),
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,
@@ -4517,7 +5509,10 @@ def _run_rag_with_vectors(
             sparse_topk=int(sparse_topk_eff),
             sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
-            executed_filter_spec_json=_serialize_filter_for_log(qfilter),
+            executed_filter_spec_json={
+                "qfilter": _serialize_filter_for_log(qfilter),
+                "title_filter_server_applied": bool(title_filter_server_applied and col in (COL_PROJECT, COL_PERF)),
+            },
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
         )
@@ -4546,6 +5541,7 @@ def _run_rag_with_vectors(
                 mode=plan.mode,
                 contract_scope=f"{plan.mode}:{col}",
                 timings=local_timings,
+                strict=False,
             )
 
         _apply_dense_threshold(
@@ -4647,7 +5643,7 @@ def _run_rag_with_vectors(
                 "dense_hits": float(d_hit),
                 "lex_hits": float(l_hit),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "sparse_hits": _resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "best_dense": float(best_dense) if best_dense is not None else -1.0,
@@ -4672,7 +5668,7 @@ def _run_rag_with_vectors(
             per_col_stats[col] = {
                 "hybrid_hits": float(len(hybrid_points)),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": float(local_timings.get("lexical_scored", 0.0)),
+                "sparse_hits": _resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "total": float(local_timings.get("total", 0.0)),
@@ -4718,22 +5714,120 @@ def _run_rag_with_vectors(
 
     log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
 
-    # promotion 비활성 기본값(disable): 명시적으로 켠 경우에만 동작 가능
+    # promotion feature-flag: 1차 SEARCH hit에서 ID를 추출해 2차 LOOKUP/JOIN 실행
     promotion_mode = mode
     promotion_intent = it
     promotion_feature_mode = str(os.getenv("RAG_PROMOTION_MODE", "disable") or "disable").strip().lower()
     promotion_enabled = promotion_feature_mode in ("enable", "enabled", "on", "1", "true", "yes", "y")
-    if promotion_enabled:
-        # 기본 정책은 비활성. 켜져도 현재는 passthrough 동작만 수행한다.
+    promotion_max_depth = max(0, int(os.getenv("RAG_PROMOTION_MAX_DEPTH", "1") or "1"))
+
+    if promotion_enabled and mode == "search" and promotion_depth < promotion_max_depth:
+        promotion = _promote_mode_from_search_hits(
+            current_mode=mode,
+            search_hits=list(merged_rrf or []),
+            ids_map=dict(getattr(it, "ids_map", {}) or {}),
+            planner_strategy=strategy,
+        )
+        promoted_mode = str((promotion or {}).get("mode", mode) or mode).strip().lower()
+        promoted_ids_map = dict((promotion or {}).get("ids_map", {}) or {})
+
         log_kv(
-            "RAG.PROMOTION.DISABLED_POLICY",
+            "RAG.PROMOTION.DECISION",
             promotion_feature_mode=promotion_feature_mode,
-            planner_mode=planner_mode,
-            executed_mode=promotion_mode,
-            reason="promotion_policy_passthrough",
+            promotion_depth=promotion_depth,
+            promotion_max_depth=promotion_max_depth,
+            current_mode=mode,
+            promoted_mode=promoted_mode,
+            reason=(promotion or {}).get("reason"),
+            kind=(promotion or {}).get("kind"),
+            signals=(promotion or {}).get("signals"),
+            strategy_key=(promotion or {}).get("strategy_key"),
         )
 
+        if promoted_mode in ("lookup", "join") and promoted_mode != mode and promoted_ids_map:
+            promoted_relation = relation
+            planner_rel = (promotion or {}).get("planner_relation")
+            planner_action_for_promotion = str((promotion or {}).get("planner_action", "") or "").strip().lower()
+            if promoted_mode == "join" and promoted_relation is None and isinstance(planner_rel, tuple) and len(planner_rel) == 2:
+                promoted_relation = planner_rel
+            if promoted_mode == "join" and promoted_relation is None and planner_action_for_promotion == "relation":
+                promoted_relation = ("project", "perf")
+
+            promoted_intent = replace(
+                it,
+                mode=promoted_mode,
+                relation=promoted_relation,
+                ids_map=promoted_ids_map,
+                ids_flat=[v for vals in promoted_ids_map.values() for v in (vals or []) if str(v).strip()],
+            )
+            promoted_payload = {"normalized_intent": promoted_intent}
+
+            log_kv(
+                "RAG.PROMOTION.REEXECUTE",
+                from_mode=mode,
+                to_mode=promoted_mode,
+                planner_relation=planner_rel,
+                promoted_relation=promoted_relation,
+                promoted_ids_keys=sorted(promoted_ids_map.keys()),
+                promotion_depth=promotion_depth,
+            )
+
+            promoted_result = _run_rag_with_vectors(
+                query=query,
+                model_name=model_name,
+                intent_payload=promoted_payload,
+                stack=stack,
+                vector_names=vector_names,
+                w_dense_map=w_dense_map,
+                lexical_field_weights=lexical_field_weights,
+                sparse_vector_name=sparse_vector_name,
+                sparse_topk=sparse_topk,
+                sparse_weight=sparse_weight,
+                domain_hint=domain_hint,
+                promotion_depth=promotion_depth + 1,
+            )
+
+            timings_merged = dict(timings)
+            timings_merged["phase.promotion_reexecute"] = 1.0
+            for k, v in (promoted_result.timings or {}).items():
+                if k.startswith("phase.") or k.startswith("info."):
+                    timings_merged[f"promotion.{k}"] = v
+            promoted_result.timings = timings_merged
+            return promoted_result
+
     # final rerank
+    title_post_filter_applied = False
+    title_post_filter_hits = 0
+    title_soft_boost = 0.0
+    title_soft_terms_for_rerank: List[str] = []
+    if (
+        plan.mode == "lookup"
+        and title_match_mode == TITLE_MATCH_MODE_CONTAINS
+        and bool(title_terms)
+    ):
+        title_filter_topn = max(1, int(os.getenv("RAG_TITLE_POST_FILTER_TOPN", "80")))
+        post_filter_pool = list(merged_rrf[:title_filter_topn])
+        title_post_filter_hits = sum(
+            1
+            for p in post_filter_pool
+            if _soft_title_contains(getattr(p, "payload", None) or {}, title_terms)
+        )
+        title_soft_terms_for_rerank = list(title_terms)
+        title_soft_boost = float(os.getenv("RAG_TITLE_SOFT_BOOST", "8.0"))
+        log_kv(
+            "RAG.TITLE_POST_FILTER",
+            applied=int(title_post_filter_applied),
+            policy=lookup_title_filter_policy,
+            title_match_mode=title_match_mode,
+            topn=title_filter_topn,
+            input_count=len(post_filter_pool),
+            hits=title_post_filter_hits,
+            title_terms=title_terms[:6],
+        )
+
+    _timing_put(timings, "info.title_post_filter_applied", int(title_post_filter_applied))
+    _timing_put(timings, "info.title_post_filter_hits", int(title_post_filter_hits))
+
     t0 = time.time()
     final_keep = int((rerank_spec or {}).get("final_keep", 80))
     reranked = _final_rerank(
@@ -4746,24 +5840,55 @@ def _run_rag_with_vectors(
         keep=final_keep,
         tag_boost=float(getattr(preset, "tag_boost", 0.0)),
         tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+        title_soft_terms=title_soft_terms_for_rerank,
+        title_soft_boost=title_soft_boost,
     )
     reranked = _dedup_by_doc_id(reranked)
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
     _timing_put(timings, "phase.final_rerank", time.time() - t0)
 
+    aggregation = _build_people_superlative_aggregation(
+        reranked=reranked,
+        intent=promotion_intent,
+        hinted_limit=hinted_limit,
+        policy_limit=int(getattr(preset, "max_ctx_items", 10) or 10),
+    )
+    if aggregation:
+        _timing_put(timings, "info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
+        _timing_put(timings, "info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
+
     log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
 
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
     min_reranked = max(0, int(getattr(preset, "min_reranked", 0) or 0))
+    effective_min_reranked, min_reranked_clamp_reason = _resolve_effective_min_reranked(
+        intent=promotion_intent,
+        mode=promotion_mode,
+        base_route=base_route,
+        preset_min_reranked=min_reranked,
+        hinted_limit=hinted_limit,
+    )
+    _timing_put(timings, "info.contract_min_reranked", int(min_reranked))
+    _timing_put(timings, "info.contract_effective_min_reranked", int(effective_min_reranked))
+    _timing_put(timings, "info.contract_min_reranked_clamp_reason", min_reranked_clamp_reason)
+    log_kv(
+        "RAG.CONTRACT.MIN_RERANKED",
+        mode=promotion_mode,
+        base_route=base_route,
+        preset_min_reranked=int(min_reranked),
+        hinted_limit=int(max(0, int(hinted_limit or 0))),
+        effective_min_reranked=int(effective_min_reranked),
+        clamp_reason=min_reranked_clamp_reason,
+    )
     min_final_avg = float(os.getenv("RAG_FALLBACK_MIN_FINAL_AVG", "0"))
     min_final_max = float(os.getenv("RAG_FALLBACK_MIN_FINAL_MAX", "0"))
     score_topn = max(1, int(os.getenv("RAG_FALLBACK_SCORE_TOPN", "5")))
 
     contract_fail_reason = _enforce_reranked_contract(
         reranked=reranked,
-        min_reranked=min_reranked,
+        min_reranked=effective_min_reranked,
         min_final_avg=min_final_avg,
         min_final_max=min_final_max,
         score_topn=score_topn,
@@ -4777,6 +5902,7 @@ def _run_rag_with_vectors(
         requested_limit = max(
             0,
             _coerce_int(_get_attr(intent_payload, "limit", 0), 0),
+            _coerce_int(hinted_limit, 0),
         )
         hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
         reranked_for_hydrate = reranked[:hydrate_upper]
@@ -4784,7 +5910,7 @@ def _run_rag_with_vectors(
         _hydrate_points_payload(qdr, reranked_for_hydrate)
         _timing_put(timings, "phase.hydrate_full_payload", time.time() - t0)
 
-        check_top_k = min(len(reranked), max(1, requested_limit or max_items))
+        check_top_k = min(len(reranked), max(1, requested_limit))
         missing_kor = []
         for rank, p in enumerate(reranked[:check_top_k], start=1):
             pl = getattr(p, "payload", {}) or {}
@@ -4795,7 +5921,7 @@ def _run_rag_with_vectors(
             "[RAG.HYDRATE_CHECK] top_k=%s missing_meta_basic_kor_pjt_nm=%s",
             check_top_k,
             missing_kor or "none",
-        )
+            )
 
         # 공통 필터 적용 검증(관측용): LOOKUP/JOIN에서 인명 하드 필터가 걸렸는데 topN에 0건이면 경고
         probe_terms = [str(t).strip() for t in (people_terms or []) if str(t).strip()]
@@ -4835,10 +5961,12 @@ def _run_rag_with_vectors(
             action=action,
             base_route=base_route,
             output_type=plan.output_type,
+            mode=mode,
             max_items=max_items,
             query_text=q,
             people_terms=people_terms,
             person_ids=people_ids,
+            org_terms=org_terms,
             org_role=org_role,
         )
     else:
@@ -4898,15 +6026,16 @@ def _run_rag_with_vectors(
         context=context,
         refs=refs,
         timings=timings,
+        aggregation=aggregation,
     )
 
 # -------------------------
 # Public entry
 # -------------------------
 def run_rag_once(
-    query: str,
-    model_name: str = DEFAULT_MODEL_NAME,
-    intent_payload: Any = None,
+        query: str,
+        model_name: str = DEFAULT_MODEL_NAME,
+        intent_payload: Any = None,
 ) -> RagResult:
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
@@ -4926,12 +6055,13 @@ def run_rag_once(
         w_dense_map=w_dense_map,
         lexical_field_weights=None,
         domain_hint=domain_hint,
+        promotion_depth=0,
     )
 
 def run_rag_ab_compare(
-    query: str,
-    model_name: str = DEFAULT_MODEL_NAME,
-    intent_payload: Any = None,
+        query: str,
+        model_name: str = DEFAULT_MODEL_NAME,
+        intent_payload: Any = None,
 ) -> Dict[str, RagResult]:
     res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload)
     return {"M": res_m}

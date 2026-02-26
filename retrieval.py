@@ -39,6 +39,28 @@ _SPARSE_ENCODERS: dict[str, Any] = {}
 _SPARSE_LOCK = threading.Lock()
 
 
+def _is_debug_logging_enabled() -> bool:
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_query_preview(text: str, *, max_len: int = 80) -> str:
+    q = str(text or "").strip()
+    if not q:
+        return ""
+    return q[:max_len] + ("...(truncated)" if len(q) > max_len else "")
+
+
+def _resolve_fastembed_cache_dir() -> Optional[str]:
+    raw = str(os.getenv("RAG_FASTEMBED_CACHE_DIR", "")).strip()
+    cache_dir = raw or "../../Models/hub/"
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+    except Exception as e:
+        logger.warning("[retrieval] fastembed cache dir unavailable (%s): %s", cache_dir, e)
+        return None
+
+
 # logger는 기존 그대로 쓴다고 가정
 # logger = logging.getLogger("RAG_Retrieval")
 
@@ -81,9 +103,12 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
     with _SPARSE_LOCK:
         enc = _SPARSE_ENCODERS.get(model_id)
         if enc is None:
+            cache_dir = _resolve_fastembed_cache_dir()
+            if not cache_dir:
+                return None
             enc = SparseTextEmbedding(
                 model_name=model_id,
-                cache_dir="./Qdrant/ModelsCache",
+                cache_dir=cache_dir,
             )
             _SPARSE_ENCODERS[model_id] = enc
         return enc
@@ -102,6 +127,9 @@ def _encode_sparse_query(text: str, *, model_id: str) -> Optional[models.SparseV
 
     try:
         enc = _get_sparse_encoder(model_id)
+        if enc is None:
+            logger.info("[retrieval] sparse encoder disabled (cache dir/config issue)")
+            return None
         # fastembed expects list[str] and yields SparseEmbedding (indices/values)
         emb = next(enc.embed([text]))
         idx = emb.indices.tolist() if hasattr(emb.indices, "tolist") else list(emb.indices)
@@ -201,13 +229,21 @@ def _qdrant_sparse_search(
             sparse_vector_name,
         )
         return []
-    logger.info(
-        "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
-        model_id,
-        len(query_text or ""),
-        len(getattr(sv, "indices", []) or []),
-        (query_text or "")[:80],
-    )
+    if _is_debug_logging_enabled():
+        logger.info(
+            "[SPARSE.ENC] model=%s len=%d nnz=%d head=%r",
+            model_id,
+            len(query_text or ""),
+            len(getattr(sv, "indices", []) or []),
+            _safe_query_preview(query_text),
+        )
+    else:
+        logger.info(
+            "[SPARSE.ENC] model=%s len=%d nnz=%d",
+            model_id,
+            len(query_text or ""),
+            len(getattr(sv, "indices", []) or []),
+        )
 
     return _qdrant_query_points_sparse(
         client,
@@ -260,9 +296,9 @@ def _supports_qdrant_hybrid_query() -> bool:
 
 
 def _build_hybrid_query_model(
-    *,
-    prefetch: Sequence[Any],
-    fusion: Any,
+        *,
+        prefetch: Sequence[Any],
+        fusion: Any,
 ) -> Any:
     query_model = getattr(models, "Query", None)
     if inspect.isclass(query_model):
@@ -291,24 +327,27 @@ def _get_fusion_rrf() -> Any:
 
 
 def _qdrant_hybrid_query_once(
-    client: Any,
-    *,
-    collection_name: str,
-    query_text: str,
-    emb_map: Dict[str, Any],
-    sparse_vector_name: str,
-    top_k_dense: int,
-    top_k_lexical_candidates: int,
-    top_k_lexical: int,
-    lexical_fields: Optional[List[str]],
-    query_filter: Any = None,
+        client: Any,
+        *,
+        collection_name: str,
+        query_text: str,
+        emb_map: Dict[str, Any],
+        sparse_vector_name: str,
+        top_k_dense: int,
+        top_k_lexical_candidates: int,
+        top_k_lexical: int,
+        lexical_fields: Optional[List[str]],
+        query_filter: Any = None,
 ) -> Optional[List[models.ScoredPoint]]:
     if not _supports_qdrant_hybrid_query():
         return None
     fusion = _get_fusion_rrf()
     if fusion is None:
         return None
-    logger.warning(f"[retrieval] hybrid query_points query_text: {query_text}")
+    if _is_debug_logging_enabled():
+        logger.info("[retrieval] hybrid query_points q_len=%d q=%r", len(query_text or ""), _safe_query_preview(query_text))
+    else:
+        logger.info("[retrieval] hybrid query_points q_len=%d", len(query_text or ""))
     supports_using = _prefetch_supports_using()
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")
@@ -501,9 +540,9 @@ _PAYLOAD_MIN_FIELDS = [s.strip() for s in os.getenv(
 ).split(",") if s.strip()]
 
 def _with_payload_selector(
-    mode: str,
-    fields: List[str],
-    extra_fields: Optional[List[str]] = None,
+        mode: str,
+        fields: List[str],
+        extra_fields: Optional[List[str]] = None,
 ):
     """
     Qdrant with_payload:
@@ -729,7 +768,7 @@ def _set_payload_hint(point: Any, collection: str, vec_name: str = "") -> None:
     #         point.payload.setdefault("_vec", vec_name)
     # except Exception as e:  # pragma: no cover
     #     logger.warning(f"[retrieval] _set_payload_hint failed: {e}")
-        #return None
+    #return None
     return
 
 # =========================
@@ -777,25 +816,25 @@ def _combine_filters(base: Optional[models.Filter], extra: Optional[models.Filte
 # =========================
 
 def dense_retrieve_hybrid_multi(
-    *,
-    client: QdrantClient,
-    emb_map: Dict[str, Any],
-    expanded_text: str,
-    keywords: List[str],
-    collection_name: str,
-    lexical_fields: Optional[List[str]] = None,
-    lexical_field_weights: Optional[Dict[str, float]] = None,
-    lexical_scoring_mode: str = "bm25",
-    top_k_dense: int = _DEFAULT_TOPK_DENSE,
-    top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
-    top_k_lexical: int = _DEFAULT_TOPK_LEX,
-    sparse_vector_name: Optional[str] = None,
-    sparse_topk: Optional[int] = None,
-    query_filter: Optional[models.Filter] = None,
-    timings: Optional[Dict[str, float]] = None,
-    hybrid_once: Optional[bool] = None,
-    require_hybrid_both_sides: bool = False,
-    contract_scope: Optional[str] = None,
+        *,
+        client: QdrantClient,
+        emb_map: Dict[str, Any],
+        expanded_text: str,
+        keywords: List[str],
+        collection_name: str,
+        lexical_fields: Optional[List[str]] = None,
+        lexical_field_weights: Optional[Dict[str, float]] = None,
+        lexical_scoring_mode: str = "bm25",
+        top_k_dense: int = _DEFAULT_TOPK_DENSE,
+        top_k_lexical_candidates: int = _DEFAULT_TOPK_LEX_CAND,
+        top_k_lexical: int = _DEFAULT_TOPK_LEX,
+        sparse_vector_name: Optional[str] = None,
+        sparse_topk: Optional[int] = None,
+        query_filter: Optional[models.Filter] = None,
+        timings: Optional[Dict[str, float]] = None,
+        hybrid_once: Optional[bool] = None,
+        require_hybrid_both_sides: bool = False,
+        contract_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
@@ -823,8 +862,8 @@ def dense_retrieve_hybrid_multi(
     if hybrid_once_eff:
         if not sparse_vector_name or not emb_map:
             msg = (
-                "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
-                % (bool(sparse_vector_name), bool(emb_map), contract_scope)
+                    "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
+                    % (bool(sparse_vector_name), bool(emb_map), contract_scope)
             )
             if force_hybrid_once:
                 raise RuntimeError(msg)
@@ -1076,10 +1115,10 @@ def _merge_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _select_meta_fields(
-    meta: Dict[str, Any],
-    query_text: str,
-    *,
-    include_meta_long: Optional[bool] = None,
+        meta: Dict[str, Any],
+        query_text: str,
+        *,
+        include_meta_long: Optional[bool] = None,
 ) -> List[str]:
     if not isinstance(meta, dict) or not meta:
         return []
@@ -1179,7 +1218,7 @@ def build_context_docstyle(
 
         meta_detail = pl.get("meta_detail") if isinstance(pl.get("meta_detail"), dict) else {}
         detail_only = meta_source == "detail_only" or (
-            fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset
+                fieldset and "meta_detail" in fieldset and "meta_basic" not in fieldset
         )
         if detail_only:
             meta = dict(meta_detail)
@@ -1193,7 +1232,7 @@ def build_context_docstyle(
             or meta.get("eng_pjt_nm")
             or "",
             max_chars=200,
-        )
+            )
         doc_id = _safe_str(pl.get("doc_id") or "", max_chars=160)
         systems = pl.get("systems") if isinstance(pl.get("systems"), list) else []
         urls = pl.get("urls") if isinstance(pl.get("urls"), list) else []
@@ -1206,7 +1245,7 @@ def build_context_docstyle(
                 or pl.get("content2")
                 or "",
                 max_chars=per_doc_char_budget,
-            )
+                )
         meta_lines = ""
         if include_meta:
             meta_full = dict(meta)

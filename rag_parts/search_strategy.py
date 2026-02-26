@@ -1,74 +1,100 @@
 # -*- coding: utf-8 -*-
-"""
-검색 전략 매트릭스
-
-- 프리셋(action 기반 파라미터)와 파이프라인(mode 기반 rerank/필터 정책)을
-  하나의 매트릭스로 묶어 버전/키를 관리합니다.
-
-운영 로그 키 네이밍:
-- strategy_version: planner 스키마 버전(server3 planner contract)
-- policy_version: 내부 검색 정책/매트릭스 버전(이 모듈 상수)
-"""
 from __future__ import annotations
 
-from typing import Dict
+import json
+from typing import Any, Dict, List, Optional, Tuple
 
-SEARCH_POLICY_VERSION = "v1.0"
-
-PRESET_KEYS_BY_ACTION: Dict[str, str] = {
-    "support": "support",
-    "relation": "relation",
-    "id_exact": "id_exact",
-    "id_fuzzy": "id_fuzzy",
-    "list": "filter",
-    "download": "filter",
-    "stats": "filter",
-    "topic": "topic",
-    "search": "search",
-}
-
-MODE_POLICY: Dict[str, Dict[str, object]] = {
-    "search": {
-        "rerank_weights": {"rrf": 0.45, "kw": 0.35, "filter": 0.20},
-        "strict_ids": False,
-        "filter_scope": "optional(search_filter+tag/people/org/year/keyword/perf_type)",
-    },
-    "lookup": {
-        "rerank_weights": {"rrf": 0.30, "kw": 0.25, "filter": 0.45},
-        "strict_ids": True,
-        "filter_scope": "server_filters(id/tag/org/people/year/keyword/perf_type)",
-    },
-    "join": {
-        "rerank_weights": {"rrf": 0.25, "kw": 0.25, "filter": 0.50},
-        "strict_ids": True,
-        "filter_scope": "hop1(search)+hop2(join_filter+year/keyword/perf_type)",
-    },
-}
-
-STRATEGY_MATRIX = {
-    "version": SEARCH_POLICY_VERSION,
-    "preset_keys_by_action": PRESET_KEYS_BY_ACTION,
-    "mode_policy": MODE_POLICY,
-}
+SEARCH_POLICY_VERSION = "v1.2"
 
 
-def resolve_preset_key(action: str) -> str:
-    key = PRESET_KEYS_BY_ACTION.get((action or "").strip().lower())
-    return key or "default"
+def safe_json(obj: Any, max_len: int = 1200) -> str:
+    try:
+        s = json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        s = str(obj)
+    if len(s) > max_len:
+        return s[:max_len] + "…"
+    return s
 
 
-def build_strategy_key(action: str, mode: str) -> str:
-    return f"{resolve_preset_key(action)}:{(mode or '').strip().lower() or 'search'}"
+def first_match(text_lower: str, cues: List[str]) -> Optional[str]:
+    for c in cues:
+        if c and c.lower() in text_lower:
+            return c
+    return None
 
 
-def get_mode_policy(mode: str) -> Dict[str, object]:
-    return dict(MODE_POLICY.get((mode or "").strip().lower(), MODE_POLICY["search"]))
+def count_hits(sr: Dict[str, Any]) -> Tuple[int, int, float]:
+    dense_hit = 0
+    best_dense = -1.0
+    for _, lst in (sr.get("dense") or {}).items():
+        dense_hit += len(lst)
+        if lst:
+            best_dense = max(best_dense, float(lst[0].score))
+    lex_hit = len(sr.get("lexical") or [])
+    return dense_hit, lex_hit, best_dense
 
 
-def build_rerank_spec(mode: str) -> Dict[str, object]:
-    policy = get_mode_policy(mode)
+def point_brief(p: Any) -> Dict[str, Any]:
+    pl = getattr(p, "payload", None) or {}
+    if not isinstance(pl, dict):
+        pl = {}
+
+    score = getattr(p, "score", None)
+    title = (
+        pl.get("title_text")
+        or pl.get("title1")
+        or pl.get("title2")
+        or ""
+    )
+    doc_id = pl.get("doc_id") or ""
+    col = pl.get("_collection") or ""
+    tag = pl.get("tag") or ""
     return {
-        "rerank_weights": dict(policy.get("rerank_weights", {})),
-        "strict_ids": bool(policy.get("strict_ids", False)),
-        "filter_scope": policy.get("filter_scope"),
+        "score": float(score) if score is not None else None,
+        "col": str(col),
+        "doc_id": str(doc_id),
+        "tag": str(tag),
+        "source_table": "",
+        "title": str(title)[:80],
+    }
+
+
+def build_strategy_key(action: Optional[str], mode: Optional[str]) -> str:
+    action_norm = str(action or "").strip().lower() or "unknown"
+    mode_norm = str(mode or "").strip().lower() or "unknown"
+    return f"{action_norm}:{mode_norm}"
+
+
+def build_rerank_spec(mode: Optional[str]) -> Dict[str, Any]:
+    """실행 모드별 rerank preset 생성.
+
+    NOTE: 최소 계약(top-level key)은 유지하고, 상세 가중치는 추후 정책 고도화 시 교체 가능.
+    """
+    mode_norm = str(mode or "").strip().lower()
+
+    if mode_norm == "lookup":
+        return {
+            "final_keep": 80,
+            "rerank_weights": {
+                "lexical": 1.2,
+                "dense": 1.0,
+                "tag": 0.5,
+            },
+        }
+    if mode_norm == "join":
+        return {
+            "final_keep": 120,
+            "rerank_weights": {
+                "lexical": 1.1,
+                "dense": 1.0,
+                "join_key": 0.8,
+            },
+        }
+    return {
+        "final_keep": 80,
+        "rerank_weights": {
+            "lexical": 1.0,
+            "dense": 1.0,
+        },
     }

@@ -43,20 +43,20 @@ class RagMapper:
             프로젝트명(2023)
         """
         cls._validate_item(item)
-        
+
         schema = cls._get_schema(item)
         result = deepcopy(item)
         result["tag"] = item["tag"]
 
         has_valid_existing_title = cls._has_valid_title(result.get("title"))
-        
+
         # title 추출 및 처리
         if not has_valid_existing_title:
             cls._process_title(result, schema)
-        
+
         # 데이터 필드 매핑
         cls._map_data_fields(result, schema)
-        
+
         return result
 
     @staticmethod
@@ -73,7 +73,7 @@ class RagMapper:
             return False
 
         return normalized.lower() != "none"
-        
+
     @classmethod
     def get_researcher_info(cls, item: dict) -> List[str]:
         """
@@ -81,16 +81,16 @@ class RagMapper:
         """
         researchers = item.get("prtcp_mp", [])
         results: List[str] = []
-    
+
         for researcher in researchers:
             name = researcher.get("hm_nm")
             org = researcher.get("blng_org_nm") or "소속미상"
-    
+
             if name:
                 results.append(
                     f"- {name}({org})"
                 )
-    
+
         return results
 
     @classmethod
@@ -116,19 +116,19 @@ class RagMapper:
         cls._validate_item(item)
         schema = cls._get_schema(item)
         data = cls._extract_data(item, schema)
-        
+
         result = {"tag": item["tag"]}
-        
+
         # title 추가
         title = schema.format_title(data)
         if title:
             result["title"] = title
-        
+
         # 다른 reference 필드 추가
         for ref_key, field_name in schema.get_reference_fields().items():
             if ref_key != "title" and field_name in data and data[field_name] is not None:
                 result[ref_key] = str(data[field_name])
-        
+
         return result
 
     @classmethod
@@ -144,7 +144,7 @@ class RagMapper:
         """
         if not isinstance(item, dict):
             raise MappingError("item은 dict여야 합니다")
-        
+
         if "tag" not in item:
             raise MappingError("item에 'tag' 필드가 필수입니다")
 
@@ -163,19 +163,19 @@ class RagMapper:
             MappingError: 지원하지 않는 tag이거나 스키마가 없는 경우
         """
         tag_value = item["tag"]
-        
+
         try:
             tag = DataTag(tag_value)
         except ValueError:
             print(f"{item}")
             raise MappingError(f"지원하지 않는 tag입니다: {tag_value}")
-        
+
         registry = get_schema_registry()
         schema = registry.get(tag)
-        
+
         if not schema:
             raise MappingError(f"tag에 대한 스키마가 없습니다: {tag}")
-        
+
         return schema
 
     @classmethod
@@ -194,7 +194,7 @@ class RagMapper:
             MappingError: 데이터 필드를 찾을 수 없는 경우
         """
         data_fields = schema.get_data_fields()
-        
+
         for field_name in data_fields:
             if field_name in item:
                 value = item[field_name]
@@ -219,23 +219,23 @@ class RagMapper:
         title_fields = schema.get_title_fields()
         if not title_fields:
             return
-        
+
         data_fields = schema.get_data_fields()
 
         # 첫 번째 데이터 필드에서 title 값 찾기
         for data_field in data_fields:
             if data_field not in result or not isinstance(result[data_field], dict):
                 continue
-            
+
             source_data = result[data_field]
             title = schema.format_title(source_data)
-            
+
             if title:
                 result["title"] = title
                 # title 구성 필드들을 데이터에서 제거
                 for field in title_fields:
                     source_data.pop(field, None)
-            
+
             break
 
     @classmethod
@@ -248,11 +248,11 @@ class RagMapper:
             schema: TagSchema 인스턴스
         """
         data_fields = schema.get_data_fields()
-        
+
         for data_field in data_fields:
             if data_field in result and isinstance(result[data_field], dict):
                 result[data_field] = cls._map_fields(
-                    result[data_field], 
+                    result[data_field],
                     schema.label_map,
                     include_unmapped=cls.include_unmapped_fields
                 )
@@ -274,12 +274,12 @@ class RagMapper:
         # include_unmapped가 명시되지 않으면 클래스 설정값 사용
         if include_unmapped is None:
             include_unmapped = RagMapper.include_unmapped_fields
-        
+
         result = {}
-        
+
         for raw_key, raw_value in data.items():
             label_key = label_map.get(raw_key.lower())
-            
+
             if label_key is not None:
                 # 매칭되는 필드: 자연어 라벨로 변환
                 result[label_key] = raw_value
@@ -287,5 +287,5 @@ class RagMapper:
                 # 매칭되지 않는 필드: 원본 key 유지 (설정에 따라)
                 result[raw_key] = raw_value
             # else: 매칭되지 않는 필드 제외
-        
+
         return result
