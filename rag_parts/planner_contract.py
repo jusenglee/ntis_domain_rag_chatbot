@@ -121,7 +121,7 @@ def validate_planner_contract(
         )
         return violations
 
-    if head_norm and relation[0] != head_norm:
+    if head_norm and relation[1] != head_norm:
         violations.append(
             PlannerContractViolation(
                 error_code="PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH",

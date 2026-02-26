@@ -3664,7 +3664,7 @@ def _run_rag_with_vectors(
             ["mode", "action", "relation", "join_key_mode", "target_cols", "keywords"],
         ),
     )
-    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "0")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "1")
     planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
     _assert_allowlist_only(
