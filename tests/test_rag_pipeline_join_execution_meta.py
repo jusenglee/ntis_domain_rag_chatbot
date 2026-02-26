@@ -56,3 +56,21 @@ def test_resolve_join_execution_policy_people_gate_uses_lookup() -> None:
     assert policy["hop1_strategy"] == "lookup"
     assert policy["seed_key_source"] == "people_org_conditions"
     assert policy["seed_key_count"] == 0
+
+
+def test_resolve_join_execution_policy_group_seed_forces_lookup() -> None:
+    fn = _load_resolve_join_execution_policy()
+    policy = fn(
+        relation=("project", "perf"),
+        mode="join",
+        action="relation",
+        join_key_mode="group",
+        seed_join_pjt_ids=[],
+        seed_join_pjt_nos=["PNO-2024-0001"],
+        has_people_org_gate=False,
+    )
+
+    assert policy["hop1_strategy"] == "lookup"
+    assert policy["reason"] == "group_seed_pjt_no_expand"
+    assert policy["seed_key_source"] == "ids_map.pjt_no"
+    assert policy["seed_key_count"] == 1

@@ -6,7 +6,8 @@ rag_pipeline.py (redesigned)
 - SEARCH / LOOKUP / JOIN 을 모드로 분리해 "필터의 역할"을 설계로 고정한다.
 - SEARCH: 모든 컬렉션에서 얇고 넓게 후보 탐색 -> (약한 RRF) + (강한 키워드/소프트필터)로 최종 랭킹
 - LOOKUP(list/stats/download, id query 등): 서버단 필터로 후보군을 먼저 좁힘 -> 소프트 랭킹으로 마무리
-- JOIN(2-hop): Hop1=SEARCH로 join-key 확보 -> Hop2=JOIN 필터로 강제 제한 + 소프트 랭킹
+- JOIN(2-hop): join_key_mode+ids_map+people/org 게이트를 먼저 판정해 Hop1(skip/lookup/search)을 결정,
+  Hop2=JOIN 필터로 강제 제한 + 소프트 랭킹
 
 의존
 - build_rag_objects(): qdr/emb 2종
@@ -2210,7 +2211,7 @@ def _resolve_join_execution_policy(
     """JOIN 경로 Hop1 실행 정책을 단일화한다.
 
     우선순위:
-    1) instance + ids_map.pjt_id   -> hop1_strategy="skip"
+    1) instance + ids_map.pjt_id   -> hop1_strategy="skip" (옵션 시 최소 lookup 보강)
     2) group + ids_map.pjt_no      -> hop1_strategy="lookup"
     3) people/org 조건 존재        -> hop1_strategy="lookup"
     4) 그 외                        -> hop1_strategy="search"
@@ -4587,13 +4588,15 @@ def _run_rag_with_vectors(
             has_people_org_gate=has_people_org_gate,
         )
         hop1_strategy = str(join_execution_policy.get("hop1_strategy") or "search")
-        logger.warning(
-            "[RAG] join hop1 strategy resolved: relation=%s action=%s join_key_mode=%s hop1_strategy=%s reason=%s",
-            relation,
-            action,
-            join_key_mode,
-            hop1_strategy,
-            join_execution_policy.get("reason"),
+        log_kv(
+            "RAG.JOIN.POLICY",
+            relation=relation,
+            action=action,
+            join_key_mode=join_key_mode,
+            hop1_strategy=hop1_strategy,
+            reason=join_execution_policy.get("reason"),
+            seed_key_source=join_execution_policy.get("seed_key_source"),
+            seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
         )
 
         # relation mapping
@@ -4655,6 +4658,21 @@ def _run_rag_with_vectors(
                 join_key_source = "ids_map"
 
             local_timings_h1: Dict[str, float] = {}
+            allow_skip_min_lookup = str(os.getenv("RAG_JOIN_HOP1_SKIP_MIN_LOOKUP", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "y",
+            )
+            run_hop1 = (
+                hop1_strategy in ("lookup", "search")
+                or (
+                    hop1_strategy == "skip"
+                    and join_key_mode == "instance"
+                    and bool(seed_join_pjt_ids)
+                    and allow_skip_min_lookup
+                )
+            )
             hop1_filter = _build_tag_only_filter(hop1_tag_filters) if hop1_tag_filters else None
             if  people_filter:
                 hop1_filter = _and_filter(hop1_filter, people_filter)
@@ -4768,115 +4786,131 @@ def _run_rag_with_vectors(
                 hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
                 hop1_k_base=hop1_k_base,
                 hop1_keep=hop1_keep,
+                hop1_execute=int(run_hop1),
+                reason=join_execution_policy.get("reason"),
+                seed_key_source=join_execution_policy.get("seed_key_source"),
+                seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
             )
+            if run_hop1:
+                vec_avail = _named_vectors_in_collection(qdr, hop1_col)
+                use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
+                pre_vecs_h1 = _get_pre_vecs(hop1_q)
+                emb_map_h1: Dict[str, Any] = {}
+                for vname in use_vecs_h1:
+                    pe = pre_vecs_h1.get(vname)
+                    emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
+                emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
 
-            vec_avail = _named_vectors_in_collection(qdr, hop1_col)
-            use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
-            pre_vecs_h1 = _get_pre_vecs(hop1_q)
-            emb_map_h1: Dict[str, Any] = {}
-            for vname in use_vecs_h1:
-                pe = pre_vecs_h1.get(vname)
-                emb_map_h1[vname] = pe if pe is not None else fallback_emb.get(vname)
-            emb_map_h1 = {k: v for k, v in emb_map_h1.items() if v is not None}
+                sr1 = _call_dense_retrieve_hybrid_multi(
+                    qdr=qdr,
+                    emb_map=emb_map_h1,
+                    qtext=hop1_q,
+                    kws=kws,
+                    collection=hop1_col,
+                    lexical_fields=preset.lexical_fields,
+                    sparse_vector_name=sparse_vector_name_eff,
+                    sparse_topk=min(hop1_k_base, 80),
+                    top_k_dense=topk_dense,
+                    top_k_lex_cand=hop1_k_base,
+                    top_k_lex=min(hop1_k_base, 80),
+                    query_filter=hop1_filter,  # ✅ 실제 적용
+                    timings_out=local_timings_h1,
+                    require_hybrid_both_sides=True,
+                    contract_scope="join_hop1",
+                    violation_on_contract=True,
+                )
+                _validate_lookup_join_hybrid_metrics(
+                    mode="join",
+                    contract_scope=f"join_hop1:{hop1_col}",
+                    timings=local_timings_h1,
+                    strict=False,
+                )
+                _apply_dense_threshold(
+                    sr1,
+                    use_dense_threshold=use_dense_threshold_policy,
+                    min_dense_score=min_dense_score_policy,
+                    log_prefix="RAG.DENSE.THRESHOLD.HOP1",
+                    col=hop1_col,
+                    action=action,
+                    base_route=base_route,
+                    relation=relation,
+                )
+                hybrid_points = sr1.get("hybrid") or []
+                if hybrid_points:
+                    _ensure_collection_mark(hybrid_points, hop1_col)
+                    h1_rrf = _dedup_by_doc_id(hybrid_points)
+                else:
+                    _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
+                    for _, lst in (sr1.get("dense") or {}).items():
+                        _ensure_collection_mark(lst or [], hop1_col)
 
-            sr1 = _call_dense_retrieve_hybrid_multi(
-                qdr=qdr,
-                emb_map=emb_map_h1,
-                qtext=hop1_q,
-                kws=kws,
-                collection=hop1_col,
-                lexical_fields=preset.lexical_fields,
-                sparse_vector_name=sparse_vector_name_eff,
-                sparse_topk=min(hop1_k_base, 80),
-                top_k_dense=topk_dense,
-                top_k_lex_cand=hop1_k_base,
-                top_k_lex=min(hop1_k_base, 80),
-                query_filter=hop1_filter,  # ✅ 실제 적용
-                timings_out=local_timings_h1,
-                require_hybrid_both_sides=True,
-                contract_scope="join_hop1",
-                violation_on_contract=True,
-            )
-            _validate_lookup_join_hybrid_metrics(
-                mode="join",
-                contract_scope=f"join_hop1:{hop1_col}",
-                timings=local_timings_h1,
-                strict=False,
-            )
-            _apply_dense_threshold(
-                sr1,
-                use_dense_threshold=use_dense_threshold_policy,
-                min_dense_score=min_dense_score_policy,
-                log_prefix="RAG.DENSE.THRESHOLD.HOP1",
-                col=hop1_col,
-                action=action,
-                base_route=base_route,
-                relation=relation,
-            )
-            hybrid_points = sr1.get("hybrid") or []
-            if hybrid_points:
-                _ensure_collection_mark(hybrid_points, hop1_col)
-                h1_rrf = _dedup_by_doc_id(hybrid_points)
+                    # Hop1 RRF merge
+                    sources_h1: List[_RankSource] = []
+                    for vname, lst in (sr1.get("dense") or {}).items():
+                        base_weight = float(w_dense_map.get(vname, 1.0))
+                        score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
+                        sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+                    sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
+                    h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
+                    h1_rrf = _dedup_by_doc_id(h1_rrf)
+                hop1_reranked = _final_rerank(
+                    h1_rrf,
+                    it=it,
+                    kws=kws,
+                    lex_w=lex_w_eff,
+                    base_route=("perf" if hop1_kind == "perf" else base_route),
+                    mode="search",
+                    keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
+                    tag_boost=float(getattr(preset, "tag_boost", 0.2)),
+                    tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
+                )
+
+                if len(hop1_reranked) > ctx_hard_limit:
+                    hop1_reranked = hop1_reranked[:ctx_hard_limit]
+
+                hop1_top = hop1_reranked[: max(1, hop1_keep)]
+                if not hop1_top:
+                    log_kv(
+                        "RAG.JOIN.HOP1.EMPTY",
+                        hop1_kind=hop1_kind,
+                        hop1_tag_filters=hop1_tag_filters,
+                        hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    )
+                else:
+                    # ✅ hop1 결과에 meta_basic 포함 payload 보강
+                    hydrate_keep = min(
+                        max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
+                        ctx_hard_limit,
+                    )
+                    _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
+                    missing = _count_missing_join_keys(hop1_top, join_key_mode=join_key_mode)
+                    if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
+                        if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                            _hydrate_points_payload(qdr, hop1_top)
+                        _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode)
+
+                if join_key_mode == "group":
+                    join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
+                    join_pjt_nos = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
+                    join_pjt_ids = []
+                else:
+                    join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
+                    join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
+                    join_pjt_nos = []
+                if hop1_top:
+                    join_key_source = "hop1"
             else:
-                _ensure_collection_mark((sr1.get("lexical") or []), hop1_col)
-                for _, lst in (sr1.get("dense") or {}).items():
-                    _ensure_collection_mark(lst or [], hop1_col)
-
-                # Hop1 RRF merge
-                sources_h1: List[_RankSource] = []
-                for vname, lst in (sr1.get("dense") or {}).items():
-                    base_weight = float(w_dense_map.get(vname, 1.0))
-                    score_weight = _dense_score_weight(lst or []) if _use_dense_score_weight() else 1.0
-                    sources_h1.append(_RankSource(name=f"{hop1_col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-                sources_h1.append(_RankSource(name=f"{hop1_col}:lex", weight=float(sparse_weight_eff), points=sr1.get("lexical") or []))
-                h1_rrf = _rrf_merge(sources_h1, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=500)
-                h1_rrf = _dedup_by_doc_id(h1_rrf)
-            hop1_reranked = _final_rerank(
-                h1_rrf,
-                it=it,
-                kws=kws,
-                lex_w=lex_w_eff,
-                base_route=("perf" if hop1_kind == "perf" else base_route),
-                mode="search",
-                keep=int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")),
-                tag_boost=float(getattr(preset, "tag_boost", 0.2)),
-                tag_mismatch_penalty=float(getattr(preset, "tag_mismatch_penalty", 0.0)),
-            )
-
-            if len(hop1_reranked) > ctx_hard_limit:
-                hop1_reranked = hop1_reranked[:ctx_hard_limit]
-
-            hop1_top = hop1_reranked[: max(1, hop1_keep)]
-            if not hop1_top:
+                join_key_result = {"keys": [], "invalid_values": [], "suspected_swap_count": 0}
                 log_kv(
-                    "RAG.JOIN.HOP1.EMPTY",
-                    hop1_kind=hop1_kind,
-                    hop1_tag_filters=hop1_tag_filters,
-                    hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
+                    "RAG.JOIN.HOP1.SKIPPED",
+                    relation=relation,
+                    hop1_col=hop1_col,
+                    hop1_strategy=hop1_strategy,
+                    reason=join_execution_policy.get("reason"),
+                    seed_key_source=join_execution_policy.get("seed_key_source"),
+                    seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
+                    allow_skip_min_lookup=int(allow_skip_min_lookup),
                 )
-            else:
-                # ✅ hop1 결과에 meta_basic 포함 payload 보강
-                hydrate_keep = min(
-                    max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20),
-                    ctx_hard_limit,
-                )
-                _hydrate_points_payload(qdr, hop1_reranked[:hydrate_keep])
-                missing = _count_missing_join_keys(hop1_top, join_key_mode=join_key_mode)
-                if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
-                    if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
-                        _hydrate_points_payload(qdr, hop1_top)
-                    _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode)
-
-            if join_key_mode == "group":
-                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
-                join_pjt_nos = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
-                join_pjt_ids = []
-            else:
-                join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
-                join_pjt_ids = [str(x).strip() for x in join_key_result.get("keys", []) if str(x).strip()]
-                join_pjt_nos = []
-            if hop1_top:
-                join_key_source = "hop1"
 
             invalid_values = [str(x).strip() for x in (join_key_result.get("invalid_values") or []) if str(x).strip()]
             suspected_swap_count = int(join_key_result.get("suspected_swap_count", 0) or 0)
