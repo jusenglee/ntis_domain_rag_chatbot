@@ -940,60 +940,29 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    completion_chain = prompt | llm
+    chain = prompt | llm | sanitize_llm_json | parser
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
-        raw_text = ""
-        sanitized_text = ""
-        raw_type = "unknown"
-        sanitized_json_loadable = False
         try:
-            llm_response = await completion_chain.ainvoke({
+            result: QuestionAnalysis = await chain.ainvoke({
                 "format_instructions": parser.get_format_instructions(),
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
                 "question": question
             })
-
-            raw_text = llm_response.content if hasattr(llm_response, "content") else str(llm_response)
-            raw_type = _detect_raw_type(raw_text)
-            logger.info(
-                "[PLANNER.V2] event=raw_completion conversation_id=%s attempt=%s max_attempts=%s preview=%s",
-                conversation_id,
-                attempt,
-                max_attempts,
-                _truncate_text(raw_text, log_preview_limit),
-            )
-
-            sanitized_text = sanitize_llm_json(raw_text)
-            sanitized_json_loadable = True
-            logger.info(
-                "[PLANNER.V2] event=sanitized_completion conversation_id=%s attempt=%s max_attempts=%s preview=%s",
-                conversation_id,
-                attempt,
-                max_attempts,
-                _truncate_text(sanitized_text, log_preview_limit),
-            )
-
-            result: QuestionAnalysis = parser.parse(sanitized_text)
             normalized_payload = _normalize_none_string(result.model_dump())
             _validate_question_analysis_required_keys(normalized_payload)
             result = QuestionAnalysis.model_validate(normalized_payload)
             result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
             logger.info(
-                "[PLANNER.V2] event=analysis_succeeded conversation_id=%s attempt=%s retries=%s fallback=%s raw_completion_logged=%s sanitized_logged=%s mode=%s head=%s relation=%s",
+                "[PLANNER.V2] event=analysis_succeeded conversation_id=%s attempt=%s retries=%s fallback=%s",
                 conversation_id,
                 attempt,
                 attempt - 1,
                 0,
-                1,
-                1,
-                result.mode,
-                result.head,
-                result.relation,
                 )
             log_section(
                 "QUESTION ANALYSIS",
@@ -1020,14 +989,8 @@ async def _run_question_analysis(
             last_error = e
             should_retry = attempt < max_attempts
             backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
-            if sanitized_text and not sanitized_json_loadable:
-                try:
-                    json.loads(sanitized_text)
-                    sanitized_json_loadable = True
-                except json.JSONDecodeError:
-                    sanitized_json_loadable = False
             logger.warning(
-                "[PLANNER.V2] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s raw_type=%s sanitized_json_loadable=%s raw_preview=%s sanitized_preview=%s",
+                "[PLANNER.V2] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s",
                 conversation_id,
                 attempt,
                 max_attempts,
@@ -1036,10 +999,6 @@ async def _run_question_analysis(
                 int(not should_retry),
                 type(e).__name__,
                 e,
-                raw_type,
-                int(sanitized_json_loadable),
-                _truncate_text(raw_text, log_preview_limit),
-                _truncate_text(sanitized_text, log_preview_limit),
             )
             if should_retry:
                 await asyncio.sleep(backoff_seconds)
