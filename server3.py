@@ -1452,7 +1452,7 @@ async def load_system_prompt(path: Path) -> str:
         return await f.read()
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    llm = TritonChatModel(model_name=model_name)
+    llm = _build_llm(model_name=model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
