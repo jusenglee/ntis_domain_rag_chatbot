@@ -63,6 +63,7 @@ from rag_parts.query_intent import (
     relation_target_collections,
     normalize_categories,
     normalize_org_terms,
+    pick_perf_tag_filters,
 )
 from rag_parts.search_preset import (
     SearchPreset as _SearchPreset,
@@ -3395,20 +3396,34 @@ def _run_rag_with_vectors(
     ctx.keywords = keyword_terms
     kws = keyword_terms
 
-    # perf/project tag filter (필요 시) + generic tag 분리 적용
-    generic_tag_filter_raw = _build_tag_only_filter(list(ctx.tag_filters)) if ctx.tag_filters else None
+    # perf/project tag filter 구성
+    # - explicit(intent_payload)만 server-side must 후보로 사용
+    # - query inferred tag는 rerank/soft gate 전용으로 분리
+    explicit_project_tags = list(ctx.project_tag_filters or [])
+    explicit_perf_tags = list(ctx.perf_tag_filters or [])
+    inferred_perf_tags = pick_perf_tag_filters(q)
+    tag_filter_source = "explicit" if explicit_perf_tags else ("query_inferred" if inferred_perf_tags else "none")
 
-    generic_project_tags, generic_perf_tags, generic_other_tags = _split_tag_filters_by_family(
-        list(ctx.tag_filters or [])
+    project_tag_filter = _build_tag_only_filter(explicit_project_tags) if explicit_project_tags else None
+
+    # perf_types(perf_type_filter)와 같은 의미의 perf tag must 중복 적용 방지
+    perf_types_norm_set = {str(t).strip() for t in perf_types if str(t).strip()}
+    perf_tag_filters_for_col = [
+        t for t in explicit_perf_tags
+        if str(t).strip() and str(t).strip() not in perf_types_norm_set
+    ]
+    perf_tag_filter = _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
+
+    log_kv(
+        "RAG.TAG_FILTER.SOURCE",
+        tag_filter_source=tag_filter_source,
+        explicit_perf_tags=explicit_perf_tags,
+        inferred_perf_tags=inferred_perf_tags,
+        perf_tags_server_must=perf_tag_filters_for_col,
     )
-    project_tag_filters_for_col = list(ctx.project_tag_filters or []) + generic_project_tags + generic_other_tags
-    perf_tag_filters_for_col = list(ctx.perf_tag_filters or []) + generic_perf_tags + generic_other_tags
-    project_tag_filter = (
-        _build_tag_only_filter(project_tag_filters_for_col) if project_tag_filters_for_col else None
-    )
-    perf_tag_filter = (
-        _build_tag_only_filter(perf_tag_filters_for_col) if perf_tag_filters_for_col else None
-    )
+    soft_perf_tag_filters = explicit_perf_tags if explicit_perf_tags else inferred_perf_tags
+    ctx.perf_tag_filters = list(soft_perf_tag_filters)
+
 
     search_filter_min_conf = float(os.getenv("RAG_SEARCH_FILTER_MIN_CONF", "0.6"))
     search_filter_signal = bool(
@@ -4310,7 +4325,7 @@ def _run_rag_with_vectors(
         perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
         title_filter=str(title_filter) if title_filter is not None else None,
         project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
-        generic_tag_filter=str(generic_tag_filter_raw) if generic_tag_filter_raw is not None else None,
+        tag_filter_source=tag_filter_source,
         year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
         perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
