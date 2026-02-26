@@ -51,3 +51,21 @@ curl -i http://localhost:8010/v1/chat/completions \
 - 응답 헤더에 `X-Request-Id: req-ntis-001`가 포함되는지 확인
 - 서버 로그에서 동일 request_id를 기준으로 요청 흐름 추적 가능 여부 확인
 
+
+
+## OpenAI 2.16.0 스트리밍 스모크 테스트
+
+`tests/test_openai_compat_stream_smoke.py`를 추가해 OpenAI Python 클라이언트(2.16.0)와 vLLM OpenAI-compatible `/v1/chat/completions` 스트리밍 회귀를 조기에 감지할 수 있습니다.
+
+실행 예시:
+
+```bash
+OPENAI_COMPAT_SMOKE=1 \
+OPENAI_COMPAT_BASE_URL=http://localhost:8010/v1 \
+OPENAI_COMPAT_MODEL=/model \
+pytest -q tests/test_openai_compat_stream_smoke.py
+```
+
+검증 항목:
+- stream=True 호출 시 chunk가 1개 이상 수신되는지
+- 수신 텍스트를 합친 최종 응답이 비어있지 않은지

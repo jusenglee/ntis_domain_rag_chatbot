@@ -1394,15 +1394,26 @@ async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
     return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
 
+_LLM_CACHE: Dict[str, Any] = {}
+
+
 def _build_llm(model_name: str):
+    cached = _LLM_CACHE.get(model_name)
+    if cached is not None:
+        return cached
+
     if model_name == "solar_vllm_0":
-        return OpenAICompatChatModel(
+        llm = OpenAICompatChatModel(
             model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
             base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"),
             api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
             timeout=float(os.getenv("SOLAR_VLLM_TIMEOUT", "120")),
         )
-    return TritonChatModel(model_name=model_name)
+    else:
+        llm = TritonChatModel(model_name=model_name)
+
+    _LLM_CACHE[model_name] = llm
+    return llm
 
 import aiofiles
 
@@ -2678,6 +2689,16 @@ async def lifespan(app: FastAPI):
     finally:
         if kv_store:
             await kv_store.close()
+
+        for llm in _LLM_CACHE.values():
+            close_fn = getattr(llm, "aclose", None)
+            if close_fn is None:
+                continue
+            try:
+                await close_fn()
+            except Exception as e:
+                logger.warning("[shutdown] llm close failed: model=%s error=%s", getattr(llm, "model_name", "unknown"), e)
+        _LLM_CACHE.clear()
 
 app = FastAPI(lifespan=lifespan)
 

@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, AIMessageChunk
 from langchain_core.outputs import ChatResult, ChatGeneration, ChatGenerationChunk
 from openai import AsyncOpenAI
+from pydantic import PrivateAttr
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class OpenAICompatChatModel(BaseChatModel):
     base_url: str = "http://vllm_solar:8010/v1"
     api_key: str = "EMPTY"
     timeout: float = 120.0
+    _client: Optional[AsyncOpenAI] = PrivateAttr(default=None)
 
     def _generate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         raise NotImplementedError("Use ainvoke/astream")
@@ -43,20 +45,47 @@ class OpenAICompatChatModel(BaseChatModel):
             converted.append({"role": role, "content": str(m.content)})
         return converted
 
-    async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
-        client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
+    def _build_openai_request_kwargs(
+        self,
+        *,
+        request_id: Optional[str] = None,
+        stop: Optional[List[str]] = None,
+        kwargs: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        kwargs = kwargs or {}
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        request_kwargs: dict[str, Any] = {
+            "temperature": kwargs.get("temperature", 0.2),
+            "top_p": kwargs.get("top_p", 0.8),
+        }
+        if max_tokens_hint is not None:
+            request_kwargs["max_tokens"] = max_tokens_hint
+        if stop:
+            request_kwargs["stop"] = stop
+        if request_id:
+            request_kwargs["extra_headers"] = {"x-request-id": request_id}
+        return request_kwargs
+
+    def _get_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            self._client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
+    async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
+        client = self._get_client()
         request_id = kwargs.get("request_id")
-        extra_headers = {"x-request-id": request_id} if request_id else None
+        request_kwargs = self._build_openai_request_kwargs(request_id=request_id, stop=kwargs.get("stop"), kwargs=kwargs)
         t0 = time.monotonic()
         response = await client.chat.completions.create(
             model=self.model_name,
             messages=self._to_openai_messages(messages),
-            temperature=kwargs.get("temperature", 0.2),
-            top_p=kwargs.get("top_p", 0.8),
-            max_tokens=max_tokens_hint,
             stream=False,
-            extra_headers=extra_headers,
+            **request_kwargs,
         )
         content = (response.choices[0].message.content if response.choices else "") or ""
         dt_ms = (time.monotonic() - t0) * 1000
@@ -71,7 +100,6 @@ class OpenAICompatChatModel(BaseChatModel):
             usage,
             self.base_url,
         )
-        await client.close()
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
 
@@ -88,32 +116,24 @@ class OpenAICompatChatModel(BaseChatModel):
         stop: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        client = AsyncOpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
-        max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
+        client = self._get_client()
         request_id = kwargs.get("request_id")
-        extra_headers = {"x-request-id": request_id} if request_id else None
+        request_kwargs = self._build_openai_request_kwargs(request_id=request_id, stop=stop, kwargs=kwargs)
         t0 = time.monotonic()
-        request_params: dict[str, Any] = {
-            "temperature": kwargs.get("temperature", 0.2),
-            "top_p": kwargs.get("top_p", 0.8),
-            "max_tokens": max_tokens_hint,
-            "stop": stop,
-        }
 
         stream = await client.chat.completions.create(
             model=self.model_name,
             messages=self._to_openai_messages(messages),
-            temperature=request_params["temperature"],
-            top_p=request_params["top_p"],
-            max_tokens=request_params["max_tokens"],
-            stop=request_params["stop"],
             stream=True,
-            extra_headers=extra_headers,
+            **request_kwargs,
         )
 
         emitted = False
+        fallback_used = False
         chunk_n = 0
+        emitted_chunks = 0
         char_n = 0
+        ttft_ms = None
         last_finish_reason = None
         try:
             async for chunk in stream:
@@ -126,6 +146,9 @@ class OpenAICompatChatModel(BaseChatModel):
                 text = getattr(delta, "content", None)
                 if text:
                     emitted = True
+                    emitted_chunks += 1
+                    if ttft_ms is None:
+                        ttft_ms = (time.monotonic() - t0) * 1000
                     char_n += len(text)
                     yield ChatGenerationChunk(message=AIMessageChunk(content=text))
                 else:
@@ -144,38 +167,38 @@ class OpenAICompatChatModel(BaseChatModel):
                     self.model_name,
                     self.base_url,
                 )
+                fallback_used = True
                 response = await client.chat.completions.create(
                     model=self.model_name,
                     messages=self._to_openai_messages(messages),
-                    temperature=request_params["temperature"],
-                    top_p=request_params["top_p"],
-                    max_tokens=request_params["max_tokens"],
-                    stop=request_params["stop"],
                     stream=False,
-                    extra_headers=extra_headers,
+                    **request_kwargs,
                 )
                 fallback_content = (response.choices[0].message.content if response.choices else "") or ""
                 if fallback_content:
+                    emitted_chunks += 1
                     char_n += len(fallback_content)
                     yield ChatGenerationChunk(message=AIMessageChunk(content=fallback_content))
                 else:
                     raise EmptyStreamContentError(
                         "No text content emitted in stream and fallback non-stream response was empty. "
-                        f"model={self.model_name}, base_url={self.base_url}, request_params={request_params}"
+                        f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}"
                     )
         finally:
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f chunk_n=%d char_n=%d finish_reason=%s model=%s base_url=%s",
+                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_ms=%s chunk_n=%d emitted_chunks=%d char_n=%d finish_reason=%s fallback=%s model=%s base_url=%s",
                 request_id,
                 dt_ms,
+                f"{ttft_ms:.1f}" if ttft_ms is not None else "none",
                 chunk_n,
+                emitted_chunks,
                 char_n,
                 last_finish_reason,
+                fallback_used,
                 self.model_name,
                 self.base_url,
             )
-            await client.close()
 
     @property
     def _llm_type(self) -> str:
