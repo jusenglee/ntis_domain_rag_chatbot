@@ -14,10 +14,46 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _PJT_ID_ALLOWED_RE = re.compile(r"^\d{8,12}$")
 _PJT_NO_ALLOWED_RE = re.compile(os.getenv("RAG_JOIN_PJT_NO_ALLOWED_RE", r"^[A-Za-z0-9_-]{4,40}$"))
+
+
+@dataclass(frozen=True)
+class JoinKeySwapHint:
+    index: int
+    expected_key: str
+    candidate: str
+    swap_candidate: str
+
+
+@dataclass(frozen=True)
+class JoinKeyExtractionResult:
+    keys: List[str]
+    invalid_values: List[str]
+    suspected_swaps: List[JoinKeySwapHint]
+
+    @property
+    def suspected_swap_count(self) -> int:
+        return len(self.suspected_swaps)
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        return {
+            "keys": list(self.keys),
+            "invalid_values": list(self.invalid_values),
+            "suspected_swaps": [
+                {
+                    "index": hint.index,
+                    "expected_key": hint.expected_key,
+                    "candidate": hint.candidate,
+                    "swap_candidate": hint.swap_candidate,
+                }
+                for hint in self.suspected_swaps
+            ],
+            "suspected_swap_count": self.suspected_swap_count,
+        }
 
 
 def _as_dict(x: Any) -> Optional[Dict[str, Any]]:
@@ -50,7 +86,7 @@ def is_valid_join_key(value: Any, *, mode: str) -> bool:
     return bool(_PJT_ID_ALLOWED_RE.fullmatch(text))
 
 
-def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids: int = 80) -> Dict[str, Any]:
+def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids: int = 80) -> JoinKeyExtractionResult:
     """JOIN key 추출 SSOT.
 
     Returns:
@@ -70,15 +106,10 @@ def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids:
     keys: List[str] = []
     seen: set[str] = set()
     invalid_values: List[str] = []
-    suspected_swaps: List[Dict[str, str]] = []
+    suspected_swaps: List[JoinKeySwapHint] = []
 
     if not points:
-        return {
-            "keys": keys,
-            "invalid_values": invalid_values,
-            "suspected_swaps": suspected_swaps,
-            "suspected_swap_count": 0,
-        }
+        return JoinKeyExtractionResult(keys=keys, invalid_values=invalid_values, suspected_swaps=suspected_swaps)
 
     for idx, p in enumerate(points):
         payload = _get_payload(p)
@@ -92,12 +123,12 @@ def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids:
             invalid_values.append(target_value)
             if other_value and is_valid_join_key(other_value, mode=mode_norm):
                 suspected_swaps.append(
-                    {
-                        "index": str(idx),
-                        "expected_key": target_key,
-                        "candidate": target_value,
-                        "swap_candidate": other_value,
-                    }
+                    JoinKeySwapHint(
+                        index=idx,
+                        expected_key=target_key,
+                        candidate=target_value,
+                        swap_candidate=other_value,
+                    )
                 )
             continue
 
@@ -110,16 +141,11 @@ def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids:
         if len(keys) >= max_ids:
             break
 
-    return {
-        "keys": keys,
-        "invalid_values": invalid_values,
-        "suspected_swaps": suspected_swaps,
-        "suspected_swap_count": len(suspected_swaps),
-    }
+    return JoinKeyExtractionResult(keys=keys, invalid_values=invalid_values, suspected_swaps=suspected_swaps)
 
 
 def extract_pjt_ids(points: Iterable[Any], *, max_ids: int = 80) -> List[str]:
-    return extract_join_keys(points, mode="instance", max_ids=max_ids).get("keys", [])
+    return extract_join_keys(points, mode="instance", max_ids=max_ids).keys
 
 def normalize_relation_hint(value: Any) -> Optional[Tuple[str, str]]:
     if not value:
