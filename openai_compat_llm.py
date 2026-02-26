@@ -23,7 +23,7 @@ class EmptyStreamContentError(OpenAICompatStreamError):
 class OpenAICompatChatModel(BaseChatModel):
     """OpenAI 호환 API(vLLM 등)용 LangChain 래퍼"""
 
-    model_name: str = "/model"
+    model_name: str = "solar_102b"
     base_url: str = "http://vllm_solar:8010/v1"
     api_key: str = "EMPTY"
     timeout: float = 120.0

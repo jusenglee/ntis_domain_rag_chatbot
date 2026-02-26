@@ -29,3 +29,14 @@ export GEMMA_MAX_TOKENS=8192
 
 - 실행 경로: `scripts/vllm/start_vllm_solar.sh`
 - 상세 가이드: `docs/vllm_request_id_tracking.md`
+
+## Solar vLLM 기본 모델/스트리밍 가드
+
+```bash
+# Solar vLLM 기본 모델명 (미지정 시 solar_102b)
+export SOLAR_VLLM_MODEL=solar_102b
+
+# Solar 스트리밍 제어(기본값)
+export SOLAR_DEADLINE_MS=4500
+export SOLAR_STREAM_MAX_CHARS=8000
+```

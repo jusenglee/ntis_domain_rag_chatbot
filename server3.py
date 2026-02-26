@@ -541,6 +541,7 @@ class AgentState(BaseModel):
 
     # 메타데이터
     conversation_id: str = ""
+    request_id: str = ""
 
     question: str = ""
 
@@ -1463,8 +1464,49 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
-    final_answer = response.content.replace("<eos>", "").strip()
+    if model_name == "solar_vllm_0":
+        started_at = time.monotonic()
+        chunks: List[str] = []
+        emitted_chars = 0
+        timed_out = False
+        char_limited = False
+
+        async for chunk in llm.astream(messages, max_tokens_hint=max_tokens_hint, request_id=state.request_id):
+            token = getattr(chunk, "content", "") or ""
+            if not token:
+                continue
+            chunks.append(token)
+            emitted_chars += len(token)
+
+            if emitted_chars >= SOLAR_STREAM_MAX_CHARS:
+                char_limited = True
+                break
+
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            if elapsed_ms >= SOLAR_DEADLINE_MS:
+                timed_out = True
+                break
+
+        final_answer = "".join(chunks).replace("<eos>", "").strip()
+        if timed_out:
+            logger.warning(
+                "[solar_stream_guard] request_id=%s deadline_ms=%s exceeded; truncated_chars=%s",
+                state.request_id,
+                SOLAR_DEADLINE_MS,
+                len(final_answer),
+            )
+            final_answer = (final_answer + "\n\n(안내: 응답 시간을 제한하여 일부만 반환했습니다.)").strip()
+        elif char_limited:
+            logger.warning(
+                "[solar_stream_guard] request_id=%s max_chars=%s exceeded; truncated_chars=%s",
+                state.request_id,
+                SOLAR_STREAM_MAX_CHARS,
+                len(final_answer),
+            )
+            final_answer = (final_answer + "\n\n(안내: 응답 길이 제한으로 일부만 반환했습니다.)").strip()
+    else:
+        response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
+        final_answer = response.content.replace("<eos>", "").strip()
 
     log_section(f"GENERATE ANSWER ({model_name})",
                 f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
@@ -2722,6 +2764,7 @@ async def query_stream(payload: QueryRequest):
 
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
+    request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
 
     graph = app.state.graph
 
@@ -2739,6 +2782,7 @@ async def query_stream(payload: QueryRequest):
         )
         inputs = {
             "conversation_id": conversation_id,
+            "request_id": request_id,
             "messages": [user_message],
             "intent_payload": intent_payload,
             "question_analysis": question_analysis,
@@ -2827,6 +2871,7 @@ async def query_debug(payload: QueryRequest):
 
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
+    request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
 
     loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
     chat_history = loaded_history + [HumanMessage(content=question)]
@@ -2839,6 +2884,7 @@ async def query_debug(payload: QueryRequest):
 
     inputs = {
         "conversation_id": conversation_id,
+        "request_id": request_id,
         "messages": [HumanMessage(content=question)],
         "intent_payload": intent_payload,
         "question_analysis": question_analysis,
