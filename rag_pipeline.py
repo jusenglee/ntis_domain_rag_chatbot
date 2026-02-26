@@ -664,8 +664,9 @@ def _ensure_join_mode_has_keys(
         _raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}:drop_keys", join_key_mode=join_key_mode)
 
     join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
+    error_code = "JOIN_GROUP_KEYS_UNRESOLVED" if str(join_key_mode or "").strip().lower() == "group" else "JOIN_KEYS_MISSING"
     raise StrategyViolation(
-        error_code="JOIN_KEYS_MISSING",
+        error_code=error_code,
         reason=(
             "mode=join requires Hop2 execution, but join keys were not extracted "
             f"from Hop1 ({join_key_label} missing; "
@@ -2586,16 +2587,27 @@ def _build_join_hop2_filter(
     if str(join_key_mode or "instance").strip().lower() == "group":
         join_ids = []
 
+    join_mode_norm = str(join_key_mode or "instance").strip().lower()
+    join_compile_selection = "planner_contract"
+    effective_perf_join_mode = join_mode_norm
+    if hop2_col == COL_PERF and join_mode_norm == "group" and not join_pjt_nos and join_pjt_ids:
+        effective_perf_join_mode = "instance"
+        join_compile_selection = "group_perf_pjt_id_fallback"
+
     relation_matrix = {
         "relation": relation,
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
+        "effective_perf_join_mode": effective_perf_join_mode,
+        "join_compile_selection": join_compile_selection,
+        "join_pjt_ids_count": len(join_pjt_ids),
+        "join_pjt_nos_count": len(join_pjt_nos),
     }
     log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix)
 
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
-        join_key_mode=join_key_mode,
+        join_key_mode=effective_perf_join_mode,
         join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
         pjt_nos=join_pjt_nos,
         resolved_pjt_ids=join_pjt_ids,
@@ -2635,6 +2647,8 @@ def _build_join_hop2_filter(
             **dict(executed_join_filter_spec.get("_meta") or {}),
             "hop2_col": hop2_col,
             "join_key_mode": join_key_mode,
+            "effective_perf_join_mode": effective_perf_join_mode,
+            "join_compile_selection": join_compile_selection,
             "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
             "pjt_nos_count": len(join_pjt_nos),
             "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
@@ -4990,20 +5004,36 @@ def _run_rag_with_vectors(
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             planner_join_key_mode = resolved_join_key_mode
-            executed_join_key_mode = "group" if join_pjt_nos else "instance"
+            executed_join_key_mode = planner_join_key_mode
+            join_compile_selection = "planner_contract"
+            if planner_join_key_mode == "group" and hop2_col == COL_PERF:
+                if join_pjt_nos:
+                    executed_join_key_mode = "group"
+                elif join_pjt_ids:
+                    executed_join_key_mode = "instance"
+                    join_compile_selection = "group_perf_pjt_id_fallback"
+                else:
+                    raise StrategyViolation(
+                        error_code="JOIN_GROUP_KEYS_UNRESOLVED",
+                        reason=(
+                            "group JOIN Hop2(perf) compile failed: neither pjt_no nor fallback pjt_id is available "
+                            f"(relation={relation}, hop2_col={hop2_col}, join_key_mode={planner_join_key_mode})"
+                        ),
+                    )
             log_kv(
                 "RAG.JOIN.KEY_MODE.CHECK",
                 resolved_join_key_mode=resolved_join_key_mode,
                 planner_raw_join_key_mode=planner_raw_join_key_mode,
                 planner_join_key_mode=planner_join_key_mode,
                 executed_join_key_mode=executed_join_key_mode,
+                join_compile_selection=join_compile_selection,
                 join_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
                 opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)),
                 relation=relation,
                 hop2_col=hop2_col,
             )
-            if planner_join_key_mode != executed_join_key_mode:
+            if planner_join_key_mode != executed_join_key_mode and join_compile_selection == "planner_contract":
                 raise StrategyViolation(
                     error_code="PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH",
                     reason=(
@@ -5074,6 +5104,10 @@ def _run_rag_with_vectors(
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)
             if hop2_col == COL_PERF and perf_type_filter:
                 hop2_filter = _and_filter(hop2_filter, perf_type_filter)
+
+            executed_join_meta = dict((executed_join_filter_spec or {}).get("_meta") or {})
+            effective_join_mode = str(executed_join_meta.get("effective_perf_join_mode") or hop2_join_key_mode)
+            join_compile_selection = str(executed_join_meta.get("join_compile_selection") or join_compile_selection)
 
 
             log_kv(
@@ -5187,8 +5221,8 @@ def _run_rag_with_vectors(
                 org_role=org_role,
             )
 
-            join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
-            join_key_preview = join_pjt_nos[:10] if join_key_mode == "group" else join_pjt_ids[:10]
+            join_key_label = "PJT_NO" if effective_join_mode == "group" else "PJT_ID"
+            join_key_preview = join_pjt_nos[:10] if effective_join_mode == "group" else join_pjt_ids[:10]
             context = (
                 f"### [Hop1] 검색 결과 요약\n{hop1_ctx or '(후보 없음)'}\n\n"
                 f"### [Hop2] {hop2_label}\n"
@@ -5209,8 +5243,8 @@ def _run_rag_with_vectors(
             _timing_put(timings, "phase.hop_total", time.time() - t_hop0)
             _timing_put(timings, "phase.total", time.time() - t_all0)
             hits = (hop1_top or []) + (hop2_top or [])
-            join_keys_used_count = len(join_pjt_ids) if join_key_mode == "instance" else len(join_pjt_nos)
-            hop2_key_strategy = "pjt_id_in" if join_key_mode == "instance" else "pjt_no"
+            join_keys_used_count = len(join_pjt_ids) if effective_join_mode == "instance" else len(join_pjt_nos)
+            hop2_key_strategy = "pjt_id_in" if effective_join_mode == "instance" else "pjt_no"
             strategy = replace(
                 strategy,
                 join_key_source=join_key_source,
@@ -5225,6 +5259,7 @@ def _run_rag_with_vectors(
                     "join_key_source": join_key_source,
                     "hop1_mode": hop1_strategy,
                     "hop2_key_strategy": hop2_key_strategy,
+                    "join_compile_selection": join_compile_selection,
                     "join_keys_used_count": join_keys_used_count,
                     "seed_key_source": join_execution_policy.get("seed_key_source"),
                     "seed_key_count": int(join_execution_policy.get("seed_key_count") or 0),

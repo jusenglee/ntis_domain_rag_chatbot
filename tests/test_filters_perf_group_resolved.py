@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 import rag_parts.filters as filters
-from rag_parts.planner_contract import StrategyViolation
 
 
 class _DummyFieldCondition:
@@ -92,19 +90,31 @@ def test_build_perf_filter_group_resolved_uses_alias_project_keys(monkeypatch):
     assert pjt_id_keys == ["pjt_id", "meta_basic.pjt_id"]
 
 
-def test_build_collection_join_filter_group_rejects_missing_pjt_no_even_with_resolved_ids(monkeypatch):
-    def _should_not_call(*_args, **_kwargs):
-        raise AssertionError("하위 빌더는 호출되면 안됩니다")
+def test_build_collection_join_filter_group_allows_pjt_id_fallback_when_pjt_no_missing(monkeypatch):
+    called = {}
 
-    monkeypatch.setattr(filters, "build_perf_filter_by_pjt_id", _should_not_call)
+    def _fake_build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False):
+        called["join_ids"] = list(join_ids)
+        called["query"] = query
+        called["apply_query_tag_inference"] = apply_query_tag_inference
+        return SimpleNamespace(must=["pjt_id_fallback"])
+
+    def _should_not_call(*_args, **_kwargs):
+        raise AssertionError("pjt_no가 없으면 group_resolved는 호출되면 안됩니다")
+
+    monkeypatch.setattr(filters, "build_perf_filter_by_pjt_id", _fake_build_perf_filter_by_pjt_id)
     monkeypatch.setattr(filters, "build_perf_filter_group_resolved", _should_not_call)
 
-    with pytest.raises(StrategyViolation, match="group requires pjt_no and forbids pjt_id"):
-        filters.build_collection_join_filter(
-            hop2_col="ntis_perf",
-            join_key_mode="group",
-            join_ids=[],
-            pjt_nos=[],
-            resolved_pjt_ids=["202300001234", "202300001235"],
-            query="fallback",
-        )
+    out = filters.build_collection_join_filter(
+        hop2_col="ntis_perf",
+        join_key_mode="group",
+        join_ids=[],
+        pjt_nos=[],
+        resolved_pjt_ids=["202300001234", "202300001235"],
+        query="fallback",
+    )
+
+    assert called["join_ids"] == ["202300001234", "202300001235"]
+    assert called["query"] == "fallback"
+    assert called["apply_query_tag_inference"] is False
+    assert out.must == ["pjt_id_fallback"]
