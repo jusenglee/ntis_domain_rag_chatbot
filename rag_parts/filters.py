@@ -1055,9 +1055,9 @@ def _build_perf_filter_for_keys(
         )
         must.append(join_any)
 
-    tag_filters = pick_perf_tag_filters(query) if apply_query_tag_inference else []
-    if tag_filters:
-        must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
+    # JOIN Hop2 must 정책: join key(pjt_id/pjt_no) 전용 필터만 구성한다.
+    # query 기반 perf tag 추론은 server-side must에 결합하지 않는다.
+    _ = (query, apply_query_tag_inference)
 
     return qmodels.Filter(must=must, must_not=[])
 
@@ -1162,9 +1162,9 @@ def build_perf_filter_group_resolved(
     if should:
         must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
 
-    tag_filters = pick_perf_tag_filters(query) if apply_query_tag_inference else []
-    if tag_filters:
-        must.append(qmodels.FieldCondition(key="tag", match=make_match_any(tag_filters)))
+    # JOIN Hop2 must 정책: group 모드 역시 join key 전용 필터만 구성한다.
+    # query 기반 perf tag 추론은 server-side must에 결합하지 않는다.
+    _ = (query, apply_query_tag_inference)
 
     return qmodels.Filter(must=must, must_not=[])
 
