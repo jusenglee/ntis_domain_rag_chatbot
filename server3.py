@@ -33,7 +33,7 @@ from langgraph.graph.message import add_messages
 from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
-from openai_compat_llm import OpenAICompatChatModel, EmptyStreamContentError
+from openai_compat_llm import OpenAICompatChatModel
 from rag_pipeline import run_rag_ab_compare
 from retrieval import ensure_keyword_index
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
@@ -47,9 +47,11 @@ from settings import (
     MAX_TOP_K_SIZE,
     MAX_DOC_SENTENCES,
     MAX_DOC_TOKENS, DEFAULT_MODEL_NAME,
+    SOLAR_VLLM_CONFIG,
 )
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
+from llm_streaming import run_llm_streaming, StreamFallbackPolicy
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -103,6 +105,9 @@ SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
 SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
+STREAM_FALLBACK_ALLOW = os.getenv("STREAM_FALLBACK_ALLOW", "true").strip().lower() in {"1", "true", "yes", "on"}
+STREAM_FALLBACK_EMIT_MODE = os.getenv("STREAM_FALLBACK_EMIT_MODE", "single_chunk").strip().lower()
+STREAM_FALLBACK_USER_NOTICE = os.getenv("STREAM_FALLBACK_USER_NOTICE", "스트리밍이 불안정하여 완성된 응답으로 대체했습니다.").strip()
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 RAG_RENDER_TEXT_FIELDS = tuple(
@@ -557,6 +562,13 @@ class AgentState(BaseModel):
         return result
 
     latencies: Annotated[Dict[str, float], merge_latencies] = Field(default_factory=dict)
+
+    def merge_stream_meta(existing: Dict[str, Dict[str, Any]], new: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        result = existing.copy()
+        result.update(new)
+        return result
+
+    stream_meta: Annotated[Dict[str, Dict[str, Any]], merge_stream_meta] = Field(default_factory=dict)
 
 # --- Utility: Latency Decorator ---
 def measure_latency(node_name: str):
@@ -1405,10 +1417,10 @@ def _build_llm(model_name: str):
 
     if model_name == "solar_vllm_0":
         llm = OpenAICompatChatModel(
-            model_name=os.getenv("SOLAR_VLLM_MODEL", "/model"),
-            base_url=os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1"),
-            api_key=os.getenv("SOLAR_VLLM_API_KEY", "EMPTY"),
-            timeout=float(os.getenv("SOLAR_VLLM_TIMEOUT", "120")),
+            model_name=SOLAR_VLLM_CONFIG.model_name,
+            base_url=SOLAR_VLLM_CONFIG.base_url,
+            api_key=SOLAR_VLLM_CONFIG.api_key,
+            timeout=SOLAR_VLLM_CONFIG.timeout,
         )
     else:
         llm = TritonChatModel(model_name=model_name)
@@ -1418,9 +1430,11 @@ def _build_llm(model_name: str):
 
 import aiofiles
 
+
 async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
+
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = _build_llm(model_name=model_name)
@@ -1428,11 +1442,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
 
-    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
     is_detail = False
 
-    # ✅ 2) JOIN이면 detail 우선
     if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
         is_detail = True
 
@@ -1447,8 +1459,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         if docs_for_ctx
         else "없음"
     )
-    # log_section("context_text - 페이로드 평탄화 후 데이터",
-    #             f"title: {context_text}")
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
@@ -1464,55 +1474,47 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    if model_name == "solar_vllm_0":
-        started_at = time.monotonic()
-        chunks: List[str] = []
-        emitted_chars = 0
-        timed_out = False
-        char_limited = False
+    fallback_policy = StreamFallbackPolicy(
+        allow_empty_stream_fallback=STREAM_FALLBACK_ALLOW,
+        emit_mode=STREAM_FALLBACK_EMIT_MODE,
+        user_notice=STREAM_FALLBACK_USER_NOTICE,
+    )
 
-        async for chunk in llm.astream(messages, max_tokens_hint=max_tokens_hint, request_id=state.request_id):
-            token = getattr(chunk, "content", "") or ""
-            if not token:
-                continue
-            chunks.append(token)
-            emitted_chars += len(token)
+    final_answer, stream_metrics = await run_llm_streaming(
+        llm,
+        messages,
+        max_tokens_hint=max_tokens_hint,
+        request_id=state.request_id,
+        deadline_ms=SOLAR_DEADLINE_MS if model_name == "solar_vllm_0" else None,
+        max_chars=SOLAR_STREAM_MAX_CHARS if model_name == "solar_vllm_0" else None,
+        fallback_policy=fallback_policy,
+    )
 
-            if emitted_chars >= SOLAR_STREAM_MAX_CHARS:
-                char_limited = True
-                break
+    if stream_metrics.get("deadline_exceeded"):
+        logger.warning(
+            "[solar_stream_guard] request_id=%s deadline_ms=%s exceeded; truncated_chars=%s",
+            state.request_id,
+            SOLAR_DEADLINE_MS,
+            len(final_answer),
+        )
+    elif stream_metrics.get("char_limited"):
+        logger.warning(
+            "[solar_stream_guard] request_id=%s max_chars=%s exceeded; truncated_chars=%s",
+            state.request_id,
+            SOLAR_STREAM_MAX_CHARS,
+            len(final_answer),
+        )
 
-            elapsed_ms = (time.monotonic() - started_at) * 1000
-            if elapsed_ms >= SOLAR_DEADLINE_MS:
-                timed_out = True
-                break
-
-        final_answer = "".join(chunks).replace("<eos>", "").strip()
-        if timed_out:
-            logger.warning(
-                "[solar_stream_guard] request_id=%s deadline_ms=%s exceeded; truncated_chars=%s",
-                state.request_id,
-                SOLAR_DEADLINE_MS,
-                len(final_answer),
-            )
-            final_answer = (final_answer + "\n\n(안내: 응답 시간을 제한하여 일부만 반환했습니다.)").strip()
-        elif char_limited:
-            logger.warning(
-                "[solar_stream_guard] request_id=%s max_chars=%s exceeded; truncated_chars=%s",
-                state.request_id,
-                SOLAR_STREAM_MAX_CHARS,
-                len(final_answer),
-            )
-            final_answer = (final_answer + "\n\n(안내: 응답 길이 제한으로 일부만 반환했습니다.)").strip()
-    else:
-        response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
-        final_answer = response.content.replace("<eos>", "").strip()
-
-    log_section(f"GENERATE ANSWER ({model_name})",
-                f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
-                f"ctx_chars={len(context_text)}\n"
-                f"{final_answer[:100]}")
-    return {final_field: final_answer}
+    log_section(
+        f"GENERATE ANSWER ({model_name})",
+        f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
+        f"ctx_chars={len(context_text)}\n"
+        f"{final_answer[:100]}",
+    )
+    return {
+        final_field: final_answer,
+        "stream_meta": {final_field: stream_metrics},
+    }
 
 
 # --- Node 8: Direct Answer (Rule-based) ---
@@ -2814,6 +2816,26 @@ async def query_stream(payload: QueryRequest):
                     chunk = data.get("chunk")
                     if hasattr(chunk, "content") and chunk.content:
                         yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+                elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
+                    output = data.get("output", {})
+                    model = "SOLAR" if node == "generate_answer_solar" else "GEMMA"
+                    answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
+                    stream_meta = (output.get("stream_meta") or {}).get(answer_key, {})
+                    final_text = (output.get(answer_key) or "").strip()
+                    if stream_meta.get("fallback_used") and final_text:
+                        emit_mode = stream_meta.get("fallback_emit_mode", "single_chunk")
+                        payload = {
+                            "model": model,
+                            "fallback": True,
+                            "fallback_emit_mode": emit_mode,
+                            "notice": STREAM_FALLBACK_USER_NOTICE,
+                        }
+                        if emit_mode != "final_only":
+                            payload["content"] = final_text
+                        else:
+                            payload["final"] = final_text
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":

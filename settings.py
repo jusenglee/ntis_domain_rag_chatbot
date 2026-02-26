@@ -2,6 +2,7 @@
 import os
 import logging
 from pathlib import Path
+from dataclasses import dataclass
 
 # 로깅
 logger = logging.getLogger("RAG_Pipeline")
@@ -176,3 +177,36 @@ os.environ.setdefault(
     ),
 )
 os.environ.setdefault("SNIPPET_MAX_CHARS", str(SNIPPET_MAX_CHARS))
+
+
+@dataclass(frozen=True)
+class SolarVLLMConfig:
+    model_name: str
+    base_url: str
+    api_key: str
+    timeout: float
+
+    @classmethod
+    def from_env(cls) -> "SolarVLLMConfig":
+        model_name = (os.getenv("SOLAR_VLLM_MODEL", "/model") or "").strip()
+        base_url = (os.getenv("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1") or "").strip()
+        api_key = (os.getenv("SOLAR_VLLM_API_KEY", "EMPTY") or "").strip()
+        timeout_raw = (os.getenv("SOLAR_VLLM_TIMEOUT", "120") or "").strip()
+
+        if not model_name:
+            raise ValueError("SOLAR_VLLM_MODEL must not be empty")
+        if not base_url:
+            raise ValueError("SOLAR_VLLM_BASE_URL must not be empty")
+
+        try:
+            timeout = float(timeout_raw)
+        except ValueError as exc:
+            raise ValueError("SOLAR_VLLM_TIMEOUT must be a float") from exc
+
+        if timeout <= 0:
+            raise ValueError("SOLAR_VLLM_TIMEOUT must be > 0")
+
+        return cls(model_name=model_name, base_url=base_url, api_key=api_key or "EMPTY", timeout=timeout)
+
+
+SOLAR_VLLM_CONFIG = SolarVLLMConfig.from_env()
