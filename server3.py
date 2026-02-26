@@ -707,7 +707,8 @@ async def _run_question_analysis(
         ====================
         - SEARCH: 탐색형(누락 방지 최우선). server-side must 필터로 후보를 먼저 자르지 않습니다.
         - LOOKUP: 정확형(필터/ID 기반). server-side 하드필터로 정답집합 근처를 강제합니다.
-        - JOIN: 2-hop 관계형(project↔perf). Hop1에서 키를 확보하고 Hop2에서 하드필터로 강제합니다.
+        - JOIN: 2-hop 관계형(project↔perf). join_key_mode+ids_map+people/org 게이트를 먼저 판정해
+          Hop1(skip/lookup/search)을 선택하고, Hop2에서 하드필터로 강제합니다.
         
         ====================
         [Mode 결정 규칙(우선순위)]
@@ -855,10 +856,10 @@ async def _run_question_analysis(
         1) relation="project_perf"
           - head="perf"를 기본으로 사용
           - Hop1 전략 우선순위(항상 SEARCH 아님):
-            * instance + ids_map.pjt_id 존재 => Hop1 skip (필요시 context용 단건 lookup 허용)
-            * group + ids_map.pjt_no 존재 => Hop1 lookup(pjt_no must)로 group 인스턴스 pjt_id 확장
-            * people/org 조건 존재 => Hop1 lookup(people/org gate)
-            * 그 외 => Hop1 search
+            * instance + ids_map.pjt_id 존재 => 기본 Hop1 skip (옵션 플래그일 때만 최소 보강 lookup 허용)
+            * group + ids_map.pjt_no 존재 => Hop1 search 금지, lookup(pjt_no must) 강제
+            * seed key가 없고 people/org 조건 존재 => Hop1 lookup(people/org gate)
+            * seed key도 people/org gate도 없을 때만 => Hop1 search
           - hop2(perf): hop1/seed에서 확보한 키 집합을 하드필터로 적용
             * join_key_mode="instance": pjt_id IN (...) must
             * join_key_mode="group": pjt_no IN (...) must
