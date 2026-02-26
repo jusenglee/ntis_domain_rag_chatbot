@@ -32,6 +32,7 @@ from .constants import (
     TAG_RI_ORGSM_INFO,
     TAG_RI_ORGSM_RES,
 )
+from .planner_contract import StrategyViolation
 
 # qdrant filter models (optional import)
 try:
@@ -804,7 +805,7 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {spec.join_key_mode}")
 
-    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
 
     _log_project_key_policy_once()
     primary_id = _project_key_candidates("pjt_id")[0]
@@ -845,6 +846,9 @@ def build_collection_join_filter(
     resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
+    # Hop2 JOIN key 입력 검증은 단일 함수에서 선행 수행한다.
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm)
+
     col_norm = str(hop2_col or "").strip().lower()
 
     def _canonical_collection(name: str) -> str:
@@ -879,10 +883,7 @@ def build_collection_join_filter(
                 query=query,
                 apply_query_tag_inference=False,
             )
-        validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos_norm, pjt_ids=join_ids)
         return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
-
-    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos_norm, pjt_ids=join_ids)
 
     if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
@@ -979,8 +980,35 @@ def validate_group_join_runtime_keys(*, pjt_nos: List[str], pjt_ids: List[str]) 
 
 
 def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
-    """하위호환: resolved 단계 검증으로 위임한다."""
-    validate_resolved_join_keys(mode=mode, pjt_nos=pjt_nos, pjt_ids=join_ids)
+    """JOIN key 입력 계약을 단일 지점에서 검증한다.
+
+    - instance: pjt_id(join_ids) 필수, pjt_no 금지
+    - group: pjt_no 필수, pjt_id(join_ids) 금지
+    """
+    mode_norm = str(mode or "").strip().lower()
+    join_ids_norm = _dedupe_non_empty(join_ids)
+    pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+
+    if mode_norm == "instance":
+        if join_ids_norm and not pjt_nos_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="instance requires pjt_id and forbids pjt_no",
+        )
+
+    if mode_norm == "group":
+        if pjt_nos_norm and not join_ids_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="group requires pjt_no and forbids pjt_id",
+        )
+
+    raise StrategyViolation(
+        error_code="EXECUTOR_JOIN_KEY_MODE_INVALID",
+        reason=f"unsupported join_key_mode: {mode}",
+    )
 
 
 def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> None:
