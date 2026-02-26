@@ -161,29 +161,10 @@ class OpenAICompatChatModel(BaseChatModel):
                     )
 
             if not emitted:
-                logger.warning(
-                    "[openai_compat_llm] Stream ended without text chunks; fallback to non-stream: request_id=%s model=%s base_url=%s",
-                    request_id,
-                    self.model_name,
-                    self.base_url,
+                raise EmptyStreamContentError(
+                    "No text content emitted in stream. "
+                    f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}"
                 )
-                fallback_used = True
-                response = await client.chat.completions.create(
-                    model=self.model_name,
-                    messages=self._to_openai_messages(messages),
-                    stream=False,
-                    **request_kwargs,
-                )
-                fallback_content = (response.choices[0].message.content if response.choices else "") or ""
-                if fallback_content:
-                    emitted_chunks += 1
-                    char_n += len(fallback_content)
-                    yield ChatGenerationChunk(message=AIMessageChunk(content=fallback_content))
-                else:
-                    raise EmptyStreamContentError(
-                        "No text content emitted in stream and fallback non-stream response was empty. "
-                        f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}"
-                    )
         finally:
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
