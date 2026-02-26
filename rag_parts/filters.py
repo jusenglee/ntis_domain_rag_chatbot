@@ -846,9 +846,6 @@ def build_collection_join_filter(
     resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
 
-    # Hop2 JOIN key 입력 검증은 단일 함수에서 선행 수행한다.
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm)
-
     col_norm = str(hop2_col or "").strip().lower()
 
     def _canonical_collection(name: str) -> str:
@@ -868,6 +865,8 @@ def build_collection_join_filter(
     col_canonical = _canonical_collection(col_norm)
     if col_canonical == "ntis_perf":
         if mode == "group":
+            # group 기본 키는 pjt_no 이지만, perf 인덱스/페이로드에서 pjt_no 가용성이 낮은 경우
+            # Hop1에서 수집한 pjt_id 목록으로 fallback 해야 하므로 runtime 키 기준으로 검증한다.
             # runtime(Hop2) 검증: Hop1 결과가 pjt_id-only 여도 허용
             validate_group_join_runtime_keys(pjt_nos=pjt_nos_norm, pjt_ids=resolved_pjt_ids)
             if not pjt_nos_norm:
@@ -884,6 +883,9 @@ def build_collection_join_filter(
                 apply_query_tag_inference=False,
             )
         return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
+
+    # non-perf 경로는 planner 계약(join_key_mode)의 입력 규칙을 그대로 적용한다.
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm)
 
     if col_canonical == "ntis_project":
         pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
