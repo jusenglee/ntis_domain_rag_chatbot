@@ -102,6 +102,8 @@ HISTORY_PREVIEW_LIMIT = 100
 SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
 FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
+SOLAR_TTFT_DEADLINE_MS = int(os.getenv("SOLAR_TTFT_DEADLINE_MS", str(SOLAR_DEADLINE_MS)))
+SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "12000"))
 SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
@@ -1485,18 +1487,34 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         messages,
         max_tokens_hint=max_tokens_hint,
         request_id=state.request_id,
-        deadline_ms=SOLAR_DEADLINE_MS if model_name == "solar_vllm_0" else None,
+        ttft_deadline_ms=SOLAR_TTFT_DEADLINE_MS if model_name == "solar_vllm_0" else None,
+        gen_deadline_ms=SOLAR_GEN_DEADLINE_MS if model_name == "solar_vllm_0" else None,
         max_chars=SOLAR_STREAM_MAX_CHARS if model_name == "solar_vllm_0" else None,
         fallback_policy=fallback_policy,
     )
 
-    if stream_metrics.get("deadline_exceeded"):
+    if stream_metrics.get("ttft_deadline_exceeded"):
         logger.warning(
-            "[solar_stream_guard] request_id=%s deadline_ms=%s exceeded; truncated_chars=%s",
+            "[solar_stream_guard] request_id=%s ttft_deadline_ms=%s exceeded; truncated_chars=%s",
             state.request_id,
-            SOLAR_DEADLINE_MS,
+            SOLAR_TTFT_DEADLINE_MS,
             len(final_answer),
         )
+    elif stream_metrics.get("gen_deadline_exceeded"):
+        logger.warning(
+            "[solar_stream_guard] request_id=%s gen_deadline_ms=%s exceeded; truncated_chars=%s emitted_chars=%s",
+            state.request_id,
+            SOLAR_GEN_DEADLINE_MS,
+            len(final_answer),
+            stream_metrics.get("emitted_chars"),
+        )
+        if stream_metrics.get("short_output_guard_triggered"):
+            logger.warning(
+                "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
+                state.request_id,
+                stream_metrics.get("short_output_guard_min_chars"),
+                stream_metrics.get("emitted_chars"),
+            )
     elif stream_metrics.get("char_limited"):
         logger.warning(
             "[solar_stream_guard] request_id=%s max_chars=%s exceeded; truncated_chars=%s",

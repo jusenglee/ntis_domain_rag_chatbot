@@ -15,15 +15,18 @@ class _Chunk:
 
 
 class _FakeLLM:
-    def __init__(self, chunks=None, raises_empty=False, fallback_text="대체 응답"):
+    def __init__(self, chunks=None, raises_empty=False, fallback_text="대체 응답", sleep_before_chunks=None):
         self._chunks = chunks or []
         self._raises_empty = raises_empty
         self._fallback_text = fallback_text
+        self._sleep_before_chunks = sleep_before_chunks or []
 
     async def astream(self, messages, **kwargs):
         if self._raises_empty:
             raise EmptyStreamContentError("empty")
-        for c in self._chunks:
+        for idx, c in enumerate(self._chunks):
+            if idx < len(self._sleep_before_chunks):
+                await asyncio.sleep(self._sleep_before_chunks[idx])
             yield _Chunk(c)
 
     async def ainvoke(self, messages, **kwargs):
@@ -51,5 +54,41 @@ def test_run_llm_streaming_uses_fallback_on_empty_stream_error() -> None:
         )
         assert text == "완성 응답"
         assert metrics["fallback_used"] is True
+
+    asyncio.run(_run())
+
+
+def test_run_llm_streaming_ttft_timeout_phase() -> None:
+    async def _run() -> None:
+        llm = _FakeLLM(chunks=["늦게도착"], sleep_before_chunks=[0.03])
+        text, metrics = await run_llm_streaming(
+            llm,
+            [HumanMessage(content="hi")],
+            ttft_deadline_ms=5,
+            gen_deadline_ms=50,
+        )
+        assert metrics["deadline_exceeded"] is True
+        assert metrics["ttft_deadline_exceeded"] is True
+        assert metrics["timeout_phase"] == "ttft"
+        assert "응답 시간을 제한" in text
+
+    asyncio.run(_run())
+
+
+def test_run_llm_streaming_gen_timeout_phase_and_short_output_guard() -> None:
+    async def _run() -> None:
+        llm = _FakeLLM(chunks=["짧다", "뒤늦게"], sleep_before_chunks=[0.0, 0.03])
+        text, metrics = await run_llm_streaming(
+            llm,
+            [HumanMessage(content="hi")],
+            ttft_deadline_ms=100,
+            gen_deadline_ms=5,
+        )
+        assert metrics["deadline_exceeded"] is True
+        assert metrics["gen_deadline_exceeded"] is True
+        assert metrics["timeout_phase"] == "gen"
+        assert metrics["emitted_chars"] == len("짧다")
+        assert metrics["short_output_guard_triggered"] is True
+        assert "응답 시간을 제한" in text
 
     asyncio.run(_run())
