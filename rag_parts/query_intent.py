@@ -14,6 +14,7 @@ Goal:
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass, field
 import logging
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -37,6 +38,16 @@ from .constants import (
     TAG_RI_ORGSM_RES,
 )
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+INTENT_FORCE_PROJECT_PERF_RELATION = _env_flag("INTENT_FORCE_PROJECT_PERF_RELATION", default=False)
 
 # -----------------------------
 # Regex
@@ -891,11 +902,40 @@ def _apply_affiliation_intent(
     return people_terms, org_terms, None
 
 
-def _strip_non_join_relation(relation: Optional[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
+def _strip_non_join_relation(
+        relation: Optional[Tuple[str, str]],
+        *,
+        base_route: Optional[str] = None,
+        action: Optional[str] = None,
+        wants_list: bool = False,
+        has_people: bool = False,
+        has_org: bool = False,
+        has_perf: bool = False,
+) -> Optional[Tuple[str, str]]:
     if not relation:
         return None
     if any(part in ("people", "org") for part in relation):
         return None
+    # 사람/기관 기반 성과 목록 질의는 JOIN 보다 단일 컬렉션 LOOKUP(perf) 우선
+    if (has_people or has_org) and has_perf and wants_list:
+        return None
+    if base_route in ("people", "org") and action not in ("relation",):
+        return None
+    return relation
+
+
+def _maybe_force_project_perf_relation(
+        *,
+        relation: Optional[Tuple[str, str]],
+        has_people: bool,
+        has_org: bool,
+        has_project: bool,
+        has_perf: bool,
+) -> Optional[Tuple[str, str]]:
+    if not INTENT_FORCE_PROJECT_PERF_RELATION:
+        return relation
+    if (has_people or has_org) and has_project and has_perf:
+        return ("project", "perf")
     return relation
 
 
@@ -1409,9 +1449,21 @@ def _classify_query_heuristic(
         ids_map=ids_map,
         relation=relation,
     )
-
-    if (has_people or has_org) and has_project and has_perf:
-        relation = ("project", "perf")
+    relation = _maybe_force_project_perf_relation(
+        relation=relation,
+        has_people=has_people,
+        has_org=has_org,
+        has_project=has_project,
+        has_perf=has_perf,
+    )
+    relation = _strip_non_join_relation(
+        relation,
+        base_route=base_route,
+        wants_list=wants_list,
+        has_people=has_people,
+        has_org=has_org,
+        has_perf=has_perf,
+    )
 
     intent = pick_structured_intent(base_route, q, is_id_query=is_id_query)
 
@@ -1682,9 +1734,22 @@ def classify_query(
         ids_map=ids_map,
         relation=relation,
     )
-    relation = _strip_non_join_relation(relation)
-    if (has_people or has_org) and has_project and has_perf:
-        relation = ("project", "perf")
+    relation = _maybe_force_project_perf_relation(
+        relation=relation,
+        has_people=has_people,
+        has_org=has_org,
+        has_project=has_project,
+        has_perf=has_perf,
+    )
+    relation = _strip_non_join_relation(
+        relation,
+        base_route=base_route,
+        action=action,
+        wants_list=wants_list,
+        has_people=has_people,
+        has_org=has_org,
+        has_perf=has_perf,
+    )
 
     if not action or (action == "relation" and relation is None):
         action = _resolve_action(
