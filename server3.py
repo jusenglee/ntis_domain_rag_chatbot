@@ -107,6 +107,7 @@ SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "12000"))
 SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
+SOLAR_MIN_ANSWER_CHARS = int(os.getenv("SOLAR_MIN_ANSWER_CHARS", "60"))
 STREAM_FALLBACK_ALLOW = os.getenv("STREAM_FALLBACK_ALLOW", "true").strip().lower() in {"1", "true", "yes", "on"}
 STREAM_FALLBACK_EMIT_MODE = os.getenv("STREAM_FALLBACK_EMIT_MODE", "single_chunk").strip().lower()
 STREAM_FALLBACK_USER_NOTICE = os.getenv("STREAM_FALLBACK_USER_NOTICE", "스트리밍이 불안정하여 완성된 응답으로 대체했습니다.").strip()
@@ -547,6 +548,8 @@ class AgentState(BaseModel):
     answer_solar: Optional[str] = None
     answer_gemma_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_solar_meta: Dict[str, Any] = Field(default_factory=dict)
+    answer_solar_raw: Optional[str] = None
+    merge_debug: Dict[str, Any] = Field(default_factory=dict)
 
     # 메타데이터
     conversation_id: str = ""
@@ -1558,17 +1561,77 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
     solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
 
-    # messages에는 gemma 답변을 기본으로 추가
+    answer_gemma = (state.answer_gemma or "").strip()
+    answer_solar_raw = state.answer_solar or ""
+    answer_solar = answer_solar_raw.strip()
+    solar_meta = state.answer_solar_meta or {}
+
+    solar_fail_reasons: List[str] = []
+    # 1) deadline_exceeded
+    deadline_exceeded = bool(
+        solar_meta.get("deadline_exceeded")
+        or solar_meta.get("ttft_deadline_exceeded")
+        or solar_meta.get("gen_deadline_exceeded")
+    )
+    if deadline_exceeded:
+        solar_fail_reasons.append("deadline_exceeded")
+
+    # 2) char_limited
+    if bool(solar_meta.get("char_limited")):
+        solar_fail_reasons.append("char_limited")
+
+    # 3) 안내 문구 포함 여부
+    guidance_markers = [DUAL_MODEL_FALLBACK_MESSAGE, STREAM_FALLBACK_USER_NOTICE]
+    for marker in guidance_markers:
+        marker_text = (marker or "").strip()
+        if marker_text and marker_text in answer_solar:
+            solar_fail_reasons.append("contains_fallback_notice")
+            break
+
+    # 4) 최소 길이 정책 미달
+    if len(answer_solar) < SOLAR_MIN_ANSWER_CHARS:
+        solar_fail_reasons.append(f"too_short<{SOLAR_MIN_ANSWER_CHARS}")
+
+    solar_failed = len(solar_fail_reasons) > 0
+    selected_model = "gemma" if solar_failed else "solar"
+    selected_answer = answer_gemma if solar_failed else answer_solar
+
+    if not selected_answer:
+        selected_model = "gemma" if answer_gemma else "solar"
+        selected_answer = answer_gemma or answer_solar or DUAL_MODEL_FALLBACK_MESSAGE
+
+    merge_debug = {
+        "policy": DUAL_MODEL_MERGE_POLICY,
+        "selected_model": selected_model,
+        "solar_failed": solar_failed,
+        "solar_fail_reasons": solar_fail_reasons,
+        "solar_meta": solar_meta,
+        "solar_answer_chars": len(answer_solar),
+        "gemma_answer_chars": len(answer_gemma),
+        "min_chars_threshold": SOLAR_MIN_ANSWER_CHARS,
+    }
+
     log_section("MERGE ANSWERS",
                 f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"SOLAR: {solar_preview}")
+                f"SOLAR: {solar_preview}\n"
+                f"selected_model={selected_model}\n"
+                f"solar_fail_reasons={solar_fail_reasons}")
+
+    logger.info(
+        "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
+        state.request_id,
+        selected_model,
+        solar_fail_reasons,
+    )
 
     return {
-        "messages": [AIMessage(content=state.answer_solar)],
-        "answer_gemma": state.answer_gemma,
-        "answer_solar": state.answer_solar,
+        "messages": [AIMessage(content=selected_answer)],
+        "answer_gemma": answer_gemma,
+        "answer_solar": answer_solar,
+        "answer_solar_raw": answer_solar_raw,
+        "merge_debug": merge_debug,
         "context" : state.context,
         "fallback_context": state.fallback_context
     }
