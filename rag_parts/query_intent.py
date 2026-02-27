@@ -716,8 +716,8 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     우선순위:
       1) domain_hint(신뢰 가능한 경우)
       2) support(trouble/account-like)
-      3) people/org (사람/기관이 주어+과제/성과 요청의 head일 때)
-      4) perf / project
+      3) people/org (사람/기관 단독이거나 과제 탐색의 주어일 때)
+      4) perf / project (사람/기관이 필터이고 목적 엔티티가 성과면 base_route=perf)
       5) default support
     """
     if domain_hint in ("support", "project", "perf", "people", "org"):
@@ -760,12 +760,11 @@ def pick_base_route(q: str, kws: List[str], ids_map: Dict[str, List[str]], *, do
     if has_org and not (has_project or has_perf):
         return "org"
 
-    # 사람/기관 + 성과(논문/특허...) 요청이면 people/org를 head로 두고 join으로 처리하기 쉬움
-    # (예: "이한조 연구자의 논문", "KAIST 특허")
+    # 사람/기관 + 성과(논문/특허...) 요청은 성과 엔티티가 목적이므로 perf head를 사용
     if has_people and has_perf and not has_project:
-        return "people"
+        return "perf"
     if has_org and has_perf and not has_project:
-        return "org"
+        return "perf"
 
     if has_perf and not has_project:
         return "perf"
