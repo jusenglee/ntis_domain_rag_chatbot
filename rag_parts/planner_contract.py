@@ -142,11 +142,16 @@ def validate_planner_contract(
         )
 
     join_key_mode_norm = str(join_key_mode or "").strip().lower()
-    if join_key_mode_norm == "group" and pjt_ids and not pjt_nos:
+    if join_key_mode_norm == "group" and not pjt_nos:
+        reason = (
+            "join_key_mode=group 인데 ids_map에 pjt_no가 비어 있음"
+            if not pjt_ids
+            else "join_key_mode=group 인데 ids_map에 pjt_no 없이 pjt_id만 존재"
+        )
         violations.append(
             PlannerContractViolation(
                 error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
-                reason="join_key_mode=group 인데 ids_map에 pjt_no 없이 pjt_id만 존재",
+                reason=reason,
             )
         )
     if join_key_mode_norm == "instance" and pjt_nos and not pjt_ids:
