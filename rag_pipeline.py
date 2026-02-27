@@ -3800,12 +3800,6 @@ def _run_rag_with_vectors(
         resolved_join_key_mode = "instance"
     join_key_mode_for_contract = resolved_join_key_mode
     strategy_snapshot = replace(strategy_snapshot, join_key_mode=resolved_join_key_mode)
-    _validate_join_key_contract(
-        strategy_snapshot.mode,
-        resolved_join_key_mode,
-        dict(ctx.ids_map or {}),
-        planner_strategy_relation,
-    )
 
     route_for_contract = get_relation_route(planner_strategy_relation) if planner_strategy_relation else None
     relation_target_cols_for_contract = (
@@ -3884,6 +3878,15 @@ def _run_rag_with_vectors(
                 reason=first.reason,
                 violations=planner_contract_violations,
             )
+
+    # planner 계약 위반 fallback 적용 이후에 JOIN 키 하드 검증을 수행한다.
+    # (fallback 활성 시 JOIN 키 위반도 planner contract 경로로 완화 가능)
+    _validate_join_key_contract(
+        strategy_snapshot.mode,
+        strategy_snapshot.join_key_mode,
+        dict(ctx.ids_map or {}),
+        planner_strategy_relation,
+    )
 
     planner_filter_spec = dict(plan.filters or {})
 
