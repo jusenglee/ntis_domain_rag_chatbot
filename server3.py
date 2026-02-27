@@ -99,14 +99,15 @@ TEMPLATE_INDEX_PATH = Path("templates/index.html")
 kv_store: Optional[KVStore] = None
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
-SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "4096"))
-FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "8192"))
+SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
+FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
 SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
 SOLAR_TTFT_DEADLINE_MS = int(os.getenv("SOLAR_TTFT_DEADLINE_MS", str(SOLAR_DEADLINE_MS)))
 SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "12000"))
 SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
+SOLAR_MIN_ANSWER_CHARS = int(os.getenv("SOLAR_MIN_ANSWER_CHARS", "60"))
 STREAM_FALLBACK_ALLOW = os.getenv("STREAM_FALLBACK_ALLOW", "true").strip().lower() in {"1", "true", "yes", "on"}
 STREAM_FALLBACK_EMIT_MODE = os.getenv("STREAM_FALLBACK_EMIT_MODE", "single_chunk").strip().lower()
 STREAM_FALLBACK_USER_NOTICE = os.getenv("STREAM_FALLBACK_USER_NOTICE", "스트리밍이 불안정하여 완성된 응답으로 대체했습니다.").strip()
@@ -547,6 +548,8 @@ class AgentState(BaseModel):
     answer_solar: Optional[str] = None
     answer_gemma_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_solar_meta: Dict[str, Any] = Field(default_factory=dict)
+    answer_solar_raw: Optional[str] = None
+    merge_debug: Dict[str, Any] = Field(default_factory=dict)
 
     # 메타데이터
     conversation_id: str = ""
@@ -755,42 +758,33 @@ async def _run_question_analysis(
         ====================
         - SEARCH: 탐색형(누락 방지 최우선). server-side must 필터로 후보를 먼저 자르지 않습니다.
         - LOOKUP: 정확형(필터/ID 기반). server-side 하드필터로 정답집합 근처를 강제합니다.
-        - JOIN: 2-hop 관계형(project↔perf).
-          JOIN은 반드시 ids_map에 프로젝트 조인키(pjt_id 또는 pjt_no)를 확정해서 넣을 수 있을 때만 사용한다.
-          사람/기관 기반 질의는 JOIN을 사용하지 않고 LOOKUP으로 해결한다.
+        - JOIN: 2-hop 관계형(project↔perf). join_key_mode+ids_map+people/org 게이트를 먼저 판정해
+          Hop1(skip/lookup/search)을 선택하고, Hop2에서 하드필터로 강제합니다.
         
         ====================
-        [Mode 결정 규칙(우선순위) - v1.2 강제]
+        [Mode 결정 규칙(우선순위)]
         ====================
-        0) (절대 규칙) JOIN Gate
-           - mode="JOIN"은 "프로젝트 조인키"를 ids_map에 '확정해서 넣을 수 있을 때만' 선택한다.
-             * join_key_mode="instance" => ids_map.pjt_id 가 반드시 있어야 한다.
-             * join_key_mode="group"    => ids_map.pjt_no 가 반드시 있어야 한다.
-           - 위 키를 확정할 수 없으면, 문장에 "과제/논문/특허/성과"가 함께 있어도 JOIN을 선택하지 않는다.
-           - 조인키는 절대 추측/생성하지 않는다. (모르면 ids_map은 빈 배열)
-        
-        1) 사람/기관 필터로 '성과(논문/특허/보고서/SW/...) 목록'을 요구하면 => 무조건 LOOKUP(perf)
-           - mode="LOOKUP", head="perf", relation=null, join_key_mode=null
-           - target_cols=["ntis_perf_v1"]
-           - filters에 사람/기관 슬롯 + perf_types를 채운다.
-           예)
-           - "신동구 연구자가 참가한 과제들의 논문만 보여줘" => LOOKUP(perf)
-           - "ETRI 참여 성과 중 특허 목록" => LOOKUP(perf)
-        
-        2) 프로젝트 식별자(PJT_ID/PJT_NO)가 질의/이전문맥에서 명시적으로 확정되고,
-           그 프로젝트의 성과(논문/특허 등)를 요구할 때만 => JOIN(project↔perf)
-           - PJT_ID가 있으면:
-             mode="JOIN", relation="project_perf", join_key_mode="instance", ids_map.pjt_id=[...]
-           - PJT_NO가 있으면:
-             mode="JOIN", relation="project_perf", join_key_mode="group",    ids_map.pjt_no=[...]
-        
-        3) action이 list/detail/stats/download 이거나, 단순 ID 조회면 => LOOKUP
-        4) 그 외 토픽/키워드 탐색이면 => SEARCH
-        
-        [관계형 성과 키워드 사전 - 적용 조건]
-        - 아래 패턴은 "0번 JOIN Gate 통과(조인키 확정)"에만 JOIN 선택 근거로 사용한다.
-        - 패턴 예시: "1711015550 과제의 논문", "PJT-2020-XXXX 성과",
-                    "이 과제의 성과"(단, 이전 문맥에서 과제가 1개로 확정된 경우)
+        선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
+        - relation은 ["project","perf"](= "project_perf")로 확정
+        - head는 반드시 "perf"로 확정
+        - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
+
+        A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
+           - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
+        B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
+           단순 ID 조회/목록/통계 요청이면 => mode="LOOKUP"
+        C) ids_map에 값이 하나라도 있고, A에 해당하지 않으면 => mode="LOOKUP"
+        D) 위에 해당하지 않는 토픽/키워드 탐색이면 => mode="SEARCH"
+
+        예시:
+        - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
+        - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
+
+        [관계형 성과 키워드 사전]
+        - 핵심 키워드(예시): "파생 성과", "성과", "논문", "특허", "산출물"
+        - 패턴 예시: "과제 + (성과|논문|특허|산출물)", "~에서 나온 성과", "~의 파생 성과"
+        - 위 패턴이 감지되면 planner는 처음부터 JOIN 전략을 출력해야 하며,
+          실행단에서 mode/relation 보정이 필요하지 않도록 합니다.
         
         추가 원칙(중요):
         - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
@@ -915,7 +909,8 @@ async def _run_question_analysis(
           - Hop1 전략 우선순위(항상 SEARCH 아님):
             * instance + ids_map.pjt_id 존재 => 기본 Hop1 skip (옵션 플래그일 때만 최소 보강 lookup 허용)
             * group + ids_map.pjt_no 존재 => Hop1 search 금지, lookup(pjt_no must) 강제
-            
+            * seed key가 없고 people/org 조건 존재 => Hop1 lookup(people/org gate)
+            * seed key도 people/org gate도 없을 때만 => Hop1 search
           - hop2(perf): hop1/seed에서 확보한 키 집합을 하드필터로 적용
             * join_key_mode="instance": pjt_id IN (...) must
             * join_key_mode="group": pjt_no IN (...) must
@@ -1418,7 +1413,7 @@ async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
     """RAG 결과로 Fast Answer 보강 - solar"""
     return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
-    
+
 _LLM_CACHE: Dict[str, Any] = {}
 
 
@@ -1566,17 +1561,77 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
     solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
 
-    # messages에는 gemma 답변을 기본으로 추가
+    answer_gemma = (state.answer_gemma or "").strip()
+    answer_solar_raw = state.answer_solar or ""
+    answer_solar = answer_solar_raw.strip()
+    solar_meta = state.answer_solar_meta or {}
+
+    solar_fail_reasons: List[str] = []
+    # 1) deadline_exceeded
+    deadline_exceeded = bool(
+        solar_meta.get("deadline_exceeded")
+        or solar_meta.get("ttft_deadline_exceeded")
+        or solar_meta.get("gen_deadline_exceeded")
+    )
+    if deadline_exceeded:
+        solar_fail_reasons.append("deadline_exceeded")
+
+    # 2) char_limited
+    if bool(solar_meta.get("char_limited")):
+        solar_fail_reasons.append("char_limited")
+
+    # 3) 안내 문구 포함 여부
+    guidance_markers = [DUAL_MODEL_FALLBACK_MESSAGE, STREAM_FALLBACK_USER_NOTICE]
+    for marker in guidance_markers:
+        marker_text = (marker or "").strip()
+        if marker_text and marker_text in answer_solar:
+            solar_fail_reasons.append("contains_fallback_notice")
+            break
+
+    # 4) 최소 길이 정책 미달
+    if len(answer_solar) < SOLAR_MIN_ANSWER_CHARS:
+        solar_fail_reasons.append(f"too_short<{SOLAR_MIN_ANSWER_CHARS}")
+
+    solar_failed = len(solar_fail_reasons) > 0
+    selected_model = "gemma" if solar_failed else "solar"
+    selected_answer = answer_gemma if solar_failed else answer_solar
+
+    if not selected_answer:
+        selected_model = "gemma" if answer_gemma else "solar"
+        selected_answer = answer_gemma or answer_solar or DUAL_MODEL_FALLBACK_MESSAGE
+
+    merge_debug = {
+        "policy": DUAL_MODEL_MERGE_POLICY,
+        "selected_model": selected_model,
+        "solar_failed": solar_failed,
+        "solar_fail_reasons": solar_fail_reasons,
+        "solar_meta": solar_meta,
+        "solar_answer_chars": len(answer_solar),
+        "gemma_answer_chars": len(answer_gemma),
+        "min_chars_threshold": SOLAR_MIN_ANSWER_CHARS,
+    }
+
     log_section("MERGE ANSWERS",
                 f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"Solar: {solar_preview}")
+                f"SOLAR: {solar_preview}\n"
+                f"selected_model={selected_model}\n"
+                f"solar_fail_reasons={solar_fail_reasons}")
+
+    logger.info(
+        "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
+        state.request_id,
+        selected_model,
+        solar_fail_reasons,
+    )
 
     return {
-        "messages": [AIMessage(content=state.answer_solar)],
-        "answer_gemma": state.answer_gemma,
-        "answer_solar": state.answer_solar,
+        "messages": [AIMessage(content=selected_answer)],
+        "answer_gemma": answer_gemma,
+        "answer_solar": answer_solar,
+        "answer_solar_raw": answer_solar_raw,
+        "merge_debug": merge_debug,
         "context" : state.context,
         "fallback_context": state.fallback_context
     }
