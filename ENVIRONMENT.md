@@ -37,7 +37,11 @@ export GEMMA_MAX_TOKENS=8192
 export SOLAR_VLLM_MODEL=solar_102b
 
 # Solar 스트리밍 제어(기본값)
+# - SOLAR_TTFT_DEADLINE_MS 미지정 시 SOLAR_DEADLINE_MS 값을 TTFT 제한으로 사용(하위 호환)
+# - SOLAR_GEN_DEADLINE_MS 는 첫 토큰 이후 생성 구간 제한
 export SOLAR_DEADLINE_MS=4500
+export SOLAR_TTFT_DEADLINE_MS=4500
+export SOLAR_GEN_DEADLINE_MS=12000
 export SOLAR_STREAM_MAX_CHARS=8000
 
 # Solar OpenAI-Compat 엔드포인트
