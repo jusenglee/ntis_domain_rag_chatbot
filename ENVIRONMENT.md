@@ -44,6 +44,17 @@ export SOLAR_TTFT_DEADLINE_MS=4500
 export SOLAR_GEN_DEADLINE_MS=12000
 export SOLAR_STREAM_MAX_CHARS=8000
 
+
+# Solar 문서 정제 상한(모델별 분기)
+# - Solar 경로는 relax_limits=False + 아래 상한 우선 적용
+# - Gemma 경로는 기존처럼 relax_limits=True(완화) 유지
+export SOLAR_MAX_DOC_SENTENCES=10
+export SOLAR_MAX_DOC_TOKENS=600
+export SOLAR_MAX_CONTEXT_CHARS=18000
+
+# 핵심 필드 최소 포함(과제명/ID 보존)
+export PRIORITY_CONTEXT_FIELDS="title,title_text,title1,title2,pjt_id,pjt_no,project_id,project_no,ntis_task_id,task_id,과제명,과제번호"
+
 # Solar OpenAI-Compat 엔드포인트
 # 누락/오타는 서버 부팅 시점에 즉시 에러 처리됩니다.
 export SOLAR_VLLM_BASE_URL=http://vllm_solar:8010/v1
