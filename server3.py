@@ -472,6 +472,18 @@ class QuestionAnalysisV2(BaseModel):
             except Exception:
                 # Pydantic config가 frozen인 경우 등
                 pass
+        else:
+            ids_map = dict(self.ids_map or {})
+            pjt_ids = [str(v).strip() for v in ids_map.get("pjt_id", []) if str(v).strip()]
+            pjt_nos = [str(v).strip() for v in ids_map.get("pjt_no", []) if str(v).strip()]
+            if self.join_key_mode == "group" and (not pjt_nos) and pjt_ids:
+                logger.warning(
+                    "[PLANNER] JOIN join_key_mode auto-correction: group->instance (reason=missing_pjt_no has_pjt_id=1)"
+                )
+                try:
+                    object.__setattr__(self, "join_key_mode", "instance")
+                except Exception:
+                    pass
 
         if self.mode == "SEARCH":
             filters = dict(self.filters or {})
@@ -912,9 +924,12 @@ async def _run_question_analysis(
         - relation이 명확하면 mode="JOIN"을 우선 적용하고, 단순 ID 조회/목록/통계는 mode="LOOKUP"을 사용합니다.
         - mode="JOIN"이면 join_key_mode는 필수이며 "instance" | "group" 중 하나여야 합니다.
         - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
-        - JOIN에서 ids_map 키는 XOR 규칙을 반드시 지킵니다(동시 존재 금지):
-          * join_key_mode="instance" => ids_map.pjt_id만 허용
-          * join_key_mode="group" => ids_map.pjt_no만 허용
+        - JOIN ids_map 규칙:
+          * join_key_mode="instance": ids_map.pjt_id를 사용합니다.
+          * join_key_mode="instance"인데 ids_map.pjt_no만 있으면 계약 위반입니다.
+          * join_key_mode="group": ids_map.pjt_no를 사용합니다.
+          * join_key_mode="group"인데 ids_map.pjt_no가 비어 있고 ids_map.pjt_id만 있으면 실행 전 정규화에서
+            join_key_mode를 "instance"로 보정하고 경고를 남깁니다.
         
         1) relation="project_perf"
           - head="perf"를 기본으로 사용
