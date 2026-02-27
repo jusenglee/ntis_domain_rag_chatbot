@@ -1,79 +1,79 @@
-# ntis_domain_rag_chatbot — DocOps (ChatGPT Pro 문서화+캐시 운영)
+# ntis_domain_rag_chatbot 문서 허브
 
-> 목적: **대규모 RAG(SEARCH / LOOKUP / JOIN)** 파이프라인을 “대화”가 아니라 **문서 캐시(SSoT)** 로 운영하기.
->
-> - 대화(L0): 디버깅/실험 (휘발)
-> - 문서(L1): 계약/정책/현재상태 (영속, 단일 기준)
-> - 재현장치(L2): Runbook/Golden tests/ADR (영속, 회귀)
+이 문서는 운영자가 RAG 파이프라인을 빠르게 파악하고 재현하기 위한 진입점입니다.
 
-## 0. 이 레포에서 문서가 ‘캐시’가 되는 이유
+## 1) 아키텍처 요약
 
-이 프로젝트는 레이어가 많습니다.
+- API/오케스트레이션: `server3.py`
+- 실행 파이프라인: `rag_pipeline.py`
+- 계약/검증: `rag_parts/planner_contract.py`, `rag_parts/result_contract.py`
+- 검색 계층: `retrieval.py`
+- 의도 payload 계약: `docs/intent_payload_v2_schema.md`
 
-- 서버: `server3.py` (FastAPI + LangGraph)
-- 파이프라인: `rag_pipeline.py`
-- 전처리/의도분석: `rag_parts/query_intent.py`, `rag_parts/pipeline_steps.py`
-- 계약/검증/컴파일: `rag_parts/planner_contract.py`, `rag_parts/filters.py`
-- 검색/컨텍스트: `retrieval.py`
-- 결과 계약: `rag_parts/result_contract.py`
+핵심 운영 모드는 `SEARCH / LOOKUP / JOIN`이며, 플래너 산출을 실행 레이어가 검증/컴파일 후 수행합니다.
 
-그래서 **“어느 레이어에서 의미가 바뀌었는지”** 를 문서로 고정하지 않으면, 운영이 ‘촉’으로 변합니다.
+## 2) 로컬 실행 (예시)
 
-## 1. 문서 구조(SSoT)
+```bash
+# 필수 예시 (환경에 맞게 조정)
+export OPENAI_API_KEY=...
+export QDRANT_URL=http://localhost:6333
+export QDRANT_API_KEY=...
 
-- `docs/README.md`
-  - 현재 상태 / 백로그 / 세션 로그 / 링크
-- `docs/CONTRACT.md`
-  - Strategy Contract (플래너→실행 불변), 모드 규칙, JOIN 규칙, 필터 의미론, 에러코드
-- `docs/RUNBOOK.md`
-  - 장애 트리아지 / 관측성(로그 키) / 재현 절차 / 자주 터지는 패턴
-- `docs/GOLDEN_TESTS.md`
-  - “정답 문장”이 아니라 **계약 invariants** 를 회귀 테스트로 유지하기 위한 골든 질의 셋
-- `docs/ADR/`
-  - 중요한 결정(계약/정책/데이터모델)이 바뀔 때마다 1장씩 기록
+# RAG 계약 관련 주요 스위치
+export RAG_PLANNER_INVALID_FALLBACK=1
+export RAG_PROMOTION_MODE=disable
+export RAG_PROMOTION_MAX_DEPTH=1
+export RAG_EMPTY_RESULT_CONTRACT=1
+export RAG_FORCE_FALLBACK_CHAT=0
 
-## 2. ChatGPT Pro에서 ‘프로젝트 캐시’로 굴리는 운영 루틴
-
-### 2.1 ChatGPT Project 세팅(권장)
-1) ChatGPT에서 Project 생성: `NTIS-RAG (DocOps)`
-2) 가능하면 **Project-only memory** 사용 (프로젝트 밖 맥락 오염 방지)
-3) 아래 파일을 Project에 업로드(40개 제한 고려):
-
-- `docs/README.md`
-- `docs/CONTRACT.md`
-- `docs/RUNBOOK.md`
-- `docs/GOLDEN_TESTS.md`
-- `NTIS_RAG_Search_Strategy_v1_1.md` (원문 정책)
-- (코드 레퍼런스) `rag_pipeline.py`, `rag_parts/planner_contract.py`, `rag_parts/filters.py`, `rag_parts/query_intent.py`, `schemas.py`
-
-### 2.2 세션 시작 프롬프트(복붙)
-```txt
-docs/README.md와 docs/CONTRACT.md를 기준으로
-1) 현재 상태 5줄 요약
-2) 오늘의 우선순위 Top 3
-3) 리스크/불확실 3개
-4) 오늘 바뀌면 문서에 반드시 남겨야 할 항목(계약/검증/로그/골든테스트)
-을 뽑아줘.
+python server3.py
 ```
 
-### 2.3 세션 종료 프롬프트(복붙) — “문서 캐시 업데이트 엔진”
-```txt
-지금 세션 결과를 ‘문서 캐시’로 반영해줘.
+운영 ENV 상세는 `docs/ENVIRONMENT.md`, 키 매핑 계약은 `docs/project_key_env_contract.md`를 참고하세요.
 
-반드시 아래 파일들에 대한 “복붙 가능한 패치 블록”을 만들어:
-- docs/README.md: 상태/백로그/세션로그 업데이트
-- docs/CONTRACT.md: 계약/불변성/금지 규칙이 바뀐 경우만
-- docs/RUNBOOK.md: 트리아지/관측성/장애 대응이 바뀐 경우만
-- docs/GOLDEN_TESTS.md: 기대 invariants가 바뀐 경우만
+## 3) 정책/계약 문서
 
-그리고 마지막에 “이번 세션에서 새 ADR이 필요한가?” 판단해서
-필요하면 docs/ADR/ADR-XXXX 초안도 만들어줘.
-```
+- 실행 계약(단일 전략, fallback/promotion/result contract): `docs/CONTRACT.md`
+- intent payload 송신/수신 스키마: `docs/intent_payload_v2_schema.md`
+- 전략 배경 문서(v1.2): `docs/NTIS_RAG_Search_Strategy_v1_2.md`
+- 장애 대응/관측성: `docs/RUNBOOK.md`
+- 골든 테스트 운영: `docs/GOLDEN_TESTS.md`
 
-## 3. 빠른 링크
-- 운영 환경 변수: `ENVIRONMENT.md`
-- 검색전략 원문: `NTIS_RAG_Search_Strategy_v1_1.md`
+## 4) 관측/디버깅 로그 키
 
-## 4. 세션 로그(최근 5개만 유지)
-- 2026-02-27: DocOps 스캐폴드 생성(초기)
+문서/코드 동기화 시 아래 이벤트를 우선 관측합니다.
 
+- Planner/계약
+  - `RAG.PLAN.INVALID_STRATEGY`
+  - `RAG.PLAN.FALLBACK_ON_CONTRACT_VIOLATION`
+- Promotion
+  - `RAG.PROMOTION`
+  - `RAG.PLAN_PROMOTED`
+- Result contract
+  - `RAG.CONTRACT.MIN_RERANKED`
+  - `RAG_EMPTY_RESULT_CONTRACT`(error_code)
+- 서버 응답 보조 경로
+  - `fallback_context` 포함 여부 (`server3.py` 응답 payload)
+
+## 5) Golden Test 실행/갱신 규칙
+
+`docs/GOLDEN_TESTS.md`의 모드별 대표 질의를 기준으로 아래 변경 시 반드시 골든 기대값을 갱신합니다.
+
+- `RAG_PLANNER_INVALID_FALLBACK` on/off
+- `RAG_PROMOTION_MODE` on/off, `RAG_PROMOTION_MAX_DEPTH`
+- `RAG_EMPTY_RESULT_CONTRACT`, `RAG_FORCE_FALLBACK_CHAT` 정책 변경
+- 최소 rerank 임계값(`RAG_MIN_RERANKED_*`) 또는 프리셋 변경
+
+권장 검증 축:
+
+1. 기대 plan(mode/action/relation/join_key_mode)
+2. 기대 filter/ids_map 컴파일 결과
+3. 결과 계약 통과/실패 및 반환 정책(예외 vs fallback_chat)
+
+## 6) 현재 문서-코드 정합 메모
+
+- 문서상 “fallback 전략 금지” 취지가 있어도, 현재 기본값은 `RAG_PLANNER_INVALID_FALLBACK=1`입니다.
+- 문서상 promotion이 passthrough로 소개된 버전이 있었으나, 현재 `rag_pipeline.py`에는 SEARCH→LOOKUP/JOIN 승격 재실행 로직이 존재합니다.
+
+운영 의사결정 시 위 두 항목을 우선 확정하고, `docs/CONTRACT.md`를 기준 계약으로 유지하세요.

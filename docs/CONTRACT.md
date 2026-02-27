@@ -1,191 +1,124 @@
-# CONTRACT — Strategy/Planner/Executor 불변 계약
+# CONTRACT — RAG 실행 계약 (SEARCH / LOOKUP / JOIN)
 
-> 이 문서는 `NTIS_RAG_Search_Strategy_v1_1.md`(설계 원문) + 실제 코드의 “강제 지점”을 합쳐서,
-> 구현/운영에서 흔들리지 않게 만든 **실행 가능한 계약(Contract)** 입니다.
+이 문서는 `server3.py`, `rag_pipeline.py`, `rag_parts/result_contract.py`의 현재 동작을 기준으로 한 운영 계약입니다.
 
----
+## 1) Planner Output Schema (필수 키/enum)
 
-## 1) 절대 불변 원칙(Non‑negotiable)
+플래너 출력은 아래 필드를 포함해야 합니다.
 
-### 1.1 Planner 단일 Strategy 원칙
-- 플래너는 질의마다 **단 하나의 Strategy**를 확정한다.
-- 실행 레이어는 Strategy를 **재해석/재결정하지 않는다.**
-- 실행 레이어가 할 수 있는 건 오직 **compile(strategy) → 실행** 뿐이다.
+- `strategy_version`: 문자열 (예: `v2`)
+- `mode`: `SEARCH | LOOKUP | JOIN`
+- `head`: `project | perf | people | org | support`
+- `action`: `topic | list | detail | stats | download`
+- `relation`: `project_perf | perf_project | null`
+- `join_key_mode`: `instance | group | null`
+- `target_cols`: 배열 (예: `["project", "perf"]`)
+- `ids_map`: 객체
+- `filters`: 객체 (`lookup_title_filter_policy`, `relation_lookup_enforce` 포함 가능)
+- `limit`: 정수
+- `retrieval_query`: 문자열
+- `confidence`: 숫자
 
-코드 근거(예시):
-- mode/action 일치성 검증: `rag_parts/planner_contract.py::planner_contract_mode()`
-- 실행 직전 계약 위반 수집: `rag_parts/planner_contract.py::validate_planner_contract()`
-- 결과 계약 위반 시 예외: `rag_parts/result_contract.py::enforce_reranked_contract()`
+예시(JSON):
 
----
+```json
+{
+  "strategy_version": "v2",
+  "mode": "JOIN",
+  "head": "project",
+  "action": "detail",
+  "relation": "project_perf",
+  "join_key_mode": "instance",
+  "target_cols": ["project", "perf"],
+  "ids_map": {"pjt_id": ["12345"]},
+  "filters": {
+    "lookup_title_filter_policy": "soft",
+    "relation_lookup_enforce": true
+  },
+  "limit": 20,
+  "retrieval_query": "...",
+  "confidence": 0.92
+}
+```
 
-## 2) Strategy 데이터 모델(내부 표준)
+## 2) Mode별 실행 규칙
 
-### 2.1 StrategySpec(실행 단계 스냅샷)
-|필드(StrategySpec)|타입|
-|---|---|
-|mode|str|
-|action|str|
-|relation|Optional[Tuple[str, str]]|
-|join_key_mode|Optional[str]|
-|people_terms|Tuple[str, ...]|
-|target_collections|Tuple[str, ...]|
-|search_filter_enabled|bool|
-|lookup_filter_enabled|bool|
-|relation_lookup_enforce|bool|
-|lookup_filter_policy|Optional[str]|
-|lookup_title_filter_policy|Optional[str]|
-|title_match_mode|Optional[str]|
+### SEARCH
+- 목적: 후보 확장/탐색.
+- 사람/기관 질의라도 계약 위반 보정 외 임의 모드 전환은 금지.
 
+### LOOKUP
+- 목적: ID/명시 조건 기반 정확 조회.
+- `detail`이 아닌 LOOKUP에서는 `lookup_title_filter_policy=hard` 입력 시 `soft` 강등 가능.
 
-### 2.2 NormalizedIntent(의도 분석/정규화 산출물)
-|필드(NormalizedIntent)|타입|
-|---|---|
-|action|str|
-|base_route|str|
-|relation|Optional[Tuple[str, str]]|
-|is_id_query|bool|
-|mode|Optional[str]|
-|output_type|Optional[str]|
-|join_key_mode|Optional[Literal['instance', 'group']]|
-|planner_limit|Optional[int]|
-|retrieval_query|Optional[str]|
-|planner_confidence|Optional[float]|
-|people_terms|List[str]|
-|org_terms|List[str]|
-|lead_org_terms|List[str]|
-|participant_org_terms|List[str]|
-|people_affiliation_org_terms|List[str]|
-|perf_types|List[str]|
-|title|List[str]|
-|tag_filters|List[str]|
-|ids_map|Dict[str, List[str]]|
-|ids_flat|List[str]|
-|lookup_filter_policy|Optional[str]|
+### JOIN
+- 목적: project↔perf 2-hop 관계 조회.
+- `mode=JOIN`이면 `join_key_mode`는 필수(`instance|group`).
+- `join_key_mode=instance`는 `ids_map.pjt_id` 축 사용.
+- `join_key_mode=group`은 `ids_map.pjt_no` 축 사용.
+- `group + pjt_no 없음 + pjt_id 존재`인 경우 정규화 단계에서 `instance` 보정 + 경고 로그.
 
+## 3) Fallback 정책 (플래너 계약 위반)
 
-> **권장**: 운영 로그/트레이스에 `NormalizedIntent`와 `StrategySpec`를 “그대로” 남기면,
-> 왜 SEARCH였는지/왜 JOIN이었는지/왜 필터가 이렇게 되었는지를 재현하기 쉬워집니다.
+현재 구현 기준:
 
----
+- 플래너 출력이 계약 위반/불능일 때 fallback 재계획 경로가 존재.
+- 기본값: `RAG_PLANNER_INVALID_FALLBACK=1` (활성).
+- 즉, 문서 취지의 “fallback 전략 없음”과 달리, 운영 기본값은 fallback 허용 상태입니다.
 
-## 3) Mode 계약(SEARCH / LOOKUP / JOIN)
+운영 결론을 내려야 할 항목:
 
-### 3.1 SEARCH (탐색형)
-목표: **누락 방지**. 후보군을 넓게 확보하고, 소프트 랭킹/보너스로 정렬한다.
+1. 기본값을 `0`으로 바꿔 strict contract로 운영할지
+2. `1` 유지 시 허용 조건(예: id_query만)과 감사 로그를 어디까지 강제할지
 
-금지:
-- server-side must를 만들지 말 것(특히 사람/기관 이름 hard filter)
-- JOIN relation 없이 JOIN 모드를 선택하지 말 것
+## 4) Promotion 정책 (SEARCH → LOOKUP/JOIN)
 
-허용:
-- `must_not`로 명백한 제외
-- 태그/사람/기관은 rerank signal(soft)로 사용
+현재 구현 기준:
 
-관련 코드:
-- 모드/액션 불일치 검출: `planner_contract_mode()`
-- SEARCH filter on/off는 컴파일 단계에서만 결정: `StrategyCompiler.compile()`
+- `RAG_PROMOTION_MODE`가 활성 모드일 때 검색 결과/신호 기반 승격 재실행 로직이 존재.
+- 깊이 제한: `RAG_PROMOTION_MAX_DEPTH`.
+- 관련 로그: `RAG.PROMOTION`, `RAG.PLAN_PROMOTED`.
 
-### 3.2 LOOKUP (정확형)
-목표: **정확성**. 서버단 필터로 후보를 먼저 좁힌다.
+정책 계약으로 명시할 항목:
 
-우선순위(권장):
-1) pjt_id (instance)  
-2) pjt_no (group)  
-3) 성과 식별자(doi/issn/patent_no/rst_id 등)
+- 승격 허용 시작 모드(예: SEARCH only)
+- 최대 승격 깊이
+- 승격 전/후 전략을 trace에 남기는 필수 필드
 
-주의:
-- 사람 이름만 있는 LOOKUP은 should + min_should 게이트를 권장(오염 방지)
+## 5) Result Contract (빈 결과/최소 rerank)
 
-관련 코드:
-- lookup filter 정책/타이틀 정책 정규화: `normalize_lookup_filter_policy()`, `normalize_lookup_title_filter_policy()`
-- title hard filter는 detail lookup에서만 허용(컴파일러에서 soft로 강등 가능): `StrategyCompiler.compile()`
+- 결과 계약 강제 지점: `rag_parts/result_contract.py::enforce_reranked_contract()`.
+- 빈 결과/계약 실패 에러코드: `RAG_EMPTY_RESULT_CONTRACT`.
+- LOOKUP + 명시 ID 맥락에서는 `RAG_MIN_RERANKED_LOOKUP_ID`(기본 1) 완화 규칙이 적용될 수 있음.
+- 최종 반환 정책은 `RAG_FORCE_FALLBACK_CHAT`로 제어:
+  - `0`: 계약 실패를 오류로 유지
+  - `1`: fallback_chat reason 반환 경로 허용
 
-### 3.3 JOIN (관계형 2-hop)
-목표: 관계 오염 차단을 위해 **server-side must 필터가 필수**.
+## 6) intent_payload.v2 송신 계약
 
-필수:
-- mode=join이면 relation 필수
-- join_key_mode는 `instance|group` 중 하나
+- 송신/수신 허용 키는 `normalized_intent` 단일 필드.
+- 금지: `query_intent`, `raw_intent`, 기타 임의 키.
+- 위반 시 `intent_payload.v2 schema mismatch` 경고 또는 fail-fast(`RAG_FAIL_FAST_SCHEMA`) 처리.
 
-관련 코드:
-- join_without_relation 검출: `planner_contract_mode()`
-- relation/head/target_cols 일치성 검증: `validate_planner_contract()`
+자세한 스키마는 `docs/intent_payload_v2_schema.md`를 단일 기준으로 사용합니다.
 
----
+## 7) 로그 표준 키
 
-## 4) JOIN key 계약(가장 많이 터지는 지점)
+아래 키를 운영 표준으로 고정합니다.
 
-### 4.1 XOR 규칙 (pjt_id vs pjt_no)
-- lookup/join에서 `ids_map.pjt_id`와 `ids_map.pjt_no` **동시 입력 금지**
-- 이건 “정확도” 문제가 아니라 **의미가 달라서** 계약 위반이다.
+- `RAG.PLAN.INVALID_STRATEGY`
+- `RAG.PLAN.FALLBACK_ON_CONTRACT_VIOLATION`
+- `RAG.PROMOTION`
+- `RAG.PLAN_PROMOTED`
+- `RAG.CONTRACT.MIN_RERANKED`
+- `RAG_EMPTY_RESULT_CONTRACT`(error_code)
+- 서버 응답의 `fallback_context` 포함 여부
 
-관련 코드:
-- `rag_parts/planner_contract.py::validate_planner_contract()` → `PLANNER_MIXED_PROJECT_KEYS`
-- `rag_parts/filters.py::validate_planner_join_keys()` → ValueError(`PLANNER_MIXED_PROJECT_KEYS`)
+## 8) 골든 테스트 갱신 트리거
 
-### 4.2 join_key_mode 규칙
-- join_key_mode=instance → pjt_id 필수, pjt_no 금지
-- join_key_mode=group → pjt_no 필수, pjt_id 금지(입력 단계)
+아래 변경 시 골든 케이스를 반드시 갱신합니다.
 
-관련 코드:
-- planner 단계 위반: `PLANNER_JOIN_KEY_MODE_IDS_MISMATCH`
-- executor 단계 위반: `validate_resolved_join_keys()`, `validate_join_mode_key_inputs()`
-
----
-
-## 5) 컴파일(compile) 규칙 — “변경이 아니라 변환”
-컴파일러는 의미를 바꾸지 말고 실행 가능한 스펙으로 **변환**만 한다.
-
-허용:
-- `filter_spec(JSON)` → Qdrant Filter 변환(중첩 포함)
-- topK/limit 적용
-- rerank preset 적용
-
-금지:
-- mode 변경(SEARCH↔LOOKUP↔JOIN)
-- join_key_mode 변경
-- SEARCH에서 must 생성
-- 하이브리드 비활성화(BM25-only 등)
-
-관련 코드:
-- `rag_parts/planner_contract.py::StrategyCompiler.compile()`
-
----
-
-## 6) 공통 에러 코드(StrategyViolation)
-|에러코드|주 사용 위치(파일)|
-|---|---|
-|EXECUTOR_JOIN_KEY_INPUT_INVALID|rag_parts/filters.py|
-|EXECUTOR_JOIN_KEY_MODE_INVALID|rag_parts/filters.py|
-|JOIN_GROUP_KEYS_UNRESOLVED|rag_pipeline.py|
-|JOIN_KEYS_INVALID|rag_pipeline.py|
-|PLANNER_INTENT_PAYLOAD_INVALID|rag_pipeline.py|
-|PLANNER_INTENT_PAYLOAD_REQUIRED|rag_pipeline.py|
-|PLANNER_INVALID_STRATEGY|rag_pipeline.py|
-|PLANNER_JOIN_HOP1_COLLECTION_MISMATCH|rag_pipeline.py|
-|PLANNER_JOIN_HOP2_COLLECTION_MISMATCH|rag_pipeline.py|
-|PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH|rag_pipeline.py|
-|PLANNER_JOIN_KEY_MODE_IDS_MISMATCH|rag_parts/planner_contract.py, rag_pipeline.py|
-|PLANNER_JOIN_KEY_MODE_INVALID|rag_pipeline.py|
-|PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH|rag_parts/planner_contract.py|
-|PLANNER_JOIN_RELATION_UNRESOLVED|rag_parts/planner_contract.py, rag_pipeline.py|
-|PLANNER_MIXED_PROJECT_KEYS|rag_parts/planner_contract.py, rag_pipeline.py|
-|PLANNER_PARSE_FINAL_FAILED|server3.py|
-|PLANNER_PEOPLE_RELATION_FORBIDDEN|rag_pipeline.py|
-|PLANNER_TARGET_COLS_ALLOWLIST_VIOLATION|rag_pipeline.py|
-|RAG_EMPTY_RESULT_CONTRACT|rag_parts/result_contract.py|
-|STRATEGY_MISMATCH|rag_pipeline.py|
-
-
-> 참고: 일부 규칙은 `ValueError("PLANNER_...")` 같은 형태로도 발생합니다.  
-> 운영/테스트에서는 “문자열 코드”도 표준화해 로그에 남기도록 권장합니다.
-
----
-
-## 7) 구현 체크리스트(문서↔코드 동기화)
-- [ ] `NTIS_RAG_Search_Strategy_v1_1.md`의 규칙이 코드의 단일 지점에서 강제되는가?
-- [ ] JOIN key 관련 에러가 “조용히 fallback” 되지 않고, 명시적으로 드러나는가?
-- [ ] SEARCH에서 사람/기관이 must로 들어가면 즉시 계약 위반으로 실패하는가?
-- [ ] 결과가 0일 때(혹은 점수가 낮을 때) 어떤 정책으로 fallback 하는지 명문화돼 있는가?
-
+- planner fallback on/off (`RAG_PLANNER_INVALID_FALLBACK`)
+- promotion on/off (`RAG_PROMOTION_MODE`, `RAG_PROMOTION_MAX_DEPTH`)
+- empty result contract on/off + fallback_chat on/off
+- rerank 최소치 프리셋/임계값(`RAG_MIN_RERANKED_*`) 변경
