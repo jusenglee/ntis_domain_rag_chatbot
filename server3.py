@@ -45,6 +45,7 @@ from settings import (
     REDIS_URL,
     REDIS_TTL,
     MAX_TOP_K_SIZE,
+    MAX_CONTEXT_CHARS,
     MAX_DOC_SENTENCES,
     MAX_DOC_TOKENS, DEFAULT_MODEL_NAME,
     SOLAR_VLLM_CONFIG,
@@ -113,6 +114,17 @@ STREAM_FALLBACK_EMIT_MODE = os.getenv("STREAM_FALLBACK_EMIT_MODE", "single_chunk
 STREAM_FALLBACK_USER_NOTICE = os.getenv("STREAM_FALLBACK_USER_NOTICE", "스트리밍이 불안정하여 완성된 응답으로 대체했습니다.").strip()
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
+SOLAR_MAX_DOC_SENTENCES = int(os.getenv("SOLAR_MAX_DOC_SENTENCES", str(MAX_DOC_SENTENCES)))
+SOLAR_MAX_DOC_TOKENS = int(os.getenv("SOLAR_MAX_DOC_TOKENS", str(MAX_DOC_TOKENS)))
+SOLAR_MAX_CONTEXT_CHARS = int(os.getenv("SOLAR_MAX_CONTEXT_CHARS", str(MAX_CONTEXT_CHARS)))
+PRIORITY_CONTEXT_FIELDS = tuple(
+    field.strip()
+    for field in os.getenv(
+        "PRIORITY_CONTEXT_FIELDS",
+        "title,title_text,title1,title2,pjt_id,pjt_no,project_id,project_no,ntis_task_id,task_id,과제명,과제번호",
+    ).split(",")
+    if field.strip()
+)
 RAG_RENDER_TEXT_FIELDS = tuple(
     field.strip()
     for field in os.getenv(
@@ -1455,17 +1467,25 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
         is_detail = True
 
+    is_solar = model_name == "solar_vllm_0"
     context_text = (
         refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
             org_filters=(qa.filters if qa else None),
             ids_map=(qa.ids_map if qa else None),
-            relax_limits=True,
+            relax_limits=False if is_solar else True,
+            max_doc_sentences=SOLAR_MAX_DOC_SENTENCES if is_solar else None,
+            max_doc_tokens=SOLAR_MAX_DOC_TOKENS if is_solar else None,
         )
         if docs_for_ctx
         else "없음"
     )
+    if is_solar and SOLAR_MAX_CONTEXT_CHARS > 0:
+        context_text = context_text[:SOLAR_MAX_CONTEXT_CHARS]
+
+    context_sentences = len(_split_sentences(context_text)) if context_text and context_text != "없음" else 0
+    context_tokens_est = len(context_text.split()) if context_text and context_text != "없음" else 0
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
@@ -1532,6 +1552,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"GENERATE ANSWER ({model_name})",
         f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
         f"ctx_chars={len(context_text)}\n"
+        f"ctx_sentences={context_sentences}\n"
+        f"ctx_tokens_est={context_tokens_est}\n"
         f"{final_answer[:100]}",
     )
     return {
@@ -2395,6 +2417,27 @@ def _safe_map_doc(doc: Document, *, context: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _collect_priority_field_lines(mapped_doc: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    seen: set[str] = set()
+
+    for field in PRIORITY_CONTEXT_FIELDS:
+        value = mapped_doc.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() == "none":
+            continue
+
+        normalized = f"{field}:{text}".lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(f"- {field}: {text}")
+
+    return lines
+
+
 def refine_documents_rule_based(
         docs: List[Document],
         is_detail: bool = False,
@@ -2405,12 +2448,18 @@ def refine_documents_rule_based(
         ids_map: Optional[Dict[str, Any]] = None,
         max_matches: int = 5,
         relax_limits: bool = False,
+        max_doc_sentences: Optional[int] = None,
+        max_doc_tokens: Optional[int] = None,
 ) -> str:
     context_chunks: List[str] = []
     field_max_sentences = None if relax_limits else MAX_FIELD_SENTENCES
     field_max_tokens = None if relax_limits else MAX_FIELD_TOKENS
-    doc_max_sentences = None if relax_limits else MAX_DOC_SENTENCES
-    doc_max_tokens = None if relax_limits else MAX_DOC_TOKENS
+    if relax_limits:
+        doc_max_sentences = None
+        doc_max_tokens = None
+    else:
+        doc_max_sentences = max_doc_sentences if max_doc_sentences is not None else MAX_DOC_SENTENCES
+        doc_max_tokens = max_doc_tokens if max_doc_tokens is not None else MAX_DOC_TOKENS
 
     for doc in docs:
         if str(doc.get("source_type", "")).strip().lower() == "aggregation":
@@ -2494,6 +2543,7 @@ def refine_documents_rule_based(
             prtcp_orgs,
             max_matches=max_matches,
         )
+        priority_lines = _collect_priority_field_lines(mapped_doc)
         # log_section("refine_documents_rule_based - 페이로드 평탄화 메소드 내부",
         #             f"matched_members: {matched_members}\n"
         #             f"fallback_lines: {fallback_lines}\n"
@@ -2508,15 +2558,15 @@ def refine_documents_rule_based(
         body_sentences = _split_sentences(limited_body)
         body_token_counts = [len(sentence.split()) for sentence in body_sentences]
         body_token_count = sum(body_token_counts)
-        extra_lines = [line for line in [researcher_line, org_line] if line]
+        extra_lines = [line for line in priority_lines + [researcher_line, org_line] if line]
         extra_text = "\n".join(extra_lines)
         extra_sentences = _split_sentences(extra_text)
         extra_token_count = len(extra_text.split())
 
-        if not relax_limits:
+        if not relax_limits and doc_max_sentences is not None and doc_max_tokens is not None:
             while body_sentences and (
-                    len(body_sentences) + len(extra_sentences) > MAX_DOC_SENTENCES
-                    or body_token_count + extra_token_count > MAX_DOC_TOKENS
+                    len(body_sentences) + len(extra_sentences) > doc_max_sentences
+                    or body_token_count + extra_token_count > doc_max_tokens
             ):
                 body_token_count -= body_token_counts.pop()
                 body_sentences.pop()
