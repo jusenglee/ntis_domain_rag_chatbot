@@ -1,5 +1,8 @@
 # 프로젝트 키 ENV 계약 (JOIN/LOOKUP)
 
+> 운영 RUNBOOK 진입점: [`RUNBOOK.md`](./RUNBOOK.md)
+
+
 운영 환경에서 `pjt_id`(과제 인스턴스 식별자)와 `pjt_no`(과제 번호 그룹 식별자)를 혼동하면,
 JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아래 ENV 계약을 강제합니다.
 

@@ -1,5 +1,8 @@
 # intent_payload.v2 송신/수신 스키마 계약
 
+> 운영 RUNBOOK 진입점: [`RUNBOOK.md`](./RUNBOOK.md)
+
+
 `run_rag_ab_compare(..., intent_payload=...)`에서 사용하는 `intent_payload.v2` 계약은 아래처럼 **단일 필드만 허용**합니다.
 
 ## Sender (server3.py)

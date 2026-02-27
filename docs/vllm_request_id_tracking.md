@@ -1,5 +1,8 @@
 # vLLM request_id 추적 설정/검증
 
+> 운영 RUNBOOK 진입점: [`RUNBOOK.md`](./RUNBOOK.md)
+
+
 이 저장소에서 vLLM 서버 실행 커맨드는 아래 경로의 엔트리포인트 스크립트로 관리합니다.
 
 - `scripts/vllm/start_vllm_solar.sh`
