@@ -43,6 +43,8 @@ async def run_llm_streaming(
         stream_kwargs["request_id"] = request_id
 
     started = time.monotonic()
+    deadline_s = (deadline_ms / 1000) if deadline_ms is not None else None
+    deadline_at = (started + deadline_s) if deadline_s is not None else None
     chunks: List[str] = []
     emitted_chars = 0
     emitted_chunks = 0
@@ -50,22 +52,56 @@ async def run_llm_streaming(
     char_limited = False
     fallback_used = False
 
+    stream_iter = llm.astream(list(messages), **stream_kwargs)
     try:
-        async for chunk in llm.astream(list(messages), **stream_kwargs):
-            text = getattr(chunk, "content", "") or getattr(getattr(chunk, "message", None), "content", "") or ""
-            if not text:
-                continue
-            chunks.append(text)
-            emitted_chars += len(text)
-            emitted_chunks += 1
+        if deadline_s is not None and hasattr(asyncio, "timeout"):
+            async with asyncio.timeout(deadline_s):
+                async for chunk in stream_iter:
+                    text = getattr(chunk, "content", "") or getattr(getattr(chunk, "message", None), "content", "") or ""
+                    if not text:
+                        continue
+                    chunks.append(text)
+                    emitted_chars += len(text)
+                    emitted_chunks += 1
 
-            if max_chars and emitted_chars >= max_chars:
-                char_limited = True
-                break
+                    if max_chars and emitted_chars >= max_chars:
+                        char_limited = True
+                        break
+        elif deadline_s is not None:
+            stream_aiter = stream_iter.__aiter__()
+            while True:
+                remaining = (deadline_at - time.monotonic()) if deadline_at is not None else None
+                if remaining is not None and remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    chunk = await asyncio.wait_for(stream_aiter.__anext__(), timeout=remaining)
+                except StopAsyncIteration:
+                    break
 
-            if deadline_ms is not None and ((time.monotonic() - started) * 1000 >= deadline_ms):
-                deadline_exceeded = True
-                break
+                text = getattr(chunk, "content", "") or getattr(getattr(chunk, "message", None), "content", "") or ""
+                if not text:
+                    continue
+                chunks.append(text)
+                emitted_chars += len(text)
+                emitted_chunks += 1
+
+                if max_chars and emitted_chars >= max_chars:
+                    char_limited = True
+                    break
+        else:
+            async for chunk in stream_iter:
+                text = getattr(chunk, "content", "") or getattr(getattr(chunk, "message", None), "content", "") or ""
+                if not text:
+                    continue
+                chunks.append(text)
+                emitted_chars += len(text)
+                emitted_chunks += 1
+
+                if max_chars and emitted_chars >= max_chars:
+                    char_limited = True
+                    break
+    except asyncio.TimeoutError:
+        deadline_exceeded = True
     except EmptyStreamContentError:
         if not fallback_policy.allow_empty_stream_fallback:
             raise
@@ -73,8 +109,12 @@ async def run_llm_streaming(
     except Exception:
         logger.exception("run_llm_streaming failed: request_id=%s", request_id)
         raise
+    finally:
+        aclose = getattr(stream_iter, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
-    if emitted_chunks == 0 and fallback_policy.allow_empty_stream_fallback:
+    if emitted_chunks == 0 and fallback_policy.allow_empty_stream_fallback and not deadline_exceeded:
         fallback_used = True
         response = await llm.ainvoke(list(messages), max_tokens_hint=max_tokens_hint, request_id=request_id)
         fallback_text = (getattr(response, "content", "") or "").strip()
