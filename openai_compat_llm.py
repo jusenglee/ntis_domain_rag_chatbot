@@ -127,6 +127,16 @@ class OpenAICompatChatModel(BaseChatModel):
             stream=True,
             **request_kwargs,
         )
+        stream_type = type(stream).__name__
+        has_aclose = callable(getattr(stream, "aclose", None))
+        has_close = callable(getattr(stream, "close", None))
+        logger.debug(
+            "[openai_compat_llm] stream capabilities: request_id=%s stream_type=%s has_aclose=%s has_close=%s",
+            request_id,
+            stream_type,
+            has_aclose,
+            has_close,
+        )
 
         emitted = False
         fallback_used = False
@@ -135,6 +145,9 @@ class OpenAICompatChatModel(BaseChatModel):
         char_n = 0
         ttft_ms = None
         last_finish_reason = None
+        closed = False
+        primary_exc: Optional[BaseException] = None
+        close_exc: Optional[Exception] = None
         try:
             async for chunk in stream:
                 chunk_n += 1
@@ -165,10 +178,31 @@ class OpenAICompatChatModel(BaseChatModel):
                     "No text content emitted in stream. "
                     f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}"
                 )
+        except BaseException as exc:
+            primary_exc = exc
+            raise
         finally:
+            try:
+                if has_aclose:
+                    await stream.aclose()
+                    closed = True
+                elif has_close:
+                    stream.close()
+                    closed = True
+            except Exception as exc:
+                close_exc = exc
+                logger.warning(
+                    "[openai_compat_llm] stream close failed: request_id=%s stream_type=%s has_aclose=%s has_close=%s",
+                    request_id,
+                    stream_type,
+                    has_aclose,
+                    has_close,
+                    exc_info=exc,
+                )
+
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_ms=%s chunk_n=%d emitted_chunks=%d char_n=%d finish_reason=%s fallback=%s model=%s base_url=%s",
+                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_ms=%s chunk_n=%d emitted_chunks=%d char_n=%d finish_reason=%s fallback=%s closed=%s model=%s base_url=%s",
                 request_id,
                 dt_ms,
                 f"{ttft_ms:.1f}" if ttft_ms is not None else "none",
@@ -177,9 +211,12 @@ class OpenAICompatChatModel(BaseChatModel):
                 char_n,
                 last_finish_reason,
                 fallback_used,
+                closed,
                 self.model_name,
                 self.base_url,
             )
+            if close_exc is not None and primary_exc is None:
+                raise close_exc
 
     @property
     def _llm_type(self) -> str:
