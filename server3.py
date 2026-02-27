@@ -545,6 +545,8 @@ class AgentState(BaseModel):
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
     answer_solar: Optional[str] = None
+    answer_gemma_meta: Dict[str, Any] = Field(default_factory=dict)
+    answer_solar_meta: Dict[str, Any] = Field(default_factory=dict)
 
     # 메타데이터
     conversation_id: str = ""
@@ -1531,6 +1533,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     )
     return {
         final_field: final_answer,
+        f"{final_field}_meta": stream_metrics,
+        # legacy compatibility
         "stream_meta": {final_field: stream_metrics},
     }
 
@@ -2817,6 +2821,7 @@ async def query_stream(payload: QueryRequest):
             log_section("REQUEST START", f"ID: {conversation_id}\nQ_len: {len(question)}")
 
         documents_used = []
+        done_meta_by_model: Dict[str, Dict[str, Any]] = {}
 
         try:
             async for event in graph.astream_events(inputs, version="v2"):
@@ -2839,7 +2844,9 @@ async def query_stream(payload: QueryRequest):
                     output = data.get("output", {})
                     model = "SOLAR" if node == "generate_answer_solar" else "GEMMA"
                     answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
-                    stream_meta = (output.get("stream_meta") or {}).get(answer_key, {})
+                    answer_meta_key = f"{answer_key}_meta"
+                    stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
+                    done_meta_by_model[model] = stream_meta or {}
                     final_text = (output.get(answer_key) or "").strip()
                     if stream_meta.get("fallback_used") and final_text:
                         emit_mode = stream_meta.get("fallback_emit_mode", "single_chunk")
@@ -2880,6 +2887,25 @@ async def query_stream(payload: QueryRequest):
             # log_section("REF PUSH", f"{_format_coq(conversation_id, question)}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
+
+            logger.info(
+                "[stream_done_metrics] request_id=%s solar=%s gemma=%s",
+                request_id,
+                {
+                    "deadline_exceeded": bool((done_meta_by_model.get("SOLAR") or {}).get("deadline_exceeded")),
+                    "char_limited": bool((done_meta_by_model.get("SOLAR") or {}).get("char_limited")),
+                    "fallback_used": bool((done_meta_by_model.get("SOLAR") or {}).get("fallback_used")),
+                    "elapsed_ms": (done_meta_by_model.get("SOLAR") or {}).get("elapsed_ms"),
+                    "ttft_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_ms"),
+                },
+                {
+                    "deadline_exceeded": bool((done_meta_by_model.get("GEMMA") or {}).get("deadline_exceeded")),
+                    "char_limited": bool((done_meta_by_model.get("GEMMA") or {}).get("char_limited")),
+                    "fallback_used": bool((done_meta_by_model.get("GEMMA") or {}).get("fallback_used")),
+                    "elapsed_ms": (done_meta_by_model.get("GEMMA") or {}).get("elapsed_ms"),
+                    "ttft_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_ms"),
+                },
+            )
 
             # 루프 종료 후
             yield f"data: {json.dumps({'status': 'done'})}\n\n"
