@@ -3,6 +3,8 @@
 
 작성일: 2026-02-09 (Asia/Seoul)
 
+세션 패치 템플릿: [docs/SESSION_PATCH_TEMPLATE.md](docs/SESSION_PATCH_TEMPLATE.md)
+
 ---
 
 ## 1. 목적
