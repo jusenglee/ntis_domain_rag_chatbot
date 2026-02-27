@@ -1,56 +1,153 @@
-# RAG 운영 RUNBOOK
+# RUNBOOK — NTIS Domain RAG 운영/트리아지
 
-> 운영 진입점 단일화: 상세 계약/추적 문서는 본 RUNBOOK를 기준으로 이동합니다.
+> 목적: 장애/품질 저하 시 “촉”이 아니라 **계약(Contract) + 트레이스**로 원인을 좁히기.
 
-## 관련 상세 문서
+---
 
-- 프로젝트 키 ENV 계약: [`project_key_env_contract.md`](./project_key_env_contract.md)
-- intent payload v2 스키마: [`intent_payload_v2_schema.md`](./intent_payload_v2_schema.md)
-- vLLM request_id 추적: [`vllm_request_id_tracking.md`](./vllm_request_id_tracking.md)
+## 1) 빠른 트리아지(3분 컷)
 
-## ENV 운영 기준표
+### Step 1 — Planner/Strategy 확인
+요청 1건에 대해 아래를 확보:
+- 원문 질의(query)
+- `NormalizedIntent` (의도 분석 결과)
+- `StrategySpec` (실행 전략 스냅샷)
 
-| 분류 | ENV | 기본값 | 허용값 | 영향 범위 | 대표 로그 키 |
-| --- | --- | --- | --- | --- | --- |
-| 계약/스키마 | `RAG_FAIL_FAST_SCHEMA` | `0` | `1/true/yes/y`(엄격), 그 외(경고 후 진행) | `intent_payload.v2` 수신 스키마 위반 시 에러 승격 여부 | `[RAG] intent_payload.v2 schema mismatch: ...` |
-| LOOKUP 정책 | `RAG_LOOKUP_FILTER_POLICY` | `hard` | `hard`, `off`, `must_one_then_should` (그 외 `hard`로 폴백) | LOOKUP 모드 server-side 필터 강도(필터 적용 여부/방식) | `RAG.STRATEGY.FILTER` |
-| LOOKUP 정책 | `RAG_LOOKUP_TITLE_FILTER_POLICY` | `soft` | `soft`, `hard` (그 외 `soft`로 폴백, detail 이외 요청의 `hard`는 강제 `soft`) | LOOKUP title_terms 적용 방식(`must` vs soft rerank/post-filter) | `RAG.LOOKUP.TITLE_FILTER_POLICY` |
-| 결과/계약 | `RAG_MIN_RERANKED_LOOKUP_ID` | `1` | `0` 이상의 정수 | LOOKUP + 명시적 ID 질의(`pjt_id/pjt_no`)의 최소 reranked 건수 clamp | `RAG.CONTRACT.MIN_RERANKED`, `info.contract_effective_min_reranked` |
-| 검색/랭킹 | `RAG_SEARCH_FILTER_MIN_CONF` | `0.6` | 실수(float) | SEARCH 모드에서 planner confidence 기반 필터 활성화 임계치 | `RAG.STRATEGY.FILTER` |
-| 검색/랭킹 | `RAG_TITLE_POST_FILTER_TOPN` | `80` | `1` 이상의 정수 | `lookup + title soft` 경로에서 title post-filter 후보군 크기 | `RAG.TITLE_POST_FILTER` |
-| 검색/랭킹 | `RAG_TITLE_SOFT_BOOST` | `8.0` | 실수(float) | title soft match 점수 가중치(rerank 가산점) | `RAG.TITLE_POST_FILTER` |
-| 키 매핑 | `RAG_KEY_PJT_ID` | `pjt_id` | 비어있지 않은 문자열 (`RAG_KEY_PJT_NO`와 동일값 금지) | 프로젝트 인스턴스 ID 필드 매핑(필터/JOIN/LOOKUP) | `[startup][key-mapping]` |
-| 키 매핑 | `RAG_KEY_PJT_NO` | `pjt_no` | 비어있지 않은 문자열 (`RAG_KEY_PJT_ID`와 동일값 금지) | 프로젝트 번호 그룹 키 필드 매핑(필터/JOIN/LOOKUP) | `[startup][key-mapping]` |
+체크:
+- mode가 `search|lookup|join` 중 하나인가?
+- join인데 relation이 비어있지 않은가?
+- lookup/join인데 `ids_map.pjt_id`와 `ids_map.pjt_no`가 섞이지 않았는가?
 
-## `RAG_EMPTY_RESULT_CONTRACT` 운영 대응 절차
+관련 계약/코드:
+- `rag_parts/planner_contract.py::planner_contract_mode()`
+- `rag_parts/planner_contract.py::validate_planner_contract()`
+- `rag_parts/filters.py::validate_planner_join_keys()`
 
-### 1) 사용자 메시지 변환 조건
+### Step 2 — 필터 컴파일 결과 확인
+- planner filter spec(JSON)이 어떤 Qdrant Filter로 컴파일됐는지 확인
+- SEARCH에서 must가 생기지 않았는지 확인(특히 사람/기관)
 
-아래 조건을 모두 만족하면 계약 오류를 사용자 친화 메시지로 변환합니다.
+관련 코드:
+- `rag_parts/planner_contract.py::StrategyCompiler.compile()`
+- `rag_parts/filters.py::compile_filter()` (filter_spec → Qdrant Filter)
 
-- 오류 코드가 `RAG_EMPTY_RESULT_CONTRACT`
-- 질의 모드가 `LOOKUP`
-- 아래 중 하나 충족
-  - `action == detail`
-  - `ids_map`에 명시적 ID(`pjt_id/pjt_no` 등)가 1개 이상 존재
+### Step 3 — Retrieval hit 분포 확인
+- dense hit / lexical hit이 0인지
+- 컬렉션별 hit 수가 정상인지
+- 하이브리드가 “사실상 꺼진” 상태인지(BM25-only 우회 등)
 
-변환 메시지:
+관련 코드:
+- `retrieval.py::dense_retrieve_hybrid_multi()`
 
-`요청하신 식별자(ID)에 해당하는 상세 정보를 찾지 못했습니다. ID를 다시 확인해 주세요.`
+### Step 4 — rerank/결과 계약 확인
+- reranked 결과가 너무 적거나 점수가 너무 낮으면 계약 실패가 난다.
 
-그 외 계약 오류는 일반 전략 오류 메시지로 응답합니다.
+관련 코드:
+- `rag_parts/result_contract.py::enforce_reranked_contract()` (에러코드: `RAG_EMPTY_RESULT_CONTRACT`)
 
-### 2) 운영자 확인 포인트
+---
 
-1. `question_analysis.mode/action/ids_map`가 위 변환 조건에 맞는지 확인
-2. `RAG.CONTRACT.MIN_RERANKED` 로그에서 `effective_min_reranked`, `clamp_reason=lookup_id_query` 여부 확인
-3. `info.contract_fail_reason`(예: `insufficient_hits`)으로 근본 원인 분류
-4. 키 매핑 배포 이슈 여부 확인: `[startup][key-mapping]`
+## 2) 관측성(로그) 최소 스키마 — “이거 없으면 디버깅이 안 됨”
+요청 단위 trace_id(예: request_id)로 아래를 한 덩어리로 남기세요.
 
-### 3) 1차 조치 가이드
+- input:
+  - query
+  - hint(있다면)
+- planner:
+  - normalized_intent
+  - strategy(mode/action/relation/join_key_mode/ids_map 요약)
+  - planner_confidence
+- compile:
+  - qdrant_filter 요약(must/should/min_should)
+  - hop1/hop2 filter(Join이면)
+  - topK/limit
+- retrieval:
+  - collection별 hit count
+  - dense/lexical 각각 hit, top score
+  - latency
+- rerank:
+  - rerank preset
+  - final_keep, 상위 N의 _final_total 통계(avg/max)
+- output:
+  - 반환 문서 수
+  - 컨텍스트 토큰/문자
+  - LLM finish_reason(스트리밍 이슈 추적)
 
-- ID 오타 가능성이 높으면 사용자에게 ID 재확인 요청
-- 대량 누락/반복 발생 시 아래를 순서대로 점검
-  1. `RAG_KEY_PJT_ID`, `RAG_KEY_PJT_NO` 매핑 충돌 여부
-  2. 인덱스 측 ID 필드 적재 상태
-  3. `RAG_MIN_RERANKED_LOOKUP_ID` 과도 설정 여부
+---
+
+## 3) 디버그를 켜는 방법(권장)
+### 3.1 RAG 내부 디버그
+- `RAG_DEBUG_LEVEL` / `RAG_DEBUG_TOPN` / `RAG_DEBUG_MAX_KWS`
+
+`rag_parts/debug.py`의 설명:
+- 0: off
+- 1: 핵심 결정/요약
+- 2: retrieve 요약
+- 3: 매우 자세히
+
+예:
+```bash
+export RAG_DEBUG_LEVEL=2
+export RAG_DEBUG_TOPN=5
+```
+
+### 3.2 결과 계약 실패 시 fallback 정책
+- `RAG_FORCE_FALLBACK_CHAT=true`면 계약 실패를 예외로 던지지 않고 reason을 반환(운영 정책용)
+
+---
+
+## 4) 자주 터지는 패턴과 처방
+
+### (A) JOIN인데 결과가 0 (또는 hop2=0)
+원인 후보:
+- join_key_mode/ids_map 불일치 (instance인데 pjt_no만 있음 등)
+- hop2 filter가 잘못된 key(pjt_id vs pjt_no)를 must로 만들었음
+- hop1에서 키 확장 실패
+
+즉시 확인:
+- `validate_planner_contract()` 위반 목록
+- `validate_resolved_join_keys()` / `validate_group_join_runtime_keys()`
+- hop1/hop2 filter key
+
+처방:
+- JOIN gate 규칙을 CONTRACT에 명문화하고, 위반 시 “조용한 fallback” 금지
+- hop1 확장 결과(키 리스트)를 로그에 남기기
+
+### (B) SEARCH인데 결과가 엉뚱하게 좁아짐
+원인 후보:
+- SEARCH에서 must 조건이 생김(특히 사람/기관)
+- filter_signal이 너무 공격적으로 켜짐
+
+즉시 확인:
+- compile 결과에서 must/should 구조
+- `search_filter_enabled`가 켜진 근거(filter_conf_ok 등)
+
+처방:
+- SEARCH hard filter 금지 규칙을 validator에서 강제(실패 처리)
+
+### (C) LOOKUP인데 결과가 과하게 넓음/오염됨
+원인 후보:
+- ID 기반인데 ID filter가 누락
+- 이름 기반인데 min_should gate가 없음
+
+즉시 확인:
+- ids_map 및 compile된 filter
+- `lookup_filter_policy`, `lookup_filter_min_should`
+
+처방:
+- LOOKUP 정책을 `hard` 또는 `must_one_then_should`로 고정(운영 정책)
+
+---
+
+## 5) 장애 대응 체크리스트(복붙)
+```txt
+[ ] query / hint / request_id 확보
+[ ] normalized_intent 출력 확보
+[ ] strategy(mode/action/relation/join_key_mode) 확인
+[ ] ids_map(pjt_id vs pjt_no XOR) 확인
+[ ] compile 결과(qdrant_filter must/should/min_should) 확인
+[ ] retrieval hit 분포(dense/lexical/collection별) 확인
+[ ] rerank score(avg/max) 확인
+[ ] contract_fail_reason / error_code 기록
+[ ] 재현용 최소 입력(질의+hint+env) 정리
+```
+

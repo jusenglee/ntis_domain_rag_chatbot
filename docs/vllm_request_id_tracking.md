@@ -1,74 +1,25 @@
-# vLLM request_id 추적 설정/검증
+# vLLM request_id 추적 가이드
 
-> 운영 RUNBOOK 진입점: [`RUNBOOK.md`](./RUNBOOK.md)
+이 레포는 vLLM(OpenAI-Compat) 경로에서 요청 단위 추적을 위해
+`--enable-request-id-headers` 옵션을 사용합니다.
 
+- 실행 스크립트: `scripts/vllm/start_vllm_solar.sh`
+- 핵심 플래그: `--enable-request-id-headers`
 
-이 저장소에서 vLLM 서버 실행 커맨드는 아래 경로의 엔트리포인트 스크립트로 관리합니다.
+## 1) 왜 필요한가?
+스트리밍 장애/지연(TTFT)처럼 “재현이 어려운” 문제는
+요청 단위 request_id가 없으면 서버/프록시/LLM 엔진 로그를 연결하기 어렵습니다.
 
-- `scripts/vllm/start_vllm_solar.sh`
+## 2) 운영 체크리스트
+- [ ] vLLM이 request id 헤더를 활성화했는지 확인
+- [ ] gateway(리버스프록시)가 해당 헤더를 보존하는지 확인
+- [ ] `server3.py`에서 request_id를 로그에 남기는지 확인
+- [ ] 장애 티켓에 query + request_id + timestamp를 함께 남기기
 
-## 반영된 실행 옵션
+## 3) 권장 로그 필드(요청 1건)
+- request_id
+- model / base_url
+- TTFT / total latency
+- streaming chunk count
+- finish_reason
 
-- `--enable-request-id-headers`
-  - 클라이언트의 `X-Request-Id`를 수신/응답 헤더에 반영합니다.
-- `--uvicorn-log-level debug`
-  - Uvicorn 레벨을 디버그로 설정합니다. (`trace`로 상향 가능)
-- `--disable-log-requests` **미사용**
-  - 요청 로그 기본 동작을 유지합니다.
-- `--max-log-len 512`
-  - 로그 길이 상한을 512로 설정합니다.
-
-## 런타임 엔진 로그 상세화(선택)
-
-운영 중 엔진 로그를 더 보고 싶다면 아래 환경 변수를 설정한 뒤 서버를 기동하세요.
-
-```bash
-export VLLM_LOGGING_LEVEL=DEBUG
-./scripts/vllm/start_vllm_solar.sh
-```
-
-## request_id 추적 검증
-
-1) 서버 기동
-
-```bash
-./scripts/vllm/start_vllm_solar.sh
-```
-
-2) 클라이언트 요청 (`X-Request-Id` 전달)
-
-```bash
-curl -i http://localhost:8010/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer EMPTY' \
-  -H 'X-Request-Id: req-ntis-001' \
-  -d '{
-    "model": "solar_102b",
-    "messages": [{"role": "user", "content": "ping"}],
-    "max_tokens": 16
-  }'
-```
-
-3) 확인 포인트
-
-- 응답 헤더에 `X-Request-Id: req-ntis-001`가 포함되는지 확인
-- 서버 로그에서 동일 request_id를 기준으로 요청 흐름 추적 가능 여부 확인
-
-
-
-## OpenAI 2.16.0 스트리밍 스모크 테스트
-
-`tests/test_openai_compat_stream_smoke.py`를 추가해 OpenAI Python 클라이언트(2.16.0)와 vLLM OpenAI-compatible `/v1/chat/completions` 스트리밍 회귀를 조기에 감지할 수 있습니다.
-
-실행 예시:
-
-```bash
-OPENAI_COMPAT_SMOKE=1 \
-OPENAI_COMPAT_BASE_URL=http://localhost:8010/v1 \
-OPENAI_COMPAT_MODEL=/model \
-pytest -q tests/test_openai_compat_stream_smoke.py
-```
-
-검증 항목:
-- stream=True 호출 시 chunk가 1개 이상 수신되는지
-- 수신 텍스트를 합친 최종 응답이 비어있지 않은지
