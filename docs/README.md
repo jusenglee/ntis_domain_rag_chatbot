@@ -77,3 +77,6 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 ## 4. 세션 로그(최근 5개만 유지)
 - 2026-02-27: DocOps 스캐폴드 생성(초기)
 
+## 5. 스트리밍 장애 정책(요약)
+- 스트림 실패 시 non-stream fallback 재시도는 하지 않는다(지연 최소화 우선).
+- 운영 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 중심으로 본다.

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from llm_streaming import run_llm_streaming, StreamFallbackPolicy
+from llm_streaming import run_llm_streaming
 from openai_compat_llm import EmptyStreamContentError
 
 
@@ -49,16 +49,14 @@ def test_run_llm_streaming_collects_chunks() -> None:
     asyncio.run(_run())
 
 
-def test_run_llm_streaming_uses_fallback_on_empty_stream_error() -> None:
+def test_run_llm_streaming_empty_stream_error_fail_fast() -> None:
     async def _run() -> None:
         llm = _FakeLLM(raises_empty=True, fallback_text="완성 응답")
-        text, metrics = await run_llm_streaming(
-            llm,
-            [HumanMessage(content="hi")],
-            fallback_policy=StreamFallbackPolicy(allow_empty_stream_fallback=True),
-        )
-        assert text == "완성 응답"
-        assert metrics["fallback_used"] is True
+        try:
+            await run_llm_streaming(llm, [HumanMessage(content="hi")])
+            assert False, "EmptyStreamContentError가 전파되어야 합니다."
+        except EmptyStreamContentError:
+            pass
 
     asyncio.run(_run())
 
@@ -113,7 +111,7 @@ def test_run_llm_streaming_reasoning_filtered_and_metrics() -> None:
     asyncio.run(_run())
 
 
-def test_run_llm_streaming_deadline_then_fallback_without_notice() -> None:
+def test_run_llm_streaming_deadline_on_reasoning_only_returns_empty_result() -> None:
     async def _run() -> None:
         llm = _FakeLLM(chunks=[("사고", "reasoning")], fallback_text="완성형")
         text, metrics = await run_llm_streaming(
@@ -123,9 +121,10 @@ def test_run_llm_streaming_deadline_then_fallback_without_notice() -> None:
             gen_deadline_ms=1,
         )
         assert metrics["deadline_exceeded"] is True
-        assert metrics["fallback_used"] is True
-        assert metrics["content_emitted_chunks"] == 1
+        assert metrics["fallback_used"] is False
+        assert metrics["fallback_emit_mode"] == "disabled"
+        assert metrics["content_emitted_chunks"] == 0
         assert metrics["stream_content_emitted_chunks"] == 0
-        assert text == "완성형"
+        assert text == ""
 
     asyncio.run(_run())
