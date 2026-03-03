@@ -202,3 +202,28 @@
   - 하위 호환을 위해 `ttft_ms`는 `ttft_content_ms`와 동일 의미로 유지한다.
 - deadline 초과여도 `stream_content_emitted_chunks == 0`이면 fallback(완성 응답) 라우팅을 허용한다.
 - truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착하며, fallback으로 완성 응답을 얻은 경우에는 부착하지 않는다.
+
+
+## Streaming Contract (vLLM / OpenAI-Compatible)
+
+### Invariant: User-facing output MUST be "content-only"
+- vLLM Solar 스트리밍에서 `choices[0].delta.reasoning` (또는 `reasoning_content`)가 먼저 출력될 수 있다.
+- **사용자에게 노출되는 텍스트는 반드시 `choices[0].delta.content`로부터만 구성**되어야 한다.
+- reasoning 텍스트는 어떤 경우에도 사용자 출력에 포함하지 않는다.
+
+### Invariant: Stream field tagging
+- 스트리밍 chunk는 `additional_kwargs["stream_field"]`로 유형을 태깅해야 한다.
+  - `"reasoning"`: keepalive/관측용 (final_text 누적 금지)
+  - `"content"`: 최종 답변 텍스트 (final_text 누적 허용)
+
+### Invariant: EmptyStream 판단 기준
+- 스트리밍에서 `"content"`가 한 번도 나오지 않으면 **EmptyStreamContentError**로 간주한다.
+  - reasoning만 나온 것은 “최종답변 없음”으로 실패 처리한다.
+
+### Invariant: TTFT metrics are split
+- `ttft_any_ms`: reasoning 포함 “첫 텍스트(chunk)” 기준
+- `ttft_content_ms`: `content`가 처음 나타난 시점 기준
+- 운영/트리아지는 `ttft_any_ms`(스트림 정지 여부)와 `ttft_content_ms`(content 지연)로 분리 판단한다.
+
+### Forbidden: Exposing reasoning to clients
+- `/query/stream` 등 사용자 스트림 응답에서 `stream_field=="reasoning"`인 chunk는 반드시 drop 한다.

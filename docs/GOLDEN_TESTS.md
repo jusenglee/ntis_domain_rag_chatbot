@@ -52,3 +52,29 @@
 
 > 실제 retrieval(Qdrant) 없이도 “전략 결정/계약 위반”은 충분히 회귀 테스트 가능합니다.
 
+
+
+## Streaming Invariants (Solar vLLM)
+
+### GT-SOLAR-STREAM-001: Reasoning-first stream must not be treated as dead
+- Preconditions
+  - vLLM Solar streaming에서 reasoning 토큰이 먼저 출력되고 content가 뒤늦게 출력되는 모델/설정
+- Expected
+  - `ttft_any_ms`는 수 초 이내로 기록된다(스트림 시작 확인)
+  - `ttft_content_ms`는 늦게 기록될 수 있으나, content가 나오면 최종 응답이 정상 생성된다
+  - 사용자 출력에는 reasoning이 포함되지 않는다
+- Assert
+  - `reasoning_chars > 0`
+  - `content_chars > 0` (정상 케이스)
+  - `/query/stream` SSE payload에 reasoning chunk가 포함되지 않음
+
+### GT-SOLAR-STREAM-002: Content never appears → fallback/empty handling
+- Preconditions
+  - 스트림에서 reasoning만 나오고 content가 끝까지 나오지 않는 케이스
+- Expected
+  - EmptyStreamContentError → fallback policy에 따라 non-stream 대체 또는 에러 처리
+  - “안내문만 단독 반환”은 금지
+- Assert
+  - `stream_content_emitted_chunks == 0`
+  - `fallback_used == True` (`allow_empty_stream_fallback=True`일 때)
+  - 최종 `final_text`가 빈 문자열이 아님

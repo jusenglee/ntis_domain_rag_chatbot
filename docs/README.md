@@ -77,3 +77,50 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 ## 4. 세션 로그(최근 5개만 유지)
 - 2026-02-27: DocOps 스캐폴드 생성(초기)
 
+
+
+## Current Status
+
+### ✅ Solar(vLLM) Streaming Stability (P0)
+- Solar(vLLM) OpenAI-compatible streaming에서 **reasoning/content 분리 출력**이 확인됨.
+- 스트림에서 `choices[0].delta.reasoning(/reasoning_content)`가 먼저 길게 나오고, 최종 답변은 `choices[0].delta.content`로 뒤늦게 출력됨.
+- 기존 파서가 `delta.content`만 읽어 TTFT 가드에서 끊기던 문제를 해결하기 위해:
+  - `openai_compat_llm.py`: reasoning/content를 모두 파싱하고 `stream_field` 태깅
+  - `llm_streaming.py`: reasoning은 keepalive/TTFT용으로만 처리하고 final_text에는 content만 누적
+  - `server3.py`: /query/stream에서 reasoning chunk를 클라이언트로 보내지 않도록 필터링
+  - TTFT를 any/content로 분리하여 관측/트리아지 개선
+
+### Known Good Behavior
+- 스트리밍 SSE에서 `Content-Type: text/event-stream` + `object=chat.completion.chunk` 유지
+- reasoning이 먼저 나오더라도 content가 나오기 전까지 스트림을 "죽었다"고 판단하지 않음
+- 사용자 출력은 content만(Reasoning은 절대 노출 금지)
+
+## Backlog
+
+### P0
+- [ ] Solar 모델에서 content가 지나치게 늦게 시작되는 케이스 튜닝
+  - 옵션/템플릿/토큰예산/가드 정책을 기반으로 content 지연을 줄이는 실험
+
+### P1
+- [ ] Stream 메트릭을 Prometheus/로그에 일관된 필드로 노출 (`ttft_any_ms`, `ttft_content_ms`, `reasoning_chars`, `content_chars`)
+- [ ] merge 정책에서 Solar 실패/경고 분류(`stream stalled` vs `content delayed`) 기반 규칙 고도화
+
+## Session Log (Latest)
+
+### 2026-03-03 Solar(vLLM) streaming output parser / TTFT 안정화
+- 원인
+  - Solar(vLLM)이 스트리밍에서 reasoning을 `delta.reasoning`로 먼저 방출하고 `delta.content`는 뒤늦게 생성
+  - 기존 구현이 `delta.content`만 "텍스트"로 간주하여 TTFT 가드(예: 4500ms)에서 content가 나오기 전에 중단됨
+- 해결
+  - `openai_compat_llm.py`
+    - `STREAM_FIELD_KEY="stream_field"` 추가
+    - `delta.reasoning`/`delta.reasoning_content` 및 `delta.content`를 각각 `AIMessageChunk.additional_kwargs[stream_field]`로 태깅하여 스트림으로 전달
+    - close coroutine 안전 처리(awaitable close/aclose)
+    - EmptyStream 판단은 **content 기준** 유지(최종답이 없으면 실패)
+  - `llm_streaming.py`
+    - `stream_field == "reasoning"`은 keepalive/metrics만, final_text 누적 금지
+    - `ttft_any_ms`(첫 reasoning 포함) / `ttft_content_ms`(첫 content) 분리
+    - content=0이면 deadline_exceeded여도 fallback 허용("안내문만 반환" 방지)
+  - `server3.py`
+    - /query/stream에서 `stream_field=="reasoning"` chunk는 skip
+    - stream_done_metrics/solar_stream_guard에서 any vs content 기준 분리 로그

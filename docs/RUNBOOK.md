@@ -152,3 +152,43 @@ export RAG_DEBUG_TOPN=5
 [ ] 재현용 최소 입력(질의+hint+env) 정리
 ```
 
+
+
+## Incident: Solar(vLLM) streaming returns empty/short response
+
+### Symptoms
+- 스트리밍이 200 OK인데 사용자 출력이 비거나 “안내문만” 반환됨
+- 로그 예시:
+  - `ttft_ms=None` 또는 `emitted_chunks=0`
+  - `solar_stream_guard`에서 `deadline_*` / `content_delayed` / `stream_not_started_or_stalled`
+
+### Root Causes
+1) vLLM Solar가 reasoning을 먼저 `delta.reasoning(/reasoning_content)`로 길게 출력하고,
+   최종 답변은 늦게 `delta.content`로 출력한다.
+2) 파서가 content만 “텍스트”로 간주하면 content 등장 전 TTFT deadline에 걸려 중단될 수 있다.
+
+### Triage Checklist (Order)
+1) **SSE 여부 확인**
+   - 응답 헤더: `Content-Type: text/event-stream`
+   - 이벤트 object: `chat.completion.chunk`
+2) **Stream field 분포 확인**
+   - `reasoning_chars > 0`이고 `content_chars == 0`이면 “content 미시작/미생성” 케이스
+3) **TTFT 분리 확인**
+   - `ttft_any_ms`가 None이면 → 스트림 시작 자체가 stall(네트워크/서버)
+   - `ttft_any_ms`는 있는데 `ttft_content_ms`가 None이거나 지연이면 → content delayed
+4) **Fallback 여부 확인**
+   - `fallback_used == True`이고 `stream_content_emitted_chunks == 0`이면
+     → 스트림에서 content가 안 나와 non-stream fallback으로 대체한 케이스
+
+### Observability Fields
+- `ttft_any_ms`, `ttft_content_ms`
+- `reasoning_chars`, `content_chars`
+- `deadline_exceeded`, `ttft_deadline_exceeded`, `gen_deadline_exceeded`
+- `fallback_used`, `stream_content_emitted_chunks`, `content_emitted_chunks`
+
+### 대응 가이드
+- content delayed가 잦으면:
+  - `gen_deadline_ms` / `ttft_deadline_ms` 정책 조정
+  - vLLM Solar 설정(템플릿/토큰 예산/추론 분리 모드) 재검토
+- stream_not_started_or_stalled이면:
+  - vLLM 서버 상태, 네트워크, 프록시 버퍼링 여부 확인
