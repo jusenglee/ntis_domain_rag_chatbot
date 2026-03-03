@@ -10,8 +10,9 @@ from openai_compat_llm import EmptyStreamContentError
 
 
 class _Chunk:
-    def __init__(self, content: str):
-        self.message = SimpleNamespace(content=content)
+    def __init__(self, content: str, stream_field: str | None = None):
+        additional_kwargs = {} if stream_field is None else {"stream_field": stream_field}
+        self.message = SimpleNamespace(content=content, additional_kwargs=additional_kwargs)
 
 
 class _FakeLLM:
@@ -24,10 +25,14 @@ class _FakeLLM:
     async def astream(self, messages, **kwargs):
         if self._raises_empty:
             raise EmptyStreamContentError("empty")
-        for idx, c in enumerate(self._chunks):
+        for idx, chunk in enumerate(self._chunks):
             if idx < len(self._sleep_before_chunks):
                 await asyncio.sleep(self._sleep_before_chunks[idx])
-            yield _Chunk(c)
+            if isinstance(chunk, tuple):
+                content, stream_field = chunk
+                yield _Chunk(content, stream_field=stream_field)
+            else:
+                yield _Chunk(chunk)
 
     async def ainvoke(self, messages, **kwargs):
         return SimpleNamespace(content=self._fallback_text)
@@ -90,5 +95,37 @@ def test_run_llm_streaming_gen_timeout_phase_and_short_output_guard() -> None:
         assert metrics["emitted_chars"] == len("짧다")
         assert metrics["short_output_guard_triggered"] is True
         assert "응답 시간을 제한" in text
+
+    asyncio.run(_run())
+
+
+def test_run_llm_streaming_reasoning_filtered_and_metrics() -> None:
+    async def _run() -> None:
+        llm = _FakeLLM(chunks=[("생각중", "reasoning"), ("정답", "content")])
+        text, metrics = await run_llm_streaming(llm, [HumanMessage(content="hi")])
+        assert text == "정답"
+        assert metrics["reasoning_chars"] == len("생각중")
+        assert metrics["content_chars"] == len("정답")
+        assert metrics["content_emitted_chunks"] == 1
+        assert metrics["ttft_any_ms"] is not None
+        assert metrics["ttft_content_ms"] is not None
+
+    asyncio.run(_run())
+
+
+def test_run_llm_streaming_deadline_then_fallback_without_notice() -> None:
+    async def _run() -> None:
+        llm = _FakeLLM(chunks=[("사고", "reasoning")], fallback_text="완성형")
+        text, metrics = await run_llm_streaming(
+            llm,
+            [HumanMessage(content="hi")],
+            ttft_deadline_ms=100,
+            gen_deadline_ms=1,
+        )
+        assert metrics["deadline_exceeded"] is True
+        assert metrics["fallback_used"] is True
+        assert metrics["content_emitted_chunks"] == 1
+        assert metrics["stream_content_emitted_chunks"] == 0
+        assert text == "완성형"
 
     asyncio.run(_run())

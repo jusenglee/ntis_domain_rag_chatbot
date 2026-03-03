@@ -189,3 +189,16 @@
 - [ ] SEARCH에서 사람/기관이 must로 들어가면 즉시 계약 위반으로 실패하는가?
 - [ ] 결과가 0일 때(혹은 점수가 낮을 때) 어떤 정책으로 fallback 하는지 명문화돼 있는가?
 
+
+
+## 8) LLM 스트리밍 출력 계약
+
+- 청크 파싱은 `message.content` + `message.additional_kwargs.stream_field`를 기준으로 한다.
+- `stream_field=reasoning` 청크는 사용자 응답으로 emit/append하지 않고, `reasoning_chars`로만 집계한다.
+- `stream_field=content` 또는 `None`만 최종 응답에 포함한다.
+- TTFT는 두 축으로 기록한다.
+  - `ttft_any_ms`: reasoning 포함 첫 청크
+  - `ttft_content_ms`: 실제 사용자 content 첫 청크
+  - 하위 호환을 위해 `ttft_ms`는 `ttft_content_ms`와 동일 의미로 유지한다.
+- deadline 초과여도 `stream_content_emitted_chunks == 0`이면 fallback(완성 응답) 라우팅을 허용한다.
+- truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착하며, fallback으로 완성 응답을 얻은 경우에는 부착하지 않는다.
