@@ -230,9 +230,9 @@ def _deserialize_history(payload: Any) -> List[BaseMessage]:
 
 
 
-def _extract_stream_chunk_text_and_field(chunk: Any) -> Tuple[str, Optional[str]]:
+def _extract_stream_chunk_text_and_field(chunk: Any) -> Tuple[Optional[str], Optional[str]]:
     msg = getattr(chunk, "message", None) or chunk
-    text = getattr(msg, "content", "") or ""
+    text = getattr(msg, "content", None)
     ak = getattr(msg, "additional_kwargs", {}) or {}
     return text, ak.get("stream_field")
 
@@ -3014,14 +3014,18 @@ async def query_stream(payload: QueryRequest):
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
-                    if stream_field in {None, "content"} and chunk_text:
+                    if stream_field == "reasoning":
+                        continue
+                    if chunk_text:
                         yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
-                    if stream_field in {None, "content"} and chunk_text:
+                    if stream_field == "reasoning":
+                        continue
+                    if chunk_text:
                         yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
