@@ -1,3 +1,4 @@
+import inspect
 import logging
 import time
 from typing import Any, List, Optional, AsyncIterator
@@ -10,6 +11,7 @@ from pydantic import PrivateAttr
 
 
 logger = logging.getLogger(__name__)
+STREAM_FIELD_KEY = "stream_field"
 
 
 class OpenAICompatStreamError(RuntimeError):
@@ -138,12 +140,13 @@ class OpenAICompatChatModel(BaseChatModel):
             has_close,
         )
 
-        emitted = False
+        emitted_content_chunk = False
         fallback_used = False
         chunk_n = 0
-        emitted_chunks = 0
-        char_n = 0
-        ttft_ms = None
+        emitted_any_chunk_n = 0
+        emitted_content_chunk_n = 0
+        content_char_n = 0
+        ttft_content_ms = None
         last_finish_reason = None
         closed = False
         primary_exc: Optional[BaseException] = None
@@ -156,26 +159,41 @@ class OpenAICompatChatModel(BaseChatModel):
                     continue
                 last_finish_reason = getattr(chunk.choices[0], "finish_reason", None) or last_finish_reason
                 delta = chunk.choices[0].delta
-                text = getattr(delta, "content", None)
-                if text:
-                    emitted = True
-                    emitted_chunks += 1
-                    if ttft_ms is None:
-                        ttft_ms = (time.monotonic() - t0) * 1000
-                    char_n += len(text)
-                    yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+                content = getattr(delta, "content", None)
+                reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+                if reasoning and not content:
+                    emitted_any_chunk_n += 1
+                    yield ChatGenerationChunk(
+                        message=AIMessageChunk(
+                            content=reasoning,
+                            additional_kwargs={STREAM_FIELD_KEY: "reasoning"},
+                        )
+                    )
+                elif content:
+                    emitted_content_chunk = True
+                    emitted_any_chunk_n += 1
+                    emitted_content_chunk_n += 1
+                    if ttft_content_ms is None:
+                        ttft_content_ms = (time.monotonic() - t0) * 1000
+                    content_char_n += len(content)
+                    yield ChatGenerationChunk(
+                        message=AIMessageChunk(
+                            content=content,
+                            additional_kwargs={STREAM_FIELD_KEY: "content"},
+                        )
+                    )
                 else:
                     logger.debug(
-                        "[openai_compat_llm] Non-text stream chunk received: model=%s base_url=%s finish_reason=%s delta=%s",
+                        "[openai_compat_llm] Non-content stream chunk received: model=%s base_url=%s finish_reason=%s delta=%s",
                         self.model_name,
                         self.base_url,
                         getattr(chunk.choices[0], "finish_reason", None),
                         delta,
                     )
 
-            if not emitted:
+            if not emitted_content_chunk:
                 raise EmptyStreamContentError(
-                    "No text content emitted in stream. "
+                    "No content emitted in stream. "
                     f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}"
                 )
         except BaseException as exc:
@@ -187,7 +205,9 @@ class OpenAICompatChatModel(BaseChatModel):
                     await stream.aclose()
                     closed = True
                 elif has_close:
-                    stream.close()
+                    close_result = stream.close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
                     closed = True
             except Exception as exc:
                 close_exc = exc
@@ -202,13 +222,14 @@ class OpenAICompatChatModel(BaseChatModel):
 
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_ms=%s chunk_n=%d emitted_chunks=%d char_n=%d finish_reason=%s fallback=%s closed=%s model=%s base_url=%s",
+                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_content_ms=%s chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d content_char_n=%d finish_reason=%s fallback=%s closed=%s model=%s base_url=%s",
                 request_id,
                 dt_ms,
-                f"{ttft_ms:.1f}" if ttft_ms is not None else "none",
+                f"{ttft_content_ms:.1f}" if ttft_content_ms is not None else "none",
                 chunk_n,
-                emitted_chunks,
-                char_n,
+                emitted_any_chunk_n,
+                emitted_content_chunk_n,
+                content_char_n,
                 last_finish_reason,
                 fallback_used,
                 closed,
