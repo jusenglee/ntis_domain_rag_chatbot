@@ -71,7 +71,7 @@
   - 반환 문서 수
   - 컨텍스트 토큰/문자
   - LLM finish_reason(스트리밍 이슈 추적)
-  - 스트리밍 메트릭: `ttft_any_ms`, `ttft_content_ms`, `ttft_ms(=content)`, `reasoning_chars`, `content_chars`, `stream_content_emitted_chunks`, `fallback_used`, `deadline_exceeded`, `char_limited`
+  - 스트리밍 메트릭: `ttft_any_ms`, `ttft_content_ms`, `ttft_ms(=content)`, `reasoning_chars`, `content_chars`, `stream_content_emitted_chunks`, `deadline_exceeded`, `char_limited`, `short_output_guard_triggered`
 
 ---
 
@@ -93,6 +93,7 @@ export RAG_DEBUG_TOPN=5
 
 ### 3.2 결과 계약 실패 시 fallback 정책
 - `RAG_FORCE_FALLBACK_CHAT=true`면 계약 실패를 예외로 던지지 않고 reason을 반환(운영 정책용)
+- 스트리밍 실패(`EmptyStreamContentError`, `stream_content_emitted_chunks == 0`) 시에는 non-stream 재시도를 하지 않는다. 장애 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 조합으로 수행한다.
 
 ---
 
