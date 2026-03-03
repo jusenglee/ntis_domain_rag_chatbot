@@ -228,6 +228,14 @@ def _deserialize_history(payload: Any) -> List[BaseMessage]:
             history.append(AIMessage(content=content))
     return history
 
+
+
+def _extract_stream_chunk_text_and_field(chunk: Any) -> Tuple[str, Optional[str]]:
+    msg = getattr(chunk, "message", None) or chunk
+    text = getattr(msg, "content", "") or ""
+    ak = getattr(msg, "additional_kwargs", {}) or {}
+    return text, ak.get("stream_field")
+
 def _normalize_none_string(value: Any) -> Any:
     if isinstance(value, str) and value.strip() == "None":
         return None
@@ -1610,7 +1618,9 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         or solar_meta.get("ttft_deadline_exceeded")
         or solar_meta.get("gen_deadline_exceeded")
     )
-    if deadline_exceeded:
+    stream_content_emitted_chunks = int(solar_meta.get("stream_content_emitted_chunks") or 0)
+    fallback_from_empty_content = bool(solar_meta.get("fallback_used")) and stream_content_emitted_chunks == 0
+    if deadline_exceeded and not fallback_from_empty_content:
         solar_fail_reasons.append("deadline_exceeded")
 
     # 2) char_limited
@@ -2959,14 +2969,16 @@ async def query_stream(payload: QueryRequest):
                 # Answer 스트리밍 - SOLAR
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
+                    if stream_field in {None, "content"} and chunk_text:
+                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
-                    if hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
+                    if stream_field in {None, "content"} and chunk_text:
+                        yield f"data: {json.dumps({'model' : 'GEMMA', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
                     output = data.get("output", {})
@@ -3025,6 +3037,10 @@ async def query_stream(payload: QueryRequest):
                     "fallback_used": bool((done_meta_by_model.get("SOLAR") or {}).get("fallback_used")),
                     "elapsed_ms": (done_meta_by_model.get("SOLAR") or {}).get("elapsed_ms"),
                     "ttft_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_ms"),
+                    "ttft_any_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_any_ms"),
+                    "ttft_content_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_content_ms"),
+                    "reasoning_chars": (done_meta_by_model.get("SOLAR") or {}).get("reasoning_chars"),
+                    "content_chars": (done_meta_by_model.get("SOLAR") or {}).get("content_chars"),
                 },
                 {
                     "deadline_exceeded": bool((done_meta_by_model.get("GEMMA") or {}).get("deadline_exceeded")),
@@ -3032,6 +3048,10 @@ async def query_stream(payload: QueryRequest):
                     "fallback_used": bool((done_meta_by_model.get("GEMMA") or {}).get("fallback_used")),
                     "elapsed_ms": (done_meta_by_model.get("GEMMA") or {}).get("elapsed_ms"),
                     "ttft_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_ms"),
+                    "ttft_any_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_any_ms"),
+                    "ttft_content_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_content_ms"),
+                    "reasoning_chars": (done_meta_by_model.get("GEMMA") or {}).get("reasoning_chars"),
+                    "content_chars": (done_meta_by_model.get("GEMMA") or {}).get("content_chars"),
                 },
             )
 
