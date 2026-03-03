@@ -21,9 +21,11 @@ def _parse_chunk_fields(chunk: Any) -> Tuple[str, Optional[str]]:
 
 @dataclass(frozen=True)
 class StreamFallbackPolicy:
-    allow_empty_stream_fallback: bool = True
-    emit_mode: str = "single_chunk"  # single_chunk | final_only
-    user_notice: str = "스트리밍이 불안정하여 완성된 응답으로 대체했습니다."
+    # Deprecated: non-stream fallback 정책은 2026-03 기준 비활성화되었으며,
+    # 하위 호환을 위해 필드만 유지합니다(값은 run_llm_streaming에서 사용하지 않음).
+    allow_empty_stream_fallback: Optional[bool] = None
+    emit_mode: Optional[str] = None
+    user_notice: Optional[str] = None
 
 
 async def run_llm_streaming(
@@ -69,7 +71,6 @@ async def run_llm_streaming(
     ttft_deadline_exceeded = False
     gen_deadline_exceeded = False
     char_limited = False
-    fallback_used = False
     short_output_guard_triggered = False
 
     stream_iter = llm.astream(list(messages), **stream_kwargs)
@@ -138,9 +139,8 @@ async def run_llm_streaming(
             gen_deadline_exceeded = True
             timeout_phase = "gen"
     except EmptyStreamContentError:
-        if not fallback_policy.allow_empty_stream_fallback:
-            raise
-        fallback_used = True
+        # 빈 스트림은 상위 레이어에서 fail-fast 처리하도록 전파한다.
+        raise
     except Exception:
         logger.exception("run_llm_streaming failed: request_id=%s", request_id)
         raise
@@ -150,17 +150,6 @@ async def run_llm_streaming(
             await aclose()
 
     stream_content_emitted_chunks = content_emitted_chunks
-
-    if content_emitted_chunks == 0 and fallback_policy.allow_empty_stream_fallback:
-        fallback_used = True
-        response = await llm.ainvoke(list(messages), max_tokens_hint=max_tokens_hint, request_id=request_id)
-        fallback_text = (getattr(response, "content", "") or "").strip()
-        if fallback_text:
-            chunks.append(fallback_text)
-            content_emitted_chunks = 1
-            content_chars = len(fallback_text)
-            emitted_chunks = content_emitted_chunks
-            emitted_chars = content_chars
 
     # 생성 제한으로 끊긴 경우, 지나치게 짧은 출력은 별도 정책(재시도/폴백)으로 라우팅할 수 있는 분기 포인트
     short_output_guard_min_chars = 40
@@ -188,13 +177,14 @@ async def run_llm_streaming(
         "ttft_deadline_exceeded": ttft_deadline_exceeded,
         "gen_deadline_exceeded": gen_deadline_exceeded,
         "char_limited": char_limited,
-        "fallback_used": fallback_used,
-        "fallback_emit_mode": fallback_policy.emit_mode,
+        # Deprecated metric: non-stream fallback 제거 이후 상수값으로 유지하고 점진 제거 예정.
+        "fallback_used": False,
+        "fallback_emit_mode": None,
         "short_output_guard_triggered": short_output_guard_triggered,
         "short_output_guard_min_chars": short_output_guard_min_chars,
     }
 
-    is_partial_content_truncation = (deadline_exceeded or char_limited) and content_emitted_chunks > 0 and not fallback_used
+    is_partial_content_truncation = (deadline_exceeded or char_limited) and content_emitted_chunks > 0
     if deadline_exceeded and is_partial_content_truncation:
         final_text = (final_text + "\n\n(안내: 응답 시간을 제한하여 일부만 반환했습니다.)").strip()
     elif char_limited and is_partial_content_truncation:

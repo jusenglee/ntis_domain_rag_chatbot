@@ -200,5 +200,6 @@
   - `ttft_any_ms`: reasoning 포함 첫 청크
   - `ttft_content_ms`: 실제 사용자 content 첫 청크
   - 하위 호환을 위해 `ttft_ms`는 `ttft_content_ms`와 동일 의미로 유지한다.
-- deadline 초과여도 `stream_content_emitted_chunks == 0`이면 fallback(완성 응답) 라우팅을 허용한다.
-- truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착하며, fallback으로 완성 응답을 얻은 경우에는 부착하지 않는다.
+- `EmptyStreamContentError`(빈 스트림)는 삼키지 않고 상위 레이어로 전파한다(fail-fast).
+- deadline 초과/무컨텐츠 시 non-stream fallback(`ainvoke`)으로 대체하지 않으며, 빈 문자열을 반환할 수 있다.
+- truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착한다(폴백 여부와 무관).

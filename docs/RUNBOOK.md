@@ -71,7 +71,8 @@
   - 반환 문서 수
   - 컨텍스트 토큰/문자
   - LLM finish_reason(스트리밍 이슈 추적)
-  - 스트리밍 메트릭: `ttft_any_ms`, `ttft_content_ms`, `ttft_ms(=content)`, `reasoning_chars`, `content_chars`, `stream_content_emitted_chunks`, `fallback_used`, `deadline_exceeded`, `char_limited`
+  - 스트리밍 메트릭: `ttft_any_ms`, `ttft_content_ms`, `ttft_ms(=content)`, `reasoning_chars`, `content_chars`, `stream_content_emitted_chunks`, `deadline_exceeded`, `char_limited`
+  - `fallback_used=false`, `fallback_emit_mode=None`는 하위 호환용 고정 메트릭(점진 제거 예정)
 
 ---
 

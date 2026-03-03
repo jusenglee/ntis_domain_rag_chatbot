@@ -61,9 +61,7 @@ export SOLAR_VLLM_BASE_URL=http://vllm_solar:8010/v1
 export SOLAR_VLLM_API_KEY=EMPTY
 export SOLAR_VLLM_TIMEOUT=120
 
-# 빈 스트림 fallback 서버 정책
-export STREAM_FALLBACK_ALLOW=true
-# single_chunk | final_only (현재 single_chunk 권장)
-export STREAM_FALLBACK_EMIT_MODE=single_chunk
-export STREAM_FALLBACK_USER_NOTICE="스트리밍이 불안정하여 완성된 응답으로 대체했습니다."
+# 빈 스트림 fallback 정책(Deprecated)
+# - STREAM_FALLBACK_* 환경변수는 더 이상 사용되지 않습니다.
+# - 빈 스트림/무컨텐츠는 non-stream fallback 없이 fail-fast 또는 빈 응답으로 처리합니다.
 ```
