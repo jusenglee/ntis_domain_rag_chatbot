@@ -1541,35 +1541,67 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         fallback_policy=fallback_policy,
     )
 
-    if stream_metrics.get("ttft_deadline_exceeded"):
-        logger.warning(
-            "[solar_stream_guard] request_id=%s ttft_deadline_ms=%s exceeded; truncated_chars=%s",
-            state.request_id,
-            SOLAR_TTFT_DEADLINE_MS,
-            len(final_answer),
-        )
-    elif stream_metrics.get("gen_deadline_exceeded"):
-        logger.warning(
-            "[solar_stream_guard] request_id=%s gen_deadline_ms=%s exceeded; truncated_chars=%s emitted_chars=%s",
-            state.request_id,
-            SOLAR_GEN_DEADLINE_MS,
-            len(final_answer),
-            stream_metrics.get("emitted_chars"),
-        )
-        if stream_metrics.get("short_output_guard_triggered"):
+    ttft_any_ms = stream_metrics.get("ttft_any_ms")
+    ttft_content_ms = stream_metrics.get("ttft_content_ms")
+    reasoning_chars = int(stream_metrics.get("reasoning_chars") or 0)
+    content_chars = int(stream_metrics.get("content_chars") or 0)
+
+    logger.info(
+        "[stream_metrics] request_id=%s model=%s ttft_any_ms=%s ttft_content_ms=%s reasoning_chars=%s content_chars=%s",
+        state.request_id,
+        model_name,
+        ttft_any_ms,
+        ttft_content_ms,
+        reasoning_chars,
+        content_chars,
+    )
+
+    if model_name == "solar_vllm_0":
+        content_delay_ms: Optional[float] = None
+        if ttft_any_ms is not None and ttft_content_ms is not None:
+            content_delay_ms = round(ttft_content_ms - ttft_any_ms, 1)
+
+        if ttft_any_ms is None:
             logger.warning(
-                "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
+                "[solar_stream_guard] request_id=%s category=stream_not_started_or_stalled ttft_any_ms=%s ttft_content_ms=%s ttft_deadline_exceeded=%s deadline_exceeded=%s",
                 state.request_id,
-                stream_metrics.get("short_output_guard_min_chars"),
+                ttft_any_ms,
+                ttft_content_ms,
+                bool(stream_metrics.get("ttft_deadline_exceeded")),
+                bool(stream_metrics.get("deadline_exceeded")),
+            )
+        elif ttft_content_ms is None or (content_delay_ms is not None and content_delay_ms >= 500):
+            logger.warning(
+                "[solar_stream_guard] request_id=%s category=content_delayed ttft_any_ms=%s ttft_content_ms=%s content_delay_ms=%s reasoning_chars=%s content_chars=%s",
+                state.request_id,
+                ttft_any_ms,
+                ttft_content_ms,
+                content_delay_ms,
+                reasoning_chars,
+                content_chars,
+            )
+        elif stream_metrics.get("gen_deadline_exceeded"):
+            logger.warning(
+                "[solar_stream_guard] request_id=%s category=gen_deadline_exceeded gen_deadline_ms=%s truncated_chars=%s emitted_chars=%s",
+                state.request_id,
+                SOLAR_GEN_DEADLINE_MS,
+                len(final_answer),
                 stream_metrics.get("emitted_chars"),
             )
-    elif stream_metrics.get("char_limited"):
-        logger.warning(
-            "[solar_stream_guard] request_id=%s max_chars=%s exceeded; truncated_chars=%s",
-            state.request_id,
-            SOLAR_STREAM_MAX_CHARS,
-            len(final_answer),
-        )
+            if stream_metrics.get("short_output_guard_triggered"):
+                logger.warning(
+                    "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
+                    state.request_id,
+                    stream_metrics.get("short_output_guard_min_chars"),
+                    stream_metrics.get("emitted_chars"),
+                )
+        elif stream_metrics.get("char_limited"):
+            logger.warning(
+                "[solar_stream_guard] request_id=%s category=char_limited max_chars=%s truncated_chars=%s",
+                state.request_id,
+                SOLAR_STREAM_MAX_CHARS,
+                len(final_answer),
+            )
 
     log_section(
         f"GENERATE ANSWER ({model_name})",
@@ -1612,16 +1644,27 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     solar_meta = state.answer_solar_meta or {}
 
     solar_fail_reasons: List[str] = []
-    # 1) deadline_exceeded
+    solar_warning_reasons: List[str] = []
+    # 1) deadline_exceeded 세분화
     deadline_exceeded = bool(
         solar_meta.get("deadline_exceeded")
         or solar_meta.get("ttft_deadline_exceeded")
         or solar_meta.get("gen_deadline_exceeded")
     )
+    ttft_any_ms = solar_meta.get("ttft_any_ms")
+    ttft_content_ms = solar_meta.get("ttft_content_ms")
+    content_chars = int(solar_meta.get("content_chars") or 0)
     stream_content_emitted_chunks = int(solar_meta.get("stream_content_emitted_chunks") or 0)
     fallback_from_empty_content = bool(solar_meta.get("fallback_used")) and stream_content_emitted_chunks == 0
     if deadline_exceeded and not fallback_from_empty_content:
-        solar_fail_reasons.append("deadline_exceeded")
+        if ttft_any_ms is None:
+            solar_fail_reasons.append("deadline_stream_not_started_or_stalled")
+        elif ttft_content_ms is None and content_chars == 0:
+            solar_fail_reasons.append("deadline_content_not_started")
+        elif ttft_content_ms is None:
+            solar_warning_reasons.append("deadline_content_delayed")
+        else:
+            solar_warning_reasons.append("deadline_with_partial_or_delayed_content")
 
     # 2) char_limited
     if bool(solar_meta.get("char_limited")):
@@ -1652,6 +1695,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "selected_model": selected_model,
         "solar_failed": solar_failed,
         "solar_fail_reasons": solar_fail_reasons,
+        "solar_warning_reasons": solar_warning_reasons,
         "solar_meta": solar_meta,
         "solar_answer_chars": len(answer_solar),
         "gemma_answer_chars": len(answer_gemma),
