@@ -52,7 +52,7 @@ from settings import (
 )
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
-from llm_streaming import run_llm_streaming, StreamFallbackPolicy
+from llm_streaming import run_llm_streaming
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -109,9 +109,6 @@ SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 SOLAR_MIN_ANSWER_CHARS = int(os.getenv("SOLAR_MIN_ANSWER_CHARS", "60"))
-STREAM_FALLBACK_ALLOW = os.getenv("STREAM_FALLBACK_ALLOW", "true").strip().lower() in {"1", "true", "yes", "on"}
-STREAM_FALLBACK_EMIT_MODE = os.getenv("STREAM_FALLBACK_EMIT_MODE", "single_chunk").strip().lower()
-STREAM_FALLBACK_USER_NOTICE = os.getenv("STREAM_FALLBACK_USER_NOTICE", "스트리밍이 불안정하여 완성된 응답으로 대체했습니다.").strip()
 MAX_FIELD_SENTENCES = int(os.getenv("MAX_FIELD_SENTENCES", "3"))
 MAX_FIELD_TOKENS = int(os.getenv("MAX_FIELD_TOKENS", "120"))
 SOLAR_MAX_DOC_SENTENCES = int(os.getenv("SOLAR_MAX_DOC_SENTENCES", str(MAX_DOC_SENTENCES)))
@@ -194,6 +191,22 @@ def _mask_query_for_log(query: str, *, max_len: int = 80) -> str:
         return ""
     clipped = text[:max_len]
     return clipped + ("...(truncated)" if len(text) > max_len else "")
+
+def _derive_stream_error_code(meta: Dict[str, Any]) -> Optional[str]:
+    if not meta:
+        return None
+    if bool(meta.get("ttft_deadline_exceeded")):
+        return "TTFT_DEADLINE_EXCEEDED"
+    if bool(meta.get("gen_deadline_exceeded")):
+        return "GEN_DEADLINE_EXCEEDED"
+    if bool(meta.get("deadline_exceeded")):
+        return "DEADLINE_EXCEEDED"
+    if bool(meta.get("char_limited")):
+        return "CHAR_LIMITED"
+    if int(meta.get("stream_content_emitted_chunks") or 0) == 0:
+        return "EMPTY_STREAM"
+    return None
+
 
 def _safe_json_loads(raw: Optional[str]) -> Any:
     if not raw:
@@ -1524,12 +1537,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
-    fallback_policy = StreamFallbackPolicy(
-        allow_empty_stream_fallback=STREAM_FALLBACK_ALLOW,
-        emit_mode=STREAM_FALLBACK_EMIT_MODE,
-        user_notice=STREAM_FALLBACK_USER_NOTICE,
-    )
-
     final_answer, stream_metrics = await run_llm_streaming(
         llm,
         messages,
@@ -1538,7 +1545,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         ttft_deadline_ms=SOLAR_TTFT_DEADLINE_MS if model_name == "solar_vllm_0" else None,
         gen_deadline_ms=SOLAR_GEN_DEADLINE_MS if model_name == "solar_vllm_0" else None,
         max_chars=SOLAR_STREAM_MAX_CHARS if model_name == "solar_vllm_0" else None,
-        fallback_policy=fallback_policy,
     )
 
     ttft_any_ms = stream_metrics.get("ttft_any_ms")
@@ -1645,7 +1651,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
     solar_fail_reasons: List[str] = []
     solar_warning_reasons: List[str] = []
-    # 1) deadline_exceeded 세분화
+    # 1) deadline_exceeded 세분화 (stream_content_emitted_chunks 중심)
     deadline_exceeded = bool(
         solar_meta.get("deadline_exceeded")
         or solar_meta.get("ttft_deadline_exceeded")
@@ -1655,8 +1661,9 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     ttft_content_ms = solar_meta.get("ttft_content_ms")
     content_chars = int(solar_meta.get("content_chars") or 0)
     stream_content_emitted_chunks = int(solar_meta.get("stream_content_emitted_chunks") or 0)
-    fallback_from_empty_content = bool(solar_meta.get("fallback_used")) and stream_content_emitted_chunks == 0
-    if deadline_exceeded and not fallback_from_empty_content:
+    if deadline_exceeded:
+        if stream_content_emitted_chunks == 0:
+            solar_fail_reasons.append("deadline_without_stream_content")
         if ttft_any_ms is None:
             solar_fail_reasons.append("deadline_stream_not_started_or_stalled")
         elif ttft_content_ms is None and content_chars == 0:
@@ -1671,7 +1678,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         solar_fail_reasons.append("char_limited")
 
     # 3) 안내 문구 포함 여부
-    guidance_markers = [DUAL_MODEL_FALLBACK_MESSAGE, STREAM_FALLBACK_USER_NOTICE]
+    guidance_markers = [DUAL_MODEL_FALLBACK_MESSAGE]
     for marker in guidance_markers:
         marker_text = (marker or "").strip()
         if marker_text and marker_text in answer_solar:
@@ -3036,19 +3043,8 @@ async def query_stream(payload: QueryRequest):
                     stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
                     done_meta_by_model[model] = stream_meta or {}
                     final_text = (output.get(answer_key) or "").strip()
-                    if stream_meta.get("fallback_used") and final_text:
-                        emit_mode = stream_meta.get("fallback_emit_mode", "single_chunk")
-                        payload = {
-                            "model": model,
-                            "fallback": True,
-                            "fallback_emit_mode": emit_mode,
-                            "notice": STREAM_FALLBACK_USER_NOTICE,
-                        }
-                        if emit_mode != "final_only":
-                            payload["content"] = final_text
-                        else:
-                            payload["final"] = final_text
-                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    if final_text:
+                        yield f"data: {json.dumps({'model': model, 'final': final_text}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
@@ -3082,7 +3078,8 @@ async def query_stream(payload: QueryRequest):
                 {
                     "deadline_exceeded": bool((done_meta_by_model.get("SOLAR") or {}).get("deadline_exceeded")),
                     "char_limited": bool((done_meta_by_model.get("SOLAR") or {}).get("char_limited")),
-                    "fallback_used": bool((done_meta_by_model.get("SOLAR") or {}).get("fallback_used")),
+                    "empty_stream": int((done_meta_by_model.get("SOLAR") or {}).get("stream_content_emitted_chunks") or 0) == 0,
+                    "stream_error_code": _derive_stream_error_code(done_meta_by_model.get("SOLAR") or {}),
                     "elapsed_ms": (done_meta_by_model.get("SOLAR") or {}).get("elapsed_ms"),
                     "ttft_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_ms"),
                     "ttft_any_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_any_ms"),
@@ -3093,7 +3090,8 @@ async def query_stream(payload: QueryRequest):
                 {
                     "deadline_exceeded": bool((done_meta_by_model.get("GEMMA") or {}).get("deadline_exceeded")),
                     "char_limited": bool((done_meta_by_model.get("GEMMA") or {}).get("char_limited")),
-                    "fallback_used": bool((done_meta_by_model.get("GEMMA") or {}).get("fallback_used")),
+                    "empty_stream": int((done_meta_by_model.get("GEMMA") or {}).get("stream_content_emitted_chunks") or 0) == 0,
+                    "stream_error_code": _derive_stream_error_code(done_meta_by_model.get("GEMMA") or {}),
                     "elapsed_ms": (done_meta_by_model.get("GEMMA") or {}).get("elapsed_ms"),
                     "ttft_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_ms"),
                     "ttft_any_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_any_ms"),
