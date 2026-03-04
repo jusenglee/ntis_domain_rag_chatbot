@@ -151,6 +151,9 @@
 메모:
 - JOIN Hop2(perf)에서 group 키 컴파일은 `join_key_mode=group`을 유지한 채,
   `pjt_no 우선 / pjt_id fallback` 선택으로만 처리한다(컴파일 메타: `join_compile_selection`).
+- planner `join_filter.qdrant_filter` 검증은 **부분 포함(subset)** 기준이다.
+  - planner가 명시한 조건이 실행 필터에 **누락**되면 계약 위반
+  - JOIN key 컴파일로 실행 필터가 planner보다 더 좁아지는 것은 허용
 
 관련 코드:
 - `rag_parts/planner_contract.py::StrategyCompiler.compile()`
