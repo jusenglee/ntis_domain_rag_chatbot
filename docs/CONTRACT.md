@@ -148,6 +148,10 @@
 - SEARCH에서 must 생성
 - 하이브리드 비활성화(BM25-only 등)
 
+메모:
+- JOIN Hop2(perf)에서 group 키 컴파일은 `join_key_mode=group`을 유지한 채,
+  `pjt_no 우선 / pjt_id fallback` 선택으로만 처리한다(컴파일 메타: `join_compile_selection`).
+
 관련 코드:
 - `rag_parts/planner_contract.py::StrategyCompiler.compile()`
 
@@ -165,7 +169,6 @@
 |PLANNER_INVALID_STRATEGY|rag_pipeline.py|
 |PLANNER_JOIN_HOP1_COLLECTION_MISMATCH|rag_pipeline.py|
 |PLANNER_JOIN_HOP2_COLLECTION_MISMATCH|rag_pipeline.py|
-|PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH|rag_pipeline.py|
 |PLANNER_JOIN_KEY_MODE_IDS_MISMATCH|rag_parts/planner_contract.py, rag_pipeline.py|
 |PLANNER_JOIN_KEY_MODE_INVALID|rag_pipeline.py|
 |PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH|rag_parts/planner_contract.py|

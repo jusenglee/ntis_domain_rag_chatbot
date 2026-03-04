@@ -829,8 +829,9 @@ def build_collection_join_filter(
         join_ids: List[str],
         pjt_nos: List[str],
         resolved_pjt_ids: Optional[List[str]] = None,
-        perf_group_strategy: str = "or_both",
+        perf_group_strategy: str = "prefer_pjt_no",
         query: str = "",
+        apply_query_tag_inference: bool = False,
         fallback_spec: Optional[JoinFilterInput] = None,
 ) -> "qmodels.Filter":
     """Hop2 컬렉션 기준으로 JOIN 필터를 생성한다.
@@ -839,6 +840,7 @@ def build_collection_join_filter(
     - hop2_col=project: project 전용 필터를 사용
     - 그 외: build_join_filter 로 폴백
     """
+    _ = apply_query_tag_inference
     mode = str(join_key_mode or "instance").strip().lower()
     if mode not in ("instance", "group"):
         raise ValueError(f"지원하지 않는 join_key_mode 입니다: {join_key_mode}")
@@ -865,9 +867,7 @@ def build_collection_join_filter(
     col_canonical = _canonical_collection(col_norm)
     if col_canonical == "ntis_perf":
         if mode == "group":
-            # group 기본 키는 pjt_no 이지만, perf 인덱스/페이로드에서 pjt_no 가용성이 낮은 경우
-            # Hop1에서 수집한 pjt_id 목록으로 fallback 해야 하므로 runtime 키 기준으로 검증한다.
-            # runtime(Hop2) 검증: Hop1 결과가 pjt_id-only 여도 허용
+            # group 기본 키는 pjt_no 이며, pjt_id는 fallback 용도로만 사용한다.
             validate_group_join_runtime_keys(pjt_nos=pjt_nos_norm, pjt_ids=resolved_pjt_ids)
             if not pjt_nos_norm:
                 return build_perf_filter_by_pjt_id(
@@ -1099,12 +1099,12 @@ def build_perf_filter_by_pjt_no(
 def build_perf_filter_group_resolved(
         pjt_nos: List[str],
         pjt_ids: List[str],
-        strategy: str = "or_both",
+        strategy: str = "prefer_pjt_no",
         query: str = "",
         *,
         apply_query_tag_inference: bool = False,
 ) -> "qmodels.Filter":
-    """group 모드(perf)에서 pjt_no/pjt_id를 OR 결합(min_should=1)해 필터를 생성한다."""
+    """group 모드(perf)에서 pjt_no 우선/ pjt_id fallback 기반으로 필터를 생성한다."""
     if qmodels is None:
         raise RuntimeError("qdrant_client is required for perf filter build")
 
@@ -1112,7 +1112,7 @@ def build_perf_filter_group_resolved(
     pjt_no_values = _dedupe_non_empty(pjt_nos)
     pjt_id_values = _dedupe_non_empty(pjt_ids)
 
-    strategy_norm = str(strategy or "or_both").strip().lower()
+    strategy_norm = str(strategy or "prefer_pjt_no").strip().lower()
     if strategy_norm not in {"prefer_pjt_no", "prefer_pjt_id", "or_both"}:
         raise ValueError(f"지원하지 않는 perf group strategy 입니다: {strategy}")
 
@@ -1144,25 +1144,22 @@ def build_perf_filter_group_resolved(
             min_should=1,
         )
 
+    must: List[Any] = []
     if strategy_norm == "prefer_pjt_no":
-        if pjt_no_cond:
-            should.append(pjt_no_cond)
-        if pjt_id_cond:
-            should.append(pjt_id_cond)
+        chosen = pjt_no_cond or pjt_id_cond
+        if chosen is not None:
+            must.append(chosen)
     elif strategy_norm == "prefer_pjt_id":
-        if pjt_id_cond:
-            should.append(pjt_id_cond)
-        if pjt_no_cond:
-            should.append(pjt_no_cond)
+        chosen = pjt_id_cond or pjt_no_cond
+        if chosen is not None:
+            must.append(chosen)
     else:
         if pjt_no_cond:
             should.append(pjt_no_cond)
         if pjt_id_cond:
             should.append(pjt_id_cond)
-
-    must: List[Any] = []
-    if should:
-        must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
+        if should:
+            must.append(_build_filter(must=None, should=should, must_not=None, min_should=1))
 
     # JOIN Hop2 must 정책: group 모드 역시 join key 전용 필터만 구성한다.
     # query 기반 perf tag 추론은 server-side must에 결합하지 않는다.

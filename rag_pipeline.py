@@ -104,6 +104,7 @@ from rag_parts.promotion import (
 from rag_parts.join import (
     JoinKeyExtractionResult,
     extract_join_keys as _extract_join_keys,
+    is_valid_join_key as _is_valid_join_key,
     normalize_relation_hint as _normalize_relation_hint,
 )
 from rag_parts.filters import (
@@ -485,6 +486,33 @@ def _count_missing_join_keys(points: Iterable[Any], *, join_key_mode: str = "ins
     stats["invalid_pjt_no"] = len(group_keys.invalid_values)
     stats["suspected_swap"] = instance_keys.suspected_swap_count if mode == "instance" else group_keys.suspected_swap_count
     return stats
+
+
+def _resolve_group_pjt_ids(points: Iterable[Any], *, max_ids: int) -> List[str]:
+    resolved: List[str] = []
+    seen: set[str] = set()
+    for p in points or []:
+        payload = getattr(p, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        meta_basic = payload.get("meta_basic") if isinstance(payload.get("meta_basic"), dict) else {}
+        candidates = [
+            payload.get("pjt_id"),
+            meta_basic.get("pjt_id"),
+            getattr(p, "id", None),
+        ]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text or text in seen:
+                continue
+            if not _is_valid_join_key(text, mode="instance"):
+                continue
+            seen.add(text)
+            resolved.append(text)
+            break
+        if len(resolved) >= max_ids:
+            break
+    return resolved
 
 def _ensure_join_keys_in_payload(
         points: Iterable[Any],
@@ -2565,16 +2593,22 @@ def _build_join_hop2_filter(
 
     join_mode_norm = str(join_key_mode or "instance").strip().lower()
     join_compile_selection = "planner_contract"
-    effective_perf_join_mode = join_mode_norm
+    if hop2_col == COL_PERF and join_mode_norm == "group":
+        if join_pjt_nos and join_pjt_ids:
+            join_compile_selection = "group_pjt_no_only"
+        elif join_pjt_nos:
+            join_compile_selection = "group_pjt_no_only"
+        elif join_pjt_ids:
+            join_compile_selection = "group_perf_pjt_id_fallback"
+        else:
+            join_compile_selection = "group_join_keys_missing"
     if hop2_col == COL_PERF and join_mode_norm == "group" and not join_pjt_nos and join_pjt_ids:
-        effective_perf_join_mode = "instance"
         join_compile_selection = "group_perf_pjt_id_fallback"
 
     relation_matrix = {
         "relation": relation,
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
-        "effective_perf_join_mode": effective_perf_join_mode,
         "join_compile_selection": join_compile_selection,
         "join_pjt_ids_count": len(join_pjt_ids),
         "join_pjt_nos_count": len(join_pjt_nos),
@@ -2583,10 +2617,11 @@ def _build_join_hop2_filter(
 
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
-        join_key_mode=effective_perf_join_mode,
+        join_key_mode=join_mode_norm,
         join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
         pjt_nos=join_pjt_nos,
         resolved_pjt_ids=join_pjt_ids,
+        perf_group_strategy="prefer_pjt_no",
         query=q,
         fallback_spec=JoinFilterInput(
             join_ids=join_pjt_ids,
@@ -2623,10 +2658,10 @@ def _build_join_hop2_filter(
             **dict(executed_join_filter_spec.get("_meta") or {}),
             "hop2_col": hop2_col,
             "join_key_mode": join_key_mode,
-            "effective_perf_join_mode": effective_perf_join_mode,
             "join_compile_selection": join_compile_selection,
             "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
             "pjt_nos_count": len(join_pjt_nos),
+            "resolved_pjt_ids_count": len(join_pjt_ids),
             "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
         }
     return hop2_filter, executed_join_filter_spec
@@ -4900,8 +4935,18 @@ def _run_rag_with_vectors(
 
                 if join_key_mode == "group":
                     join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
-                    join_pjt_nos = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
-                    join_pjt_ids = []
+                    group_resolve_max = int(os.getenv("RAG_GROUP_RESOLVED_PJT_IDS_MAX", "120"))
+                    join_pjt_nos = seed_join_pjt_nos[:] if seed_join_pjt_nos else [str(x).strip() for x in join_key_result.keys if str(x).strip()]
+                    join_pjt_ids = _resolve_group_pjt_ids(hop1_top[:hop1_keep], max_ids=max(1, group_resolve_max))
+                    log_kv(
+                        "RAG.JOIN.GROUP.RESOLVE",
+                        pjt_no=(join_pjt_nos[0] if join_pjt_nos else None),
+                        resolved_pjt_ids_count=len(join_pjt_ids),
+                        resolved_pjt_ids_top10=join_pjt_ids[:10],
+                        hop1_k=hop1_k_base,
+                        hop1_keep=hop1_keep,
+                        cache_hit=0,
+                    )
                 else:
                     join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
                     join_pjt_ids = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
@@ -4981,16 +5026,22 @@ def _run_rag_with_vectors(
                 join_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
             )
+            if join_key_mode == "group" and len(join_pjt_ids) == 0:
+                raise StrategyViolation(
+                    error_code="JOIN_GROUP_KEYS_UNRESOLVED",
+                    reason=(
+                        "group JOIN Hop1 resolve failed: resolved_pjt_ids is empty "
+                        f"(relation={relation}, hop1_col={hop1_col}, seed_pjt_nos={len(seed_join_pjt_nos)})"
+                    ),
+                )
 
             # 2) Hop2 (LOOKUP/JOIN): JOIN 필터로 강제 제한
             planner_join_key_mode = resolved_join_key_mode
-            executed_join_key_mode = planner_join_key_mode
             join_compile_selection = "planner_contract"
             if planner_join_key_mode == "group" and hop2_col == COL_PERF:
                 if join_pjt_nos:
-                    executed_join_key_mode = "group"
+                    join_compile_selection = "group_pjt_no_only"
                 elif join_pjt_ids:
-                    executed_join_key_mode = "instance"
                     join_compile_selection = "group_perf_pjt_id_fallback"
                 else:
                     raise StrategyViolation(
@@ -5005,22 +5056,14 @@ def _run_rag_with_vectors(
                 resolved_join_key_mode=resolved_join_key_mode,
                 planner_raw_join_key_mode=planner_raw_join_key_mode,
                 planner_join_key_mode=planner_join_key_mode,
-                executed_join_key_mode=executed_join_key_mode,
                 join_compile_selection=join_compile_selection,
                 join_pjt_ids_count=len(join_pjt_ids),
+                resolved_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
                 opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)),
                 relation=relation,
                 hop2_col=hop2_col,
             )
-            if planner_join_key_mode != executed_join_key_mode and join_compile_selection == "planner_contract":
-                raise StrategyViolation(
-                    error_code="PLANNER_JOIN_KEY_MODE_EXECUTION_MISMATCH",
-                    reason=(
-                        "planner join_key_mode와 실행 join filter key가 불일치"
-                        f"(planner={planner_join_key_mode}, executed={executed_join_key_mode}, relation={relation})"
-                    ),
-                )
 
             try:
                 validate_resolved_join_keys(
@@ -5086,7 +5129,7 @@ def _run_rag_with_vectors(
                 hop2_filter = _and_filter(hop2_filter, perf_type_filter)
 
             executed_join_meta = dict((executed_join_filter_spec or {}).get("_meta") or {})
-            effective_join_mode = str(executed_join_meta.get("effective_perf_join_mode") or hop2_join_key_mode)
+            effective_join_mode = str(hop2_join_key_mode or "")
             join_compile_selection = str(executed_join_meta.get("join_compile_selection") or join_compile_selection)
 
 
