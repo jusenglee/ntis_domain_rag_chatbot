@@ -3048,9 +3048,9 @@ async def query_stream(payload: QueryRequest):
                     answer_meta_key = f"{answer_key}_meta"
                     stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
                     done_meta_by_model[model] = stream_meta or {}
-                    final_text = (output.get(answer_key) or "").strip()
-                    if final_text:
-                        yield f"data: {json.dumps({'model': model, 'final': final_text}, ensure_ascii=False)}\n\n"
+                    # final_text = (output.get(answer_key) or "").strip() API 응답 명세는 절대 바뀌어서는 안됨.
+                    # if final_text:
+                    #     yield f"data: {json.dumps({'model': model, 'final': final_text}, ensure_ascii=False)}\n\n"
 
                 # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
