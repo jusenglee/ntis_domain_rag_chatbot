@@ -138,6 +138,23 @@ export RAG_DEBUG_TOPN=5
 처방:
 - LOOKUP 정책을 `hard` 또는 `must_one_then_should`로 고정(운영 정책)
 
+
+### (D) LLM 스트리밍에서 content가 늦게 나오거나(또는 비어보이는) 현상 — vLLM reasoning 계열
+증상:
+- `ttft_any_ms`는 존재하지만 `ttft_content_ms`가 `None`이거나 매우 큼
+- `reasoning_chars > 0` 인데 `content_chars == 0` 또는 `stream_content_emitted_chunks == 0`
+- 로그에서 `content_delayed` / `empty_stream_content` / `deadline_exceeded`가 함께 보일 수 있음
+
+즉시 확인:
+- (서버) vLLM이 reasoning parser를 켠 모델인지 확인(`--reasoning-parser ...`). reasoning 모델은 스트리밍에서 reasoning이 먼저 나올 수 있음.
+- (클라이언트/래퍼) Answer 경로에서 `reasoning_effort="low"`, `include_reasoning=false`를 요청 단위로 강제했는지 확인.
+- (파서/메트릭) `stream_field=reasoning` 청크를 최종 답변에 append하지 않는지, 그리고 reasoning 텍스트가 `message.content`가 아니라 별도 필드(`additional_kwargs.reasoning_text`)로 올 때도 집계되는지 확인.
+- (SSE) `stream_field in {None,"content"}`만 브라우저로 emit하고 있는지 확인(=reasoning이 사용자 출력에 섞이면 안 됨).
+
+처방:
+- Answer(Solar) 경로: thinking/reason 출력은 기본 OFF(요청 단위로 `reasoning_effort=low`, `include_reasoning=false`, `chat_template_kwargs.enable_thinking=false` 권장).
+- Planner 경로: 필요 시 요청 단위로 thinking ON(`reasoning_effort=high` 등)하되, 최종 출력(JSON)이 깨지지 않도록 reasoning은 별도 필드로만 처리.
+
 ---
 
 ## 5) 장애 대응 체크리스트(복붙)

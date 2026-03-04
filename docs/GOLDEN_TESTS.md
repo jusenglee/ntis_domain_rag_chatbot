@@ -52,3 +52,22 @@
 
 > 실제 retrieval(Qdrant) 없이도 “전략 결정/계약 위반”은 충분히 회귀 테스트 가능합니다.
 
+
+
+---
+
+## 4) LLM 스트리밍 계약(invariants) 골든
+목표: “모델이 뭘 답했냐”가 아니라, **스트리밍 출력 계약이 깨지지 않는지**를 회귀로 잡는다.
+
+### Streaming invariants
+- [ ] `stream_field=reasoning` 청크는 최종 사용자 응답 문자열에 절대 포함되지 않는다(집계만).
+- [ ] `ttft_any_ms`는 “첫 청크(=reasoning 포함)” 기준, `ttft_content_ms`는 “첫 content 청크” 기준으로 기록된다.
+- [ ] deadline/char limit 발생 시에도, `stream_content_emitted_chunks == 0`로 fallback한 경우에는 “부분 반환 안내문”이 붙지 않는다.
+- [ ] `stream_field=reasoning` 이고 `message.content==""`인 케이스에서 reasoning 텍스트가 별도 필드로 전달되더라도(`additional_kwargs.reasoning_text`) `reasoning_chars`가 정상 집계된다.
+
+### 추천 테스트(최소)
+- `tests/test_llm_streaming.py`
+  - reasoning 필터링 + ttft_any/ttft_content 메트릭 검증
+  - deadline 후 fallback 시 안내문 부착 금지 검증
+- (추가 권장) `tests/test_openai_compat_reasoning_chunk_contract.py`
+  - openai_compat_llm가 reasoning을 content에 섞지 않는지(=SSE/최종 문자열 오염 방지)

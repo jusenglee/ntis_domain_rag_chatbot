@@ -74,9 +74,24 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 - 운영 환경 변수: `ENVIRONMENT.md`
 - 검색전략 원문: `NTIS_RAG_Search_Strategy_v1_1.md`
 
-## 4. 세션 로그(최근 5개만 유지)
+## 4. 상태/백로그/세션 로그(최근 5개만 유지)
+
+### 4.1 현재 상태
+- Solar(vLLM) 스트리밍에서 reasoning이 먼저 출력되고 content가 지연되는 케이스가 발생할 수 있음(운영상 `content_delayed`로 분류).
+- openai_compat_llm ↔ llm_streaming 간 “reasoning 청크 텍스트 전달 방식” 불일치 가능성 점검/정리 중.
+
+### 4.2 백로그(Top)
+- [ ] openai_compat_llm: (Planner vs Answer) stage별 reasoning 정책을 요청 단위로 고정(`reasoning_effort`, `include_reasoning`, `chat_template_kwargs`).
+- [ ] llm_streaming: reasoning 청크가 `content=""`로 오고 별도 필드로 텍스트가 전달되는 케이스까지 파싱 계약 확정(+테스트).
+- [ ] server3: Planner 체인에서 `llm.bind(...)`로 planner-only thinking/high 적용 + `format_instructions` 실제 프롬프트 삽입 누락 보완.
+- [ ] RUNBOOK: `content_delayed` 트리아지(체크리스트/재현 절차) 보강 + 알람 후보 정의.
+
+### 4.3 세션 로그(최근 5개만 유지)
+- 2026-03-03: Solar(vLLM) 스트리밍 “reasoning 먼저/ content 지연” 이슈 원인 정리 + 스트리밍 계약/트리아지 문서 반영.
 - 2026-02-27: DocOps 스캐폴드 생성(초기)
 
 ## 5. 스트리밍 장애 정책(요약)
 - 스트림 실패 시 non-stream fallback 재시도는 하지 않는다(지연 최소화 우선).
 - 운영 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 중심으로 본다.
+- reasoning 모델(vLLM reasoning outputs)은 스트리밍에서 reasoning이 먼저 오고 `content`가 늦게 올 수 있으므로, “빈 응답”이 아니라 “content 지연”으로 분리 판정한다.
+- 최종 사용자 출력에는 `stream_field in {None,"content"}`만 포함한다(=reasoning은 집계/메트릭용).
