@@ -5,7 +5,7 @@ import json
 import time
 import os
 import re
-from typing import Annotated, Optional, List, Dict, Any, Literal
+from typing import Annotated, Optional, List, Dict, Any, Literal, Tuple
 from contextlib import asynccontextmanager
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -100,12 +100,12 @@ TEMPLATE_INDEX_PATH = Path("templates/index.html")
 kv_store: Optional[KVStore] = None
 MAX_HISTORY_TURNS = 10
 HISTORY_PREVIEW_LIMIT = 100
-SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "1024"))
-FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "2048"))
-SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "4500"))
+SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "4096"))
+FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "4096"))
+SOLAR_DEADLINE_MS = int(os.getenv("SOLAR_DEADLINE_MS", "9000"))
 SOLAR_TTFT_DEADLINE_MS = int(os.getenv("SOLAR_TTFT_DEADLINE_MS", str(SOLAR_DEADLINE_MS)))
-SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "12000"))
-SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "8000"))
+SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "15000"))
+SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "10000"))
 DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
 DUAL_MODEL_FALLBACK_MESSAGE = "일시적으로 생성 결과가 비어 재시도해주세요"
 SOLAR_MIN_ANSWER_CHARS = int(os.getenv("SOLAR_MIN_ANSWER_CHARS", "60"))
@@ -1008,7 +1008,13 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    chain = prompt | llm | sanitize_llm_json | parser
+    planner_llm = llm.bind(
+        reasoning_effort="high",       # planner만 깊게
+        include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
+        disable_thinking=False,        # 네 openai_compat_llm에서 chat_template_kwargs 자동-disable 방지용
+    )
+
+    chain = prompt | planner_llm | sanitize_llm_json | parser
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
 
@@ -1713,7 +1719,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
                 f"{_format_coq(state.conversation_id, state.question)}\n"
                 f"Strategy: {strategy}\n"
                 f"Gemma: {gemma_preview}\n"
-                f"SOLAR: {solar_preview}\n"
+                f"UpStage: {solar_preview}\n"
                 f"selected_model={selected_model}\n"
                 f"solar_fail_reasons={solar_fail_reasons}")
 
@@ -3024,7 +3030,7 @@ async def query_stream(payload: QueryRequest):
                     if stream_field == "reasoning":
                         continue
                     if chunk_text:
-                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': chunk_text}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'UPSTAGE', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
                 # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
@@ -3051,7 +3057,7 @@ async def query_stream(payload: QueryRequest):
                     output = data.get("output", {})
                     if "answer_gemma" in output:
                         answer = output["answer_gemma"]
-                        yield f"data: {json.dumps({'model' : 'SOLAR', 'content': answer}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'model' : 'UPSTAGE', 'content': answer}, ensure_ascii=False)}\n\n"
                         yield f"data: {json.dumps({'model' : 'GEMMA', 'content': answer}, ensure_ascii=False)}\n\n"
 
                 elif kind == "on_chain_start" and node == "rag_search":
