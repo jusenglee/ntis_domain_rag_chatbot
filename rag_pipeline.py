@@ -2235,14 +2235,24 @@ def _resolve_join_execution_policy(
     seed_join_pjt_ids = [str(x).strip() for x in (seed_join_pjt_ids or []) if str(x).strip()]
     seed_join_pjt_nos = [str(x).strip() for x in (seed_join_pjt_nos or []) if str(x).strip()]
 
+    group_resolve_project_ids = str(os.getenv("RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS", "1")).strip().lower() in (
+        "1", "true", "yes", "y", "on",
+    )
+    group_resolve_max_ids = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_MAX_IDS", "200")))
+    group_resolve_topk = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_TOPK", "400")))
+
     if join_key_mode == "instance" and seed_join_pjt_ids:
         hop1_strategy = "skip"
         reason = "instance_seed_pjt_id"
         seed_key_source = "ids_map.pjt_id"
         seed_key_count = len(seed_join_pjt_ids)
     elif join_key_mode == "group" and seed_join_pjt_nos:
-        hop1_strategy = "lookup"
-        reason = "group_seed_pjt_no_expand"
+        if group_resolve_project_ids:
+            hop1_strategy = "lookup"
+            reason = "group_seed_pjt_no_expand"
+        else:
+            hop1_strategy = "skip"
+            reason = "group_seed_pjt_no_only"
         seed_key_source = "ids_map.pjt_no"
         seed_key_count = len(seed_join_pjt_nos)
     elif has_people_org_gate:
@@ -2262,6 +2272,9 @@ def _resolve_join_execution_policy(
         "action": action,
         "seed_key_source": seed_key_source,
         "seed_key_count": seed_key_count,
+        "group_resolve_project_ids": int(group_resolve_project_ids),
+        "group_resolve_max_ids": group_resolve_max_ids,
+        "group_resolve_topk": group_resolve_topk,
     }
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
@@ -2469,8 +2482,13 @@ def _diff_filter_spec(
         *,
         planner_filter_spec: Dict[str, Any],
         executed_filter_spec: Dict[str, Any],
+        list_match_mode: str = "exact",
 ) -> Dict[str, Any]:
     """planner가 명시한 subset key 기준으로 실행 filter 스펙 diff를 계산한다."""
+
+    list_mode = str(list_match_mode or "exact").strip().lower()
+    if list_mode not in {"exact", "subset"}:
+        list_mode = "exact"
 
     def _semantic_subset_equal(planner_val: Any, exec_val: Any) -> bool:
         # planner가 명시한 key/subtree만 비교하고, 실행 측의 메타/추가 필드는 허용한다.
@@ -2487,9 +2505,24 @@ def _diff_filter_spec(
         if isinstance(planner_val, list):
             if not isinstance(exec_val, list):
                 return False
-            if len(planner_val) != len(exec_val):
-                return False
-            return all(_semantic_subset_equal(p, e) for p, e in zip(planner_val, exec_val))
+            if list_mode == "exact":
+                if len(planner_val) != len(exec_val):
+                    return False
+                return all(_semantic_subset_equal(p, e) for p, e in zip(planner_val, exec_val))
+
+            matched = [False] * len(exec_val)
+            for p in planner_val:
+                found = False
+                for idx, e in enumerate(exec_val):
+                    if matched[idx]:
+                        continue
+                    if _semantic_subset_equal(p, e):
+                        matched[idx] = True
+                        found = True
+                        break
+                if not found:
+                    return False
+            return True
 
         return planner_val == exec_val
 
@@ -2502,6 +2535,7 @@ def _diff_filter_spec(
             changed[key] = {"planner": planner_val, "executed": exec_val}
     return {
         "planner_keys": planner_keys,
+        "list_match_mode": list_mode,
         "changed": changed,
     }
 
@@ -4641,6 +4675,9 @@ def _run_rag_with_vectors(
             reason=join_execution_policy.get("reason"),
             seed_key_source=join_execution_policy.get("seed_key_source"),
             seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
+            group_resolve_project_ids=int(join_execution_policy.get("group_resolve_project_ids") or 0),
+            group_resolve_max_ids=int(join_execution_policy.get("group_resolve_max_ids") or 0),
+            group_resolve_topk=int(join_execution_policy.get("group_resolve_topk") or 0),
         )
 
         # relation mapping
@@ -4670,6 +4707,8 @@ def _run_rag_with_vectors(
             hop2_keep = int(os.getenv("RAG_HOP2_KEEP", "10"))
             hop1_k_base = int(os.getenv("RAG_HOP1_TOPK_BASE", "250"))
             hop2_k_base = int(os.getenv("RAG_HOP2_TOPK_BASE", "300"))
+            if join_key_mode == "group" and int(join_execution_policy.get("group_resolve_project_ids") or 0):
+                hop1_k_base = max(hop1_k_base, int(join_execution_policy.get("group_resolve_topk") or 1))
 
             # Hop1 query sanitize (people/org head에서 잡음 제거)
             hop1_q = q
@@ -4935,12 +4974,18 @@ def _run_rag_with_vectors(
 
                 if join_key_mode == "group":
                     join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
-                    group_resolve_max = int(os.getenv("RAG_GROUP_RESOLVED_PJT_IDS_MAX", "120"))
+                    group_resolve_max = int(join_execution_policy.get("group_resolve_max_ids") or 1)
+                    group_resolve_enabled = int(join_execution_policy.get("group_resolve_project_ids") or 0)
                     join_pjt_nos = seed_join_pjt_nos[:] if seed_join_pjt_nos else [str(x).strip() for x in join_key_result.keys if str(x).strip()]
-                    join_pjt_ids = _resolve_group_pjt_ids(hop1_top[:hop1_keep], max_ids=max(1, group_resolve_max))
+                    join_pjt_ids = (
+                        _resolve_group_pjt_ids(hop1_top[:hop1_keep], max_ids=max(1, group_resolve_max))
+                        if group_resolve_enabled
+                        else []
+                    )
                     log_kv(
                         "RAG.JOIN.GROUP.RESOLVE",
                         pjt_no=(join_pjt_nos[0] if join_pjt_nos else None),
+                        resolve_project_ids=group_resolve_enabled,
                         resolved_pjt_ids_count=len(join_pjt_ids),
                         resolved_pjt_ids_top10=join_pjt_ids[:10],
                         hop1_k=hop1_k_base,
@@ -5026,7 +5071,11 @@ def _run_rag_with_vectors(
                 join_pjt_ids_count=len(join_pjt_ids),
                 join_pjt_nos_count=len(join_pjt_nos),
             )
-            if join_key_mode == "group" and len(join_pjt_ids) == 0:
+            if (
+                    join_key_mode == "group"
+                    and int(join_execution_policy.get("group_resolve_project_ids") or 0)
+                    and len(join_pjt_ids) == 0
+            ):
                 raise StrategyViolation(
                     error_code="JOIN_GROUP_KEYS_UNRESOLVED",
                     reason=(
@@ -5101,6 +5150,7 @@ def _run_rag_with_vectors(
             join_filter_diff = _diff_filter_spec(
                 planner_filter_spec=planner_join_filter_spec,
                 executed_filter_spec=executed_join_filter_spec,
+                list_match_mode="subset",
             )
             join_filter_diff_changed = join_filter_diff.get("changed", {})
             log_kv(
