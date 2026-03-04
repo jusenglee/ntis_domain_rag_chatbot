@@ -193,9 +193,12 @@
 
 ## 8) LLM 스트리밍 출력 계약
 
-- 청크 파싱은 `message.content` + `message.additional_kwargs.stream_field`를 기준으로 한다.
+- 청크 파싱은 `message.additional_kwargs.stream_field` + 텍스트를 기준으로 한다.
+  - 기본 텍스트: `message.content`
+  - 예외: `stream_field=reasoning` 이고 `message.content`가 비어있으면 `message.additional_kwargs.reasoning_text`를 텍스트로 본다.
 - `stream_field=reasoning` 청크는 사용자 응답으로 emit/append하지 않고, `reasoning_chars`로만 집계한다.
 - `stream_field=content` 또는 `None`만 최종 응답에 포함한다.
+- (호환성) vLLM reasoning 모델은 `delta.reasoning` 또는 `delta.reasoning_content`로 들어올 수 있으므로, 래퍼는 이를 `stream_field=reasoning`으로 정규화해 전달한다.
 - TTFT는 두 축으로 기록한다.
   - `ttft_any_ms`: reasoning 포함 첫 청크
   - `ttft_content_ms`: 실제 사용자 content 첫 청크
