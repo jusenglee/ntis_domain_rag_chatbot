@@ -109,10 +109,12 @@ export RAG_DEBUG_TOPN=5
 - `validate_planner_contract()` 위반 목록
 - `validate_resolved_join_keys()` / `validate_group_join_runtime_keys()`
 - hop1/hop2 filter key
+- `RAG.JOIN.GROUP.RESOLVE` 로그의 `resolved_pjt_ids_count`(group Hop1에서 pjt_id 해석 성공 여부)
 
 처방:
 - JOIN gate 규칙을 CONTRACT에 명문화하고, 위반 시 “조용한 fallback” 금지
 - hop1 확장 결과(키 리스트)를 로그에 남기기
+- group JOIN은 seed `pjt_no`를 계약 키로 유지하고, Hop1(project)에서 `resolved_pjt_ids`를 확보한 뒤 Hop2(perf) fallback에 사용
 
 ### (B) SEARCH인데 결과가 엉뚱하게 좁아짐
 원인 후보:
@@ -169,4 +171,3 @@ export RAG_DEBUG_TOPN=5
 [ ] contract_fail_reason / error_code 기록
 [ ] 재현용 최소 입력(질의+hint+env) 정리
 ```
-
