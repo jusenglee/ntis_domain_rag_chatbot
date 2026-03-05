@@ -110,11 +110,17 @@ export RAG_DEBUG_TOPN=5
 - `validate_resolved_join_keys()` / `validate_group_join_runtime_keys()`
 - hop1/hop2 filter key
 - `RAG.JOIN.GROUP.RESOLVE` 로그의 `resolved_pjt_ids_count`(group Hop1에서 pjt_id 해석 성공 여부)
+- `RAG.JOIN.GROUP.RESOLVE` 로그의 `resolve_input_count`, `resolve_keep_effective`(resolve 입력 규모/보정 keep 확인)
 
 처방:
 - JOIN gate 규칙을 CONTRACT에 명문화하고, 위반 시 “조용한 fallback” 금지
 - hop1 확장 결과(키 리스트)를 로그에 남기기
 - group JOIN은 seed `pjt_no`를 계약 키로 유지하고, Hop1(project)에서 `resolved_pjt_ids`를 확보한 뒤 Hop2(perf) fallback에 사용
+
+튜닝 가이드(resolve ON):
+- `RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS=1`일 때 `RAG_JOIN_GROUP_RESOLVE_KEEP`를 `30~100` 범위에서 시작해 조정합니다.
+- 최종 resolve 입력 수는 `resolve_keep_effective = max(RAG_HOP1_KEEP, min(RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_KEEP))`이며, 실제 투입량은 `resolve_input_count`로 확인합니다.
+- `resolved_pjt_ids_count`가 지속적으로 0에 가까우면 `RAG_JOIN_GROUP_RESOLVE_KEEP` 또는 `RAG_JOIN_GROUP_RESOLVE_TOPK`를 단계적으로 상향합니다.
 
 ### (B) SEARCH인데 결과가 엉뚱하게 좁아짐
 원인 후보:

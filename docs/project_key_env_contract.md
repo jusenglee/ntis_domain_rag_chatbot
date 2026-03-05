@@ -13,6 +13,7 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - `RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS=1` (group JOIN에서 Hop1 `pjt_no -> pjt_id` resolve 수행 여부)
 - `RAG_JOIN_GROUP_RESOLVE_MAX_IDS=200` (group JOIN resolve 시 최대 `pjt_id` 수)
 - `RAG_JOIN_GROUP_RESOLVE_TOPK=400` (group JOIN resolve를 위한 Hop1 최소 topk)
+- `RAG_JOIN_GROUP_RESOLVE_KEEP=50` (group JOIN resolve 입력 후보 keep; `max(RAG_HOP1_KEEP, min(RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_KEEP))`로 보정)
 
 서버(`server3.py`)는 초기화 시점에 위 두 값을 읽어 key mapping으로 사용합니다.
 
@@ -24,6 +25,8 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - `RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS=0`이면 group JOIN에서 `pjt_no` 계약 키만으로 Hop2를 실행하며,
   resolve 미수행은 정상 동작입니다.
 - 실행 시 `RAG.JOIN.POLICY`, `RAG.JOIN.GROUP.RESOLVE` 로그에 정책값/적용 결과가 기록됩니다.
+  - `resolve_input_count`: resolve 함수에 실제 전달된 Hop1 후보 수
+  - `resolve_keep_effective`: `RAG_HOP1_KEEP`/`RAG_JOIN_GROUP_RESOLVE_MAX_IDS`/`RAG_JOIN_GROUP_RESOLVE_KEEP`를 반영한 최종 keep
 
 ## 금지사항(Prohibition)
 
