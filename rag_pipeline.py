@@ -2240,6 +2240,7 @@ def _resolve_join_execution_policy(
     )
     group_resolve_max_ids = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_MAX_IDS", "200")))
     group_resolve_topk = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_TOPK", "400")))
+    group_resolve_keep = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_KEEP", "50")))
 
     if join_key_mode == "instance" and seed_join_pjt_ids:
         hop1_strategy = "skip"
@@ -2275,6 +2276,7 @@ def _resolve_join_execution_policy(
         "group_resolve_project_ids": int(group_resolve_project_ids),
         "group_resolve_max_ids": group_resolve_max_ids,
         "group_resolve_topk": group_resolve_topk,
+        "group_resolve_keep": group_resolve_keep,
     }
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
@@ -4975,10 +4977,14 @@ def _run_rag_with_vectors(
                 if join_key_mode == "group":
                     join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=hop1_keep)
                     group_resolve_max = int(join_execution_policy.get("group_resolve_max_ids") or 1)
+                    group_resolve_keep_env = int(join_execution_policy.get("group_resolve_keep") or 1)
                     group_resolve_enabled = int(join_execution_policy.get("group_resolve_project_ids") or 0)
+                    resolve_keep_effective = max(hop1_keep, min(max(1, group_resolve_max), max(1, group_resolve_keep_env)))
+                    resolve_candidates = hop1_reranked[:resolve_keep_effective]
+                    resolve_input_count = len(resolve_candidates)
                     join_pjt_nos = seed_join_pjt_nos[:] if seed_join_pjt_nos else [str(x).strip() for x in join_key_result.keys if str(x).strip()]
                     join_pjt_ids = (
-                        _resolve_group_pjt_ids(hop1_top[:hop1_keep], max_ids=max(1, group_resolve_max))
+                        _resolve_group_pjt_ids(resolve_candidates, max_ids=max(1, group_resolve_max))
                         if group_resolve_enabled
                         else []
                     )
@@ -4986,6 +4992,8 @@ def _run_rag_with_vectors(
                         "RAG.JOIN.GROUP.RESOLVE",
                         pjt_no=(join_pjt_nos[0] if join_pjt_nos else None),
                         resolve_project_ids=group_resolve_enabled,
+                        resolve_input_count=resolve_input_count,
+                        resolve_keep_effective=resolve_keep_effective,
                         resolved_pjt_ids_count=len(join_pjt_ids),
                         resolved_pjt_ids_top10=join_pjt_ids[:10],
                         hop1_k=hop1_k_base,
