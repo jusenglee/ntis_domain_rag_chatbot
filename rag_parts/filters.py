@@ -107,6 +107,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return bool(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
 def _allow_legacy_meta_keys() -> bool:
     return _env_bool("RAG_ALLOW_LEGACY_META_KEYS", default=False)
 
@@ -418,6 +426,45 @@ def extract_org_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str
     return extract_org_terms_llm(q, kws, max_terms=max_terms)
 
 
+def _expand_org_partial_terms(terms: List[str]) -> List[str]:
+    """기관명 부분일치용 term 확장(원문 + 접두 prefix)."""
+    terms_norm = normalize_org_terms(terms)
+    if not terms_norm:
+        return []
+
+    prefix_len = max(1, _env_int("RAG_ORG_PARTIAL_PREFIX_LEN", 6))
+    min_len = max(1, _env_int("RAG_ORG_PARTIAL_MIN_LEN", 4))
+    expanded: List[str] = []
+    for term in terms_norm:
+        if term not in expanded:
+            expanded.append(term)
+        if len(term) >= min_len:
+            prefix = term[:prefix_len].strip()
+            if prefix and prefix != term and prefix not in expanded:
+                expanded.append(prefix)
+
+    logger.info(
+        "RAG.ORG.MATCH.POLICY prefix_len=%s min_len=%s terms_preview=%s expanded_terms_preview=%s",
+        prefix_len,
+        min_len,
+        terms_norm[:4],
+        expanded[:8],
+    )
+    return expanded
+
+
+def _build_match_text_conditions(key: str, terms: List[str]) -> List[Any]:
+    if qmodels is None:
+        return []
+    match_text_cls = getattr(qmodels, "MatchText", None)
+    if match_text_cls is None:
+        return []
+    conds: List[Any] = []
+    for term in terms:
+        conds.append(qmodels.FieldCondition(key=key, match=match_text_cls(text=term)))
+    return conds
+
+
 # -----------------------------
 # Org filters
 # -----------------------------
@@ -425,23 +472,25 @@ def _build_prtcp_mp_org_nested_filter(terms: List[str]) -> Optional[Any]:
     """prtcp_mp[] 내부의 blng_org_nm 매칭 (Nested)."""
     if qmodels is None or not terms:
         return None
-    org_cond = qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(terms))
-    nested_filter = qmodels.Filter(must=[org_cond])
+    should = _build_match_text_conditions("blng_org_nm", terms)
+    if not should:
+        return None
+    nested_filter = _build_filter(must=None, should=should, must_not=None, min_should=1)
     return _make_nested_condition("prtcp_mp", nested_filter)
 
 
 def build_prtcp_org_nested_filter(spec: OrgFilterInput) -> Optional[Any]:
     """참여기관/참여인력소속기관을 nested로 매칭."""
-    terms_norm = normalize_org_terms(spec.terms)
+    terms_norm = _expand_org_partial_terms(spec.terms)
     if qmodels is None or not terms_norm:
         return None
 
     nested_conditions: List[Any] = []
 
     # prtcp_org[] -> org_nm
-    should_org: List[Any] = [
-        qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm))
-    ]
+    should_org = _build_match_text_conditions("org_nm", terms_norm)
+    if not should_org:
+        return None
     nested_filter_org = _build_filter(must=None, should=should_org, must_not=None, min_should=1)
     nested_org = _make_nested_condition("prtcp_org", nested_filter_org)
     if nested_org is not None:
@@ -465,7 +514,7 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     - participant: prtcp_org/prtcp_mp nested 중심
     - None: (최상위 org_nm) OR (nested 참여기관/참여인력소속기관)
     """
-    terms_norm = normalize_org_terms(spec.terms)
+    terms_norm = _expand_org_partial_terms(spec.terms)
     if qmodels is None or not terms_norm:
         return None
 
@@ -476,7 +525,7 @@ def build_org_filter(spec: OrgFilterInput) -> Optional[Any]:
     should: List[Any] = []
 
     # 최상위 기관명
-    should.append(qmodels.FieldCondition(key="org_nm", match=make_match_any(terms_norm)))
+    should.extend(_build_match_text_conditions("org_nm", terms_norm))
 
     # role=None 이면 nested도 함께 OR
     if role is None:
@@ -641,6 +690,7 @@ def _build_prtcp_mp_people_nested_filter(
     person_ids = [str(x).strip() for x in (person_ids or []) if str(x).strip()]
     gender_terms = [str(x).strip() for x in (gender_terms or []) if str(x).strip()]
     org_terms = normalize_org_terms([str(x).strip() for x in (org_terms or []) if str(x).strip()])
+    org_terms = _expand_org_partial_terms(org_terms)
 
     force_one_must = bool(promote_one_must and not person_ids and len(people_terms) == 1)
 
@@ -662,7 +712,7 @@ def _build_prtcp_mp_people_nested_filter(
         nested_should.append(qmodels.FieldCondition(key="gndr_slct_nm", match=make_match_any(gender_terms)))
 
     if org_terms:
-        nested_should.append(qmodels.FieldCondition(key="blng_org_nm", match=make_match_any(org_terms)))
+        nested_should.extend(_build_match_text_conditions("blng_org_nm", org_terms))
 
     if not nested_must and not nested_should:
         return None

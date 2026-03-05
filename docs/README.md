@@ -95,3 +95,8 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 - 운영 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 중심으로 본다.
 - reasoning 모델(vLLM reasoning outputs)은 스트리밍에서 reasoning이 먼저 오고 `content`가 늦게 올 수 있으므로, “빈 응답”이 아니라 “content 지연”으로 분리 판정한다.
 - 최종 사용자 출력에는 `stream_field in {None,"content"}`만 포함한다(=reasoning은 집계/메트릭용).
+
+
+## 최근 정책 메모
+- 기관(ORG) 필터는 LOOKUP에서만 부분일치(MatchText + prefix 확장) 하드게이트를 사용합니다.
+- 제목(TITLE)은 server-side 하드필터를 적용하지 않고 soft ranking 신호로만 사용합니다.

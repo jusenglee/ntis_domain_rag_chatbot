@@ -3393,7 +3393,7 @@ def _run_rag_with_vectors(
 
     def _with_org_must_gate(base_filter: Any, *, col: Optional[str] = None, mode_override: Optional[str] = None) -> Any:
         mode_for_gate = mode_override or mode
-        should_apply_org_gate = mode_for_gate in ("lookup", "join") and planner_org_filter_present
+        should_apply_org_gate = mode_for_gate in ("lookup",) and planner_org_filter_present
         org_gate = _build_org_must_gate() if should_apply_org_gate else None
         combined = _and_filter(base_filter, org_gate) if org_gate is not None else base_filter
         log_kv(
@@ -4024,13 +4024,12 @@ def _run_rag_with_vectors(
         lookup_filter_policy = "hard"
 
     lookup_title_filter_policy_raw = str(os.getenv("RAG_LOOKUP_TITLE_FILTER_POLICY", "soft")).strip().lower()
-    lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_raw)
-    if lookup_title_filter_policy is None:
+    lookup_title_filter_policy = "soft"
+    if lookup_title_filter_policy_raw not in ("", "soft"):
         logger.warning(
-            "[RAG] invalid RAG_LOOKUP_TITLE_FILTER_POLICY=%s, falling back to 'soft'",
+            "[RAG] title server filter policy is fixed to soft; ignore RAG_LOOKUP_TITLE_FILTER_POLICY=%s",
             lookup_title_filter_policy_raw,
         )
-        lookup_title_filter_policy = "soft"
 
     detail_lookup_request = bool(
         plan.mode == "lookup"
@@ -4039,14 +4038,6 @@ def _run_rag_with_vectors(
                 or _normalize_output_type(getattr(plan, "output_type", None)) == "detail"
         )
     )
-    if lookup_title_filter_policy == "hard" and not detail_lookup_request:
-        logger.warning(
-            "[RAG] RAG_LOOKUP_TITLE_FILTER_POLICY=hard is only allowed for detail lookup; forcing 'soft' (mode=%s, action=%s, output_type=%s)",
-            plan.mode,
-            action,
-            getattr(plan, "output_type", None),
-        )
-        lookup_title_filter_policy = "soft"
     title_text_match_supported = bool(getattr(qmodels, "MatchText", None) is not None)
     title_match_mode = resolve_lookup_title_match_mode(
         lookup_title_filter_policy=lookup_title_filter_policy,
@@ -5179,7 +5170,8 @@ def _run_rag_with_vectors(
                     ),
                 )
 
-            hop2_filter = _with_org_must_gate(hop2_filter, col=hop2_col, mode_override="join")
+            log_kv("RAG.JOIN.HOP2.ORG_GATE.SKIP", hop2_col=hop2_col, relation=relation, join_key_mode=hop2_join_key_mode, reason="hop2_uses_join_key_only")
+            hop2_filter = _with_org_must_gate(hop2_filter, col=hop2_col, mode_override="join_hop2")
             if hop2_col in (COL_PROJECT, COL_PERF):
                 if year_range_filter:
                     hop2_filter = _and_filter(hop2_filter, year_range_filter)

@@ -166,7 +166,7 @@ def validate_planner_contract(
 
 
 LOOKUP_FILTER_POLICIES = {"hard", "off", "must_one_then_should"}
-LOOKUP_TITLE_FILTER_POLICIES = {"soft", "hard"}
+LOOKUP_TITLE_FILTER_POLICIES = {"soft"}
 TITLE_MATCH_MODE_EXACT = "EXACT"
 TITLE_MATCH_MODE_TEXT = "TEXT"
 TITLE_MATCH_MODE_CONTAINS = "CONTAINS"
@@ -214,7 +214,6 @@ def normalize_lookup_title_filter_policy(policy: Optional[str]) -> Optional[str]
 
     정책 계약:
     - soft: server-side title filter를 적용하지 않고, title_terms는 soft ranking 신호로만 활용.
-    - hard: title_terms를 server-side must로 적용(단, detail lookup에서만 허용).
     """
     value = str(policy or "").strip().lower()
     if not value:
@@ -228,12 +227,9 @@ def resolve_lookup_title_match_mode(*, lookup_title_filter_policy: str, index_su
     """lookup title 정책을 실행 가능한 title match mode로 해석한다.
 
     정책 매핑:
-    - hard: EXACT 또는 TEXT(인덱스 지원 시)
     - soft: CONTAINS(post-filter + rerank signal)
     """
     policy = str(lookup_title_filter_policy or "").strip().lower()
-    if policy == "hard":
-        return TITLE_MATCH_MODE_TEXT if bool(index_supports_text) else TITLE_MATCH_MODE_EXACT
     return TITLE_MATCH_MODE_CONTAINS
 
 
@@ -285,7 +281,7 @@ class StrategyCompiler:
 
         lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_hint) or "hard"
         lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_hint) or "soft"
-        if lookup_title_filter_policy == "hard" and not detail_lookup_request:
+        if lookup_title_filter_policy != "soft":
             lookup_title_filter_policy = "soft"
         title_match_mode = resolve_lookup_title_match_mode(
             lookup_title_filter_policy=lookup_title_filter_policy,

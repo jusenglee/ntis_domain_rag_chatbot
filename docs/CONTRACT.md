@@ -99,7 +99,7 @@
 
 관련 코드:
 - lookup filter 정책/타이틀 정책 정규화: `normalize_lookup_filter_policy()`, `normalize_lookup_title_filter_policy()`
-- title hard filter는 detail lookup에서만 허용(컴파일러에서 soft로 강등 가능): `StrategyCompiler.compile()`
+- title server-side 하드필터는 비활성(항상 soft ranking 신호): `StrategyCompiler.compile()` / `resolve_lookup_title_match_mode()`
 
 ### 3.3 JOIN (관계형 2-hop)
 목표: 관계 오염 차단을 위해 **server-side must 필터가 필수**.

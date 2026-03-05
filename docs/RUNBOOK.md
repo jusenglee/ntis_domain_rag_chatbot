@@ -180,3 +180,9 @@ export RAG_DEBUG_TOPN=5
 [ ] contract_fail_reason / error_code 기록
 [ ] 재현용 최소 입력(질의+hint+env) 정리
 ```
+
+
+## 기관/제목 필터 운영 관측성
+- `RAG.ORG.MATCH.POLICY`: 기관 필터 확장 정책 로그(prefix_len/min_len/terms preview).
+- `RAG.JOIN.HOP2.ORG_GATE.SKIP`: JOIN Hop2에서 org gate를 의도적으로 생략했는지 확인.
+- 제목 필터는 server-side 하드게이트를 사용하지 않고 soft rerank로만 동작한다.

@@ -35,12 +35,11 @@ from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel
 from rag_pipeline import run_rag_ab_compare
-from retrieval import ensure_keyword_index
+from retrieval import ensure_keyword_index, ensure_text_index
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
 from schemas import IntentPayloadV2
-from retrieval import ensure_keyword_index
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -2847,13 +2846,17 @@ async def lifespan(app: FastAPI):
     }
 
     if ensure_payload_index_on_boot:
-        index_targets = {
+        keyword_index_targets = {
             "ntis_project": ["pjt_id", "pjt_no"],
             "ntis_perf": ["pjt_id", "pjt_no"],
         }
+        text_index_targets = {
+            "ntis_project": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
+            "ntis_perf": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
+        }
 
         client = rag_resources.qdrant_client
-        for collection_name, field_names in index_targets.items():
+        for collection_name, field_names in keyword_index_targets.items():
             for field_name in field_names:
                 try:
                     collection_info = client.get_collection(collection_name=collection_name)
@@ -2863,40 +2866,21 @@ async def lifespan(app: FastAPI):
                     schema_type_name = str(schema_type).upper() if schema_type is not None else ""
 
                     if "KEYWORD" in schema_type_name:
-                        logger.info(
-                            "[startup][payload-index] %s.%s: skip (already exists)",
-                            collection_name,
-                            field_name,
-                        )
+                        logger.info("[startup][payload-index][keyword] %s.%s: skip (already exists)", collection_name, field_name)
                         continue
 
                     ensure_keyword_index(client, collection_name, field_name)
-
-                    collection_info = client.get_collection(collection_name=collection_name)
-                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
-                    field_schema = payload_schema.get(field_name)
-                    schema_type = getattr(field_schema, "data_type", None)
-                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
-
-                    if "KEYWORD" in schema_type_name:
-                        logger.info(
-                            "[startup][payload-index] %s.%s: created",
-                            collection_name,
-                            field_name,
-                        )
-                    else:
-                        logger.warning(
-                            "[startup][payload-index] %s.%s: warning (ensure called but not visible)",
-                            collection_name,
-                            field_name,
-                        )
+                    logger.info("[startup][payload-index][keyword] %s.%s: ensure called", collection_name, field_name)
                 except Exception as e:
-                    logger.warning(
-                        "[startup][payload-index] %s.%s: warning (%s)",
-                        collection_name,
-                        field_name,
-                        e,
-                    )
+                    logger.warning("[startup][payload-index][keyword] %s.%s: warning (%s)", collection_name, field_name, e)
+
+        for collection_name, field_names in text_index_targets.items():
+            for field_name in field_names:
+                try:
+                    ensure_text_index(client, collection_name, field_name)
+                    logger.info("[startup][payload-index][text] %s.%s: ensure called", collection_name, field_name)
+                except Exception as e:
+                    logger.warning("[startup][payload-index][text] %s.%s: warning (%s)", collection_name, field_name, e)
     else:
         logger.info("[startup][payload-index] skipped by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=%s", os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT"))
 
