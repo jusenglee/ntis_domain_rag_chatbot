@@ -11,7 +11,7 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - `RAG_KEY_PJT_ID=pjt_id`
 - `RAG_KEY_PJT_NO=pjt_no`
 - `RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS=1` (group JOIN에서 Hop1 `pjt_no -> pjt_id` resolve 수행 여부)
-- `RAG_JOIN_GROUP_RESOLVE_MAX_IDS=200` (group JOIN resolve 시 최대 `pjt_id` 수)
+- `RAG_JOIN_GROUP_RESOLVE_MAX_IDS=200` (group JOIN resolve 시 최대 `pjt_id` 수; 실효 상한은 resolve 입력 포인트 수에 의해 추가 제한됨)
 - `RAG_JOIN_GROUP_RESOLVE_TOPK=400` (group JOIN resolve를 위한 Hop1 최소 topk)
 - `RAG_JOIN_GROUP_RESOLVE_KEEP=50` (group JOIN resolve 입력 후보 keep; `max(RAG_HOP1_KEEP, min(RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_KEEP))`로 보정)
 
@@ -27,6 +27,17 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - 실행 시 `RAG.JOIN.POLICY`, `RAG.JOIN.GROUP.RESOLVE` 로그에 정책값/적용 결과가 기록됩니다.
   - `resolve_input_count`: resolve 함수에 실제 전달된 Hop1 후보 수
   - `resolve_keep_effective`: `RAG_HOP1_KEEP`/`RAG_JOIN_GROUP_RESOLVE_MAX_IDS`/`RAG_JOIN_GROUP_RESOLVE_KEEP`를 반영한 최종 keep
+
+### resolve 입력 상한 계산식
+
+- 실효 resolve 입력 상한은 아래 식으로 계산합니다.
+
+  - `effective_resolve_cap = min(group_resolve_max_ids, group_resolve_keep_effective, available_hop1_points)`
+  - `group_resolve_max_ids = RAG_JOIN_GROUP_RESOLVE_MAX_IDS`
+  - `group_resolve_keep_effective = resolve_keep_effective`
+  - `available_hop1_points = Hop1에서 resolve 대상으로 실제 확보된 포인트 수`
+
+- 즉, `RAG_JOIN_GROUP_RESOLVE_MAX_IDS`만 단독으로 증가시켜도 Hop1 가용 포인트(`available_hop1_points`)나 keep 보정값(`resolve_keep_effective`)이 더 작으면 `resolve_input_count`는 함께 증가하지 않을 수 있습니다.
 
 ## 금지사항(Prohibition)
 

@@ -120,7 +120,9 @@ export RAG_DEBUG_TOPN=5
 튜닝 가이드(resolve ON):
 - `RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS=1`일 때 `RAG_JOIN_GROUP_RESOLVE_KEEP`를 `30~100` 범위에서 시작해 조정합니다.
 - 최종 resolve 입력 수는 `resolve_keep_effective = max(RAG_HOP1_KEEP, min(RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_KEEP))`이며, 실제 투입량은 `resolve_input_count`로 확인합니다.
+- 경고: `RAG_JOIN_GROUP_RESOLVE_MAX_IDS`만 증가시키면 `available_hop1_points` 또는 `resolve_keep_effective`가 병목인 경우 효과가 제한될 수 있습니다.
 - `resolved_pjt_ids_count`가 지속적으로 0에 가까우면 `RAG_JOIN_GROUP_RESOLVE_KEEP` 또는 `RAG_JOIN_GROUP_RESOLVE_TOPK`를 단계적으로 상향합니다.
+- 점검 로그 키: `resolved_pjt_ids_count`, `resolve_input_count`를 함께 확인해 resolve 투입 대비 해석 효율을 판단합니다.
 
 ### (B) SEARCH인데 결과가 엉뚱하게 좁아짐
 원인 후보:
@@ -173,6 +175,7 @@ export RAG_DEBUG_TOPN=5
 [ ] ids_map(pjt_id vs pjt_no XOR) 확인
 [ ] compile 결과(qdrant_filter must/should/min_should) 확인
 [ ] retrieval hit 분포(dense/lexical/collection별) 확인
+[ ] group JOIN 시 `resolved_pjt_ids_count`가 `hop1_keep` 근처에서 고정되는지 확인(상한 병목 여부 점검)
 [ ] rerank score(avg/max) 확인
 [ ] contract_fail_reason / error_code 기록
 [ ] 재현용 최소 입력(질의+hint+env) 정리
