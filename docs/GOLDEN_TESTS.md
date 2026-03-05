@@ -41,6 +41,7 @@
 - [ ] relation이 있으면 mode는 join이 된다(특히 action=relation).
 - [ ] join_key_mode=instance면 pjt_id만 허용(pjt_no 금지)
 - [ ] join_key_mode=group이면 pjt_no가 필수(입력 단계), hop2 실행엔 pjt_no 또는 pjt_id 확장 결과 중 하나는 반드시 존재
+- [ ] JOIN Hop2는 org/title gate 없이 join key 필터만 사용한다.
 
 ---
 

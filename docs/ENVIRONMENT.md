@@ -62,3 +62,15 @@ export SOLAR_VLLM_API_KEY=EMPTY
 export SOLAR_VLLM_TIMEOUT=120
 
 ```
+
+## ORG/TITLE 필터 정책 고정값
+
+```bash
+# 기관 부분일치(prefix 확장) 정책
+export RAG_ORG_PARTIAL_PREFIX_LEN=6
+export RAG_ORG_PARTIAL_MIN_LEN=4
+
+# 제목은 server-side 하드필터를 사용하지 않고 soft ranking만 사용
+# (환경변수 입력값이 있더라도 내부적으로 soft 고정)
+export RAG_LOOKUP_TITLE_FILTER_POLICY=soft
+```
