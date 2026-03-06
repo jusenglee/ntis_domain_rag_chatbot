@@ -55,6 +55,7 @@
 - planner:
   - normalized_intent
   - strategy(mode/action/relation/join_key_mode/ids_map 요약)
+- `RAG.JOIN.HEAD.SEMANTICS`(relation/planner_head/expected_head/join_key_mode/ids_map_keys/target_cols)
   - planner_confidence
 - compile:
   - qdrant_filter 요약(must/should/min_should)
@@ -100,6 +101,7 @@ export RAG_DEBUG_TOPN=5
 ## 4) 자주 터지는 패턴과 처방
 
 ### (A) JOIN인데 결과가 0 (또는 hop2=0)
+우선 `RAG.JOIN.HEAD.SEMANTICS`에서 `planner_head == expected_head`와 `target_cols` 정합성을 먼저 확인합니다.
 원인 후보:
 - join_key_mode/ids_map 불일치 (instance인데 pjt_no만 있음 등)
 - hop2 filter가 잘못된 key(pjt_id vs pjt_no)를 must로 만들었음
