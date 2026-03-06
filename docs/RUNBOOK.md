@@ -184,5 +184,13 @@ export RAG_DEBUG_TOPN=5
 
 ## 기관/제목 필터 운영 관측성
 - `RAG.ORG.MATCH.POLICY`: 기관 필터 확장 정책 로그(prefix_len/min_len/terms preview).
-- `RAG.JOIN.HOP2.ORG_GATE.SKIP`: JOIN Hop2에서 org gate를 의도적으로 생략했는지 확인.
+- `RAG.SERVER_FILTER.ORG_GATE`: LOOKUP에서 planner_org_filter_present=true 이면서 `lookup_filter_enabled=false`인 경우에만 gate 적용.
+- `RAG.JOIN.HOP2.ORG_GATE.SKIP`: JOIN Hop2(perf)에서 org gate를 의도적으로 생략했는지 확인.
 - 제목 필터는 server-side 하드게이트를 사용하지 않고 soft rerank로만 동작한다.
+
+## fastembed(BM25) 부팅 워밍업
+- 기본값으로 서버 시작 시 sparse encoder(`Qdrant/bm25`)를 1회 warmup 하여 첫 요청 지연을 완화한다.
+- 환경변수 `RAG_FASTEMBED_WARMUP_ON_BOOT=false`로 비활성화 가능.
+- warmup 로그 키:
+  - 성공: `[retrieval] sparse encoder warmup success: model=...`
+  - 실패: `[retrieval] sparse encoder warmup failed: ...`
