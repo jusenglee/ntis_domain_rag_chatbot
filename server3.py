@@ -35,7 +35,7 @@ from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel
 from rag_pipeline import run_rag_ab_compare
-from retrieval import ensure_keyword_index, ensure_text_index
+from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
@@ -2883,6 +2883,12 @@ async def lifespan(app: FastAPI):
                     logger.warning("[startup][payload-index][text] %s.%s: warning (%s)", collection_name, field_name, e)
     else:
         logger.info("[startup][payload-index] skipped by RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=%s", os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT"))
+
+    sparse_warmup_on_boot = os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if sparse_warmup_on_boot:
+        warmup_sparse_encoder()
+    else:
+        logger.info("[startup][fastembed] skipped by RAG_FASTEMBED_WARMUP_ON_BOOT=%s", os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT"))
 
     backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
     # MEMORY_BACKEND=redis|memory|file

@@ -114,6 +114,23 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
         return enc
 
 
+def warmup_sparse_encoder(model_id: Optional[str] = None) -> bool:
+    """서버 시작 시 sparse encoder를 1회 로드/고정한다."""
+    resolved_model_id = str(model_id or os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
+    try:
+        enc = _get_sparse_encoder(resolved_model_id)
+        if enc is None:
+            logger.info("[retrieval] sparse encoder warmup skipped (cache dir/config issue)")
+            return False
+        # 첫 요청 지연/캐시 검증 비용을 부팅 시점으로 이동
+        next(enc.embed(["warmup"]), None)
+        logger.info("[retrieval] sparse encoder warmup success: model=%s", resolved_model_id)
+        return True
+    except Exception as e:  # pragma: no cover
+        logger.warning("[retrieval] sparse encoder warmup failed: model=%s err=%s", resolved_model_id, e)
+        return False
+
+
 def _encode_sparse_query(text: str, *, model_id: str) -> Optional[models.SparseVector]:
     """
     Encode query text into Qdrant SparseVector using fastembed.
