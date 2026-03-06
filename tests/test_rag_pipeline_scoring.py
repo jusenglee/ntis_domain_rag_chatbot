@@ -98,3 +98,20 @@ def test_normalize_values_minmax_with_negative_and_outlier_values() -> None:
     assert norm[0] == 0.0
     assert norm[-1] == 1.0
     assert norm[0] < norm[1] < norm[2]
+
+
+def test_join_instance_without_seed_keys_uses_hop1_search_path() -> None:
+    rag_pipeline = _load_module()
+
+    policy = rag_pipeline._resolve_join_execution_policy(
+        relation=("perf", "project"),
+        mode="join",
+        action="relation",
+        join_key_mode="instance",
+        seed_join_pjt_ids=[],
+        seed_join_pjt_nos=[],
+        has_people_org_gate=False,
+    )
+
+    assert policy["hop1_strategy"] == "search"
+    assert policy["reason"] == "default_hop1_search"

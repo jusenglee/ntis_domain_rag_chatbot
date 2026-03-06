@@ -125,7 +125,10 @@ def validate_planner_contract(
         violations.append(
             PlannerContractViolation(
                 error_code="PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH",
-                reason=f"relation/head 불일치(head={head_norm}, relation={relation})",
+                reason=(
+                    "JOIN head must equal relation target(relation[1])"
+                    f"(head={head_norm}, relation={relation}, expected={relation[1]})"
+                ),
             )
         )
 

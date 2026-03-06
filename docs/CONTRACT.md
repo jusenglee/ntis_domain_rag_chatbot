@@ -125,12 +125,23 @@
 - `rag_parts/filters.py::validate_planner_join_keys()` → ValueError(`PLANNER_MIXED_PROJECT_KEYS`)
 
 ### 4.2 join_key_mode 규칙
-- join_key_mode=instance → pjt_id 필수, pjt_no 금지
+- join_key_mode=instance → pjt_no 금지, pjt_id는 선택(없으면 Hop1 source에서 pjt_id 추출 허용)
 - join_key_mode=group → pjt_no 필수, pjt_id 금지(입력 단계)
 
 관련 코드:
 - planner 단계 위반: `PLANNER_JOIN_KEY_MODE_IDS_MISMATCH`
 - executor 단계 위반: `validate_resolved_join_keys()`, `validate_join_mode_key_inputs()`
+
+---
+
+### 4.3 JOIN head 의미(관계 target 고정)
+- head는 “최종 응답 엔티티”이며 JOIN에서는 항상 relation target(두 번째 엔티티)과 일치해야 함
+- `project_perf` → head=`perf`
+- `perf_project` → head=`project`
+
+관련 코드:
+- `rag_parts/planner_contract.py::validate_planner_contract()`
+- 위반 코드: `PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH`
 
 ---
 

@@ -21,6 +21,7 @@
 |G009|PJT-2020-XXXX 성과 전체|relation|('project', 'perf')|join|relation_action|group|{"pjt_no": ["PJT-2020-XXXX"]}|
 |G010|논문 DOI 10.1000/xyz123 관련 과제|relation|('project', 'perf')|join|relation_action||{"doi": ["10.1000/xyz123"]}|
 |G011|지원사업 공고 목록|list|None|lookup|people_org_name_lookup||{}|
+|G012|과학기술 학술정보서비스의 연계 및 융합에 관한 연구 논문은 어느 과제에 포함되어있는지?|relation|('perf', 'project')|join|relation_action|instance|{}|
 
 
 > 주의: 데이터/인덱스 상태에 따라 “검색 결과”는 변해도 되지만, **전략 결정(mode reason)과 계약 위반 여부는 안정적이어야** 합니다.
@@ -39,7 +40,8 @@
 
 ### JOIN invariants
 - [ ] relation이 있으면 mode는 join이 된다(특히 action=relation).
-- [ ] join_key_mode=instance면 pjt_id만 허용(pjt_no 금지)
+- [ ] JOIN에서는 head == relation target(두 번째 엔티티) 이어야 한다.
+- [ ] join_key_mode=instance면 pjt_no 금지, pjt_id는 선택(Hop1 source 추출 경로 허용)
 - [ ] join_key_mode=group이면 pjt_no가 필수(입력 단계), hop2 실행엔 pjt_no 또는 pjt_id 확장 결과 중 하나는 반드시 존재
 - [ ] JOIN Hop2는 org/title gate 없이 join key 필터만 사용한다.
 

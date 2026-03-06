@@ -809,8 +809,12 @@ async def _run_question_analysis(
         [Mode 결정 규칙(우선순위)]
         ====================
         선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
-        - relation은 ["project","perf"](= "project_perf")로 확정
-        - head는 반드시 "perf"로 확정
+        - relation은 질의 의미 방향을 그대로 사용합니다.
+          * "과제의 논문/성과" => relation="project_perf"
+          * "이 논문/성과가 어느 과제" => relation="perf_project"
+        - head는 항상 relation의 target(두 번째 엔티티)로 고정합니다.
+          * project_perf => head="perf"
+          * perf_project => head="project"
         - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
 
         A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
@@ -882,8 +886,9 @@ async def _run_question_analysis(
         
         추출하지 못하면 빈 dict.
         [JOIN 추가 불변 규칙]
-        - mode="JOIN"은 ids_map에 pjt_id 또는 pjt_no가 존재할 때만 허용한다.
         - 사람/기관 이름만 있는 경우 JOIN 금지. 반드시 mode="LOOKUP"으로 처리한다.
+        - mode="JOIN" + join_key_mode="instance"에서 ids_map={} 자체는 허용한다.
+          (전제: relation이 명확하고 Hop1 source에서 pjt_id 추출 가능해야 함)
         
         [ID 필드 규칙]
         - ids_map.person_no는 참여인력 ID(hm_id)일 때만 사용한다.
@@ -945,14 +950,15 @@ async def _run_question_analysis(
         - mode="JOIN"이면 join_key_mode는 필수이며 "instance" | "group" 중 하나여야 합니다.
         - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
         - JOIN ids_map 규칙:
-          * join_key_mode="instance": ids_map.pjt_id를 사용합니다.
+          * join_key_mode="instance": ids_map.pjt_id가 있으면 seed key로 사용합니다.
+          * join_key_mode="instance" + ids_map={}도 허용합니다(관계 명확 + Hop1 source에서 pjt_id 추출 전제).
           * join_key_mode="instance"인데 ids_map.pjt_no만 있으면 계약 위반입니다.
           * join_key_mode="group": ids_map.pjt_no를 사용합니다.
           * join_key_mode="group"인데 ids_map.pjt_no가 비어 있고 ids_map.pjt_id만 있으면 실행 전 정규화에서
             join_key_mode를 "instance"로 보정하고 경고를 남깁니다.
         
         1) relation="project_perf"
-          - head="perf"를 기본으로 사용
+          - head="perf" (relation target 고정)
           - Hop1 전략 우선순위(항상 SEARCH 아님):
             * instance + ids_map.pjt_id 존재 => 기본 Hop1 skip (옵션 플래그일 때만 최소 보강 lookup 허용)
             * group + ids_map.pjt_no 존재 => Hop1 search 금지, lookup(pjt_no must) 강제
@@ -963,8 +969,18 @@ async def _run_question_analysis(
             * join_key_mode="group": pjt_no IN (...) must
         
         2) relation="perf_project"
+          - head="project" (relation target 고정)
           - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
           - join_key_mode="group": Hop2(project)에서 pjt_no == PJT_NO must
+
+        예시(제목 기반 perf→project):
+        - "과학기술 학술정보서비스의 연계 및 융합에 관한 연구 논문은 어느 과제에 포함되어있는지?"
+          * mode="JOIN"
+          * relation="perf_project"
+          * head="project"
+          * join_key_mode="instance"
+          * ids_map={}
+          * target_cols=["ntis_perf_v1","ntis_project_v1"]
         
         ====================
         [retrieval_query 규칙]

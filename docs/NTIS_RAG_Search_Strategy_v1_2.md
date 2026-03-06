@@ -111,6 +111,18 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
   - `instance`: Hop2(project) `pjt_id == PJT_ID` must
   - `group`: Hop2(project) `pjt_no == PJT_NO` must
 
+### 5.4 JOIN head 의미(단일 규칙)
+- `head`는 최종 응답 엔티티이며, JOIN에서는 항상 relation target(두 번째 엔티티)과 동일해야 함
+- `project_perf` → source=project, target=perf, head=perf
+- `perf_project` → source=perf, target=project, head=project
+
+### 5.5 planner 입력 계약 vs executor 런타임 계약
+- planner 입력 계약(`validate_planner_contract`, `_validate_join_key_contract`)
+  - `join_key_mode=instance`는 `ids_map={}`도 허용 가능(관계 명확 + Hop1 source 추출 경로 전제)
+- executor 런타임 계약(`validate_resolved_join_keys`, `validate_join_mode_key_inputs`)
+  - Hop2 실행 직전에는 실제 join key가 반드시 존재해야 함
+  - 없으면 `JOIN_KEYS_MISSING` 또는 `JOIN_GROUP_KEYS_UNRESOLVED`로 명시 실패
+
 ---
 
 ## 6. 플래너 출력 계약 (v1.2)

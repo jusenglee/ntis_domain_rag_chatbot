@@ -3620,7 +3620,8 @@ def _run_rag_with_vectors(
                     error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
                     reason="join_key_mode=instance only allows ids_map.pjt_id",
                 )
-            # ✅ instance는 ids_map.pjt_id가 없어도 허용 (Hop1에서 pjt_id를 payload 최상위에서 뽑는다)
+            # ✅ instance는 ids_map.pjt_id가 없어도 허용 (Hop1 source에서 payload 최상위 pjt_id 추출 경로 허용)
+            # ❌ 단, Hop1 source 없이 Hop2 직행인데 seed key도 비어 있으면 실행 단계에서 JOIN_KEYS_MISSING으로 명시 실패한다.
             if (not has_pjt_id) and (not allow_missing_instance_ids):
                 raise StrategyViolation(
                     error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
@@ -3882,12 +3883,23 @@ def _run_rag_with_vectors(
         if route_for_contract is not None
         else None
     )
+    expected_join_head = planner_strategy_relation[1] if planner_strategy_relation else None
+    ids_map_for_contract = getattr(ctx, "ids_map", None)
+    log_kv(
+        "RAG.JOIN.HEAD.SEMANTICS",
+        relation=planner_strategy_relation,
+        planner_head=base_route,
+        expected_head=expected_join_head,
+        join_key_mode=join_key_mode_for_contract,
+        ids_map_keys=sorted(list((ids_map_for_contract or {}).keys())) if isinstance(ids_map_for_contract, dict) else [],
+        target_cols=list(ctx.target_collections or plan.target_collections or []),
+    )
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
         head=base_route,
         relation=planner_strategy_relation,
         target_cols=list(ctx.target_collections or plan.target_collections or []),
-        ids_map=getattr(ctx, "ids_map", None),
+        ids_map=ids_map_for_contract,
         relation_target_cols=relation_target_cols_for_contract,
         join_key_mode=join_key_mode_for_contract,
     )
