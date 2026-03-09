@@ -233,6 +233,23 @@
 - `EmptyStreamContentError` 또는 content 미방출(`stream_content_emitted_chunks == 0`) 상황에서 non-stream fallback 재시도는 수행하지 않는다(지연 최소화 우선).
 - truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착하며, content 미방출(빈 결과)에는 부착하지 않는다.
 
+---
+
+## 9) Metrics API 응답 계약(`/metrics`, `/metrics/stream`)
+
+`metrics.py`의 `MetricSnapshot`은 외부 공개 키를 camelCase로 고정한다.
+
+```json
+{
+  "requestCount": 4.0,
+  "gpuUtilPercent": 78.5
+}
+```
+
+- `requestCount`: 현재 시점 vLLM 처리 중 요청 수 합계
+- `gpuUtilPercent`: 현재 시점 GPU 사용률 평균(0~100)
+- `/metrics`와 `/metrics/stream`은 위 **동일 스키마**를 사용한다.
+- 서버 직렬화는 alias 기준(`requestCount`, `gpuUtilPercent`)을 강제한다.
 
 ## 9) 메트릭 SSE 출력 계약 (`metrics.py`)
 
