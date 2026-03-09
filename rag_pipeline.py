@@ -2443,8 +2443,8 @@ def _normalize_strategy_target_cols(cols: Any) -> List[str]:
 def _derive_planner_locks(plan: QueryPlan) -> tuple[str, Optional[tuple[str, str]], List[str]]:
     """planner 스냅샷(mode/relation/target_cols)을 단일 규칙으로 고정한다.
 
-    주의: fallback으로 plan이 교체될 수 있으므로, 실행 전 검증에 사용하는
-    planner lock 값은 항상 최신 plan으로 재동기화해야 한다.
+    주의: 문서 원칙은 fail-close이지만, 호환 모드(env)에서는 fallback으로 plan이 교체될 수 있다.
+    따라서 실행 전 검증에 사용하는 planner lock 값은 항상 최신 plan으로 재동기화해야 한다.
     """
     planner_mode_locked = str(getattr(plan, "mode", "") or "").strip().lower()
     planner_relation_locked = getattr(plan, "relation", None)

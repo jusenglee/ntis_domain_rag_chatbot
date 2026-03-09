@@ -5,6 +5,16 @@
 
 ---
 
+
+## 0) 이번 세션 결론(변경 여부)
+- 계약 변경 여부: **없음** (코드 변경 없이 문서 캐시/정합성 점검만 수행)
+- 확인된 운영 갭:
+  - 문서 원칙은 strict/fail-close 지향이나, 런타임 기본값은 compat fallback 경로가 활성화되어 있음
+  - 전략 재작성 경로가 parser/validator/normalizer/executor에 분산되어 단일 책임 경계가 약함
+- 본 문서는 목표 계약(SSoT)을 유지하며, 현재 구현과의 차이는 RUNBOOK/ADR에서 위험으로 관리한다.
+
+---
+
 ## 1) 절대 불변 원칙(Non‑negotiable)
 
 ### 1.1 Planner 단일 Strategy 원칙

@@ -77,19 +77,24 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 ## 4. 상태/백로그/세션 로그(최근 5개만 유지)
 
 ### 4.1 현재 상태
-- Solar(vLLM) 스트리밍에서 reasoning이 먼저 출력되고 content가 지연되는 케이스가 발생할 수 있음(운영상 `content_delayed`로 분류).
-- openai_compat_llm ↔ llm_streaming 간 “reasoning 청크 텍스트 전달 방식” 불일치 가능성 점검/정리 중.
+- JOIN 계약(`head == relation target`, `join_key_mode` XOR, Hop2 key-only 필터) 자체는 코드/문서 정합이 높은 상태.
+- 다만 실행 기본값은 여전히 compat 성격(`RAG_PLANNER_INVALID_FALLBACK=1`, `RAG_STRICT_STRATEGY_CONSISTENCY=0`)이어서 “문서상 strict 원칙”과 완전 일치하지 않음.
+- 전략 재작성 경로가 `apply_planner_v2` 외에도 parser/validator/normalizer에 분산되어 있어 단일 책임 경계가 아직 미완.
+- people/org relation JOIN 금지는 upstream에서 대부분 차단되지만, executor late guard는 기본 경고 경로가 남아 있음.
 
 ### 4.2 백로그(Top)
-- [ ] openai_compat_llm: (Planner vs Answer) stage별 reasoning 정책을 요청 단위로 고정(`reasoning_effort`, `include_reasoning`, `chat_template_kwargs`).
-- [ ] llm_streaming: reasoning 청크가 `content=""`로 오고 별도 필드로 텍스트가 전달되는 케이스까지 파싱 계약 확정(+테스트).
-- [ ] server3: Planner 체인에서 `llm.bind(...)`로 planner-only thinking/high 적용 + `format_instructions` 실제 프롬프트 삽입 누락 보완.
-- [ ] RUNBOOK: `content_delayed` 트리아지(체크리스트/재현 절차) 보강 + 알람 후보 정의.
+- [ ] **P0 관측성 표준화**: `policy_mode`, `planner_invalid_fallback`, `strict_strategy_consistency`, `promotion_mode`, `force_fallback_chat`, `strategy_mutation_stage` 로그를 공통 스키마로 고정.
+- [ ] **P1 기본값 정합화**: `RAG_PLANNER_INVALID_FALLBACK=0` 기본 전환(호환모드는 opt-in).
+- [ ] **P2 전략 재작성 인벤토리 정리**: `apply_planner_v2` + `normalize_planner_payload` + `validate_join_contract` + `normalize_intent`를 단일 책임 모델로 정리.
+- [ ] **P3 people/org 조기 차단 강화**: parser/intent 단계에서 forbidden relation 확정 차단, executor는 최종 안전장치로 축소.
+- [ ] **P4 회귀 고정**: strict/compat 정책 축 + 복합 질의 축 골든 테스트 분리.
 
 ### 4.3 세션 로그(최근 5개만 유지)
+- 2026-03-09: planner_contract/rag_pipeline/filters/query_intent/전략문서 교차 점검 결과를 문서 캐시에 반영. 주요 결론은 “JOIN 계약은 강함, 불변 계약 기본값은 미정합”.
+- 2026-03-09: 문서-주석 정합성 점검 수행. 코드 주석은 “문서상 strict 원칙 vs 현재 compat 경로 존재”를 명시하도록 갱신.
+- 2026-03-09: strict 전환 관련 ADR 초안(단계적 전환 + 조기 차단 우선)을 추가.
 - 2026-03-09: `metrics.py` API 계약 문서화(`/metrics`, `/metrics/stream`, None/로깅 정책, 환경 변수 기본값) + 함수 docstring 보강.
 - 2026-03-03: Solar(vLLM) 스트리밍 “reasoning 먼저/ content 지연” 이슈 원인 정리 + 스트리밍 계약/트리아지 문서 반영.
-- 2026-02-27: DocOps 스캐폴드 생성(초기)
 
 ## 5. 스트리밍 장애 정책(요약)
 - 스트림 실패 시 non-stream fallback 재시도는 하지 않는다(지연 최소화 우선).

@@ -205,6 +205,25 @@ export RAG_DEBUG_TOPN=5
 
 ---
 
+## 전략 불변성 정합성 트리아지 (신규)
+
+증상:
+- 같은 질의에서 strict/compat 실행 결과가 다름(예: strict는 예외, compat는 lookup/search 보정).
+- planner 출력과 최종 실행 스냅샷의 `mode/relation/join_key_mode/target_cols`가 단계 중간에 바뀜.
+
+즉시 확인:
+- `policy_mode`, `planner_invalid_fallback`, `strict_strategy_consistency`, `promotion_mode`, `force_fallback_chat`
+- `strategy_mutation_stage`, `changed_by`, `changed_strategy_fields`, `changed_filter_fields`
+
+판단 가이드:
+- 문서상 기대(strict): 계약 위반 시 즉시 `StrategyViolation`
+- 현재 운영(compat 가능): fallback/promotion 경로로 보정될 수 있음
+
+처방 우선순위:
+1) 관측성 고정(로그 키 표준화)
+2) 기본값 정합화(`RAG_PLANNER_INVALID_FALLBACK=0`)
+3) 전략 재작성 지점 단일화(parser/validator/normalizer 정리)
+
 ## 로그 키 사전 (공통)
 
 | 키 | 정의 | 예시 | 알람 조건 |
