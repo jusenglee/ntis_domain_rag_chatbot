@@ -331,7 +331,7 @@
 |`PROMETHEUS_TIMEOUT`|`5`|Prometheus HTTP 요청 타임아웃(초)|
 |`STREAM_INTERVAL_SECONDS`|`2`|`/metrics/stream` 이벤트 전송 주기(초)|
 |`VLLM_QUERY`|`vllm:num_requests_running`|vLLM running request 수집용 PromQL|
-|`GPU_UTIL_QUERY`|`DCGM_FI_DEV_GPU_UTIL`|GPU Util 수집용 PromQL|
+|`GPU_UTIL_QUERY`|`avg(DCGM_FI_DEV_GPU_UTIL{job=~"$dcgm_job", gpu=~"0|2"})`|GPU Util 수집용 PromQL|
 
 - `PROMETHEUS_URL`은 trailing `/`를 제거(`rstrip('/')`)하여 내부에서 정규화한다.
 - PromQL 변수(`VLLM_QUERY`, `GPU_UTIL_QUERY`)는 운영 환경에서 라벨 조건 포함 쿼리로 치환 가능하다.

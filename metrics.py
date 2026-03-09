@@ -17,7 +17,7 @@ STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 
 # 필요하면 PromQL 자체를 환경 변수로 바꿔서 라벨 조건을 붙일 수 있습니다.
 VLLM_QUERY = os.getenv("VLLM_QUERY", "vllm:num_requests_running")
-GPU_UTIL_QUERY = os.getenv("GPU_UTIL_QUERY", "DCGM_FI_DEV_GPU_UTIL")
+GPU_UTIL_QUERY = os.getenv("GPU_UTIL_QUERY", "avg(DCGM_FI_DEV_GPU_UTIL{job=~\"$dcgm_job\", gpu=~\"0|2\"})")
 
 
 class MetricSnapshot(BaseModel):
