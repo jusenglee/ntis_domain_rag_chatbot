@@ -643,6 +643,9 @@ class AgentState(BaseModel):
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
+    rendered_context_used: bool = False
+    fallback_context_used: bool = False
+    degraded: bool = False
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -1509,9 +1512,14 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                 json.dumps(doc, ensure_ascii=False, indent=2)
             )
 
-        _log_event("RAG.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="rag_search", docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_used=int(bool(fallback_context)))
+        fallback_context_used = bool(isinstance(fallback_context, str) and fallback_context.strip())
+        _log_event("RAG.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="rag_search", docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_used=int(fallback_context_used))
 
-        return {"context": docs, "fallback_context": fallback_context}
+        return {
+            "context": docs,
+            "fallback_context": fallback_context,
+            "fallback_context_used": fallback_context_used,
+        }
 
     except StrategyViolation:
         raise
@@ -1588,6 +1596,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         if docs_for_ctx
         else "없음"
     )
+    rendered_context_used = bool(docs_for_ctx) and context_text != "없음"
     if is_solar and SOLAR_MAX_CONTEXT_CHARS > 0:
         context_text = context_text[:SOLAR_MAX_CONTEXT_CHARS]
 
@@ -1756,6 +1765,8 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         selected_model = "gemma" if answer_gemma else "solar"
         selected_answer = answer_gemma or answer_solar or DUAL_MODEL_FALLBACK_MESSAGE
 
+    degraded = selected_answer == DUAL_MODEL_FALLBACK_MESSAGE
+
     merge_debug = {
         "policy": DUAL_MODEL_MERGE_POLICY,
         "selected_model": selected_model,
@@ -1784,7 +1795,9 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "answer_solar_raw": answer_solar_raw,
         "merge_debug": merge_debug,
         "context" : state.context,
-        "fallback_context": state.fallback_context
+        "fallback_context": state.fallback_context,
+        "rendered_context_used": rendered_context_used,
+        "degraded": degraded,
     }
 
 # --- Node 10: Save History ---
@@ -1825,7 +1838,7 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
     total_time = sum(state.latencies.values())
-    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), degraded=int(bool(state.fallback_context)), total_ms=round(total_time * 1000.0, 1))
+    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), rendered_context_used=int(bool(state.rendered_context_used)), fallback_context_used=int(bool(state.fallback_context_used)), degraded=int(bool(state.degraded)), total_ms=round(total_time * 1000.0, 1))
     _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, stage="request_end", total_ms=round(total_time * 1000.0, 1), selected_model=(state.merge_debug or {}).get("selected_model"))
 
     return {}
@@ -3170,7 +3183,7 @@ async def query_stream(payload: QueryRequest):
             total_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
             degraded = isinstance(e, StrategyViolation)
             _log_event(
-                "REQ.FAIL",
+                "REQ.ERROR",
                 request_id=request_id,
                 conversation_id=conversation_id,
                 stage="stream",
@@ -3241,14 +3254,15 @@ async def query_debug(payload: QueryRequest):
 
     except Exception as e:
         logger.error(f"Debug Error: {e}", exc_info=True)
+        degraded = isinstance(e, StrategyViolation)
         _log_event(
-            "REQ.FAIL",
+            "REQ.ERROR",
             request_id=request_id,
             conversation_id=conversation_id,
             stage="debug",
             error_code=getattr(e, "error_code", "INTERNAL_ERROR"),
             reason=getattr(e, "reason", str(e)),
-            degraded=0,
+            degraded=int(degraded),
             total_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
         )
         return {

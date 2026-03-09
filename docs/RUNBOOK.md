@@ -64,7 +64,8 @@
   - `RAG.RESULT.TOP`
   - `RAG.RESULT`
   - `LLM.RESULT`
-  - `REQ.SUMMARY` (`request_id/mode/relation/target_cols/docs_found/selected_model/total_ms/degraded` 요약)
+  - `REQ.SUMMARY` (`request_id/mode/relation/target_cols/docs_found/selected_model/rendered_context_used/fallback_context_used/degraded/total_ms` 요약)
+  - `REQ.ERROR` (요청 실패 경로의 `error_code/reason/degraded` 기록)
   - `REQ.END`
 - 디버그(`RAG_LOG_LEVEL=debug`):
   - `STREAM.DONE`(solar/gemma `ttft_any_ms`, `ttft_content_ms`, `elapsed_ms`, `content_chars`, `error_code`)
@@ -238,6 +239,9 @@ export RAG_LOG_LEVEL=debug
 | `force_fallback_chat` | 결과 계약 실패를 chat fallback으로 전환 | `0`, `1` | `1` 상태에서 계약 실패(reason) 증가 |
 | `strategy_mutation_stage` | 전략 변형 발생 단계 | `parser`, `validator`, `normalizer`, `planner_merge`, `executor` | `validator`/`executor` 단계 변형 급증 |
 | `changed_by` | 변형 주체 태그 | `parser` 등 | 특정 주체의 변형 비율 급증 |
+| `rendered_context_used` | 최종 답변 생성 시 렌더링 컨텍스트(문서/메모리)가 실제 프롬프트에 포함되었는지 | `0`, `1` | `docs_found > 0`인데 `0` 비율 급증 시 문맥 렌더링 실패 의심 |
+| `fallback_context_used` | retrieval 단계에서 fallback 문자열이 생성/사용되었는지 | `0`, `1` | `1` 비율 급증 시 검색 품질 저하/매퍼 누락 점검 |
+| `degraded` | 정책 위반 또는 생성 실패로 저하 응답(예: StrategyViolation 안내문, 듀얼모델 공통 fallback 문구) 여부 | `0`, `1` | `1` 급증 시 `REQ.ERROR`/`LLM.RESULT`의 사유와 동시 확인 |
 
 ### 변형 추적 필드
 - `changed_strategy_fields`: mode/action/relation/join_key_mode/target_cols 등의 전략 변경 필드.
