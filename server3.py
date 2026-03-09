@@ -240,6 +240,16 @@ def _derive_stream_error_code(meta: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _compute_total_ms_from_start(request_started_at: Optional[float]) -> Optional[float]:
+    """요청 시작 시각(monotonic) 기준 end-to-end 처리 시간을 계산한다."""
+    if request_started_at is None:
+        return None
+    elapsed_sec = time.perf_counter() - request_started_at
+    if elapsed_sec < 0:
+        return None
+    return round(elapsed_sec * 1000.0, 1)
+
+
 def _safe_json_loads(raw: Optional[str]) -> Any:
     if not raw:
         return None
@@ -658,6 +668,7 @@ class AgentState(BaseModel):
     # 메타데이터
     conversation_id: str = ""
     request_id: str = ""
+    request_started_at: Optional[float] = None
 
     question: str = ""
 
@@ -672,6 +683,7 @@ class AgentState(BaseModel):
         result.update(new)
         return result
 
+    # 단계별 진단용 지표(노드별 소요시간)이며, 요청 총 처리시간(total_ms) 계산에는 사용하지 않는다.
     latencies: Annotated[Dict[str, float], merge_latencies] = Field(default_factory=dict)
 
     def merge_stream_meta(existing: Dict[str, Dict[str, Any]], new: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -1837,9 +1849,9 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
     else:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
-    total_time = sum(state.latencies.values())
-    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), rendered_context_used=int(bool(state.rendered_context_used)), fallback_context_used=int(bool(state.fallback_context_used)), degraded=int(bool(state.degraded)), total_ms=round(total_time * 1000.0, 1))
-    _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, stage="request_end", total_ms=round(total_time * 1000.0, 1), selected_model=(state.merge_debug or {}).get("selected_model"))
+    total_ms = _compute_total_ms_from_start(state.request_started_at)
+    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), rendered_context_used=int(bool(state.rendered_context_used)), fallback_context_used=int(bool(state.fallback_context_used)), degraded=int(bool(state.degraded)), total_ms=total_ms)
+    _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, stage="request_end", total_ms=total_ms, selected_model=(state.merge_debug or {}).get("selected_model"))
 
     return {}
 
@@ -3086,7 +3098,7 @@ async def query_stream(payload: QueryRequest):
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
         _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="request_start", q_len=len(question), q_preview=_mask_query_for_log(question) if _is_debug_logging_enabled() else None)
-        started_at = time.perf_counter()
+        request_started_at = time.perf_counter()
 
         documents_used = []
         done_meta_by_model: Dict[str, Dict[str, Any]] = {}
@@ -3098,6 +3110,7 @@ async def query_stream(payload: QueryRequest):
             inputs = {
                 "conversation_id": conversation_id,
                 "request_id": request_id,
+                "request_started_at": request_started_at,
                 "messages": [user_message],
             }
 
@@ -3180,7 +3193,7 @@ async def query_stream(payload: QueryRequest):
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
-            total_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+            total_ms = _compute_total_ms_from_start(request_started_at)
             degraded = isinstance(e, StrategyViolation)
             _log_event(
                 "REQ.ERROR",
@@ -3229,6 +3242,7 @@ async def query_debug(payload: QueryRequest):
         inputs = {
             "conversation_id": conversation_id,
             "request_id": request_id,
+            "request_started_at": started_at,
             "messages": [user_message],
         }
 
@@ -3237,7 +3251,7 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
-        _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=round((time.perf_counter() - started_at) * 1000.0, 2))
+        _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=_compute_total_ms_from_start(started_at))
         return {
             "success": True,
             "conversation_id": conversation_id,
@@ -3248,7 +3262,7 @@ async def query_debug(payload: QueryRequest):
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
             "documents_used": len(final_state.get("context", [])),
             "latencies": final_state.get("latencies", {}),
-            "total_time": sum(final_state.get("latencies", {}).values()),
+            "total_time": _compute_total_ms_from_start(started_at),
             "processing_strategy": knowledge_sufficiency.requires_new_knowledge if knowledge_sufficiency else "unknown"
         }
 
@@ -3263,7 +3277,7 @@ async def query_debug(payload: QueryRequest):
             error_code=getattr(e, "error_code", "INTERNAL_ERROR"),
             reason=getattr(e, "reason", str(e)),
             degraded=int(degraded),
-            total_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+            total_ms=_compute_total_ms_from_start(started_at),
         )
         return {
             "success": False,
