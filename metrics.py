@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.sse import EventSourceResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090").rstrip("/")
 PROMETHEUS_TIMEOUT = float(os.getenv("PROMETHEUS_TIMEOUT", "5"))
@@ -21,8 +21,23 @@ GPU_UTIL_QUERY = os.getenv("GPU_UTIL_QUERY", "DCGM_FI_DEV_GPU_UTIL")
 
 
 class MetricSnapshot(BaseModel):
-    vllm_num_requests_running: float | None
-    dcgm_fi_dev_gpu_util_avg: float | None
+    """`/metrics`, `/metrics/stream` 공통 응답 스키마.
+
+    Example:
+        {
+          "requestCount": 4.0,
+          "gpuUtilPercent": 78.5
+        }
+
+    Fields:
+        - requestCount: 현재 시점에 처리 중인 vLLM 요청 수 합계.
+        - gpuUtilPercent: 현재 시점의 GPU 사용률 평균(0~100).
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    request_count: float | None = Field(alias="requestCount")
+    gpu_util_percent: float | None = Field(alias="gpuUtilPercent")
 
 
 @asynccontextmanager
@@ -124,25 +139,26 @@ async def collect_snapshot(client: httpx.AsyncClient) -> MetricSnapshot:
     )
 
     return MetricSnapshot(
-        vllm_num_requests_running=vllm_value,
-        dcgm_fi_dev_gpu_util_avg=gpu_avg,
+        request_count=vllm_value,
+        gpu_util_percent=gpu_avg,
     )
 
 
-@app.get("/metrics", response_model=MetricSnapshot)
+@app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
 async def get_metrics() -> MetricSnapshot:
     return await collect_snapshot(app.state.http)
 
 
 @app.get("/metrics/stream", response_class=EventSourceResponse)
-async def stream_metrics(request: Request) -> AsyncIterable[MetricSnapshot]:
-    async def event_generator() -> AsyncIterable[MetricSnapshot]:
+async def stream_metrics(request: Request) -> AsyncIterable[dict[str, float | None]]:
+    async def event_generator() -> AsyncIterable[dict[str, float | None]]:
         while True:
             if await request.is_disconnected():
                 break
 
             snapshot = await collect_snapshot(request.app.state.http)
-            yield snapshot
+            # SSE도 `/metrics`와 동일한 camelCase 계약을 강제합니다.
+            yield snapshot.model_dump(by_alias=True)
 
             await asyncio.sleep(STREAM_INTERVAL_SECONDS)
 
