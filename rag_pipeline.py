@@ -22,6 +22,7 @@ import re
 import time
 import inspect
 import json
+import contextvars
 import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
@@ -103,6 +104,7 @@ from rag_parts.log_keys import (
     LOG_KEY_FORCE_FALLBACK_CHAT,
     LOG_KEY_PLANNER_INVALID_FALLBACK,
     LOG_KEY_POLICY_MODE,
+    LOG_KEY_EXECUTION_MODE,
     LOG_KEY_PROMOTION_MODE,
     LOG_KEY_STRATEGY_MUTATION_STAGE,
     LOG_KEY_STRICT_STRATEGY_CONSISTENCY,
@@ -282,6 +284,33 @@ def _safe_json(obj: object) -> str:
     except Exception:
         return pformat(obj, width=120, compact=True)
 
+
+_request_id_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("rag_request_id", default=None)
+_conversation_id_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("rag_conversation_id", default=None)
+
+
+def set_log_context(*, request_id: Optional[str] = None, conversation_id: Optional[str] = None) -> None:
+    _request_id_ctx.set(request_id)
+    _conversation_id_ctx.set(conversation_id)
+
+
+def _merge_log_fields(
+    primary: Dict[str, Any],
+    extra: Dict[str, Any],
+    *,
+    on_conflict: str = "suffix",
+    suffix: str = "_extra",
+) -> Dict[str, Any]:
+    merged = dict(primary or {})
+    for k, v in (extra or {}).items():
+        key = str(k)
+        if key not in merged:
+            merged[key] = v
+            continue
+        if on_conflict == "suffix":
+            merged[f"{key}{suffix}"] = v
+    return merged
+
 def log_section(title: str, content: object = None, *, level: str = "info", max_chars: int = None, tier: str = "normal") -> None:
     """
     RAG_DEBUG=1 일 때만 출력.
@@ -307,6 +336,12 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
 
     if str(tier or "normal").strip().lower() == "normal":
         payload = {"event": title, "data": content if content is not None else body}
+        request_id = _request_id_ctx.get()
+        conversation_id = _conversation_id_ctx.get()
+        if request_id:
+            payload["request_id"] = request_id
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
         log_fn("[RAG] %s", json.dumps(payload, ensure_ascii=False, default=str))
         return
 
@@ -1340,6 +1375,7 @@ def _validate_lookup_join_hybrid_metrics(
 
     log_kv(
         "RAG.LOOKUP_JOIN.HYBRID.METRICS",
+        tier="debug",
         mode=mode,
         contract_scope=contract_scope,
         dense_queries=dense_queries,
@@ -1354,6 +1390,7 @@ def _validate_lookup_join_hybrid_metrics(
     if dense_queries == 0 or sparse_hits == 0:
         log_kv(
             "RAG.LOOKUP_JOIN.HYBRID.METRICS.ZERO_HIT",
+            tier="debug",
             level="warning" if not strict else "info",
             mode=mode,
             contract_scope=contract_scope,
@@ -3802,7 +3839,8 @@ def _run_rag_with_vectors(
     log_kv(
         "RAG.STRATEGY.POLICY",
         **{
-            LOG_KEY_POLICY_MODE: str(plan.mode or ""),
+            LOG_KEY_POLICY_MODE: "strict" if strict_strategy_consistency else "compat",
+            LOG_KEY_EXECUTION_MODE: str(plan.mode or ""),
             LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
             LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
         },
@@ -3850,7 +3888,8 @@ def _run_rag_with_vectors(
             "RAG.PLAN.FALLBACK_ON_INVALID_PLANNER",
             level="warning",
             **{
-                LOG_KEY_POLICY_MODE: fallback_mode,
+                LOG_KEY_POLICY_MODE: "strict" if strict_strategy_consistency else "compat",
+                LOG_KEY_EXECUTION_MODE: fallback_mode,
                 LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
                 LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
                 LOG_KEY_STRATEGY_MUTATION_STAGE: "validator",
@@ -5109,12 +5148,25 @@ def _run_rag_with_vectors(
                 log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)], tier="debug")
             else:
                 log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)], tier="debug")
+            hop1_timing_fields = {k: float(v) for k, v in (local_timings_h1 or {}).items()}
+            dense_queries_h1 = float(hop1_timing_fields.pop("dense_queries", 0.0))
+            hybrid_once_hits_h1 = float(hop1_timing_fields.pop("hybrid_once_hits", 0.0))
+            sparse_hits_h1 = float(
+                hop1_timing_fields.pop("lexical_scored", hop1_timing_fields.pop("sparse_hits", 0.0))
+            )
+            hop1_payload = _merge_log_fields(
+                {
+                    "dense_queries": dense_queries_h1,
+                    "sparse_hits": sparse_hits_h1,
+                    "hybrid_once_hits": hybrid_once_hits_h1,
+                    "timings": hop1_timing_fields,
+                },
+                {},
+            )
             log_kv(
                 "RAG.JOIN.HOP1.TIMINGS",
-                dense_queries=float(local_timings_h1.get("dense_queries", 0.0)),
-                sparse_hits=float(local_timings_h1.get("lexical_scored", 0.0)),
-                hybrid_once_hits=float(local_timings_h1.get("hybrid_once_hits", 0.0)),
-                **{k: float(v) for k, v in (local_timings_h1 or {}).items()}
+                tier="debug",
+                **hop1_payload,
             )
             # Hop1 context
             hop1_ctx, hop1_refs = ("", [])
@@ -5354,12 +5406,25 @@ def _run_rag_with_vectors(
             hop2_top = hop2_reranked[: max(1, hop2_keep)]
 
             log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")), tier="debug")
+            hop2_timing_fields = {k: float(v) for k, v in (local_timings_h2 or {}).items()}
+            dense_queries_h2 = float(hop2_timing_fields.pop("dense_queries", 0.0))
+            hybrid_once_hits_h2 = float(hop2_timing_fields.pop("hybrid_once_hits", 0.0))
+            sparse_hits_h2 = float(
+                hop2_timing_fields.pop("lexical_scored", hop2_timing_fields.pop("sparse_hits", 0.0))
+            )
+            hop2_payload = _merge_log_fields(
+                {
+                    "dense_queries": dense_queries_h2,
+                    "sparse_hits": sparse_hits_h2,
+                    "hybrid_once_hits": hybrid_once_hits_h2,
+                    "timings": hop2_timing_fields,
+                },
+                {},
+            )
             log_kv(
                 "RAG.JOIN.HOP2.TIMINGS",
-                dense_queries=float(local_timings_h2.get("dense_queries", 0.0)),
-                sparse_hits=float(local_timings_h2.get("lexical_scored", 0.0)),
-                hybrid_once_hits=float(local_timings_h2.get("hybrid_once_hits", 0.0)),
-                **{k: float(v) for k, v in (local_timings_h2 or {}).items()}
+                tier="debug",
+                **hop2_payload,
             )
             # Hop2 context
             hop2_ctx, hop2_refs, _ = _build_context_with_output_type(
@@ -5770,6 +5835,7 @@ def _run_rag_with_vectors(
                         "top_score": float(lex_top_score) if lex_top_score is not None else -1.0,
                     },
                 },
+                tier="debug",
             )
         else:
             top_score = None
@@ -5786,6 +5852,7 @@ def _run_rag_with_vectors(
                         "top_score": float(top_score) if top_score is not None else -1.0,
                     },
                 },
+                tier="debug",
             )
 
         dense_topn = int(os.getenv("RAG_LOG_TOPN_COL_DENSE", "4"))
@@ -5825,6 +5892,7 @@ def _run_rag_with_vectors(
 
             log_kv(
                 "RAG.COL.STATS",
+                tier="debug",
                 col=col,
                 dense_hits=int(d_hit),
                 lex_hits=int(l_hit),
@@ -5848,6 +5916,7 @@ def _run_rag_with_vectors(
             }
             log_kv(
                 "RAG.COL.STATS",
+                tier="debug",
                 col=col,
                 hybrid_hits=int(len(hybrid_points)),
                 timings=local_timings,
@@ -6048,6 +6117,7 @@ def _run_rag_with_vectors(
     _timing_put(timings, "info.contract_min_reranked_clamp_reason", min_reranked_clamp_reason)
     log_kv(
         "RAG.CONTRACT.MIN_RERANKED",
+        tier="debug",
         mode=promotion_mode,
         **{LOG_KEY_PROMOTION_MODE: promotion_mode},
         base_route=base_route,

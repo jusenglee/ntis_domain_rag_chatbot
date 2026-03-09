@@ -83,7 +83,7 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 - people/org relation JOIN 금지는 upstream에서 대부분 차단되지만, executor late guard는 기본 경고 경로가 남아 있음.
 
 ### 4.2 백로그(Top)
-- [ ] **P0 관측성 표준화**: `policy_mode`, `planner_invalid_fallback`, `strict_strategy_consistency`, `promotion_mode`, `force_fallback_chat`, `strategy_mutation_stage` 로그를 공통 스키마로 고정.
+- [x] **P0 관측성 표준화(1차)**: `policy_mode`(strict/compat)와 `execution_mode`(search/lookup/join)를 분리하고 `REQ.FAIL` 구조화 이벤트를 추가.
 - [ ] **P1 기본값 정합화**: `RAG_PLANNER_INVALID_FALLBACK=0` 기본 전환(호환모드는 opt-in).
 - [ ] **P2 전략 재작성 인벤토리 정리**: `apply_planner_v2` + `normalize_planner_payload` + `validate_join_contract` + `normalize_intent`를 단일 책임 모델로 정리.
 - [ ] **P3 people/org 조기 차단 강화**: parser/intent 단계에서 forbidden relation 확정 차단, executor는 최종 안전장치로 축소.
