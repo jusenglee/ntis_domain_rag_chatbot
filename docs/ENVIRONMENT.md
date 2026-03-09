@@ -104,7 +104,7 @@ export STREAM_INTERVAL_SECONDS=2
 export VLLM_QUERY='vllm:num_requests_running'
 
 # GPU Util 평균 수집 PromQL
-export GPU_UTIL_QUERY='DCGM_FI_DEV_GPU_UTIL'
+export GPU_UTIL_QUERY='avg(DCGM_FI_DEV_GPU_UTIL{job=~"$dcgm_job", gpu=~"0|2"})'
 ```
 
 - Prometheus 장애/쿼리 실패 시 해당 필드는 `None`으로 반환되고, 서버 로그에는 예외 스택트레이스가 남습니다.
