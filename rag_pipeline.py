@@ -650,7 +650,7 @@ def _raise_on_missing_join_keys(
             missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
             missing_tag=int(missing.get("missing_tag", 0) or 0),
             total=int(missing.get("total", 0) or 0),
-        )
+         tier="debug")
 
     if has_invalid:
         log_kv(
@@ -663,11 +663,11 @@ def _raise_on_missing_join_keys(
             suspected_swap=int(missing.get("suspected_swap", 0) or 0),
             same_id_no=int(missing.get("same_id_no", 0) or 0),
             total=int(missing.get("total", 0) or 0),
-        )
+         tier="debug")
 
     if has_missing and _debug_force_join_keys_enabled():
         forced = _ensure_join_keys_in_payload(points)
-        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced)
+        log_kv("RAG.JOIN_KEYS.DEBUG_FORCE", level="warning", scope=scope, **forced, tier="debug")
         missing = _count_missing_join_keys(points, join_key_mode=join_key_mode)
         has_missing = bool(missing.get("missing_pjt_any") or missing.get("missing_tag"))
         has_invalid = bool(missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no"))
@@ -683,7 +683,7 @@ def _raise_on_missing_join_keys(
                 missing_pjt_any=int(missing.get("missing_pjt_any", 0) or 0),
                 missing_tag=int(missing.get("missing_tag", 0) or 0),
                 total=int(missing.get("total", 0) or 0),
-            )
+             tier="debug")
 
     error_code = "JOIN_KEYS_INVALID" if has_invalid else "JOIN_KEYS_MISSING"
 
@@ -724,7 +724,7 @@ def _ensure_join_mode_has_keys(
         join_pjt_ids_count=int(join_pjt_ids_count or 0),
         join_pjt_nos_count=int(join_pjt_nos_count or 0),
         has_join_keys=int(bool(has_join_keys)),
-    )
+     tier="debug")
     if has_join_keys:
         return
 
@@ -1501,7 +1501,7 @@ def _apply_dense_threshold(
             reduced=reduced,
             reduced_ratio=round(reduced_ratio, 4),
             min_dense_score=float(min_dense_score),
-        )
+         tier="debug")
 
         score_values: List[float] = []
         for p in filtered:
@@ -1542,7 +1542,7 @@ def _apply_dense_threshold(
                 p90=float(_percentile(score_values, 90.0)),
                 p99=float(_percentile(score_values, 99.0)),
                 top3_avg=float(topn_avg),
-            )
+             tier="debug")
 
 def _use_dense_score_weight() -> bool:
     return str(os.getenv("RAG_USE_DENSE_SCORE_WEIGHT", "0")).strip().lower() in ("1", "true", "yes", "y")
@@ -2123,13 +2123,13 @@ def _final_rerank(
             applied=True,
             bonus=exact_bonus,
             hits_total=sum(raw_exact_hits),
-        )
+         tier="debug")
     else:
         log_kv(
             "RAG.RERANK.KEYWORD_EXACT_MATCH_BONUS",
             applied=False,
             hits_total=sum(raw_exact_hits),
-        )
+         tier="debug")
 
     sample_slice = slice(0, max(0, min(score_sample, len(raw_items))))
     log_section(
@@ -2163,7 +2163,7 @@ def _final_rerank(
             "_family_bonus_weighted": _score_stats([(w_fam * v) for v in norm_fam[sample_slice]]),
             "_tag_match_bonus_weighted": _score_stats([(w_tag * v) for v in norm_tag[sample_slice]]),
         },
-    )
+     tier="debug")
 
     legacy_w_rrf, legacy_w_kw, legacy_w_f = legacy_weights.get(mode, legacy_weights["search"])
     scored = []
@@ -2212,11 +2212,11 @@ def _final_rerank(
         log_section(
             "RAG.RERANK.COMPARE_LEGACY_TOP",
             _rerank_compare_summary([x[2] for x in legacy_scored], "_legacy_total", topn=compare_topn),
-        )
+         tier="debug")
         log_section(
             "RAG.RERANK.COMPARE_NEW_TOP",
             _rerank_compare_summary(out, "_final_total", topn=compare_topn),
-        )
+         tier="debug")
 
     return out
 
@@ -2456,7 +2456,7 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], sou
         target_cols=normalized_targets,
         allow_cols=normalized_allow,
         disallowed_cols=disallowed,
-    )
+     tier="debug")
     raise StrategyViolation(
         error_code="PLANNER_TARGET_COLS_ALLOWLIST_VIOLATION",
         reason=(
@@ -2526,7 +2526,7 @@ def _strategy_consistency_or_violation(
     }
     if context:
         payload.update(context)
-    log_kv("RAG.STRATEGY.MISMATCH", level="error" if strict else "warning", **payload)
+    log_kv("RAG.STRATEGY.MISMATCH", level="error" if strict else "warning", **payload, tier="debug")
     log_kv("RAG.ERROR.STRATEGY_MISMATCH", level="error" if strict else "warning", tier="debug", planner_snapshot=planner_value, executed_snapshot=executed_value, kind=mismatch_kind)
     if strict:
         raise StrategyViolation(
@@ -2724,7 +2724,7 @@ def _build_join_hop2_filter(
         "join_pjt_ids_count": len(join_pjt_ids),
         "join_pjt_nos_count": len(join_pjt_nos),
     }
-    log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix)
+    log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix, tier="debug")
 
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
@@ -3227,7 +3227,7 @@ def _run_rag_with_vectors(
     intent_perf_types = list(getattr(it, "perf_types", []) or [])
     if intent_perf_types:
         perf_types_source = "intent"
-        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types)
+        log_kv("RAG.PERF_TYPES.SOURCE", source=perf_types_source, values=intent_perf_types, tier="debug")
 
     ctx = ExecutionContext.from_intent(it)
     planner_snapshot = {
@@ -3496,7 +3496,7 @@ def _run_rag_with_vectors(
                         or (org_role == "affiliation")
                 )
             ),
-        )
+         tier="debug")
         return combined
 
     year_from = str(ctx.year_from or "").strip() or None
@@ -3525,7 +3525,7 @@ def _run_rag_with_vectors(
             source=perf_types_source or "derived",
             values=perf_types,
             server_must_policy="explicit_perf_types_only",
-        )
+         tier="debug")
 
     title_terms = [
         t.strip()
@@ -3567,7 +3567,7 @@ def _run_rag_with_vectors(
         explicit_perf_tags=explicit_perf_tags,
         inferred_perf_tags=inferred_perf_tags,
         perf_tags_server_must=perf_tag_filters_for_col,
-    )
+     tier="debug")
     soft_perf_tag_filters = explicit_perf_tags if explicit_perf_tags else inferred_perf_tags
     ctx.perf_tag_filters = list(soft_perf_tag_filters)
 
@@ -3596,7 +3596,7 @@ def _run_rag_with_vectors(
             relation=relation,
             planner_only_adjustment=1,
             people_terms=people_terms[:4],
-        )
+         tier="debug")
 
     intent_view = ctx.intent_view()
     it = intent_view
@@ -3732,7 +3732,7 @@ def _run_rag_with_vectors(
                     level="error",
                     error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
                     planner_snapshot=planner_snapshot,
-                )
+                 tier="debug")
                 raise StrategyViolation(
                     error_code="PLANNER_JOIN_KEY_MODE_IDS_MISMATCH",
                     reason="join_key_mode=group requires ids_map.pjt_no",
@@ -3772,7 +3772,7 @@ def _run_rag_with_vectors(
                 planner_mode=planner_mode,
                 planner_mode_source=planner_mode_source,
                 planner_action=planner_action,
-            )
+             tier="normal")
         planner_mode = None
         planner_mode_source = None
 
@@ -3825,7 +3825,7 @@ def _run_rag_with_vectors(
         ),
         changed_filter_fields={},
         **{LOG_KEY_STRATEGY_MUTATION_STAGE: "executor", LOG_KEY_CHANGED_BY: CHANGED_BY_EXECUTOR},
-    )
+     tier="debug")
     # fail-close 기본값: planner 계약 위반은 기본 차단하고, 필요 시 운영자가 env로 완화한다.
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "0")
@@ -3848,7 +3848,7 @@ def _run_rag_with_vectors(
         forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
         planner_relation=planner_relation_locked,
         planner_target_cols=planner_target_cols_locked,
-    )
+     tier="normal")
     planner_first_applied = bool(planner_mode)
     mode_override_requested = False
     mode_override_reason = None
@@ -3912,7 +3912,7 @@ def _run_rag_with_vectors(
             fallback_policy_reason=fallback_policy_reason,
             fallback_target_cols=list(fallback_plan.target_collections),
             policy_source=policy_source,
-        )
+         tier="normal")
         plan = fallback_plan
         ctx.plan = plan
         ctx.target_collections = list(plan.target_collections)
@@ -3949,7 +3949,7 @@ def _run_rag_with_vectors(
             planner_target_cols=planner_target_cols_locked,
             hinted_target_cols=hinted_cols_norm,
             applied=int(planner_target_cols_locked == hinted_cols_norm),
-        )
+         tier="debug")
     if people_relation_disabled and plan.mode == "join":
         msg = (
             "people relation join is forbidden by planner policy "
@@ -3992,7 +3992,7 @@ def _run_rag_with_vectors(
             relation=planner_strategy_relation,
             errors=strategy_errors,
             planner_confidence=planner_confidence,
-        )
+         tier="normal")
         _apply_planner_invalid_compat_fallback(
             error_code="PLANNER_INVALID_STRATEGY",
             reason=f"invalid planner strategy: {planner_mode_error}",
@@ -4025,7 +4025,7 @@ def _run_rag_with_vectors(
         join_key_mode=join_key_mode_for_contract,
         ids_map_keys=sorted(list((ids_map_for_contract or {}).keys())) if isinstance(ids_map_for_contract, dict) else [],
         target_cols=list(ctx.target_collections or plan.target_collections or []),
-    )
+     tier="debug")
     planner_contract_violations = validate_planner_contract(
         mode=planner_strategy_mode,
         head=base_route,
@@ -4164,7 +4164,7 @@ def _run_rag_with_vectors(
         output_type=getattr(plan, "output_type", None),
         detail_lookup_request=detail_lookup_request,
         title_terms=title_terms[:4],
-    )
+     tier="debug")
 
     lookup_filter_enabled = bool(
         plan.mode == "lookup"
@@ -4213,7 +4213,7 @@ def _run_rag_with_vectors(
             payload_mode=planner_mode,
             base_route=base_route,
             action=action,
-        )
+         tier="normal")
     else:
         log_kv(
             "RAG.PLAN.MODE_CONFLICT",
@@ -4224,7 +4224,7 @@ def _run_rag_with_vectors(
             base_route=base_route,
             action=action,
             conflict=0,
-        )
+         tier="normal")
 
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
     if relation_lookup_policy not in ("filter", "join"):
@@ -4264,7 +4264,7 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
             source="planner_filter_contract",
-        )
+         tier="normal")
 
 
     compiled_strategy = StrategyCompiler.compile(
@@ -4287,7 +4287,7 @@ def _run_rag_with_vectors(
             "RAG.JOIN.HOP.COMPILED",
             hop1_spec=compiled_strategy.hop1_spec,
             hop2_spec=compiled_strategy.hop2_spec,
-        )
+         tier="debug")
 
     search_filter_enabled = bool(compiled_strategy.search_filter_enabled)
     lookup_filter_enabled = bool(compiled_strategy.lookup_filter_enabled)
@@ -4315,7 +4315,7 @@ def _run_rag_with_vectors(
             relation=relation,
             people_terms=people_terms[:4],
             relation_lookup_enforce=int(relation_lookup_enforce),
-        )
+         tier="debug")
 
     # allowlist는 검증 전용: 실행 target_cols를 재결정하지 않는다.
     if effective_allow:
@@ -4327,7 +4327,7 @@ def _run_rag_with_vectors(
             planner_target_cols=planner_target_cols_locked,
             effective_allow_target_cols=effective_allow_norm,
             applied=0,
-        )
+         tier="debug")
 
     title_filter = None
     if title_terms and title_match_mode == TITLE_MATCH_MODE_EXACT:
@@ -4441,8 +4441,8 @@ def _run_rag_with_vectors(
         **{
             "planner_relation == executed_relation": planner_relation_eq,
             "planner_target_cols == executed_target_cols": planner_target_cols_eq,
-        }
-    )
+        },
+     tier="debug")
     _strategy_must_match_or_violation(
         mismatch_kind="mode",
         planner_value=planner_mode_locked,
@@ -4540,7 +4540,7 @@ def _run_rag_with_vectors(
         policy_reason=policy_reason,
         route=getattr(plan, "route", None),
         output_type=getattr(plan, "output_type", None),
-    )
+     tier="normal")
     log_kv(
         "RAG.PLAN.DEBUG",
         tier="debug",
@@ -4606,7 +4606,7 @@ def _run_rag_with_vectors(
                 "RAG.PERF.FOLLOWUP.SKIP",
                 reason="target_collections",
                 target_cols=target_cols,
-            )
+             tier="debug")
             return []
 
         route = get_relation_route(relation)
@@ -4626,7 +4626,7 @@ def _run_rag_with_vectors(
             hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
             hop1_k_base=hop1_k_base,
             hop1_keep=hop1_keep,
-        )
+         tier="debug")
 
         vec_avail = _named_vectors_in_collection(qdr, COL_PROJECT)
         use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
@@ -4731,7 +4731,7 @@ def _run_rag_with_vectors(
             join_ids_preview=join_keys[:10],
             join_ids_count=len(join_keys),
             timings={k: float(v) for k, v in (local_timings_h1 or {}).items()},
-        )
+         tier="debug")
         return join_keys
 
     # -------------------------
@@ -4775,7 +4775,7 @@ def _run_rag_with_vectors(
             group_resolve_project_ids=int(join_execution_policy.get("group_resolve_project_ids") or 0),
             group_resolve_max_ids=int(join_execution_policy.get("group_resolve_max_ids") or 0),
             group_resolve_topk=int(join_execution_policy.get("group_resolve_topk") or 0),
-        )
+         tier="debug")
 
         # relation mapping
         hop1_col = hop2_col = ""
@@ -4829,7 +4829,7 @@ def _run_rag_with_vectors(
                 hop1_strategy=hop1_strategy,
                 seed_key_source=join_execution_policy.get("seed_key_source"),
                 seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
-            )
+             tier="normal")
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
                 join_key_source = "ids_map"
@@ -4891,7 +4891,7 @@ def _run_rag_with_vectors(
                             people_ids=people_ids[:4],
                             match_mode=people_match_mode,
                             min_should=people_min_should,
-                        )
+                         tier="debug")
                 hop1_lookup_filter = None
                 if hop1_col == COL_PROJECT:
                     if join_people_filter or participant_org_filter or org_filter:
@@ -4942,7 +4942,7 @@ def _run_rag_with_vectors(
                 changed_count=len(join_hop1_filter_diff_changed),
                 planner_join_hop1_filter_spec=planner_join_hop1_filter_spec,
                 executed_join_hop1_filter_spec=executed_hop1_filter_spec,
-            )
+             tier="debug")
             if join_hop1_filter_diff_changed:
                 raise StrategyViolation(
                     error_code="STRATEGY_MISMATCH",
@@ -4970,7 +4970,7 @@ def _run_rag_with_vectors(
                 reason=join_execution_policy.get("reason"),
                 seed_key_source=join_execution_policy.get("seed_key_source"),
                 seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
-            )
+             tier="debug")
             if run_hop1:
                 vec_avail = _named_vectors_in_collection(qdr, hop1_col)
                 use_vecs_h1 = [v for v in vector_names if (not isinstance(vec_avail, set) or v in vec_avail)]
@@ -5055,7 +5055,7 @@ def _run_rag_with_vectors(
                         hop1_kind=hop1_kind,
                         hop1_tag_filters=hop1_tag_filters,
                         hop1_filter=str(hop1_filter) if hop1_filter is not None else None,
-                    )
+                     tier="debug")
                 else:
                     # ✅ hop1 결과에 meta_basic 포함 payload 보강
                     hydrate_keep = min(
@@ -5094,7 +5094,7 @@ def _run_rag_with_vectors(
                         hop1_k=hop1_k_base,
                         hop1_keep=hop1_keep,
                         cache_hit=0,
-                    )
+                     tier="debug")
                 else:
                     join_key_result = _extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=hop1_keep)
                     join_pjt_ids = [str(x).strip() for x in join_key_result.keys if str(x).strip()]
@@ -5112,7 +5112,7 @@ def _run_rag_with_vectors(
                     seed_key_source=join_execution_policy.get("seed_key_source"),
                     seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
                     allow_skip_min_lookup=int(allow_skip_min_lookup),
-                )
+                 tier="debug")
 
             invalid_values = [str(x).strip() for x in (join_key_result.invalid_values or []) if str(x).strip()]
             suspected_swap_count = int(join_key_result.suspected_swap_count or 0)
@@ -5127,13 +5127,13 @@ def _run_rag_with_vectors(
                     invalid_values=invalid_values[:10],
                     suspected_swap_count=suspected_swap_count,
                     suspected_swaps=join_key_result.to_log_dict().get("suspected_swaps", [])[:10],
-                )
+                 tier="debug")
                 log_kv(
                     "RAG.ERROR.JOIN_KEYS",
                     level="error",
                     scope=f"join_hop1:{hop1_col}:extract",
                     samples=invalid_samples,
-                )
+                 tier="normal")
                 raise StrategyViolation(
                     error_code="JOIN_KEYS_INVALID",
                     reason=(
@@ -5235,7 +5235,7 @@ def _run_rag_with_vectors(
                 opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)),
                 relation=relation,
                 hop2_col=hop2_col,
-            )
+             tier="debug")
 
             try:
                 validate_resolved_join_keys(
@@ -5284,7 +5284,7 @@ def _run_rag_with_vectors(
                 changed_count=len(join_filter_diff_changed),
                 planner_join_filter_spec=planner_join_filter_spec,
                 executed_join_filter_spec=executed_join_filter_spec,
-            )
+             tier="debug")
             if join_filter_diff_changed:
                 raise StrategyViolation(
                     error_code="STRATEGY_MISMATCH",
@@ -5301,7 +5301,7 @@ def _run_rag_with_vectors(
                     relation=relation,
                     join_key_mode=hop2_join_key_mode,
                     reason="hop2_perf_join_key_only",
-                )
+                 tier="debug")
             else:
                 hop2_filter = _with_org_must_gate(hop2_filter, col=hop2_col, mode_override="join_hop2")
             if hop2_col in (COL_PROJECT, COL_PERF):
@@ -5324,7 +5324,7 @@ def _run_rag_with_vectors(
                 hop2_keep=hop2_keep,
                 join_pjt_ids_preview=join_pjt_ids[:10],
                 join_pjt_nos_preview=join_pjt_nos[:10],
-            )
+             tier="debug")
 
             vec_avail2 = _named_vectors_in_collection(qdr, hop2_col)
             use_vecs_h2 = [v for v in vector_names if (not isinstance(vec_avail2, set) or v in vec_avail2)]
@@ -5655,7 +5655,7 @@ def _run_rag_with_vectors(
                 relation=relation,
                 perf_ids=has_perf_ids,
                 project_key_filter_type=project_key_filter_type,
-            )
+             tier="debug")
         pjt_filter = build_project_id_filter(pjt_ids, pjt_nos)
         if pjt_filter is not None:
             log_kv(
@@ -5663,7 +5663,7 @@ def _run_rag_with_vectors(
                 project_key_filter_type=project_key_filter_type,
                 pjt_id_count=len(pjt_ids),
                 pjt_no_count=len(pjt_nos),
-            )
+             tier="debug")
             # PJT_ID/PJT_NO는 project/perf 모두 join 키로 쓰이니 tag 과제 제한은 하지 말고 먼저 강제
             combined = _and_filter(pjt_filter, base_filter_lookup) if base_filter_lookup else pjt_filter
             return _apply_extra_filters(_with_org_must_gate(combined, col=col))
@@ -5753,7 +5753,7 @@ def _run_rag_with_vectors(
             },
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
             dense_vecs=list(emb_map_col.keys()),
-        )
+         tier="debug")
 
         local_timings: Dict[str, float] = {}
         sr = _call_dense_retrieve_hybrid_multi(
@@ -5943,7 +5943,7 @@ def _run_rag_with_vectors(
             sources.append(_RankSource(name=f"{col}:{vname}", weight=base_weight * score_weight, points=lst or []))
         sources.append(_RankSource(name=f"{col}:lex", weight=float(sparse_weight_eff), points=sr.get("lexical") or []))
 
-    log_section("RAG.RETRIEVE", per_col_stats)
+    log_section("RAG.RETRIEVE", per_col_stats, tier="normal")
 
     t0 = time.time()
     merged_rrf = _rrf_merge(
@@ -5984,7 +5984,7 @@ def _run_rag_with_vectors(
             kind=(promotion or {}).get("kind"),
             signals=(promotion or {}).get("signals"),
             strategy_key=(promotion or {}).get("strategy_key"),
-        )
+         tier="debug")
 
         if promoted_mode in ("lookup", "join") and promoted_mode != mode and promoted_ids_map:
             promoted_relation = relation
@@ -6012,7 +6012,7 @@ def _run_rag_with_vectors(
                 promoted_relation=promoted_relation,
                 promoted_ids_keys=sorted(promoted_ids_map.keys()),
                 promotion_depth=promotion_depth,
-            )
+             tier="debug")
 
             promoted_result = _run_rag_with_vectors(
                 query=query,
@@ -6065,7 +6065,7 @@ def _run_rag_with_vectors(
             input_count=len(post_filter_pool),
             hits=title_post_filter_hits,
             title_terms=title_terms[:6],
-        )
+         tier="debug")
 
     _timing_put(timings, "info.title_post_filter_applied", int(title_post_filter_applied))
     _timing_put(timings, "info.title_post_filter_hits", int(title_post_filter_hits))
@@ -6193,7 +6193,7 @@ def _run_rag_with_vectors(
                     values=probe_terms,
                     topN=inspect_topn,
                     matched=matched,
-                )
+                 tier="debug")
 
     # build context
     t0 = time.time()
@@ -6232,7 +6232,7 @@ def _run_rag_with_vectors(
         kept_ctx=kept_ctx,
         discarded_ctx=discarded_ctx,
         contract_fail_reason=timings.get("info.contract_fail_reason"),
-    )
+     tier="normal")
 
     log_kv(
         "RAG.CTX",

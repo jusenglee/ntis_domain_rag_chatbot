@@ -80,6 +80,17 @@
 
 운영 기본 로그는 객체 전체 문자열 dump를 피하고, 필터는 카운트/적용 여부 중심으로 남깁니다.
 
+### 운영 기본 로그 길이 축소 점검(샘플 비교 기준)
+- 목적: `RAG_LOG_LEVEL=normal` 기본값에서 디버그성 이벤트(`RAG.JOIN.*`, `RAG.RERANK.*`, `RAG.TAG_FILTER.*`, `RAG.PERF_TYPES.*`)가 제거되어 요청 1건당 로그 길이가 줄었는지 확인.
+- 샘플링: 동일 질의 10건(SEARCH 4, LOOKUP 3, JOIN 3)을 릴리즈 전/후로 각각 수집.
+- 비교 지표(필수):
+  - 요청당 로그 라인 수 중앙값(`median(lines_per_request)`) 20% 이상 감소.
+  - 요청당 로그 바이트 수 중앙값(`median(bytes_per_request)`) 20% 이상 감소.
+  - 운영 필수 이벤트(`RAG.STRATEGY.POLICY`, `RAG.PLAN*`, `RAG.RETRIEVE`, `RAG.RESULT.TOP|RAG.RESULT`, `RAG.CONTEXT`, `RAG.ERROR.*`) 누락 0건.
+- 판정:
+  - 길이 지표는 감소했지만 필수 이벤트가 누락되면 실패로 간주(관측성 회귀).
+  - 길이 감소가 20% 미만이면 debug tier 분류 누락 여부를 재점검.
+
 ---
 
 ## 3) 디버그를 켜는 방법(권장)
