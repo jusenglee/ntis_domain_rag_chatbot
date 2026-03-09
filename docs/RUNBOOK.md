@@ -220,7 +220,8 @@ export RAG_LOG_LEVEL=debug
 
 | 키 | 정의 | 예시 | 알람 조건 |
 |---|---|---|---|
-| `policy_mode` | strict/compat 또는 fallback 정책 모드 | `strict`, `compat`, `lookup` | `compat` 비율 급증(일평균 대비 +20%p) |
+| `policy_mode` | strict/compat 정책 모드 | `strict`, `compat` | `compat` 비율 급증(일평균 대비 +20%p) |
+| `execution_mode` | 실행 전략 모드 | `search`, `lookup`, `join` | 특정 모드 편향(예: `lookup` 90%+) |
 | `planner_invalid_fallback` | planner 무효 전략 fallback 허용 여부 | `0`, `1` | `1` 상태에서 `RAG.PLAN.FALLBACK_ON_INVALID_PLANNER` 급증 |
 | `strict_strategy_consistency` | 전략 불일치 시 fail-fast 여부 | `0`, `1` | `0` 상태에서 mismatch 누적 증가 |
 | `promotion_mode` | 최종 rerank/contract 적용 모드 | `search`, `lookup`, `join` | 특정 모드 편향(예: `lookup` 90%+) |

@@ -35,7 +35,7 @@ from rag_store import build_rag_objects
 from storage import KVStore, MemoryKVStore, FileKVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel
-from rag_pipeline import run_rag_ab_compare
+from rag_pipeline import run_rag_ab_compare, set_log_context
 from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent, build_changed_fields
 from rag_parts.planner_contract import StrategyViolation
@@ -87,7 +87,7 @@ logger = logging.getLogger("Chatbot_Server")
 def _log_event(name: str, **fields: Any) -> None:
     payload = {"event": name}
     if fields.get("policy_mode") is None:
-        payload["policy_mode"] = str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip()
+        payload["policy_mode"] = "strict" if str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in ("1", "true", "yes", "y") else "compat"
     for k, v in fields.items():
         if v is None:
             continue
@@ -97,8 +97,9 @@ def _log_event(name: str, **fields: Any) -> None:
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    app_logger = logging.getLogger("Chatbot_Server")
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -114,10 +115,9 @@ def setup_file_logging(log_path="logs/server3.log"):
     sh.setFormatter(fmt)
     sh.setLevel(logging.INFO)
 
-    # 중복 핸들러 방지
-    root.handlers.clear()
-    root.addHandler(fh)
-    root.addHandler(sh)
+    app_logger.handlers.clear()
+    app_logger.addHandler(fh)
+    app_logger.addHandler(sh)
 
     vllm_client_level = os.getenv("VLLM_CLIENT_LOG_LEVEL", "INFO").upper()
     logging.getLogger("openai_compat_llm").setLevel(getattr(logging, vllm_client_level, logging.INFO))
@@ -1848,6 +1848,7 @@ async def build_intent_payload(
         conversation_id: str,
         chat_history: List[BaseMessage],
         prev_context: List[Dict[str, Any]],
+        request_id: Optional[str] = None,
 ) -> tuple[IntentPayloadV2, Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
     question_analysis = None
@@ -1858,6 +1859,7 @@ async def build_intent_payload(
             conversation_id=conversation_id,
             chat_history=chat_history,
             prev_context=prev_context,
+            request_id=request_id,
         )
         planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
 
@@ -3052,35 +3054,37 @@ async def query_stream(payload: QueryRequest):
 
     async def event_generator():
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
-
-        loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
-        user_message = HumanMessage(content=question)
-        chat_history = loaded_history + [user_message]
-        intent_payload, question_analysis = await build_intent_payload(
-            question,
-            conversation_id,
-            chat_history,
-            prev_context,
-        )
-        inputs = {
-            "conversation_id": conversation_id,
-            "request_id": request_id,
-            "messages": [user_message],
-            "intent_payload": intent_payload,
-            "question_analysis": question_analysis,
-        }
-
         _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="request_start", q_len=len(question), q_preview=_mask_query_for_log(question) if _is_debug_logging_enabled() else None)
+        started_at = time.perf_counter()
 
         documents_used = []
         done_meta_by_model: Dict[str, Dict[str, Any]] = {}
+        question_analysis: Optional[QuestionAnalysis] = None
 
         try:
+            set_log_context(request_id=request_id, conversation_id=conversation_id)
+            loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
+            user_message = HumanMessage(content=question)
+            chat_history = loaded_history + [user_message]
+            intent_payload, question_analysis = await build_intent_payload(
+                question,
+                conversation_id,
+                chat_history,
+                prev_context,
+                request_id=request_id,
+            )
+            inputs = {
+                "conversation_id": conversation_id,
+                "request_id": request_id,
+                "messages": [user_message],
+                "intent_payload": intent_payload,
+                "question_analysis": question_analysis,
+            }
+
             async for event in graph.astream_events(inputs, version="v2"):
                 kind = event["event"]
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 data = event.get("data", {})
-                # Answer 스트리밍 - SOLAR
                 if kind == "on_chat_model_stream" and node == "generate_answer_solar":
                     chunk = data.get("chunk")
                     chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
@@ -3089,7 +3093,6 @@ async def query_stream(payload: QueryRequest):
                     if chunk_text:
                         yield f"data: {json.dumps({'model' : 'UPSTAGE', 'content': chunk_text}, ensure_ascii=False)}\n\n"
 
-                # Answer 스트리밍 - Gemma
                 elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                     chunk = data.get("chunk")
                     chunk_text, stream_field = _extract_stream_chunk_text_and_field(chunk)
@@ -3105,11 +3108,7 @@ async def query_stream(payload: QueryRequest):
                     answer_meta_key = f"{answer_key}_meta"
                     stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
                     done_meta_by_model[model] = stream_meta or {}
-                    # final_text = (output.get(answer_key) or "").strip() API 응답 명세는 절대 바뀌어서는 안됨.
-                    # if final_text:
-                    #     yield f"data: {json.dumps({'model': model, 'final': final_text}, ensure_ascii=False)}\n\n"
 
-                # Direct Answer (rule-based)
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
                     if "answer_gemma" in output:
@@ -3125,13 +3124,10 @@ async def query_stream(payload: QueryRequest):
                     documents_used.extend(docs)
 
             ref_docs = []
-
             for d in documents_used:
                 if not _is_hit_source(d):
                     continue
                 ref_docs.append(RagMapper.get_references(d))
-
-            # log_section("REF PUSH", f"{_format_coq(conversation_id, question)}\n{json.dumps(ref_docs, ensure_ascii=False, indent=2)}")
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
@@ -3154,14 +3150,25 @@ async def query_stream(payload: QueryRequest):
                 gemma_content_chars=gemma_done.get("content_chars"),
             )
 
-            # 루프 종료 후
             yield f"data: {json.dumps({'status': 'done'})}\n\n"
 
         except Exception as e:
             logger.error(f"Stream Error: {e}", exc_info=True)
             error_code = getattr(e, "error_code", "INTERNAL_ERROR")
             reason = getattr(e, "reason", str(e))
-            if isinstance(e, StrategyViolation):
+            total_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+            degraded = isinstance(e, StrategyViolation)
+            _log_event(
+                "REQ.FAIL",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                stage="stream",
+                error_code=error_code,
+                reason=reason,
+                degraded=int(degraded),
+                total_ms=total_ms,
+            )
+            if degraded:
                 user_message = _friendly_strategy_violation_message(
                     error_code=error_code,
                     reason=reason,
@@ -3171,6 +3178,8 @@ async def query_stream(payload: QueryRequest):
                 yield f"data: {json.dumps({'status': 'done', 'degraded': True}, ensure_ascii=False)}\n\n"
                 return
             yield f"data: {json.dumps({'error': str(e), 'error_code': error_code, 'reason': reason}, ensure_ascii=False)}\n\n"
+        finally:
+            set_log_context(request_id=None, conversation_id=None)
 
     return StreamingResponse(
         event_generator(),
@@ -3193,6 +3202,7 @@ async def query_debug(payload: QueryRequest):
         conversation_id,
         chat_history,
         prev_context,
+        request_id=request_id,
     )
 
     inputs = {
@@ -3205,12 +3215,16 @@ async def query_debug(payload: QueryRequest):
 
     graph = app.state.graph
 
+    started_at = time.perf_counter()
     try:
+        set_log_context(request_id=request_id, conversation_id=conversation_id)
+        _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="debug_request_start", q_len=len(question))
         final_state = await graph.ainvoke(inputs)
 
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
+        _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=round((time.perf_counter() - started_at) * 1000.0, 2))
         return {
             "success": True,
             "conversation_id": conversation_id,
@@ -3227,12 +3241,24 @@ async def query_debug(payload: QueryRequest):
 
     except Exception as e:
         logger.error(f"Debug Error: {e}", exc_info=True)
+        _log_event(
+            "REQ.FAIL",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            stage="debug",
+            error_code=getattr(e, "error_code", "INTERNAL_ERROR"),
+            reason=getattr(e, "reason", str(e)),
+            degraded=0,
+            total_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+        )
         return {
             "success": False,
             "error": str(e),
             "error_code": getattr(e, "error_code", "INTERNAL_ERROR"),
             "reason": getattr(e, "reason", str(e)),
         }
+    finally:
+        set_log_context(request_id=None, conversation_id=None)
 
 @app.get("/health")
 async def health_check():
