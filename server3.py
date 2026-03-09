@@ -1990,8 +1990,9 @@ async def build_intent_payload(
     )
     normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
 
-    # 전략 필드 변경 단일 지점 원칙: normalize_intent는 전략 필드를 재보정하지 않고,
-    # apply_planner_strategy에서만 mode/relation/join_key_mode/target_cols/base_route/action을 변경한다.
+    # 문서(SSoT) 원칙: 전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)는
+    # 단일 지점에서만 변경되어야 한다. 현재 구현에는 parser/validator 단계 보정 경로가 일부 남아 있으므로
+    # apply_planner_strategy를 중심으로 단계적 수렴(정리) 중임을 전제로 본다.
 
     logger.info(
         "[INTENT_PAYLOAD_V2] event=build conversation_id=%s planner_applied=%s planner_failed=%s schema_fields=%s",

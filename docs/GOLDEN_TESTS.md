@@ -130,11 +130,16 @@
 
 ---
 
-## 7) 이력(History)
+## 7) 영향 범위 메모(이번 세션)
+- people/org relation JOIN late guard는 기본 warning 경로가 남아 있지만, 정상 경로의 주 방어선은 upstream(`query_intent`, parser) 차단임.
+- 따라서 회귀 테스트는 executor late guard 단독보다 upstream 차단 + executor 안전장치를 함께 검증해야 함.
+
+## 8) 이력(History)
 
 |일자|변경유형|내용|
 |---|---|---|
 |2026-03-09|추가|정책 축(`strict/planner_invalid_fallback/promotion_mode/force_fallback_chat`)과 질의 축 분리 정의 추가|
 |2026-03-09|추가|최소 골든 5케이스(G-MIN-001~005) 단계별 기대 산출 고정|
 |2026-03-09|추가|strict/compat 동일 입력 비교 테스트(`예외 vs 보정`) 회귀 기준 반영|
+|2026-03-09|추가|people/org relation 금지의 영향 범위 메모(upstream 차단 우세, executor는 안전장치) 추가|
 
