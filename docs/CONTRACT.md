@@ -22,6 +22,12 @@
 |파싱 보정(선택)|전략 자동 보정(`group→instance`, `SEARCH→LOOKUP` 등)|`QuestionAnalysisV2.normalize_planner_payload()`, `validate_join_contract()`|기본 비활성, `ALLOW_PARSER_STRATEGY_AUTO_CORRECTION=1`일 때만 허용|
 |fallback 보정(선택)|`normalize_intent()`의 route/action fallback|`rag_parts/pipeline_steps.py::normalize_intent()`|기본 비활성(`allow_strategy_fallback=False`)|
 
+### 1.3 계층형 방어 모델 (upstream 차단 > executor 안전장치)
+- 1차(upstream): planner prompt + parser(`QuestionAnalysisV2`)에서 relation 허용값을 `project_perf|perf_project|null`로 강제한다.
+- 2차(intent 정규화): `rag_parts/query_intent.py`에서 people/org relation 경로를 생성하지 않고, 비허용 relation은 `None`으로 정규화한다.
+- 3차(executor): `rag_pipeline.py`의 `PLANNER_PEOPLE_RELATION_FORBIDDEN`를 최종 차단선으로 유지한다.
+- 기본 운영 정책은 fail-close(`RAG_STRICT_STRATEGY_CONSISTENCY=1`)이며, 완화는 명시적 env override일 때만 허용한다.
+
 코드 근거(예시):
 - mode/action 일치성 검증: `rag_parts/planner_contract.py::planner_contract_mode()`
 - 실행 직전 계약 위반 수집: `rag_parts/planner_contract.py::validate_planner_contract()`
@@ -148,6 +154,7 @@
 - head는 “최종 응답 엔티티”이며 JOIN에서는 항상 relation target(두 번째 엔티티)과 일치해야 함
 - `project_perf` → head=`perf`
 - `perf_project` → head=`project`
+- people/org relation(`people_project`, `org_perf` 등)은 계약상 금지하며, parser 단계에서 즉시 오류(`PLANNER_RELATION_FORBIDDEN_PEOPLE_ORG`)로 차단한다.
 
 관련 코드:
 - `rag_parts/planner_contract.py::validate_planner_contract()`

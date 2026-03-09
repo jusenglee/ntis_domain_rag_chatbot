@@ -3764,7 +3764,8 @@ def _run_rag_with_vectors(
         changed_filter_fields={},
         **{LOG_KEY_STRATEGY_MUTATION_STAGE: "executor", LOG_KEY_CHANGED_BY: CHANGED_BY_EXECUTOR},
     )
-    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "0")
+    # fail-close 기본값: planner 계약 위반은 기본 차단하고, 필요 시 운영자가 env로 완화한다.
+    strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "0")
     force_fallback_chat = _env_flag("RAG_FORCE_FALLBACK_CHAT", "0")
     planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)

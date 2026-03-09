@@ -305,6 +305,20 @@ class QuestionAnalysisV2(BaseModel):
     retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
 
+    _ALLOWED_RELATIONS = {"project_perf", "perf_project"}
+    _FORBIDDEN_PEOPLE_ORG_RELATIONS = {
+        "people_project",
+        "project_people",
+        "people_perf",
+        "perf_people",
+        "org_project",
+        "project_org",
+        "org_perf",
+        "perf_org",
+        "people_org",
+        "org_people",
+    }
+
     @model_validator(mode="before")
     @classmethod
     def normalize_planner_payload(cls, data: Any) -> Any:
@@ -495,6 +509,13 @@ class QuestionAnalysisV2(BaseModel):
         단, 모드가 JOIN이 아닐 때 join_key_mode가 들어오면 실행 혼선을 막기 위해 null로 정규화한다.
         또한 사람/기관 이름 기반 질의는 SEARCH 오염 방지를 위해 LOOKUP 우선으로 정규화한다.
         """
+        relation_norm = str(self.relation or "").strip().lower()
+        if relation_norm:
+            if relation_norm in self._FORBIDDEN_PEOPLE_ORG_RELATIONS:
+                raise ValueError(f"PLANNER_RELATION_FORBIDDEN_PEOPLE_ORG:{relation_norm}")
+            if relation_norm not in self._ALLOWED_RELATIONS:
+                raise ValueError(f"PLANNER_RELATION_INVALID:{relation_norm}")
+
         if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
             return self
 
@@ -820,9 +841,10 @@ async def _run_question_analysis(
         [Mode 결정 규칙(우선순위)]
         ====================
         선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
-        - relation은 질의 의미 방향을 그대로 사용합니다.
+        - relation은 아래 2개만 허용하며, 질의 의미 방향을 그대로 사용합니다.
           * "과제의 논문/성과" => relation="project_perf"
           * "이 논문/성과가 어느 과제" => relation="perf_project"
+          * people/org가 포함된 relation(예: people_project, org_perf)은 절대 출력 금지(null 또는 LOOKUP으로 처리)
         - head는 항상 relation의 target(두 번째 엔티티)로 고정합니다.
           * project_perf => head="perf"
           * perf_project => head="project"
@@ -871,7 +893,7 @@ async def _run_question_analysis(
         [relation enum]
         ====================
         relation은 아래 중 하나 또는 null:
-        - "project_perf" | "perf_project" | null
+        - "project_perf" | "perf_project" | null (people/org relation은 입력/출력 모두 금지)
         
         ====================
         [target_cols 규칙]
@@ -1016,7 +1038,7 @@ async def _run_question_analysis(
         - mode: "SEARCH" | "LOOKUP" | "JOIN"
         - head: "project" | "perf" | "people" | "org" | "support"
         - action: "topic" | "list" | "detail" | "stats" | "download"
-        - relation: "project_perf" | "perf_project" | null
+        - relation: "project_perf" | "perf_project" | null (people/org relation 금지)
         - join_key_mode: "instance" | "group" | null
         - target_cols: string 배열
         - ids_map: dict
