@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090").rstrip("/")
@@ -140,8 +140,8 @@ async def collect_snapshot(client: httpx.AsyncClient) -> MetricSnapshot:
 
     Returns:
         ``MetricSnapshot`` 객체.
-        - ``vllm_num_requests_running``: vLLM running request 합계.
-        - ``dcgm_fi_dev_gpu_util_avg``: GPU Util(%) 평균.
+        - ``requestCount``: vLLM running request 합계.
+        - ``gpuUtilPercent``: GPU Util(%) 평균.
         각 필드는 Prometheus 질의/파싱 실패 또는 빈 시계열일 때 ``None``이 된다.
 
     Exception behavior:
@@ -165,16 +165,16 @@ async def get_metrics() -> MetricSnapshot:
     return await collect_snapshot(app.state.http)
 
 
-@app.get("/metrics/stream", response_class=EventSourceResponse)
-async def stream_metrics(request: Request) -> AsyncIterable[dict[str, str]]:
+@app.get("/metrics/stream")
+async def stream_metrics(request: Request) -> StreamingResponse:
     """메트릭 SSE 스트림을 제공한다.
 
     Args:
         request: 클라이언트 연결 상태 확인(``is_disconnected``)에 사용하는 FastAPI 요청 객체.
 
     Returns:
-        ``EventSourceResponse``용 async generator.
-        각 이벤트는 ``event='metrics'``이며 ``data``에는 ``MetricSnapshot`` JSON 문자열이 담긴다.
+        ``text/event-stream`` 응답을 반환한다.
+        각 이벤트는 ``event: metrics`` 및 ``data: <MetricSnapshot JSON>`` 형식이다.
         기본 전송 주기는 ``STREAM_INTERVAL_SECONDS`` 환경 변수(기본 2초)다.
 
     Exception behavior:
@@ -183,14 +183,15 @@ async def stream_metrics(request: Request) -> AsyncIterable[dict[str, str]]:
         클라이언트 연결이 끊기면 generator가 종료된다.
     """
 
-    async def event_generator() -> AsyncIterable[dict[str, str]]:
+    async def event_generator() -> AsyncIterable[str]:
         while True:
             if await request.is_disconnected():
                 break
 
             snapshot = await collect_snapshot(request.app.state.http)
-            yield {"event": "metrics", "data": snapshot.model_dump_json()}
+            payload = snapshot.model_dump_json(by_alias=True)
+            yield f"event: metrics\ndata: {payload}\n\n"
 
             await asyncio.sleep(STREAM_INTERVAL_SECONDS)
 
-    return event_generator()
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
