@@ -63,7 +63,8 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 |---|---|
 | 단일 전략 | 플래너는 질의당 1개의 Strategy만 출력 |
 | 모드/관계 불변 | 실행 레이어는 `mode / relation / target_cols / join_key_mode` 재결정 금지 |
-| fallback 금지 | 실행 중 모드 전환(예: JOIN→SEARCH 재시도) 금지 |
+| 기본 strict(fail-close) | planner invalid/contract violation은 기본적으로 즉시 `StrategyViolation`으로 실패한다. |
+| 호환 모드(opt-in) | `RAG_PLANNER_INVALID_FALLBACK=1`일 때만 기존 fallback 경로를 허용한다. |
 
 ### 3.2 허용되는 보정 범위(정규화/컴파일)
 
@@ -74,6 +75,17 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 | 정책 강제 | detail이 아닌 LOOKUP에서 `lookup_title_filter_policy=hard` 입력 시 `soft`로 강등 |
 
 ---
+
+
+
+### 3.3 strict 기본 + 호환 모드 예외
+
+- 기본값은 strict(`RAG_PLANNER_INVALID_FALLBACK=0`)이며, planner invalid/contract violation은 fail-close로 처리한다.
+- 호환 모드가 필요한 배포에서만 `RAG_PLANNER_INVALID_FALLBACK=1`을 명시해 기존 fallback(`ids_or_id_query=>lookup_else_search`)을 opt-in으로 활성화한다.
+- 정책 적용 지점은 다음 오류군을 동일 정책으로 묶는다.
+  - `PLANNER_INVALID_STRATEGY`
+  - `PLANNER_JOIN_*`
+  - `PLANNER_*_MISMATCH`
 
 ## 4. Mode 정의
 
@@ -193,6 +205,18 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 - [ ] `strategy_version`과 `policy_version`이 분리 로깅되는가
 
 ---
+
+
+## 9. 환경변수 마이그레이션 (strict 기본 전환)
+
+| 항목 | 기존 운영값(관행) | 신규 권장값 | 롤백값(임시) |
+|---|---|---|---|
+| `RAG_PLANNER_INVALID_FALLBACK` | `1` (fallback 기본 허용) | `0` (strict fail-close 기본) | `1` (호환 모드 opt-in) |
+
+운영 가이드:
+- 신규/기본 배포는 `RAG_PLANNER_INVALID_FALLBACK`를 설정하지 않거나 `0`으로 명시한다.
+- strict 전환 직후 장애 완화가 필요하면 단기적으로만 `1`로 롤백한다.
+- 롤백 시에도 `PLANNER_INVALID_STRATEGY`, `PLANNER_JOIN_*`, `PLANNER_*_MISMATCH` 로그 비율을 모니터링하고, 원인 수정 후 다시 `0`으로 복귀한다.
 
 ## 부록 A. 금지 패턴
 
