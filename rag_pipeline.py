@@ -305,6 +305,11 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
 
     body = _clip_text(body, max_chars)
 
+    if str(tier or "normal").strip().lower() == "normal":
+        payload = {"event": title, "data": content if content is not None else body}
+        log_fn("[RAG] %s", json.dumps(payload, ensure_ascii=False, default=str))
+        return
+
     if _rag_color_on():
         header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
         footer = f"\033[96m{'='*36}\033[0m\n"
@@ -2485,6 +2490,7 @@ def _strategy_consistency_or_violation(
     if context:
         payload.update(context)
     log_kv("RAG.STRATEGY.MISMATCH", level="error" if strict else "warning", **payload)
+    log_kv("RAG.ERROR.STRATEGY_MISMATCH", level="error" if strict else "warning", tier="debug", planner_snapshot=planner_value, executed_snapshot=executed_value, kind=mismatch_kind)
     if strict:
         raise StrategyViolation(
             error_code="STRATEGY_MISMATCH",
@@ -3265,6 +3271,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.INPUT",
+        tier="debug",
         raw_query=query,
         normalized=q,
         planner_applied=planner_applied,
@@ -3567,6 +3574,7 @@ def _run_rag_with_vectors(
             "final_keywords": kws,
             "priority_rule": "planner>hint/payload",
         },
+        tier="debug",
     )
     log_kv(
         "RAG.INTENT",
@@ -4056,6 +4064,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.PRESET/PLAN.PRE",
+        tier="debug",
         policy_version=SEARCH_POLICY_VERSION,
         preset_key=getattr(preset, "strategy_key", None),
         topk_spec=topk_spec,
@@ -4063,6 +4072,7 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.SPARSE.CONFIG.FINAL",
+        tier="debug",
         sparse_vector_name=sparse_vector_name_eff,
         sparse_vector_name_source=sparse_vector_name_source,
         sparse_topk=int(sparse_topk_eff),
@@ -4419,6 +4429,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.FILTER.INPUT",
+        tier="debug",
         policy_version=SEARCH_POLICY_VERSION,
         org_terms=org_terms,
         org_role=org_role,
@@ -4481,14 +4492,20 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.PLAN",
-        strategy_summary=strategy_summary,
         mode=plan.mode,
-        route=getattr(plan, "route", None),
         base_route=base_route,
         action=action,
         relation=relation,
-        output_type=getattr(plan, "output_type", None),
+        join_key_mode=resolved_join_key_mode,
         target_cols=list(target_collections or []),
+        policy_reason=policy_reason,
+        route=getattr(plan, "route", None),
+        output_type=getattr(plan, "output_type", None),
+    )
+    log_kv(
+        "RAG.PLAN.DEBUG",
+        tier="debug",
+        strategy_summary=strategy_summary,
         planner_applied=planner_applied,
         planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
@@ -5061,6 +5078,7 @@ def _run_rag_with_vectors(
             invalid_values = [str(x).strip() for x in (join_key_result.invalid_values or []) if str(x).strip()]
             suspected_swap_count = int(join_key_result.suspected_swap_count or 0)
             if invalid_values or suspected_swap_count > 0:
+                invalid_samples = [_point_summary(p) for p in hop1_top[:3]] if hop1_top else []
                 log_kv(
                     "RAG.JOIN_KEYS.INVALID",
                     level="error",
@@ -5070,6 +5088,12 @@ def _run_rag_with_vectors(
                     invalid_values=invalid_values[:10],
                     suspected_swap_count=suspected_swap_count,
                     suspected_swaps=join_key_result.to_log_dict().get("suspected_swaps", [])[:10],
+                )
+                log_kv(
+                    "RAG.ERROR.JOIN_KEYS",
+                    level="error",
+                    scope=f"join_hop1:{hop1_col}:extract",
+                    samples=invalid_samples,
                 )
                 raise StrategyViolation(
                     error_code="JOIN_KEYS_INVALID",
@@ -6007,7 +6031,7 @@ def _run_rag_with_vectors(
         _timing_put(timings, "info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
         _timing_put(timings, "info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
 
-    log_top_points("RAG.RESULT.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "5")), tier="normal")
+    log_top_points("RAG.RESULT.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "3")), tier="normal")
 
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
@@ -6142,6 +6166,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.CTX",
+        tier="debug",
         ctx_len=len(context or ""),
         refs=len(refs or []),
         max_items=int(ctx_max_items),

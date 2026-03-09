@@ -60,13 +60,14 @@
   - `PLANNER.RESULT`
   - `KS.RESULT`
   - `RAG.PLAN`
-  - `RAG.FILTER.INPUT`
   - `RAG.RETRIEVE`
   - `RAG.RESULT.TOP`
   - `RAG.RESULT`
   - `LLM.RESULT`
+  - `REQ.SUMMARY` (`request_id/mode/relation/target_cols/docs_found/selected_model/total_ms/degraded` 요약)
   - `REQ.END`
 - 디버그(`RAG_LOG_LEVEL=debug`):
+  - `STREAM.DONE`(solar/gemma `ttft_any_ms`, `ttft_content_ms`, `elapsed_ms`, `content_chars`, `error_code`)
   - planner→executor diff(`RAG.STRATEGY.DIFF.*`)
   - compiled qdrant filter(`RAG.FILTER.COMPILED.QDRANT`)
   - hop1/hop2 topN(`RAG.JOIN.HOP1.TOP`, `RAG.JOIN.HOP2.TOP`)
