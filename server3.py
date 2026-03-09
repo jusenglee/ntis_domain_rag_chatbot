@@ -38,6 +38,7 @@ from rag_pipeline import run_rag_ab_compare
 from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent
 from rag_parts.planner_contract import StrategyViolation
+
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
 from schemas import IntentPayloadV2
 from settings import (
@@ -135,6 +136,7 @@ RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+ALLOW_PARSER_STRATEGY_AUTO_CORRECTION = os.getenv("ALLOW_PARSER_STRATEGY_AUTO_CORRECTION", "0").strip().lower() in {"1", "true", "yes", "on"}
 RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -431,23 +433,25 @@ class QuestionAnalysisV2(BaseModel):
         elif not isinstance(tc, list):
             d["target_cols"] = []
 
-        # project 중심 people/org LOOKUP은 target_cols를 project로 정규화
-        mode_norm = str(d.get("mode") or "").strip().upper()
-        head_norm = str(d.get("head") or "").strip().lower()
-        filters = d.get("filters") if isinstance(d.get("filters"), dict) else {}
-        has_people_org_filters = any(
-            bool(filters.get(k))
-            for k in (
-                "participant_researcher_name",
-                "participant_researcher_id",
-                "lead_org_name",
-                "participant_org_name",
-                "people_affiliation_org_name",
-                "org_name",
+        # 전략 필드(mode/relation/join_key_mode/target_cols/base_route/action) 자동 보정은
+        # 기본 비활성화이며, 명시 플래그로만 허용한다.
+        if ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
+            mode_norm = str(d.get("mode") or "").strip().upper()
+            head_norm = str(d.get("head") or "").strip().lower()
+            filters = d.get("filters") if isinstance(d.get("filters"), dict) else {}
+            has_people_org_filters = any(
+                bool(filters.get(k))
+                for k in (
+                    "participant_researcher_name",
+                    "participant_researcher_id",
+                    "lead_org_name",
+                    "participant_org_name",
+                    "people_affiliation_org_name",
+                    "org_name",
+                )
             )
-        )
-        if mode_norm == "LOOKUP" and (head_norm == "project" or (head_norm in ("people", "org") and has_people_org_filters)):
-            d["target_cols"] = ["ntis_project_v1"]
+            if mode_norm == "LOOKUP" and (head_norm == "project" or (head_norm in ("people", "org") and has_people_org_filters)):
+                d["target_cols"] = ["ntis_project_v1"]
 
         # --- limit/confidence coercion (파싱 실패 방지) ---
         if "limit" in d and not isinstance(d.get("limit"), int):
@@ -485,12 +489,13 @@ class QuestionAnalysisV2(BaseModel):
         단, 모드가 JOIN이 아닐 때 join_key_mode가 들어오면 실행 혼선을 막기 위해 null로 정규화한다.
         또한 사람/기관 이름 기반 질의는 SEARCH 오염 방지를 위해 LOOKUP 우선으로 정규화한다.
         """
+        if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
+            return self
+
         if self.mode != "JOIN":
-            # 파싱 단계에서는 실패시키지 않고 정규화만 한다.
             try:
                 object.__setattr__(self, "join_key_mode", None)
             except Exception:
-                # Pydantic config가 frozen인 경우 등
                 pass
         else:
             ids_map = dict(self.ids_map or {})
@@ -1943,6 +1948,7 @@ async def build_intent_payload(
         raw_intent,
         query=question,
         keywords=kws,
+        allow_strategy_fallback=False,
         hint_people_terms=hint_people_terms,
         hint_org_terms=hint_org_terms,
         hint_org_role=hint_org_role,
@@ -1952,8 +1958,8 @@ async def build_intent_payload(
     )
     normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
 
-    # 불변 Strategy 원칙: QA는 planner 입력 힌트로만 사용하고,
-    # normalize_intent 이후 실행 레이어에서 intent를 재작성하지 않는다.
+    # 전략 필드 변경 단일 지점 원칙: normalize_intent는 전략 필드를 재보정하지 않고,
+    # apply_planner_strategy에서만 mode/relation/join_key_mode/target_cols/base_route/action을 변경한다.
 
     logger.info(
         "[INTENT_PAYLOAD_V2] event=build conversation_id=%s planner_applied=%s planner_failed=%s schema_fields=%s",
@@ -1965,31 +1971,25 @@ async def build_intent_payload(
 
     return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
 
-def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+def merge_planner_hints(intent: Any, qa: Optional[QuestionAnalysis]) -> Any:
+    """비전략 필드(year/perf_types/org_terms/title/keywords 등)만 planner 힌트로 병합한다."""
     if qa is None:
-        return intent, False
+        return intent
 
-    tracked_fields = (
-        "mode", "base_route", "action", "relation", "join_key_mode", "target_cols",
-        "keywords", "people_terms", "org_terms", "perf_types", "ids_map",
-    )
-
-    before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
     confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
     if confidence < 0.2:
-        return intent, False
-
-    relation_map = {
-        "project_perf": ("project", "perf"),
-        "perf_project": ("perf", "project"),
-    }
-    relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
+        return intent
 
     filters = dict(getattr(qa, "filters", {}) or {})
     lead_org_terms = normalize_org_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
     participant_org_terms = normalize_org_terms(filters.get("participant_org_name"))
     people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
-    org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms, *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else [])])
+    org_terms = normalize_org_terms([
+        *lead_org_terms,
+        *participant_org_terms,
+        *people_affiliation_org_terms,
+        *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else []),
+    ])
 
     planner_year_from = str(filters.get("year_from") or "").strip() or None
     planner_year_to = str(filters.get("year_to") or "").strip() or None
@@ -2004,13 +2004,47 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     planner_keywords = _normalize_hint_terms(filters.get("keywords"))
     planner_people_terms = _collect_researcher_name_terms(filters)
     planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
-    planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
 
-    planner_wants_rank = bool(getattr(qa, "wants_rank", False))
-    if not planner_wants_rank:
-        planner_wants_rank = str(getattr(qa, "action", "") or "").strip().lower() in {"rank", "stats"}
-    planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
-    planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
+    if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
+        planner_people_terms = []
+
+    return replace(
+        intent,
+        planner_limit=int(getattr(qa, "limit", 20) or 20),
+        retrieval_query=getattr(qa, "retrieval_query", None),
+        planner_confidence=confidence,
+        org_role=planner_org_role,
+        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        people_terms=planner_people_terms if planner_people_terms else list(getattr(intent, "people_terms", []) or []),
+        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
+        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
+        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
+        year_from=planner_year_from or getattr(intent, "year_from", None),
+        year_to=planner_year_to or getattr(intent, "year_to", None),
+        years=planner_years or list(getattr(intent, "years", []) or []),
+        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
+        title=planner_title_terms or list(getattr(intent, "title", []) or []),
+    )
+
+
+def apply_planner_strategy(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+    """전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)를 단일 지점에서만 반영한다."""
+    if qa is None:
+        return intent, False
+
+    tracked_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "ids_map")
+    before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
+
+    confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
+    if confidence < 0.2:
+        return intent, False
+
+    relation_map = {
+        "project_perf": ("project", "perf"),
+        "perf_project": ("perf", "project"),
+    }
+    relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
 
     def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
         merged: dict[str, list[str]] = {}
@@ -2031,9 +2065,12 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         _ingest(planner_ids, overwrite=True)
         return merged
 
-    if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
-        # 기관 소속 전체 연구자 질의는 사람명 슬롯을 비워 org slot만 사용한다.
-        planner_people_terms = []
+    planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
+    planner_wants_rank = bool(getattr(qa, "wants_rank", False))
+    if not planner_wants_rank:
+        planner_wants_rank = str(getattr(qa, "action", "") or "").strip().lower() in {"rank", "stats"}
+    planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
+    planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
 
     patched = replace(
         intent,
@@ -2042,23 +2079,8 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
         mode=str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
-        ids_map=_merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
-        planner_limit=int(getattr(qa, "limit", 20) or 20),
-        retrieval_query=getattr(qa, "retrieval_query", None),
-        planner_confidence=confidence,
-        org_role=planner_org_role,
-        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
-        people_terms=planner_people_terms if planner_people_terms else list(getattr(intent, "people_terms", []) or []),
-        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
-        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
-        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
-        year_from=planner_year_from or getattr(intent, "year_from", None),
-        year_to=planner_year_to or getattr(intent, "year_to", None),
-        years=planner_years or list(getattr(intent, "years", []) or []),
-        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
-        keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
-        title=planner_title_terms or list(getattr(intent, "title", []) or []),
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
+        ids_map=_merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
         wants_rank=planner_wants_rank or bool(getattr(intent, "wants_rank", False)),
     )
 
@@ -2071,12 +2093,19 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     _logger = globals().get("logger")
     if _logger is not None:
         _logger.info(
-            "[PLANNER_V2_DIFF] applied=%s confidence=%.3f diff=%s",
+            "[PLANNER_STRATEGY_DIFF] applied=%s confidence=%.3f diff=%s",
             int(bool(diff)),
             confidence,
             diff,
         )
+
     return patched, True
+
+
+def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+    """planner 적용 엔트리포인트. 비전략 병합 후 전략 필드를 단일 지점에서 적용한다."""
+    hinted_intent = merge_planner_hints(intent, qa)
+    return apply_planner_strategy(hinted_intent, qa)
 
 def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
     """planner filters에서 연구자 이름 힌트를 폭넓게 수집한다."""
