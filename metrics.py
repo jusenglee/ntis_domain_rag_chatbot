@@ -118,6 +118,22 @@ async def _safe_value(name: str, coro) -> float | None:
 
 
 async def collect_snapshot(client: httpx.AsyncClient) -> MetricSnapshot:
+    """Prometheus에서 메트릭 스냅샷을 수집한다.
+
+    Args:
+        client: FastAPI lifespan에서 공유하는 ``httpx.AsyncClient``.
+
+    Returns:
+        ``MetricSnapshot`` 객체.
+        - ``vllm_num_requests_running``: vLLM running request 합계.
+        - ``dcgm_fi_dev_gpu_util_avg``: GPU Util(%) 평균.
+        각 필드는 Prometheus 질의/파싱 실패 또는 빈 시계열일 때 ``None``이 된다.
+
+    Exception behavior:
+        함수 자체는 예외를 외부로 전파하지 않는다.
+        내부적으로 각 메트릭 수집은 ``_safe_value``로 감싸져 실패 시 예외를 로깅한 뒤
+        해당 필드만 ``None``으로 대체한다.
+    """
     vllm_value, gpu_avg = await asyncio.gather(
         _safe_value("requestCount", fetch_vllm_num_requests_running(client)),
         _safe_value("gpuUtilPercent", fetch_dcgm_gpu_util_avg(client)),
@@ -135,14 +151,30 @@ async def get_metrics() -> MetricSnapshot:
 
 
 @app.get("/metrics/stream", response_class=EventSourceResponse)
-async def stream_metrics(request: Request) -> AsyncIterable[MetricSnapshot]:
-    async def event_generator() -> AsyncIterable[MetricSnapshot]:
+async def stream_metrics(request: Request) -> AsyncIterable[dict[str, str]]:
+    """메트릭 SSE 스트림을 제공한다.
+
+    Args:
+        request: 클라이언트 연결 상태 확인(``is_disconnected``)에 사용하는 FastAPI 요청 객체.
+
+    Returns:
+        ``EventSourceResponse``용 async generator.
+        각 이벤트는 ``event='metrics'``이며 ``data``에는 ``MetricSnapshot`` JSON 문자열이 담긴다.
+        기본 전송 주기는 ``STREAM_INTERVAL_SECONDS`` 환경 변수(기본 2초)다.
+
+    Exception behavior:
+        스냅샷 수집 중 Prometheus 오류가 발생해도 스트림은 유지된다.
+        실패한 필드는 ``None``으로 내려가며 예외 로그가 남는다.
+        클라이언트 연결이 끊기면 generator가 종료된다.
+    """
+
+    async def event_generator() -> AsyncIterable[dict[str, str]]:
         while True:
             if await request.is_disconnected():
                 break
 
             snapshot = await collect_snapshot(request.app.state.http)
-            yield snapshot
+            yield {"event": "metrics", "data": snapshot.model_dump_json()}
 
             await asyncio.sleep(STREAM_INTERVAL_SECONDS)
 
