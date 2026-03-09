@@ -26,7 +26,7 @@ import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from rag_parts.pipeline_steps import NormalizedIntent
+from rag_parts.pipeline_steps import NormalizedIntent, build_changed_fields
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
     DEFAULT_MODEL_NAME,
@@ -98,6 +98,16 @@ from rag_parts.rank_merge import (
     rrf_merge as _rrf_merge,
 )
 from rag_parts.result_contract import enforce_reranked_contract as _enforce_reranked_contract
+from rag_parts.log_keys import (
+    LOG_KEY_CHANGED_BY,
+    LOG_KEY_FORCE_FALLBACK_CHAT,
+    LOG_KEY_PLANNER_INVALID_FALLBACK,
+    LOG_KEY_POLICY_MODE,
+    LOG_KEY_PROMOTION_MODE,
+    LOG_KEY_STRATEGY_MUTATION_STAGE,
+    LOG_KEY_STRICT_STRATEGY_CONSISTENCY,
+    CHANGED_BY_EXECUTOR,
+)
 from rag_parts.promotion import (
     promote_mode_from_search_hits as _promote_mode_from_search_hits,
 )
@@ -2401,14 +2411,21 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], sou
 
 
 
-def _strategy_field_diff(planner: Any, executed: Any, keys: List[str]) -> Dict[str, Dict[str, Any]]:
-    diff: Dict[str, Dict[str, Any]] = {}
-    for key in keys:
-        planner_val = planner.get(key) if isinstance(planner, dict) else None
-        executed_val = executed.get(key) if isinstance(executed, dict) else None
-        if planner_val != executed_val:
-            diff[key] = {"planner": planner_val, "executed": executed_val}
-    return diff
+def _strategy_field_diff(
+        planner: Any,
+        executed: Any,
+        keys: List[str],
+        *,
+        changed_by: str = CHANGED_BY_EXECUTOR,
+) -> Dict[str, Dict[str, Any]]:
+    planner_map = planner if isinstance(planner, dict) else {}
+    executed_map = executed if isinstance(executed, dict) else {}
+    return build_changed_fields(
+        planner_map,
+        executed_map,
+        tuple(keys),
+        changed_by=changed_by,
+    )
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).strip().lower() in ("1", "true", "yes", "y", "on")
@@ -2534,7 +2551,7 @@ def _diff_filter_spec(
         planner_val = planner_filter_spec.get(key)
         exec_val = executed_filter_spec.get(key)
         if not _semantic_subset_equal(planner_val, exec_val):
-            changed[key] = {"planner": planner_val, "executed": exec_val}
+            changed[key] = {"planner": planner_val, "executed": exec_val, LOG_KEY_CHANGED_BY: CHANGED_BY_EXECUTOR}
     return {
         "planner_keys": planner_keys,
         "list_match_mode": list_mode,
@@ -3175,13 +3192,23 @@ def _run_rag_with_vectors(
         "keywords": list(getattr(ctx, "keywords", []) or []),
         "ids_map": dict(getattr(ctx, "ids_map", {}) or {}),
     }
+    changed_strategy_fields = _strategy_field_diff(
+        planner_snapshot,
+        ctx_snapshot,
+        ["mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "keywords"],
+    )
+    changed_filter_fields = _strategy_field_diff(
+        planner_snapshot,
+        ctx_snapshot,
+        ["ids_map"],
+    )
     log_kv(
         "RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT",
         planner=planner_snapshot,
         context=ctx_snapshot,
-        diff=_strategy_field_diff(planner_snapshot, ctx_snapshot, [
-            "mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "keywords", "ids_map"
-        ]),
+        changed_strategy_fields=changed_strategy_fields,
+        changed_filter_fields=changed_filter_fields,
+        **{LOG_KEY_STRATEGY_MUTATION_STAGE: "executor", LOG_KEY_CHANGED_BY: CHANGED_BY_EXECUTOR},
     )
     intent_contract_violations = list(getattr(it, "contract_violations", None) or [])
     planner_keywords = _normalize_hint_terms(ctx.keywords)
@@ -3729,14 +3756,17 @@ def _run_rag_with_vectors(
         "RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT",
         planner=plan_snapshot,
         execution_context=execution_snapshot,
-        diff=_strategy_field_diff(
+        changed_strategy_fields=_strategy_field_diff(
             plan_snapshot,
             execution_snapshot,
             ["mode", "action", "relation", "join_key_mode", "target_cols", "keywords"],
         ),
+        changed_filter_fields={},
+        **{LOG_KEY_STRATEGY_MUTATION_STAGE: "executor", LOG_KEY_CHANGED_BY: CHANGED_BY_EXECUTOR},
     )
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "0")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "0")
+    force_fallback_chat = _env_flag("RAG_FORCE_FALLBACK_CHAT", "0")
     planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
     _assert_allowlist_only(
         target_cols=planner_target_cols_locked,
@@ -3745,6 +3775,12 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.STRATEGY.POLICY",
+        **{
+            LOG_KEY_POLICY_MODE: str(plan.mode or ""),
+            LOG_KEY_STRICT_STRATEGY_CONSISTENCY: int(strict_strategy_consistency),
+            LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
+            LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
+        },
         strict_strategy_consistency=int(strict_strategy_consistency),
         allowed_branches=["compile_validation_only"],
         forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
@@ -3789,6 +3825,13 @@ def _run_rag_with_vectors(
         log_kv(
             "RAG.PLAN.FALLBACK_ON_INVALID_PLANNER",
             level="warning",
+            **{
+                LOG_KEY_POLICY_MODE: fallback_mode,
+                LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
+                LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
+                LOG_KEY_STRATEGY_MUTATION_STAGE: "validator",
+                LOG_KEY_CHANGED_BY: "validator",
+            },
             fallback_enabled=int(planner_invalid_fallback),
             error_code=error_code,
             reason=reason,
@@ -5980,6 +6023,7 @@ def _run_rag_with_vectors(
     log_kv(
         "RAG.CONTRACT.MIN_RERANKED",
         mode=promotion_mode,
+        **{LOG_KEY_PROMOTION_MODE: promotion_mode},
         base_route=base_route,
         preset_min_reranked=int(min_reranked),
         hinted_limit=int(max(0, int(hinted_limit or 0))),

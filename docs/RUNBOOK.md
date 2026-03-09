@@ -196,3 +196,56 @@ export RAG_DEBUG_TOPN=5
 - warmup 로그 키:
   - 성공: `[retrieval] sparse encoder warmup success: model=...`
   - 실패: `[retrieval] sparse encoder warmup failed: ...`
+
+---
+
+## 로그 키 사전 (공통)
+
+| 키 | 정의 | 예시 | 알람 조건 |
+|---|---|---|---|
+| `policy_mode` | strict/compat 또는 fallback 정책 모드 | `strict`, `compat`, `lookup` | `compat` 비율 급증(일평균 대비 +20%p) |
+| `planner_invalid_fallback` | planner 무효 전략 fallback 허용 여부 | `0`, `1` | `1` 상태에서 `RAG.PLAN.FALLBACK_ON_INVALID_PLANNER` 급증 |
+| `strict_strategy_consistency` | 전략 불일치 시 fail-fast 여부 | `0`, `1` | `0` 상태에서 mismatch 누적 증가 |
+| `promotion_mode` | 최종 rerank/contract 적용 모드 | `search`, `lookup`, `join` | 특정 모드 편향(예: `lookup` 90%+) |
+| `force_fallback_chat` | 결과 계약 실패를 chat fallback으로 전환 | `0`, `1` | `1` 상태에서 계약 실패(reason) 증가 |
+| `strategy_mutation_stage` | 전략 변형 발생 단계 | `parser`, `validator`, `normalizer`, `planner_merge`, `executor` | `validator`/`executor` 단계 변형 급증 |
+| `changed_by` | 변형 주체 태그 | `parser` 등 | 특정 주체의 변형 비율 급증 |
+
+### 변형 추적 필드
+- `changed_strategy_fields`: mode/action/relation/join_key_mode/target_cols 등의 전략 변경 필드.
+- `changed_filter_fields`: ids_map/filter_spec 계열 변경 필드.
+- 각 변경 필드에는 `changed_by`를 포함해 단계 추적 가능.
+
+### 운영 집계 쿼리 예시 (일 단위)
+
+```sql
+-- strict/compat 비율 (일 단위)
+SELECT
+  DATE(ts) AS d,
+  SUM(CASE WHEN policy_mode = 'strict' THEN 1 ELSE 0 END) AS strict_cnt,
+  SUM(CASE WHEN policy_mode = 'compat' THEN 1 ELSE 0 END) AS compat_cnt,
+  ROUND(100.0 * SUM(CASE WHEN policy_mode = 'strict' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS strict_ratio,
+  ROUND(100.0 * SUM(CASE WHEN policy_mode = 'compat' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS compat_ratio
+FROM rag_logs
+WHERE event IN ('RAG.STRATEGY.POLICY', 'PLANNER.V2')
+GROUP BY DATE(ts)
+ORDER BY d DESC;
+```
+
+```sql
+-- 전략 변형 발생률 + 단계별 분포 (일 단위)
+SELECT
+  DATE(ts) AS d,
+  COUNT(*) AS total_events,
+  SUM(CASE WHEN JSON_LENGTH(changed_strategy_fields) > 0 OR JSON_LENGTH(changed_filter_fields) > 0 THEN 1 ELSE 0 END) AS mutated_events,
+  ROUND(100.0 * SUM(CASE WHEN JSON_LENGTH(changed_strategy_fields) > 0 OR JSON_LENGTH(changed_filter_fields) > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS mutation_rate,
+  SUM(CASE WHEN changed_by = 'parser' THEN 1 ELSE 0 END) AS by_parser,
+  SUM(CASE WHEN changed_by = 'validator' THEN 1 ELSE 0 END) AS by_validator,
+  SUM(CASE WHEN changed_by = 'normalizer' THEN 1 ELSE 0 END) AS by_normalizer,
+  SUM(CASE WHEN changed_by = 'planner_merge' THEN 1 ELSE 0 END) AS by_planner_merge,
+  SUM(CASE WHEN changed_by = 'executor' THEN 1 ELSE 0 END) AS by_executor
+FROM rag_logs
+WHERE event IN ('PLANNER_V2_DIFF', 'RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT', 'RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT')
+GROUP BY DATE(ts)
+ORDER BY d DESC;
+```
