@@ -247,8 +247,22 @@ def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[s
 # Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
 # =====================================================================
 
-def _rag_debug_on() -> bool:
-    return str(os.getenv("RAG_DEBUG", "1")).strip().lower() in ("1", "true", "yes", "y")
+_RAG_LOG_LEVEL_ORDER = {"normal": 0, "debug": 1, "trace": 2}
+
+
+def _rag_log_level() -> str:
+    level = str(os.getenv("RAG_LOG_LEVEL", "")).strip().lower()
+    if level in _RAG_LOG_LEVEL_ORDER:
+        return level
+    if str(os.getenv("RAG_DEBUG", "0")).strip().lower() in ("1", "true", "yes", "y"):
+        return "debug"
+    return "normal"
+
+
+def _rag_log_enabled(tier: str = "normal") -> bool:
+    current = _RAG_LOG_LEVEL_ORDER.get(_rag_log_level(), 0)
+    required = _RAG_LOG_LEVEL_ORDER.get(str(tier or "normal").strip().lower(), 0)
+    return current >= required
 
 def _rag_color_on() -> bool:
     # 파일 로깅이면 ANSI가 지저분할 수 있으니 기본 OFF
@@ -268,13 +282,13 @@ def _safe_json(obj: object) -> str:
     except Exception:
         return pformat(obj, width=120, compact=True)
 
-def log_section(title: str, content: object = None, *, level: str = "info", max_chars: int = None) -> None:
+def log_section(title: str, content: object = None, *, level: str = "info", max_chars: int = None, tier: str = "normal") -> None:
     """
     RAG_DEBUG=1 일 때만 출력.
     - content: str/dict/list/anything
     - max_chars: 환경변수 RAG_LOG_MAX_CHARS(기본 6000)로 제한
     """
-    if not _rag_debug_on():
+    if not _rag_log_enabled(tier):
         return
 
     lvl = (level or "info").lower().strip()
@@ -291,6 +305,11 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
 
     body = _clip_text(body, max_chars)
 
+    if str(tier or "normal").strip().lower() == "normal":
+        payload = {"event": title, "data": content if content is not None else body}
+        log_fn("[RAG] %s", json.dumps(payload, ensure_ascii=False, default=str))
+        return
+
     if _rag_color_on():
         header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
         footer = f"\033[96m{'='*36}\033[0m\n"
@@ -300,9 +319,9 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
 
     log_fn(f"{header}\n{body}\n{footer}")
 
-def log_kv(title: str, *, level: str = "info", **kwargs) -> None:
+def log_kv(title: str, *, level: str = "info", tier: str = "normal", **kwargs) -> None:
     """key=value를 한 섹션으로 예쁘게."""
-    if not _rag_debug_on():
+    if not _rag_log_enabled(tier):
         return
     payload = {}
     for k, v in kwargs.items():
@@ -310,7 +329,7 @@ def log_kv(title: str, *, level: str = "info", **kwargs) -> None:
             payload[k] = _clip_text(v, int(os.getenv("RAG_LOG_KV_STR_MAX", "240")))
         else:
             payload[k] = v
-    log_section(title, payload, level=level)
+    log_section(title, payload, level=level, tier=tier)
 
 def _point_summary(p: Any) -> Dict[str, Any]:
     pl = getattr(p, "payload", None) or {}
@@ -358,15 +377,15 @@ def _point_summary(p: Any) -> Dict[str, Any]:
         "title": _clip_text(title, int(os.getenv("RAG_LOG_TITLE_MAX", "180"))),
     }
 
-def log_top_points(title: str, points: List[Any], *, topn: int = None, level: str = "info") -> None:
+def log_top_points(title: str, points: List[Any], *, topn: int = None, level: str = "info", tier: str = "debug") -> None:
     """후보/리랭크 결과 TopN 요약."""
-    if not _rag_debug_on():
+    if not _rag_log_enabled(tier):
         return
     topn = int(topn) if topn is not None else int(os.getenv("RAG_LOG_TOPN", "8"))
     arr = []
     for p in (points or [])[: max(0, topn)]:
         arr.append(_point_summary(p))
-    log_section(title, arr, level=level)
+    log_section(title, arr, level=level, tier=tier)
 
 
 
@@ -2086,6 +2105,7 @@ def _final_rerank(
             "_family_bonus": _score_stats(raw_fam[sample_slice]),
             "_tag_match_bonus": _score_stats(raw_tag[sample_slice]),
         },
+        tier="debug",
     )
 
     norm_rrf = _normalize_values(raw_rrf, score_norm_policy)
@@ -2470,6 +2490,7 @@ def _strategy_consistency_or_violation(
     if context:
         payload.update(context)
     log_kv("RAG.STRATEGY.MISMATCH", level="error" if strict else "warning", **payload)
+    log_kv("RAG.ERROR.STRATEGY_MISMATCH", level="error" if strict else "warning", tier="debug", planner_snapshot=planner_value, executed_snapshot=executed_value, kind=mismatch_kind)
     if strict:
         raise StrategyViolation(
             error_code="STRATEGY_MISMATCH",
@@ -3204,6 +3225,7 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT",
+        tier="debug",
         planner=planner_snapshot,
         context=ctx_snapshot,
         changed_strategy_fields=changed_strategy_fields,
@@ -3249,6 +3271,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.INPUT",
+        tier="debug",
         raw_query=query,
         normalized=q,
         planner_applied=planner_applied,
@@ -3551,9 +3574,11 @@ def _run_rag_with_vectors(
             "final_keywords": kws,
             "priority_rule": "planner>hint/payload",
         },
+        tier="debug",
     )
     log_kv(
         "RAG.INTENT",
+        tier="debug",
         action=action,
         base_route=base_route,
         relation=relation,
@@ -4039,6 +4064,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.PRESET/PLAN.PRE",
+        tier="debug",
         policy_version=SEARCH_POLICY_VERSION,
         preset_key=getattr(preset, "strategy_key", None),
         topk_spec=topk_spec,
@@ -4046,6 +4072,7 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.SPARSE.CONFIG.FINAL",
+        tier="debug",
         sparse_vector_name=sparse_vector_name_eff,
         sparse_vector_name_source=sparse_vector_name_source,
         sparse_topk=int(sparse_topk_eff),
@@ -4300,7 +4327,7 @@ def _run_rag_with_vectors(
     rerank_spec = dict(compiled_strategy.rerank_spec or {})
     compiled_qdrant_filter = compiled_strategy.qdrant_filter
     if compiled_qdrant_filter is not None:
-        log_kv("RAG.FILTER.COMPILED.QDRANT", compiled_filter=_serialize_filter_for_log(compiled_qdrant_filter))
+        log_kv("RAG.FILTER.COMPILED.QDRANT", tier="debug", compiled_filter=_serialize_filter_for_log(compiled_qdrant_filter))
     planner_filter_diff = _diff_filter_spec(
         planner_filter_spec=planner_filter_spec,
         executed_filter_spec=filter_spec,
@@ -4308,6 +4335,7 @@ def _run_rag_with_vectors(
     planner_filter_diff_changed = planner_filter_diff.get("changed", {})
     log_kv(
         "RAG.STRATEGY.FILTER_SPEC.DIFF",
+        tier="debug",
         planner_filter_keys=planner_filter_diff.get("planner_keys", []),
         changed=planner_filter_diff_changed,
         changed_count=len(planner_filter_diff_changed)
@@ -4361,7 +4389,7 @@ def _run_rag_with_vectors(
     planner_relation_eq = int(planner_relation_locked == relation)
     planner_target_cols_eq = int(planner_target_cols_exec == executed_target_cols)
     log_kv(
-        "RAG.MODE.EXECUTION",
+        "RAG.STRATEGY.EXECUTION",
         planner_mode=planner_mode_locked,
         executed_mode=mode,
         mode_equal=int(planner_mode_locked == str(mode or "").strip().lower()) if planner_mode_locked else None,
@@ -4400,31 +4428,32 @@ def _run_rag_with_vectors(
     relation_lookup_enforce = bool(strategy.relation_lookup_enforce)
 
     log_kv(
-        "RAG.FILTERS",
+        "RAG.FILTER.INPUT",
+        tier="debug",
         policy_version=SEARCH_POLICY_VERSION,
         org_terms=org_terms,
         org_role=org_role,
-        people_terms=people_terms,
-        people_ids=people_ids,
-        gender_terms=gender_terms,
-        people_org_terms=people_org_terms,
+        people_terms_count=len(people_terms),
+        people_ids_count=len(people_ids),
+        gender_terms_count=len(gender_terms),
+        people_org_terms_count=len(people_org_terms),
         year_from=year_from,
         year_to=year_to,
         perf_types=perf_types,
-        keywords=keyword_terms,
+        keywords_count=len(keyword_terms),
         perf_tag_filters=list(ctx.perf_tag_filters or []),
-        title_terms=title_terms,
+        title_terms_count=len(title_terms),
         title_match_mode=title_match_mode,
         tag_filters=list(ctx.tag_filters or []),
-        org_filter=str(org_filter) if org_filter is not None else None,
-        participant_org_filter=str(participant_org_filter) if participant_org_filter is not None else None,
-        people_filter=str(people_filter) if people_filter is not None else None,
-        perf_tag_filter=str(perf_tag_filter) if perf_tag_filter is not None else None,
-        title_filter=str(title_filter) if title_filter is not None else None,
-        project_tag_filter=str(project_tag_filter) if project_tag_filter is not None else None,
+        people_filter_applied=int(people_filter is not None),
+        org_filter_applied=int(org_filter is not None),
+        participant_org_filter_applied=int(participant_org_filter is not None),
+        perf_tag_filter_applied=int(perf_tag_filter is not None),
+        title_filter_applied=int(title_filter is not None),
+        project_tag_filter_applied=int(project_tag_filter is not None),
+        year_range_filter_applied=int(year_range_filter is not None),
+        perf_type_filter_applied=int(perf_type_filter is not None),
         tag_filter_source=tag_filter_source,
-        year_range_filter=str(year_range_filter) if year_range_filter is not None else None,
-        perf_type_filter=str(perf_type_filter) if perf_type_filter is not None else None,
         title_filter_applied_to=title_filter_applied_to,
         title_filter_server_applied=int(title_filter_server_applied),
         tag_filter_applied_to=tag_filter_applied_to,
@@ -4462,28 +4491,21 @@ def _run_rag_with_vectors(
     }
 
     log_kv(
-        "RAG.INTENT",
-        strategy_summary=strategy_summary,
-    )
-    log_kv(
-        "RAG.FILTERS",
-        strategy_summary=strategy_summary,
+        "RAG.PLAN",
         mode=plan.mode,
-        search_filter_signal=search_filter_signal,
-        search_filter_conf_ok=search_filter_conf_ok,
-        lookup_filter_policy=lookup_filter_policy,
-    )
-
-    log_kv(
-        "RAG.ROUTE/PLAN",
-        strategy_summary=strategy_summary,
-        mode=plan.mode,
-        route=getattr(plan, "route", None),
         base_route=base_route,
         action=action,
         relation=relation,
-        output_type=getattr(plan, "output_type", None),
+        join_key_mode=resolved_join_key_mode,
         target_cols=list(target_collections or []),
+        policy_reason=policy_reason,
+        route=getattr(plan, "route", None),
+        output_type=getattr(plan, "output_type", None),
+    )
+    log_kv(
+        "RAG.PLAN.DEBUG",
+        tier="debug",
+        strategy_summary=strategy_summary,
         planner_applied=planner_applied,
         planner_failed=planner_failed,
         planner_first_applied=int(planner_first_applied),
@@ -4503,6 +4525,7 @@ def _run_rag_with_vectors(
     )
     log_kv(
         "RAG.PRESET/PLAN.POST",
+        tier="debug",
         strategy_summary=strategy_summary,
         policy_version=SEARCH_POLICY_VERSION,
         strategy_key=strategy_key,
@@ -5055,6 +5078,7 @@ def _run_rag_with_vectors(
             invalid_values = [str(x).strip() for x in (join_key_result.invalid_values or []) if str(x).strip()]
             suspected_swap_count = int(join_key_result.suspected_swap_count or 0)
             if invalid_values or suspected_swap_count > 0:
+                invalid_samples = [_point_summary(p) for p in hop1_top[:3]] if hop1_top else []
                 log_kv(
                     "RAG.JOIN_KEYS.INVALID",
                     level="error",
@@ -5065,6 +5089,12 @@ def _run_rag_with_vectors(
                     suspected_swap_count=suspected_swap_count,
                     suspected_swaps=join_key_result.to_log_dict().get("suspected_swaps", [])[:10],
                 )
+                log_kv(
+                    "RAG.ERROR.JOIN_KEYS",
+                    level="error",
+                    scope=f"join_hop1:{hop1_col}:extract",
+                    samples=invalid_samples,
+                )
                 raise StrategyViolation(
                     error_code="JOIN_KEYS_INVALID",
                     reason=(
@@ -5074,11 +5104,11 @@ def _run_rag_with_vectors(
                     ),
                 )
 
-            log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")))
+            log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")), tier="debug")
             if join_key_mode == "group":
-                log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)])
+                log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)], tier="debug")
             else:
-                log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)])
+                log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)], tier="debug")
             log_kv(
                 "RAG.JOIN.HOP1.TIMINGS",
                 dense_queries=float(local_timings_h1.get("dense_queries", 0.0)),
@@ -5323,7 +5353,7 @@ def _run_rag_with_vectors(
                 hop2_reranked = hop2_reranked[:ctx_hard_limit]
             hop2_top = hop2_reranked[: max(1, hop2_keep)]
 
-            log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")))
+            log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")), tier="debug")
             log_kv(
                 "RAG.JOIN.HOP2.TIMINGS",
                 dense_queries=float(local_timings_h2.get("dense_queries", 0.0)),
@@ -5844,7 +5874,7 @@ def _run_rag_with_vectors(
             sources.append(_RankSource(name=f"{col}:{vname}", weight=base_weight * score_weight, points=lst or []))
         sources.append(_RankSource(name=f"{col}:lex", weight=float(sparse_weight_eff), points=sr.get("lexical") or []))
 
-    log_section("RAG.PER_COL_STATS", per_col_stats)
+    log_section("RAG.RETRIEVE", per_col_stats)
 
     t0 = time.time()
     merged_rrf = _rrf_merge(
@@ -5855,7 +5885,7 @@ def _run_rag_with_vectors(
     merged_rrf = _dedup_by_doc_id(merged_rrf)
     _timing_put(timings, "phase.rrf_merge", time.time() - t0)
 
-    log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")))
+    log_top_points("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")), tier="debug")
 
     # promotion feature-flag: 1차 SEARCH hit에서 ID를 추출해 2차 LOOKUP/JOIN 실행
     promotion_mode = mode
@@ -6001,7 +6031,7 @@ def _run_rag_with_vectors(
         _timing_put(timings, "info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
         _timing_put(timings, "info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
 
-    log_top_points("RAG.FINAL_RERANK.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "10")))
+    log_top_points("RAG.RESULT.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "3")), tier="normal")
 
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
@@ -6136,6 +6166,7 @@ def _run_rag_with_vectors(
 
     log_kv(
         "RAG.CTX",
+        tier="debug",
         ctx_len=len(context or ""),
         refs=len(refs or []),
         max_items=int(ctx_max_items),

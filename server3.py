@@ -73,12 +73,26 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def log_section(title, content):
+    if not _is_debug_logging_enabled():
+        return
     header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
     footer = f"\033[96m{'='*30}\033[0m\n"
     logger.info(f"{header}\n{content}\n{footer}")
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
+
+
+def _log_event(name: str, **fields: Any) -> None:
+    payload = {"event": name}
+    if fields.get("policy_mode") is None:
+        payload["policy_mode"] = str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip()
+    for k, v in fields.items():
+        if v is None:
+            continue
+        payload[k] = v
+    logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
 
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -696,8 +710,7 @@ async def node_load_memory(state: AgentState) -> Dict[str, Any]:
     loaded_history, ctx_list, fallback_context = await load_conversation_memory(cid)
     current_full_history = loaded_history + [state.messages[-1]]
 
-    log_section("LOAD MEMORY",
-                f"{_format_coq(cid, state.messages[-1].content)}\nHistory: {len(loaded_history)} turns\nPrev Context: {len(ctx_list)} docs")
+    _log_event("LOAD.MEMORY", request_id=state.request_id, conversation_id=cid, stage="load_memory", history_turns=len(loaded_history), prev_context_docs=len(ctx_list))
     return {
         "question": state.messages[-1].content,
         "chat_history": current_full_history,
@@ -764,6 +777,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         conversation_id=state.conversation_id,
         chat_history=state.chat_history,
         prev_context=state.prev_context,
+        request_id=state.request_id,
     )
     return {"question_analysis": result}
 
@@ -774,6 +788,7 @@ async def _run_question_analysis(
         conversation_id: str,
         chat_history: List[BaseMessage],
         prev_context: List[Dict[str, Any]],
+        request_id: Optional[str] = None,
         researchers: Optional[List[Any]] = None,
 ) -> QuestionAnalysis:
     log_preview_limit = 1500
@@ -1097,24 +1112,9 @@ async def _run_question_analysis(
                 LOG_KEY_CHANGED_BY,
                 "parser",
                 )
-            log_section(
-                "QUESTION ANALYSIS",
-                f"{_format_coq(conversation_id, question)}\n"
-                f"StrategyVersion: {result.strategy_version}\n"
-                f"Mode: {result.mode}\n"
-                f"Head: {result.head}\n"
-                f"Relation: {result.relation}\n"
-                f"JoinKeyMode: {result.join_key_mode}\n"
-                f"Action: {result.action}\n"
-                f"TargetCols: {result.target_cols}\n"
-                f"IdsMap: {result.ids_map}\n"
-                f"Filters: {result.filters}\n"
-                f"Limit: {result.limit}\n"
-                f"Query: {result.retrieval_query}\n"
-                f"Confidence: {result.confidence:.2f}\n"
-                f"planner_failed=0\n"
-                f"planner_retry_count={attempt - 1}\n"
-                f"planner_fallback=0"
+            _log_event(
+                "PLANNER.RESULT",
+                request_id=request_id, conversation_id=conversation_id, stage="planner", mode=result.mode, head=result.head, action=result.action, relation=result.relation, join_key_mode=result.join_key_mode, target_cols=result.target_cols, confidence=round(float(result.confidence), 2), planner_retry_count=attempt - 1, planner_fallback=0
             )
             return result
 
@@ -1194,12 +1194,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     if action in search_required_actions:
@@ -1209,12 +1205,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     llm = TritonChatModel(model_name="gemma_triton_0")
@@ -1274,12 +1266,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             "question": state.messages[-1].content
         })
 
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
 
         return {"knowledge_sufficiency": result}
 
@@ -1503,11 +1491,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                 json.dumps(doc, ensure_ascii=False, indent=2)
             )
 
-        log_section("RAG SEARCH",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Query: {search_query}\n"
-                    f"Found: {len(docs)} docs\n")
-        log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
+        _log_event("RAG.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="rag_search", docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_used=int(bool(fallback_context)))
 
         return {"context": docs, "fallback_context": fallback_context}
 
@@ -1673,14 +1657,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
                 len(final_answer),
             )
 
-    log_section(
-        f"GENERATE ANSWER ({model_name})",
-        f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
-        f"ctx_chars={len(context_text)}\n"
-        f"ctx_sentences={context_sentences}\n"
-        f"ctx_tokens_est={context_tokens_est}\n"
-        f"{final_answer[:100]}",
-    )
+    _log_event("LLM.GENERATE", request_id=state.request_id, conversation_id=state.conversation_id, stage="generate_answer", model=model_name, ks_level=(ks.requires_new_knowledge if ks else "unknown"), ctx_chars=len(context_text), ctx_sentences=context_sentences, ctx_tokens_est=context_tokens_est, emitted_chars=len(final_answer or ""))
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
@@ -1773,13 +1750,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "min_chars_threshold": SOLAR_MIN_ANSWER_CHARS,
     }
 
-    log_section("MERGE ANSWERS",
-                f"{_format_coq(state.conversation_id, state.question)}\n"
-                f"Strategy: {strategy}\n"
-                f"Gemma: {gemma_preview}\n"
-                f"UpStage: {solar_preview}\n"
-                f"selected_model={selected_model}\n"
-                f"solar_fail_reasons={solar_fail_reasons}")
+    _log_event("LLM.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="merge_answers", selected_model=selected_model, solar_failed=int(solar_failed), solar_fail_reasons=solar_fail_reasons, gemma_answer_chars=len(answer_gemma), solar_answer_chars=len(answer_solar))
 
     logger.info(
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
@@ -1836,9 +1807,8 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
     total_time = sum(state.latencies.values())
-    latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
-    log_section("PERFORMANCE REPORT",
-                f"{_format_coq(state.conversation_id, state.question)}\nTotal: {total_time:.3f}s\n{latency_report}")
+    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), degraded=int(bool(state.fallback_context)), total_ms=round(total_time * 1000.0, 1))
+    _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, stage="request_end", total_ms=round(total_time * 1000.0, 1), selected_model=(state.merge_debug or {}).get("selected_model"))
 
     return {}
 
@@ -3100,13 +3070,7 @@ async def query_stream(payload: QueryRequest):
             "question_analysis": question_analysis,
         }
 
-        if _is_debug_logging_enabled():
-            log_section(
-                "REQUEST START",
-                f"ID: {conversation_id}\nQ(len={len(question)}): {_mask_query_for_log(question)}",
-            )
-        else:
-            log_section("REQUEST START", f"ID: {conversation_id}\nQ_len: {len(question)}")
+        _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="request_start", q_len=len(question), q_preview=_mask_query_for_log(question) if _is_debug_logging_enabled() else None)
 
         documents_used = []
         done_meta_by_model: Dict[str, Dict[str, Any]] = {}
@@ -3171,33 +3135,23 @@ async def query_stream(payload: QueryRequest):
 
             yield f"data: {json.dumps({'reference': ref_docs}, ensure_ascii=False)}\n\n"
 
-            logger.info(
-                "[stream_done_metrics] request_id=%s solar=%s gemma=%s",
-                request_id,
-                {
-                    "deadline_exceeded": bool((done_meta_by_model.get("SOLAR") or {}).get("deadline_exceeded")),
-                    "char_limited": bool((done_meta_by_model.get("SOLAR") or {}).get("char_limited")),
-                    "empty_stream": int((done_meta_by_model.get("SOLAR") or {}).get("stream_content_emitted_chunks") or 0) == 0,
-                    "stream_error_code": _derive_stream_error_code(done_meta_by_model.get("SOLAR") or {}),
-                    "elapsed_ms": (done_meta_by_model.get("SOLAR") or {}).get("elapsed_ms"),
-                    "ttft_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_ms"),
-                    "ttft_any_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_any_ms"),
-                    "ttft_content_ms": (done_meta_by_model.get("SOLAR") or {}).get("ttft_content_ms"),
-                    "reasoning_chars": (done_meta_by_model.get("SOLAR") or {}).get("reasoning_chars"),
-                    "content_chars": (done_meta_by_model.get("SOLAR") or {}).get("content_chars"),
-                },
-                {
-                    "deadline_exceeded": bool((done_meta_by_model.get("GEMMA") or {}).get("deadline_exceeded")),
-                    "char_limited": bool((done_meta_by_model.get("GEMMA") or {}).get("char_limited")),
-                    "empty_stream": int((done_meta_by_model.get("GEMMA") or {}).get("stream_content_emitted_chunks") or 0) == 0,
-                    "stream_error_code": _derive_stream_error_code(done_meta_by_model.get("GEMMA") or {}),
-                    "elapsed_ms": (done_meta_by_model.get("GEMMA") or {}).get("elapsed_ms"),
-                    "ttft_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_ms"),
-                    "ttft_any_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_any_ms"),
-                    "ttft_content_ms": (done_meta_by_model.get("GEMMA") or {}).get("ttft_content_ms"),
-                    "reasoning_chars": (done_meta_by_model.get("GEMMA") or {}).get("reasoning_chars"),
-                    "content_chars": (done_meta_by_model.get("GEMMA") or {}).get("content_chars"),
-                },
+            solar_done = done_meta_by_model.get("SOLAR") or {}
+            gemma_done = done_meta_by_model.get("GEMMA") or {}
+            _log_event(
+                "STREAM.DONE",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                stage="stream_done",
+                solar_error_code=_derive_stream_error_code(solar_done),
+                solar_elapsed_ms=solar_done.get("elapsed_ms"),
+                solar_ttft_any_ms=solar_done.get("ttft_any_ms"),
+                solar_ttft_content_ms=solar_done.get("ttft_content_ms"),
+                solar_content_chars=solar_done.get("content_chars"),
+                gemma_error_code=_derive_stream_error_code(gemma_done),
+                gemma_elapsed_ms=gemma_done.get("elapsed_ms"),
+                gemma_ttft_any_ms=gemma_done.get("ttft_any_ms"),
+                gemma_ttft_content_ms=gemma_done.get("ttft_content_ms"),
+                gemma_content_chars=gemma_done.get("content_chars"),
             )
 
             # 루프 종료 후
