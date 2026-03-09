@@ -57,7 +57,7 @@
 
 - 운영 기본(`RAG_LOG_LEVEL=normal`):
   - `REQ.START`
-  - `PLANNER.RESULT`
+  - `PLANNER.PIPELINE` (`step=parse|intent_merge|intent_build`, `status=success|retry|final_failed`)
   - `KS.RESULT`
   - `RAG.PLAN`
   - `RAG.RETRIEVE`
@@ -240,6 +240,16 @@ export RAG_LOG_LEVEL=debug
 - 정상 예시: `request_id=6f7f7d6c-6f0d-4c8c-9f5d-31f9b189d7a9-2a4f1c3e`
 - 비정상 예시: `request_id=` (빈 문자열)
 
+## 이벤트 스키마 (Planner/Intent 단일 체계)
+
+| event | step | status | 필수 필드 | 설명 |
+|---|---|---|---|---|
+| `PLANNER.PIPELINE` | `parse` | `success` | `request_id`, `conversation_id`, `mode`, `head`, `action`, `relation`, `planner_retry_count` | planner 파싱 성공 이벤트 |
+| `PLANNER.PIPELINE` | `parse` | `retry` | `attempt`, `max_attempts`, `retry`, `backoff_sec`, `error_type` | planner 파싱 실패 후 재시도 이벤트 |
+| `PLANNER.PIPELINE` | `parse` | `final_failed` | `attempt`, `max_attempts`, `planner_fallback`, `error_type`, `error` | planner 파싱 최종 실패 이벤트 |
+| `PLANNER.PIPELINE` | `intent_merge` | `success` | `applied`, `changed_strategy_fields`, `changed_filter_fields`, `changed_by` | planner→intent 전략 병합 diff 이벤트 |
+| `PLANNER.PIPELINE` | `intent_build` | `success` | `planner_applied`, `planner_failed`, `schema_fields` | 최종 intent_payload.v2 빌드 이벤트 |
+
 ## 로그 키 사전 (공통)
 
 | 키 | 정의 | 예시 | 알람 조건 |
@@ -272,7 +282,7 @@ SELECT
   ROUND(100.0 * SUM(CASE WHEN policy_mode = 'strict' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS strict_ratio,
   ROUND(100.0 * SUM(CASE WHEN policy_mode = 'compat' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS compat_ratio
 FROM rag_logs
-WHERE event IN ('RAG.STRATEGY.POLICY', 'PLANNER.V2')
+WHERE event IN ('RAG.STRATEGY.POLICY', 'PLANNER.PIPELINE')
 GROUP BY DATE(ts)
 ORDER BY d DESC;
 ```
@@ -290,7 +300,8 @@ SELECT
   SUM(CASE WHEN changed_by = 'planner_merge' THEN 1 ELSE 0 END) AS by_planner_merge,
   SUM(CASE WHEN changed_by = 'executor' THEN 1 ELSE 0 END) AS by_executor
 FROM rag_logs
-WHERE event IN ('PLANNER_V2_DIFF', 'RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT', 'RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT')
+WHERE event IN ('PLANNER.PIPELINE', 'RAG.STRATEGY.DIFF.PLANNER_TO_CONTEXT', 'RAG.STRATEGY.DIFF.PLAN_TO_EXECUTION_CONTEXT')
+  AND (step = 'intent_merge' OR step IS NULL)
 GROUP BY DATE(ts)
 ORDER BY d DESC;
 ```

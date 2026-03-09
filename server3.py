@@ -40,9 +40,7 @@ from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_enc
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent, build_changed_fields
 from rag_parts.planner_contract import StrategyViolation
 from rag_parts.log_keys import (
-    LOG_KEY_CHANGED_BY,
     LOG_KEY_POLICY_MODE,
-    LOG_KEY_STRATEGY_MUTATION_STAGE,
     CHANGED_BY_PLANNER_MERGE,
 )
 
@@ -1134,20 +1132,24 @@ async def _run_question_analysis(
             result = QuestionAnalysis.model_validate(normalized_payload)
             result.limit = min(result.limit, MAX_TOP_K_SIZE)
 
-            logger.info(
-                "[PLANNER.V2] event=analysis_succeeded conversation_id=%s attempt=%s retries=%s fallback=%s %s=%s %s=%s",
-                conversation_id,
-                attempt,
-                attempt - 1,
-                0,
-                LOG_KEY_STRATEGY_MUTATION_STAGE,
-                "parser",
-                LOG_KEY_CHANGED_BY,
-                "parser",
-                )
             _log_event(
-                "PLANNER.RESULT",
-                request_id=request_id, conversation_id=conversation_id, stage="planner", mode=result.mode, head=result.head, action=result.action, relation=result.relation, join_key_mode=result.join_key_mode, target_cols=result.target_cols, confidence=round(float(result.confidence), 2), planner_retry_count=attempt - 1, planner_fallback=0
+                "PLANNER.PIPELINE",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                step="parse",
+                status="success",
+                stage="planner",
+                mode=result.mode,
+                head=result.head,
+                action=result.action,
+                relation=result.relation,
+                join_key_mode=result.join_key_mode,
+                target_cols=result.target_cols,
+                confidence=round(float(result.confidence), 2),
+                planner_retry_count=attempt - 1,
+                planner_fallback=0,
+                strategy_mutation_stage="parser",
+                changed_by="parser",
             )
             return result
 
@@ -1155,32 +1157,25 @@ async def _run_question_analysis(
             last_error = e
             should_retry = attempt < max_attempts
             backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
-            logger.warning(
-                "[PLANNER.V2] event=parse_failed conversation_id=%s attempt=%s max_attempts=%s retry=%s backoff_sec=%.3f fallback=%s error_type=%s error=%s %s=%s",
-                conversation_id,
-                attempt,
-                max_attempts,
-                int(should_retry),
-                backoff_seconds,
-                int(not should_retry),
-                type(e).__name__,
-                e,
-                LOG_KEY_POLICY_MODE,
-                "compat",
+            _log_event(
+                "PLANNER.PIPELINE",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                step="parse",
+                status=("retry" if should_retry else "final_failed"),
+                stage="planner",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                retry=int(should_retry),
+                backoff_sec=round(backoff_seconds, 3),
+                planner_fallback=int(not should_retry),
+                error_type=type(e).__name__,
+                error=str(e),
             )
             if should_retry:
                 await asyncio.sleep(backoff_seconds)
                 continue
 
-    logger.error(
-        "[PLANNER.V2] event=parse_final_failed conversation_id=%s retries=%s error_type=%s error=%s %s=%s",
-        conversation_id,
-        max_attempts - 1,
-        type(last_error).__name__ if last_error else "unknown",
-        last_error,
-        LOG_KEY_POLICY_MODE,
-        "compat",
-        )
     raise StrategyViolation(
         error_code="PLANNER_PARSE_FINAL_FAILED",
         reason=str(last_error or "planner parse failed"),
@@ -2009,18 +2004,26 @@ async def build_intent_payload(
         hint_participant_org_terms=hint_participant_org_terms,
         hint_people_affiliation_org_terms=hint_people_affiliation_org_terms,
     )
-    normalized_intent, planner_applied = apply_planner_v2(normalized_intent, question_analysis)
+    normalized_intent, planner_applied = apply_planner_v2(
+        normalized_intent,
+        question_analysis,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
 
     # 문서(SSoT) 원칙: 전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)는
     # 단일 지점에서만 변경되어야 한다. 현재 구현에는 parser/validator 단계 보정 경로가 일부 남아 있으므로
     # apply_planner_strategy를 중심으로 단계적 수렴(정리) 중임을 전제로 본다.
 
-    logger.info(
-        "[INTENT_PAYLOAD_V2] event=build conversation_id=%s planner_applied=%s planner_failed=%s schema_fields=%s",
-        conversation_id,
-        int(planner_applied),
-        int(planner_failed),
-        ["normalized_intent"],
+    _log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="intent_build",
+        status="success",
+        planner_applied=int(planner_applied),
+        planner_failed=int(planner_failed),
+        schema_fields=["normalized_intent"],
     )
 
     return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
@@ -2082,7 +2085,13 @@ def merge_planner_hints(intent: Any, qa: Optional[QuestionAnalysis]) -> Any:
     )
 
 
-def apply_planner_strategy(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+def apply_planner_strategy(
+    intent: Any,
+    qa: Optional[QuestionAnalysis],
+    *,
+    request_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> tuple[Any, bool]:
     """전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)를 단일 지점에서만 반영한다."""
     if qa is None:
         return intent, False
@@ -2154,27 +2163,38 @@ def apply_planner_strategy(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple
         changed_by=CHANGED_BY_PLANNER_MERGE,
     )
     diff = {**changed_strategy_fields, **changed_filter_fields}
-    _logger = globals().get("logger")
-    if _logger is not None:
-        _logger.info(
-            "[PLANNER_V2_DIFF] applied=%s confidence=%.3f %s=%s %s=%s changed_strategy_fields=%s changed_filter_fields=%s",
-            int(bool(diff)),
-            confidence,
-            LOG_KEY_STRATEGY_MUTATION_STAGE,
-            "planner_merge",
-            LOG_KEY_CHANGED_BY,
-            CHANGED_BY_PLANNER_MERGE,
-            changed_strategy_fields,
-            changed_filter_fields,
-        )
+    _log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="intent_merge",
+        status="success",
+        applied=int(bool(diff)),
+        confidence=round(confidence, 3),
+        strategy_mutation_stage="planner_merge",
+        changed_by=CHANGED_BY_PLANNER_MERGE,
+        changed_strategy_fields=changed_strategy_fields,
+        changed_filter_fields=changed_filter_fields,
+    )
 
     return patched, True
 
 
-def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, bool]:
+def apply_planner_v2(
+    intent: Any,
+    qa: Optional[QuestionAnalysis],
+    *,
+    request_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> tuple[Any, bool]:
     """planner 적용 엔트리포인트. 비전략 병합 후 전략 필드를 단일 지점에서 적용한다."""
     hinted_intent = merge_planner_hints(intent, qa)
-    return apply_planner_strategy(hinted_intent, qa)
+    return apply_planner_strategy(
+        hinted_intent,
+        qa,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
 
 def _collect_researcher_name_terms(filters: Dict[str, Any]) -> list[str]:
     """planner filters에서 연구자 이름 힌트를 폭넓게 수집한다."""
