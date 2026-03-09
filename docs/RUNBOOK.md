@@ -216,6 +216,16 @@ export RAG_LOG_LEVEL=debug
 2) 기본값 정합화(`RAG_PLANNER_INVALID_FALLBACK=0`)
 3) 전략 재작성 지점 단일화(parser/validator/normalizer 정리)
 
+## openai_compat_llm request_id 점검 샘플
+운영 중 `openai_compat_llm` 로거에서 request_id 전파 여부를 빠르게 확인할 때 아래 포맷을 기준으로 점검합니다.
+
+```text
+[openai_compat_llm] non-stream summary: request_id=<conversation_id>-<suffix> model=<model_name> dt_ms=<...> message_n=<...> content_char_n=<...> reasoning_char_n=<...> usage=<...> base_url=<...>
+```
+
+- 정상 예시: `request_id=6f7f7d6c-6f0d-4c8c-9f5d-31f9b189d7a9-2a4f1c3e`
+- 비정상 예시: `request_id=` (빈 문자열)
+
 ## 로그 키 사전 (공통)
 
 | 키 | 정의 | 예시 | 알람 조건 |

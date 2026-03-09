@@ -1084,6 +1084,18 @@ async def _run_question_analysis(
 
     planner_llm = llm #호환용
 
+    invoke_metadata = {
+        "request_id": request_id or "",
+        "conversation_id": conversation_id or "",
+    }
+    invoke_config = {
+        "metadata": invoke_metadata,
+        "tags": [
+            "planner",
+            f"conversation_id:{invoke_metadata['conversation_id'] or 'unknown'}",
+        ],
+    }
+
     chain = prompt | planner_llm | sanitize_llm_json | parser
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
     last_error: Optional[Exception] = None
@@ -1095,7 +1107,7 @@ async def _run_question_analysis(
                 "history": history_str or "없음",
                 "prev_context": prev_context_str or "없음",
                 "question": question
-            })
+            }, config=invoke_config)
             normalized_payload = _normalize_none_string(result.model_dump())
             _validate_question_analysis_required_keys(normalized_payload)
             result = QuestionAnalysis.model_validate(normalized_payload)
@@ -3194,31 +3206,31 @@ async def query_debug(payload: QueryRequest):
     question = payload.question
     conversation_id = payload.conversation_id or str(uuid.uuid4())
     request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
-
-    loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
-    chat_history = loaded_history + [HumanMessage(content=question)]
-    intent_payload, question_analysis = await build_intent_payload(
-        question,
-        conversation_id,
-        chat_history,
-        prev_context,
-        request_id=request_id,
-    )
-
-    inputs = {
-        "conversation_id": conversation_id,
-        "request_id": request_id,
-        "messages": [HumanMessage(content=question)],
-        "intent_payload": intent_payload,
-        "question_analysis": question_analysis,
-    }
-
     graph = app.state.graph
 
     started_at = time.perf_counter()
     try:
         set_log_context(request_id=request_id, conversation_id=conversation_id)
         _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="debug_request_start", q_len=len(question))
+        loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
+        user_message = HumanMessage(content=question)
+        chat_history = loaded_history + [user_message]
+        intent_payload, question_analysis = await build_intent_payload(
+            question,
+            conversation_id,
+            chat_history,
+            prev_context,
+            request_id=request_id,
+        )
+
+        inputs = {
+            "conversation_id": conversation_id,
+            "request_id": request_id,
+            "messages": [user_message],
+            "intent_payload": intent_payload,
+            "question_analysis": question_analysis,
+        }
+
         final_state = await graph.ainvoke(inputs)
 
         question_analysis = final_state.get("question_analysis")
