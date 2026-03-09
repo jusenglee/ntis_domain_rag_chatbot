@@ -12,6 +12,7 @@ from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+import httpx
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from dataclasses import replace
@@ -59,6 +60,12 @@ from settings import (
 
 from rag_mapper.rag_mapper import RagMapper, MappingError
 from llm_streaming import run_llm_streaming
+from metrics import (
+    MetricSnapshot,
+    collect_snapshot as collect_metrics_snapshot,
+    STREAM_INTERVAL_SECONDS as METRICS_STREAM_INTERVAL_SECONDS,
+    PROMETHEUS_TIMEOUT as METRICS_PROMETHEUS_TIMEOUT,
+)
 
 # --- Logging Setup ---
 def log_section(title, content):
@@ -3025,12 +3032,16 @@ async def lifespan(app: FastAPI):
         kv_store = MemoryKVStore()
         logger.warning("⚠️ Unknown MEMORY_BACKEND=%s, fallback to MemoryKVStore", backend)
 
+    metrics_timeout = httpx.Timeout(METRICS_PROMETHEUS_TIMEOUT)
+    app.state.metrics_http = httpx.AsyncClient(timeout=metrics_timeout)
+
     try:
         workflow = build_advanced_workflow().compile()
         app.state.graph = workflow
         logger.info("✅ Advanced Dual-Model Pipeline compiled successfully")
         yield
     finally:
+        await app.state.metrics_http.aclose()
         if kv_store:
             await kv_store.close()
 
@@ -3287,3 +3298,27 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8007, access_log=False)
+
+
+@app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
+async def get_metrics() -> MetricSnapshot:
+    """server3 앱에서 Prometheus 메트릭 스냅샷을 제공한다."""
+    return await collect_metrics_snapshot(app.state.metrics_http)
+
+
+@app.get("/metrics/stream")
+async def stream_metrics(request: Request) -> StreamingResponse:
+    """server3 앱에서 2초 주기 기본 SSE 메트릭 스트림을 제공한다."""
+
+    async def event_generator() -> Any:
+        while True:
+            if await request.is_disconnected():
+                break
+
+            snapshot = await collect_metrics_snapshot(request.app.state.metrics_http)
+            payload = snapshot.model_dump_json(by_alias=True)
+            yield f"event: metrics\ndata: {payload}\n\n"
+
+            await asyncio.sleep(METRICS_STREAM_INTERVAL_SECONDS)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
