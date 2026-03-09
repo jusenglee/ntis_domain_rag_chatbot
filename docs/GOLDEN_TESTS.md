@@ -74,3 +74,72 @@
   - deadline 후 fallback 시 안내문 부착 금지 검증
 - (추가 권장) `tests/test_openai_compat_reasoning_chunk_contract.py`
   - openai_compat_llm가 reasoning을 content에 섞지 않는지(=SSE/최종 문자열 오염 방지)
+
+---
+
+## 5) 정책 축/질의 축 분리 매트릭스 (신규)
+
+### 정책 축(Policy Axis)
+- `strict`: planner 계약 위반 시 `StrategyViolation`으로 즉시 실패(fail-close).
+- `planner_invalid_fallback`: planner 계약 위반 시 lookup/search로 보정(fail-open compat).
+- `promotion_mode`: 후처리 승격 모드(`search` → `lookup`/`join`) 추적.
+- `force_fallback_chat`: 강제 fallback 응답 정책 적용 여부.
+
+### 질의 축(Query Axis)
+- ID 질의: `1711015550 과제 상세`
+- relation 질의: `PJT_NO 동일과제 성과`
+- people/org 혼합: `김재수 참여 과제`
+- 연도/성과유형: `2021~2023 ETRI 논문 통계`
+- 후속 참조형: `김재수 과제의 논문`
+
+---
+
+## 6) 골든 최소 세트(단계별 고정)
+
+> 아래는 “planner output → normalized_intent → filter compile → hop1/hop2” 단계에서 회귀 고정하는 최소 스냅샷입니다.
+
+### G-MIN-001: `1711015550 과제 상세`
+- planner output: `mode=lookup`, `relation=None`, `target_cols=[ntis_project_v1]`
+- normalized_intent: `action=id_exact`, `base_route=project`, `ids_map.pjt_id=[1711015550]`
+- filter compile: lookup `qdrant_filter` 사용
+- hop1/hop2: `None / None`
+
+### G-MIN-002: `PJT_NO 동일과제 성과`
+- planner output: `mode=join`, `relation=(project, perf)`, `target_cols=[ntis_project_v1, ntis_perf_v1]`
+- normalized_intent: `action=relation`, `base_route=project`, `relation=(project, perf)`
+- filter compile: `join_hop1_filter + join_filter` 사용
+- hop1/hop2: `project / perf`
+
+### G-MIN-003: `김재수 참여 과제`
+- planner output: `mode=lookup`, `relation=None`, `target_cols=[ntis_project_v1]`
+- normalized_intent: `action=list`, `base_route=project`, `relation=None`
+- filter compile: people/org 혼합 `should + min_should` 조건 허용
+- hop1/hop2: `None / None`
+
+### G-MIN-004: `2021~2023 ETRI 논문 통계`
+- planner output: `mode=lookup`, `relation=None`, `target_cols=[ntis_perf_v1]`
+- normalized_intent: `action=stats`, `base_route=perf`
+- filter compile: `year range + perf tag(논문)` 조건 결합
+- hop1/hop2: `None / None`
+
+### G-MIN-005: `김재수 과제의 논문`
+- planner output: `mode=join`, `relation=(project, perf)`, `target_cols=[ntis_project_v1, ntis_perf_v1]`
+- normalized_intent: `action=relation`, `base_route=project`, `relation=(project, perf)`
+- filter compile: hop1(연구자명), hop2(논문 태그) 분리
+- hop1/hop2: `project / perf`
+
+---
+
+## 7) 영향 범위 메모(이번 세션)
+- people/org relation JOIN late guard는 기본 warning 경로가 남아 있지만, 정상 경로의 주 방어선은 upstream(`query_intent`, parser) 차단임.
+- 따라서 회귀 테스트는 executor late guard 단독보다 upstream 차단 + executor 안전장치를 함께 검증해야 함.
+
+## 8) 이력(History)
+
+|일자|변경유형|내용|
+|---|---|---|
+|2026-03-09|추가|정책 축(`strict/planner_invalid_fallback/promotion_mode/force_fallback_chat`)과 질의 축 분리 정의 추가|
+|2026-03-09|추가|최소 골든 5케이스(G-MIN-001~005) 단계별 기대 산출 고정|
+|2026-03-09|추가|strict/compat 동일 입력 비교 테스트(`예외 vs 보정`) 회귀 기준 반영|
+|2026-03-09|추가|people/org relation 금지의 영향 범위 메모(upstream 차단 우세, executor는 안전장치) 추가|
+
