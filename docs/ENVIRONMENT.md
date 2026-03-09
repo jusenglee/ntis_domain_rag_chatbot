@@ -75,6 +75,19 @@ export RAG_ORG_PARTIAL_MIN_LEN=4
 export RAG_LOOKUP_TITLE_FILTER_POLICY=soft
 ```
 
+
+## Prometheus SSE 메트릭 스트림 설정
+
+```bash
+# Prometheus SSE API 설정(metrics.py)
+export PROMETHEUS_URL=http://localhost:9090
+export PROMETHEUS_TIMEOUT=5
+
+# /metrics/stream 이벤트 주기(초), 기본 2초
+export STREAM_INTERVAL_SECONDS=2
+```
+
+- `/metrics/stream`은 SSE `event=metrics`로 전송하며 `data`는 JSON object(`MetricSnapshot`)입니다.
 ## Metrics API 환경 변수
 
 ```bash
