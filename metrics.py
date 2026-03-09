@@ -135,14 +135,15 @@ async def get_metrics() -> MetricSnapshot:
 
 
 @app.get("/metrics/stream", response_class=EventSourceResponse)
-async def stream_metrics(request: Request) -> AsyncIterable[MetricSnapshot]:
-    async def event_generator() -> AsyncIterable[MetricSnapshot]:
+async def stream_metrics(request: Request) -> AsyncIterable[dict[str, Any]]:
+    async def event_generator() -> AsyncIterable[dict[str, Any]]:
         while True:
             if await request.is_disconnected():
                 break
 
             snapshot = await collect_snapshot(request.app.state.http)
-            yield snapshot
+            payload = snapshot.model_dump(by_alias=True)
+            yield {"event": "metrics", "data": payload}
 
             await asyncio.sleep(STREAM_INTERVAL_SECONDS)
 

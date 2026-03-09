@@ -232,3 +232,26 @@
   - 하위 호환을 위해 `ttft_ms`는 `ttft_content_ms`와 동일 의미로 유지한다.
 - `EmptyStreamContentError` 또는 content 미방출(`stream_content_emitted_chunks == 0`) 상황에서 non-stream fallback 재시도는 수행하지 않는다(지연 최소화 우선).
 - truncation 안내문은 “실제 content 일부가 스트리밍된 경우”에만 부착하며, content 미방출(빈 결과)에는 부착하지 않는다.
+
+
+## 9) 메트릭 SSE 출력 계약 (`metrics.py`)
+
+- 엔드포인트: `GET /metrics/stream`
+- 이벤트 주기: `STREAM_INTERVAL_SECONDS` 환경 변수로 제어하며 기본값은 `2`초
+- SSE 이벤트 포맷은 명시적으로 아래 dict 형태를 사용한다.
+  - `event`: `"metrics"`
+  - `data`: `MetricSnapshot`의 JSON **object**(문자열 JSON이 아님)
+- `data` 스키마(`MetricSnapshot`):
+  - `vllm_num_requests_running: float | null`
+  - `dcgm_fi_dev_gpu_util_avg: float | null`
+
+예시:
+```json
+{
+  "event": "metrics",
+  "data": {
+    "vllm_num_requests_running": 3.0,
+    "dcgm_fi_dev_gpu_util_avg": 76.5
+  }
+}
+```
