@@ -87,6 +87,7 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 - [ ] RUNBOOK: `content_delayed` 트리아지(체크리스트/재현 절차) 보강 + 알람 후보 정의.
 
 ### 4.3 세션 로그(최근 5개만 유지)
+- 2026-03-09: `metrics.py` API 계약 문서화(`/metrics`, `/metrics/stream`, None/로깅 정책, 환경 변수 기본값) + 함수 docstring 보강.
 - 2026-03-03: Solar(vLLM) 스트리밍 “reasoning 먼저/ content 지연” 이슈 원인 정리 + 스트리밍 계약/트리아지 문서 반영.
 - 2026-02-27: DocOps 스캐폴드 생성(초기)
 

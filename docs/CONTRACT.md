@@ -255,3 +255,49 @@
   }
 }
 ```
+## 9) Metrics API 계약 (`metrics.py`)
+
+### 9.1 `/metrics` 응답 필드 계약
+
+|필드|타입|단위|null 가능 조건|
+|---|---|---|---|
+|`vllm_num_requests_running`|`number \| null`|count (요청 수)|Prometheus 쿼리 실패, 응답 파싱 실패, NaN/Inf 제거 후 유효값 없음, 시계열 미존재 시 `null`|
+|`dcgm_fi_dev_gpu_util_avg`|`number \| null`|percent (`%`)|Prometheus 쿼리 실패, 응답 파싱 실패, NaN/Inf 제거 후 유효값 없음, 시계열 미존재 시 `null`|
+
+- 응답 스키마는 `MetricSnapshot`(`metrics.py`)을 기준으로 한다.
+- `vllm_num_requests_running`은 벡터 결과 다중 시계열을 **합산(sum)** 한다.
+- `dcgm_fi_dev_gpu_util_avg`는 벡터 결과 다중 시계열을 **평균(avg)** 한다.
+
+### 9.2 `/metrics/stream` SSE 계약
+
+- 콘텐츠 타입: `text/event-stream`
+- 이벤트명(event): `metrics`
+- `data` 구조(JSON 문자열): `/metrics`와 동일한 `MetricSnapshot` 객체
+  - 예시: `{"vllm_num_requests_running": 3.0, "dcgm_fi_dev_gpu_util_avg": 58.2}`
+- 전송 주기: `STREAM_INTERVAL_SECONDS`(기본 `2`초)
+- 연결 종료 조건:
+  1. 클라이언트 연결이 끊겨 `request.is_disconnected()`가 `True`가 될 때
+  2. 서버 프로세스 종료/재시작 또는 워커 종료 시
+
+### 9.3 Prometheus 장애/쿼리 실패 정책 (`None` + 로깅)
+
+- 단일 메트릭 수집 실패는 전체 API 실패로 취급하지 않는다.
+- `_safe_value()`가 예외를 캡처하고, 실패한 필드만 `None`으로 대체한다.
+- 로그 정책:
+  - 레벨: `ERROR`(예외 스택트레이스 포함, `logger.exception`)
+  - 메시지 패턴: `Failed to collect %s from Prometheus`
+  - `%s` 값: `requestCount` 또는 `gpuUtilPercent`
+- `/metrics`와 `/metrics/stream` 모두 동일한 실패 처리 정책을 공유한다.
+
+### 9.4 메트릭 서비스 환경 변수 계약
+
+|환경 변수|기본값|의미|
+|---|---|---|
+|`PROMETHEUS_URL`|`http://localhost:9090`|Prometheus 베이스 URL (`/api/v1/query` 호출 대상)|
+|`PROMETHEUS_TIMEOUT`|`5`|Prometheus HTTP 요청 타임아웃(초)|
+|`STREAM_INTERVAL_SECONDS`|`2`|`/metrics/stream` 이벤트 전송 주기(초)|
+|`VLLM_QUERY`|`vllm:num_requests_running`|vLLM running request 수집용 PromQL|
+|`GPU_UTIL_QUERY`|`DCGM_FI_DEV_GPU_UTIL`|GPU Util 수집용 PromQL|
+
+- `PROMETHEUS_URL`은 trailing `/`를 제거(`rstrip('/')`)하여 내부에서 정규화한다.
+- PromQL 변수(`VLLM_QUERY`, `GPU_UTIL_QUERY`)는 운영 환경에서 라벨 조건 포함 쿼리로 치환 가능하다.

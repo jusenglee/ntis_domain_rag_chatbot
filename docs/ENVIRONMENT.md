@@ -88,3 +88,23 @@ export STREAM_INTERVAL_SECONDS=2
 ```
 
 - `/metrics/stream`은 SSE `event=metrics`로 전송하며 `data`는 JSON object(`MetricSnapshot`)입니다.
+## Metrics API 환경 변수
+
+```bash
+# Prometheus 접속 주소(뒤 슬래시는 자동 제거)
+export PROMETHEUS_URL=http://localhost:9090
+
+# Prometheus API timeout(초)
+export PROMETHEUS_TIMEOUT=5
+
+# SSE(/metrics/stream) 전송 주기(초)
+export STREAM_INTERVAL_SECONDS=2
+
+# vLLM running request 수집 PromQL
+export VLLM_QUERY='vllm:num_requests_running'
+
+# GPU Util 평균 수집 PromQL
+export GPU_UTIL_QUERY='DCGM_FI_DEV_GPU_UTIL'
+```
+
+- Prometheus 장애/쿼리 실패 시 해당 필드는 `None`으로 반환되고, 서버 로그에는 예외 스택트레이스가 남습니다.
