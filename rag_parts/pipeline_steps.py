@@ -159,6 +159,7 @@ def normalize_intent(
         *,
         query: str,
         keywords: List[str],
+        allow_strategy_fallback: bool = False,
         hint_people_terms: Optional[List[str]] = None,
         hint_org_terms: Optional[List[str]] = None,
         hint_org_role: Optional[str] = None,
@@ -237,7 +238,7 @@ def normalize_intent(
         "content",
         "relation",
     }
-    if base_route not in valid_routes or action not in valid_actions:
+    if allow_strategy_fallback and (base_route not in valid_routes or action not in valid_actions):
         fallback = classify_query_compat(query, keywords, domain_hint=base_route or None, hint=None)
         if base_route not in valid_routes:
             base_route = fallback.base_route

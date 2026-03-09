@@ -9,8 +9,18 @@
 
 ### 1.1 Planner 단일 Strategy 원칙
 - 플래너는 질의마다 **단 하나의 Strategy**를 확정한다.
-- 실행 레이어는 Strategy를 **재해석/재결정하지 않는다.**
+- 실행 레이어는 Strategy를 **여러 지점에서 재작성하지 않는다.**
+- 전략 필드 변경은 `apply_planner_strategy()` 단일 지점에서만 허용한다.
 - 실행 레이어가 할 수 있는 건 오직 **compile(strategy) → 실행** 뿐이다.
+
+
+### 1.2 전략/비전략 변경 책임도
+|구분|필드|변경 책임 함수|기본 정책|
+|---|---|---|---|
+|전략|`mode`, `relation`, `join_key_mode`, `target_cols`, `base_route`, `action`|`server3.py::apply_planner_strategy()`|단일 지점에서만 변경|
+|비전략|`year`, `perf_types`, `org_terms`, `title_terms`, `keywords` 등|`server3.py::merge_planner_hints()`|planner hint 병합 허용|
+|파싱 보정(선택)|전략 자동 보정(`group→instance`, `SEARCH→LOOKUP` 등)|`QuestionAnalysisV2.normalize_planner_payload()`, `validate_join_contract()`|기본 비활성, `ALLOW_PARSER_STRATEGY_AUTO_CORRECTION=1`일 때만 허용|
+|fallback 보정(선택)|`normalize_intent()`의 route/action fallback|`rag_parts/pipeline_steps.py::normalize_intent()`|기본 비활성(`allow_strategy_fallback=False`)|
 
 코드 근거(예시):
 - mode/action 일치성 검증: `rag_parts/planner_contract.py::planner_contract_mode()`
