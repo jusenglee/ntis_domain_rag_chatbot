@@ -21,6 +21,28 @@ from .query_intent import (
 )
 
 
+def build_changed_fields(
+        before: Dict[str, Any],
+        after: Dict[str, Any],
+        fields: Tuple[str, ...],
+        *,
+        changed_by: str,
+) -> Dict[str, Dict[str, Any]]:
+    """지정 필드 diff를 `changed_by` 메타와 함께 구성한다."""
+    changed: Dict[str, Dict[str, Any]] = {}
+    for field in fields:
+        before_val = before.get(field)
+        after_val = after.get(field)
+        if before_val == after_val:
+            continue
+        changed[field] = {
+            "before": before_val,
+            "after": after_val,
+            "changed_by": changed_by,
+        }
+    return changed
+
+
 def classify_query_compat(
         q: str,
         kws: List[str],
