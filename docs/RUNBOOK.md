@@ -52,50 +52,41 @@
 
 ---
 
-## 2) 관측성(로그) 최소 스키마 — “이거 없으면 디버깅이 안 됨”
-요청 단위 trace_id(예: request_id)로 아래를 한 덩어리로 남기세요.
+## 2) 관측성(로그) 최소 스키마 — 운영/디버그/포렌식 3단 분리
+요청 단위 trace_id(예: request_id)로 아래 이벤트를 유지합니다.
 
-- input:
-  - query
-  - hint(있다면)
-- planner:
-  - normalized_intent
-  - strategy(mode/action/relation/join_key_mode/ids_map 요약)
-- `RAG.JOIN.HEAD.SEMANTICS`(relation/planner_head/expected_head/join_key_mode/ids_map_keys/target_cols)
-  - planner_confidence
-- compile:
-  - qdrant_filter 요약(must/should/min_should)
-  - hop1/hop2 filter(Join이면)
-  - topK/limit
-- retrieval:
-  - collection별 hit count
-  - dense/lexical 각각 hit, top score
-  - latency
-- rerank:
-  - rerank preset
-  - final_keep, 상위 N의 _final_total 통계(avg/max)
-- output:
-  - 반환 문서 수
-  - 컨텍스트 토큰/문자
-  - LLM finish_reason(스트리밍 이슈 추적)
-  - 스트리밍 메트릭: `ttft_any_ms`, `ttft_content_ms`, `ttft_ms(=content)`, `reasoning_chars`, `content_chars`, `stream_content_emitted_chunks`, `deadline_exceeded`, `char_limited`, `short_output_guard_triggered`
+- 운영 기본(`RAG_LOG_LEVEL=normal`):
+  - `REQ.START`
+  - `PLANNER.RESULT`
+  - `KS.RESULT`
+  - `RAG.PLAN`
+  - `RAG.FILTER.INPUT`
+  - `RAG.RETRIEVE`
+  - `RAG.RESULT.TOP`
+  - `RAG.RESULT`
+  - `LLM.RESULT`
+  - `REQ.END`
+- 디버그(`RAG_LOG_LEVEL=debug`):
+  - planner→executor diff(`RAG.STRATEGY.DIFF.*`)
+  - compiled qdrant filter(`RAG.FILTER.COMPILED.QDRANT`)
+  - hop1/hop2 topN(`RAG.JOIN.HOP1.TOP`, `RAG.JOIN.HOP2.TOP`)
+  - 중간 merge 상위(`RAG.MERGED_RRF.TOP`)
+- 트레이스(`RAG_LOG_LEVEL=trace`):
+  - 점수 분포, 원시 페이로드 직렬화, 포렌식 샘플(계약 위반/필터 미스 의심 구간)
+
+운영 기본 로그는 객체 전체 문자열 dump를 피하고, 필터는 카운트/적용 여부 중심으로 남깁니다.
 
 ---
 
 ## 3) 디버그를 켜는 방법(권장)
-### 3.1 RAG 내부 디버그
-- `RAG_DEBUG_LEVEL` / `RAG_DEBUG_TOPN` / `RAG_DEBUG_MAX_KWS`
-
-`rag_parts/debug.py`의 설명:
-- 0: off
-- 1: 핵심 결정/요약
-- 2: retrieve 요약
-- 3: 매우 자세히
+### 3.1 RAG 내부 로그 레벨
+- `RAG_LOG_LEVEL=normal|debug|trace` (기본: `normal`)
+- 하위 호환: `RAG_DEBUG=1`이면 `debug`로 승격
+- TopN 출력은 기본 `debug` tier에서만 활성화
 
 예:
 ```bash
-export RAG_DEBUG_LEVEL=2
-export RAG_DEBUG_TOPN=5
+export RAG_LOG_LEVEL=debug
 ```
 
 ### 3.2 결과 계약 실패 시 fallback 정책

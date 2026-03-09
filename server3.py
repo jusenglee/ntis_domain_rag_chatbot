@@ -80,6 +80,15 @@ def log_section(title, content):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("Chatbot_Server")
 
+
+def _log_event(name: str, **fields: Any) -> None:
+    payload = {"event": name}
+    for k, v in fields.items():
+        if v is None:
+            continue
+        payload[k] = v
+    logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
+
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -1097,24 +1106,9 @@ async def _run_question_analysis(
                 LOG_KEY_CHANGED_BY,
                 "parser",
                 )
-            log_section(
-                "QUESTION ANALYSIS",
-                f"{_format_coq(conversation_id, question)}\n"
-                f"StrategyVersion: {result.strategy_version}\n"
-                f"Mode: {result.mode}\n"
-                f"Head: {result.head}\n"
-                f"Relation: {result.relation}\n"
-                f"JoinKeyMode: {result.join_key_mode}\n"
-                f"Action: {result.action}\n"
-                f"TargetCols: {result.target_cols}\n"
-                f"IdsMap: {result.ids_map}\n"
-                f"Filters: {result.filters}\n"
-                f"Limit: {result.limit}\n"
-                f"Query: {result.retrieval_query}\n"
-                f"Confidence: {result.confidence:.2f}\n"
-                f"planner_failed=0\n"
-                f"planner_retry_count={attempt - 1}\n"
-                f"planner_fallback=0"
+            _log_event(
+                "PLANNER.RESULT",
+                conversation_id=conversation_id, mode=result.mode, head=result.head, action=result.action, relation=result.relation, join_key_mode=result.join_key_mode, target_cols=result.target_cols, confidence=round(float(result.confidence), 2), planner_retry_count=attempt - 1, planner_fallback=0
             )
             return result
 
@@ -1194,12 +1188,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    conversation_id=state.conversation_id, requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     if action in search_required_actions:
@@ -1209,12 +1199,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    conversation_id=state.conversation_id, requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     llm = TritonChatModel(model_name="gemma_triton_0")
@@ -1274,12 +1260,8 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             "question": state.messages[-1].content
         })
 
-        log_section("KNOWLEDGE SUFFICIENCY",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Requires New: {result.requires_new_knowledge}\n"
-                    f"Search Intent: {result.search_intent}\n"
-                    f"Query: {result.retrieval_query}\n"
-                    f"Confidence: {result.confidence:.2f}")
+        _log_event("KS.RESULT",
+                    conversation_id=state.conversation_id, requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
 
         return {"knowledge_sufficiency": result}
 
@@ -1503,11 +1485,7 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                 json.dumps(doc, ensure_ascii=False, indent=2)
             )
 
-        log_section("RAG SEARCH",
-                    f"{_format_coq(state.conversation_id, state.question)}\n"
-                    f"Query: {search_query}\n"
-                    f"Found: {len(docs)} docs\n")
-        log_section("-------------------RAG SEARCH----------------", f"Found: {len(docs)} docs\n\n")
+        _log_event("RAG.RESULT", conversation_id=state.conversation_id, docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_used=int(bool(fallback_context)))
 
         return {"context": docs, "fallback_context": fallback_context}
 
@@ -1773,13 +1751,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "min_chars_threshold": SOLAR_MIN_ANSWER_CHARS,
     }
 
-    log_section("MERGE ANSWERS",
-                f"{_format_coq(state.conversation_id, state.question)}\n"
-                f"Strategy: {strategy}\n"
-                f"Gemma: {gemma_preview}\n"
-                f"UpStage: {solar_preview}\n"
-                f"selected_model={selected_model}\n"
-                f"solar_fail_reasons={solar_fail_reasons}")
+    _log_event("LLM.RESULT", conversation_id=state.conversation_id, selected_model=selected_model, solar_failed=int(solar_failed), solar_fail_reasons=solar_fail_reasons, gemma_answer_chars=len(answer_gemma), solar_answer_chars=len(answer_solar))
 
     logger.info(
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
@@ -1836,9 +1808,7 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
     total_time = sum(state.latencies.values())
-    latency_report = "\n".join([f"  {k}: {v}s" for k, v in state.latencies.items()])
-    log_section("PERFORMANCE REPORT",
-                f"{_format_coq(state.conversation_id, state.question)}\nTotal: {total_time:.3f}s\n{latency_report}")
+    _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, total_ms=round(total_time * 1000.0, 1), selected_model=(state.merge_debug or {}).get("selected_model"))
 
     return {}
 
@@ -3100,13 +3070,7 @@ async def query_stream(payload: QueryRequest):
             "question_analysis": question_analysis,
         }
 
-        if _is_debug_logging_enabled():
-            log_section(
-                "REQUEST START",
-                f"ID: {conversation_id}\nQ(len={len(question)}): {_mask_query_for_log(question)}",
-            )
-        else:
-            log_section("REQUEST START", f"ID: {conversation_id}\nQ_len: {len(question)}")
+        _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, q_len=len(question), q_preview=_mask_query_for_log(question) if _is_debug_logging_enabled() else None)
 
         documents_used = []
         done_meta_by_model: Dict[str, Dict[str, Any]] = {}
