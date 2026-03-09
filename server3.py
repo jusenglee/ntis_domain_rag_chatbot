@@ -769,17 +769,23 @@ async def node_rule_precheck(state: AgentState) -> Dict[str, Any]:
 @measure_latency("analyze_question")
 async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
     """질문 분석: 카테고리, 후속 질문 유형, 이력 요약"""
-    if state.question_analysis:
-        return {"question_analysis": state.question_analysis}
+    if state.question_analysis and state.intent_payload:
+        return {
+            "question_analysis": state.question_analysis,
+            "intent_payload": state.intent_payload,
+        }
 
-    result = await _run_question_analysis(
+    intent_payload, question_analysis = await build_intent_payload(
         question=state.messages[-1].content,
         conversation_id=state.conversation_id,
         chat_history=state.chat_history,
         prev_context=state.prev_context,
         request_id=state.request_id,
     )
-    return {"question_analysis": result}
+    return {
+        "question_analysis": question_analysis,
+        "intent_payload": intent_payload,
+    }
 
 
 async def _run_question_analysis(
@@ -3075,22 +3081,11 @@ async def query_stream(payload: QueryRequest):
 
         try:
             set_log_context(request_id=request_id, conversation_id=conversation_id)
-            loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
             user_message = HumanMessage(content=question)
-            chat_history = loaded_history + [user_message]
-            intent_payload, question_analysis = await build_intent_payload(
-                question,
-                conversation_id,
-                chat_history,
-                prev_context,
-                request_id=request_id,
-            )
             inputs = {
                 "conversation_id": conversation_id,
                 "request_id": request_id,
                 "messages": [user_message],
-                "intent_payload": intent_payload,
-                "question_analysis": question_analysis,
             }
 
             async for event in graph.astream_events(inputs, version="v2"):
@@ -3120,6 +3115,10 @@ async def query_stream(payload: QueryRequest):
                     answer_meta_key = f"{answer_key}_meta"
                     stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
                     done_meta_by_model[model] = stream_meta or {}
+
+                elif kind == "on_chain_end" and node == "analyze_question":
+                    output = data.get("output", {})
+                    question_analysis = output.get("question_analysis") or question_analysis
 
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
@@ -3212,23 +3211,12 @@ async def query_debug(payload: QueryRequest):
     try:
         set_log_context(request_id=request_id, conversation_id=conversation_id)
         _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="debug_request_start", q_len=len(question))
-        loaded_history, prev_context, _ = await load_conversation_memory(conversation_id)
         user_message = HumanMessage(content=question)
-        chat_history = loaded_history + [user_message]
-        intent_payload, question_analysis = await build_intent_payload(
-            question,
-            conversation_id,
-            chat_history,
-            prev_context,
-            request_id=request_id,
-        )
 
         inputs = {
             "conversation_id": conversation_id,
             "request_id": request_id,
             "messages": [user_message],
-            "intent_payload": intent_payload,
-            "question_analysis": question_analysis,
         }
 
         final_state = await graph.ainvoke(inputs)
