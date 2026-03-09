@@ -68,6 +68,10 @@ from metrics import (
 )
 
 # --- Logging Setup ---
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 def log_section(title, content):
     header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"
     footer = f"\033[96m{'='*30}\033[0m\n"
@@ -1143,7 +1147,7 @@ async def _run_question_analysis(
         last_error,
         LOG_KEY_POLICY_MODE,
         "compat",
-    )
+        )
     raise StrategyViolation(
         error_code="PLANNER_PARSE_FINAL_FAILED",
         reason=str(last_error or "planner parse failed"),
@@ -1593,11 +1597,6 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
-    )
-
-    log_section(
-        f"FINAL PROMPT ({model_name})",
-        f"[SYSTEM]\n{system_prompt}\n\n[HUMAN]\n{human_prompt}",
     )
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
@@ -3295,11 +3294,6 @@ async def health_check():
         "graph": "compiled" if hasattr(app.state, "graph") else "not_ready"
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8007, access_log=False)
-
-
 @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
 async def get_metrics() -> MetricSnapshot:
     """server3 앱에서 Prometheus 메트릭 스냅샷을 제공한다."""
@@ -3322,3 +3316,7 @@ async def stream_metrics(request: Request) -> StreamingResponse:
             await asyncio.sleep(METRICS_STREAM_INTERVAL_SECONDS)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8008, access_log=False)

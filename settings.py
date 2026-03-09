@@ -37,9 +37,10 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 
 # Triton
 TRITON_URL         = os.getenv("TRITON_URL", "triton_ntis3:8001")
-DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "solar_vllm_0")
+DEFAULT_MODEL_NAME = os.getenv("TRITON_MODEL", "gpt_triton_0")
 TOKENIZER_MAP = {
     "gemma_triton_0": "../../Models/gemma-3-27b-it",
+    "gpt_triton_0": "./Models/gpt-oss-120b",
 }
 
 # 하이퍼파라미터
@@ -88,10 +89,12 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
 MODEL_MAX_CONTEXT = {
     "solar_vllm_0": int(os.getenv("SOLAR_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
     "gemma_triton_0": int(os.getenv("GEMMA_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
+    "gpt_triton_0": int(os.getenv("GPT_OSS_MAX_MODEL_LEN", str(DEFAULT_MAX_MODEL_LEN))),
 }
 MAX_TOKENS = {
     "solar_vllm_0": int(os.getenv("SOLAR_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
     "gemma_triton_0": int(os.getenv("GEMMA_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+    "gpt_triton_0": int(os.getenv("GPT_OSS_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
 }
 
 

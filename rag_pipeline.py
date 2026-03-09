@@ -3778,11 +3778,9 @@ def _run_rag_with_vectors(
         "RAG.STRATEGY.POLICY",
         **{
             LOG_KEY_POLICY_MODE: str(plan.mode or ""),
-            LOG_KEY_STRICT_STRATEGY_CONSISTENCY: int(strict_strategy_consistency),
             LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
             LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
         },
-        strict_strategy_consistency=int(strict_strategy_consistency),
         allowed_branches=["compile_validation_only"],
         forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
         planner_relation=planner_relation_locked,
@@ -4310,11 +4308,9 @@ def _run_rag_with_vectors(
     planner_filter_diff_changed = planner_filter_diff.get("changed", {})
     log_kv(
         "RAG.STRATEGY.FILTER_SPEC.DIFF",
-        level="error" if (strict_strategy_consistency and planner_filter_diff_changed) else "info",
         planner_filter_keys=planner_filter_diff.get("planner_keys", []),
         changed=planner_filter_diff_changed,
-        changed_count=len(planner_filter_diff_changed),
-        strict_strategy_consistency=int(strict_strategy_consistency),
+        changed_count=len(planner_filter_diff_changed)
     )
     if planner_filter_diff_changed:
         _strategy_consistency_or_violation(
@@ -4378,8 +4374,7 @@ def _run_rag_with_vectors(
         **{
             "planner_relation == executed_relation": planner_relation_eq,
             "planner_target_cols == executed_target_cols": planner_target_cols_eq,
-        },
-        strict_strategy_consistency=int(strict_strategy_consistency),
+        }
     )
     _strategy_must_match_or_violation(
         mismatch_kind="mode",
