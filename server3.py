@@ -756,7 +756,7 @@ async def _run_question_analysis(
             return "object_like"
         return "text_like"
 
-    llm = _build_llm("solar_vllm_0")
+    llm = TritonChatModel(model_name="gpt_oss_triton_0")
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -898,7 +898,7 @@ async def _run_question_analysis(
         추출하지 못하면 빈 dict.
         [JOIN 추가 불변 규칙]
         - 사람/기관 이름만 있는 경우 JOIN 금지. 반드시 mode="LOOKUP"으로 처리한다.
-        - mode="JOIN" + join_key_mode="instance"에서 ids_map={} 자체는 허용한다.
+        - mode="JOIN" + join_key_mode="instance"에서 ids_map=[] 자체는 허용한다.
           (전제: relation이 명확하고 Hop1 source에서 pjt_id 추출 가능해야 함)
         
         [ID 필드 규칙]
@@ -962,7 +962,7 @@ async def _run_question_analysis(
         - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
         - JOIN ids_map 규칙:
           * join_key_mode="instance": ids_map.pjt_id가 있으면 seed key로 사용합니다.
-          * join_key_mode="instance" + ids_map={}도 허용합니다(관계 명확 + Hop1 source에서 pjt_id 추출 전제).
+          * join_key_mode="instance" + ids_map=[]도 허용합니다(관계 명확 + Hop1 source에서 pjt_id 추출 전제).
           * join_key_mode="instance"인데 ids_map.pjt_no만 있으면 계약 위반입니다.
           * join_key_mode="group": ids_map.pjt_no를 사용합니다.
           * join_key_mode="group"인데 ids_map.pjt_no가 비어 있고 ids_map.pjt_id만 있으면 실행 전 정규화에서
@@ -990,7 +990,7 @@ async def _run_question_analysis(
           * relation="perf_project"
           * head="project"
           * join_key_mode="instance"
-          * ids_map={}
+          * ids_map=[]
           * target_cols=["ntis_perf_v1","ntis_project_v1"]
         
         ====================
@@ -1034,11 +1034,7 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    planner_llm = llm.bind(
-        reasoning_effort="high",       # planner만 깊게
-        include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
-        disable_thinking=False,        # 네 openai_compat_llm에서 chat_template_kwargs 자동-disable 방지용
-    )
+    planner_llm = llm #호환용
 
     chain = prompt | planner_llm | sanitize_llm_json | parser
     max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
