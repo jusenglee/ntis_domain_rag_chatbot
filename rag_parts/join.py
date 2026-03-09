@@ -17,7 +17,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-_PJT_ID_ALLOWED_RE = re.compile(r"^\d{8,12}$")
 _PJT_NO_ALLOWED_RE = re.compile(os.getenv("RAG_JOIN_PJT_NO_ALLOWED_RE", r"^[A-Za-z0-9_-]{4,40}$"))
 
 
@@ -83,7 +82,8 @@ def is_valid_join_key(value: Any, *, mode: str) -> bool:
     mode_norm = str(mode or "instance").strip().lower()
     if mode_norm == "group":
         return bool(_PJT_NO_ALLOWED_RE.fullmatch(text))
-    return bool(_PJT_ID_ALLOWED_RE.fullmatch(text))
+    # instance(pjt_id)는 존재 여부만 확인하고 형식 검증은 하지 않는다.
+    return True
 
 
 def extract_join_keys(points: Iterable[Any], *, mode: str = "instance", max_ids: int = 80) -> JoinKeyExtractionResult:

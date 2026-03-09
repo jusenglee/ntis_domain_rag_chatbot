@@ -107,6 +107,7 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 - 사용 키: `ids_map.pjt_id`
 - `ids_map.pjt_no`가 단독으로 존재하면 계약 위반
 - `ids_map.pjt_id` 미존재는 Hop1 추출 경로가 허용된 범위에서만 운영 가능
+- `pjt_id` 값은 런타임에서 형식(숫자 8~12자리)으로 차단하지 않으며, 비어있지 않으면 join key로 사용
 
 ### 5.2 `join_key_mode=group`
 - 사용 키: `ids_map.pjt_no`
