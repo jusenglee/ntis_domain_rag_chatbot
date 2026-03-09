@@ -805,13 +805,13 @@ def pick_relation(q: str, base_route: str, *, has_project: bool, has_perf: bool,
 
     if base_route == "project":
         if has_perf:
-            return ("project", "perf")
+            return _normalize_join_relation(("project", "perf"))
         # 사람/기관은 prtcp_mp/prtcp_org로 단일 컬렉션 처리 (JOIN 비활성화)
         return None
 
     if base_route == "perf":
         if wants_perf_to_project:
-            return ("perf", "project")
+            return _normalize_join_relation(("perf", "project"))
         return None
 
     return None
@@ -914,7 +914,8 @@ def _strip_non_join_relation(
 ) -> Optional[Tuple[str, str]]:
     if not relation:
         return None
-    if any(part in ("people", "org") for part in relation):
+    relation = _normalize_join_relation(relation)
+    if not relation:
         return None
     # 사람/기관 기반 성과 목록 질의는 JOIN 보다 단일 컬렉션 LOOKUP(perf) 우선
     if (has_people or has_org) and has_perf and wants_list:
@@ -922,6 +923,21 @@ def _strip_non_join_relation(
     if base_route in ("people", "org") and action not in ("relation",):
         return None
     return relation
+
+
+def _normalize_join_relation(
+        relation: Optional[Tuple[str, str]],
+) -> Optional[Tuple[str, str]]:
+    """JOIN relation 허용 계약(project<->perf)만 통과시키고 나머지는 None 처리."""
+    allowed = {("project", "perf"), ("perf", "project")}
+    if not relation:
+        return None
+    lhs = str(relation[0]).strip().lower() if len(relation) >= 1 else ""
+    rhs = str(relation[1]).strip().lower() if len(relation) >= 2 else ""
+    rel = (lhs, rhs)
+    if rel not in allowed:
+        return None
+    return rel
 
 
 def _maybe_force_project_perf_relation(

@@ -15,12 +15,18 @@
 체크:
 - mode가 `search|lookup|join` 중 하나인가?
 - join인데 relation이 비어있지 않은가?
+- relation이 `project_perf|perf_project|null` 이외 값(특히 people/org 포함)으로 들어오지 않았는가?
 - lookup/join인데 `ids_map.pjt_id`와 `ids_map.pjt_no`가 섞이지 않았는가?
 
 관련 계약/코드:
 - `rag_parts/planner_contract.py::planner_contract_mode()`
 - `rag_parts/planner_contract.py::validate_planner_contract()`
 - `rag_parts/filters.py::validate_planner_join_keys()`
+- `server3.py::QuestionAnalysisV2.validate_join_contract()` (`PLANNER_RELATION_FORBIDDEN_PEOPLE_ORG`, `PLANNER_RELATION_INVALID`)
+
+운영 기본값:
+- `RAG_STRICT_STRATEGY_CONSISTENCY=1`(fail-close) 기준으로 planner 계약 위반은 기본 차단.
+- 필요 시에만 명시적으로 `0`으로 내려 compat 모드로 완화.
 
 ### Step 2 — 필터 컴파일 결과 확인
 - planner filter spec(JSON)이 어떤 Qdrant Filter로 컴파일됐는지 확인
