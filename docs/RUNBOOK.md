@@ -67,6 +67,8 @@
   - `REQ.SUMMARY` (`request_id/mode/relation/target_cols/docs_found/selected_model/rendered_context_used/fallback_context_used/degraded/total_ms` 요약)
   - `REQ.ERROR` (요청 실패 경로의 `error_code/reason/degraded` 기록)
   - `REQ.END`
+
+`total_ms`는 요청 시작 시점(`query_stream()`/`query_debug()`에서 기록한 monotonic timestamp)부터 계산한 end-to-end 시간이다. `state.latencies`는 노드별 단계 진단용 지표이며, 합산값을 `total_ms`와 혼용하지 않는다.
 - 디버그(`RAG_LOG_LEVEL=debug`):
   - `STREAM.DONE`(solar/gemma `ttft_any_ms`, `ttft_content_ms`, `elapsed_ms`, `content_chars`, `error_code`)
   - planner→executor diff(`RAG.STRATEGY.DIFF.*`)
