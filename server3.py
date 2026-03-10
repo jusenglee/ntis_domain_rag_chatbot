@@ -2288,6 +2288,17 @@ def apply_planner_strategy(
     if qa is None:
         return intent, False
 
+    action_mode_map = {
+        "topic": "search",
+        "list": "lookup",
+        "detail": "lookup",
+        "stats": "lookup",
+        "download": "lookup",
+        "id_exact": "lookup",
+        "id_fuzzy": "lookup",
+        "join": "join",
+    }
+
     tracked_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "ids_map")
     strategy_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols")
     filter_fields = ("ids_map",)
@@ -2296,6 +2307,38 @@ def apply_planner_strategy(
     confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
     if confidence < 0.2:
         return intent, False
+
+    strict_strategy_consistency = str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in ("1", "true", "yes", "y")
+    planner_action = str(getattr(qa, "action", "") or "").strip().lower()
+    planner_mode = str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None
+    expected_mode = action_mode_map.get(planner_action)
+    if expected_mode and planner_mode and planner_mode != expected_mode:
+        mismatch_reason = (
+            f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
+        )
+        mismatch_fields = {
+            "request_id": request_id,
+            "conversation_id": conversation_id,
+            "planner_action": planner_action,
+            "original_mode": planner_mode,
+            "corrected_mode": expected_mode,
+            "error_code": "PLANNER_ACTION_MODE_MISMATCH",
+            "reason": mismatch_reason,
+        }
+        if strict_strategy_consistency:
+            _log_event(
+                "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                **mismatch_fields,
+            )
+            raise StrategyViolation(
+                error_code="PLANNER_ACTION_MODE_MISMATCH",
+                reason=mismatch_reason,
+            )
+        _log_event(
+            "RAG.STRATEGY.ACTION_MODE_CORRECTED",
+            **mismatch_fields,
+        )
+        planner_mode = expected_mode
 
     relation_map = {
         "project_perf": ("project", "perf"),
@@ -2333,7 +2376,7 @@ def apply_planner_strategy(
         intent,
         base_route=planner_head,
         action=("stats" if planner_wants_rank else str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower()),
-        mode=str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None,
+        mode=planner_mode,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
