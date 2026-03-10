@@ -3346,7 +3346,7 @@ async def query_stream(payload: QueryRequest):
 
                 elif kind == "on_chain_end" and node == "analyze_question":
                     output = data.get("output", {})
-                    question_analysis = output.get("question_analysis")
+                    question_analysis = output
 
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})

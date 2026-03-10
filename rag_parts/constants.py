@@ -10,7 +10,7 @@ import re
 
 COL_PROJECT = (os.getenv("RAG_COL_PROJECT", "ntis_project_v1").strip() or "ntis_project_v1")
 COL_PERF = (os.getenv("RAG_COL_PERF", "ntis_perf_v1").strip() or "ntis_perf_v1")
-COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_project_v1").strip() or "ntis_project_v1")
+COL_SUPPORT = (os.getenv("RAG_COL_SUPPORT", "ntis_supports_v1").strip() or "ntis_supports_v1")
 
 # -----------------------------
 # Regex
