@@ -3457,6 +3457,8 @@ def _run_rag_with_vectors(
                     or (org_role == "affiliation")
             )
         )
+        if org_role == "affiliation":
+            include_people_filter_in_gate = False
         if participant_org_filter is not None:
             gate_filters.append(participant_org_filter)
         if org_filter is not None:
@@ -3475,6 +3477,15 @@ def _run_rag_with_vectors(
 
     def _with_org_must_gate(base_filter: Any, *, col: Optional[str] = None, mode_override: Optional[str] = None) -> Any:
         mode_for_gate = mode_override or mode
+        include_people_filter_in_gate = bool(
+            people_filter is not None
+            and (
+                bool(effective_people_affiliation_org_terms)
+                or (org_role == "affiliation")
+            )
+        )
+        if org_role == "affiliation":
+            include_people_filter_in_gate = False
         should_apply_org_gate = (
             mode_for_gate in ("lookup",)
             and planner_org_filter_present
@@ -3489,13 +3500,7 @@ def _run_rag_with_vectors(
             planner_org_filter_present=planner_org_filter_present,
             server_org_filter_applied=bool(org_gate is not None),
             org_filter_keys=org_filter_keys,
-            include_people_filter_in_gate=bool(
-                people_filter is not None
-                and (
-                        bool(effective_people_affiliation_org_terms)
-                        or (org_role == "affiliation")
-                )
-            ),
+            include_people_filter_in_gate=include_people_filter_in_gate,
          tier="debug")
         return combined
 
@@ -6177,13 +6182,49 @@ def _run_rag_with_vectors(
         if probe_terms and mode in ("lookup", "join"):
             inspect_topn = min(max(1, int(os.getenv("RAG_FILTER_PROBE_TOPN", "10"))), len(reranked))
             matched = 0
+            probe_docs: List[Dict[str, Any]] = []
             for p in reranked[:inspect_topn]:
                 payload = getattr(p, "payload", None) or {}
+                doc_id = (
+                    _payload_get(payload, "doc_id")
+                    or _payload_get(payload, "id")
+                    or _payload_get(payload, "meta_basic.doc_id")
+                    or _payload_get(payload, "meta_basic.pjt_id")
+                    or _payload_get(payload, "meta_detail.pjt_id")
+                )
+                title = (
+                    _payload_get(payload, "meta_basic.kor_pjt_nm")
+                    or _payload_get(payload, "meta_basic.title")
+                    or _payload_get(payload, "title")
+                )
                 names_raw = _payload_get(payload, "prtcp_mp[].hm_nm")
+                names_fallback = _payload_get(payload, "prtcp_mp.hm_nm")
+                orgs_raw = _payload_get(payload, "prtcp_mp[].blng_org_nm")
+                orgs_fallback = _payload_get(payload, "prtcp_mp.blng_org_nm")
                 if isinstance(names_raw, list):
                     names = [str(x).strip() for x in names_raw if str(x).strip()]
                 else:
                     names = [str(names_raw).strip()] if str(names_raw).strip() else []
+                if not names:
+                    if isinstance(names_fallback, list):
+                        names = [str(x).strip() for x in names_fallback if str(x).strip()]
+                    elif str(names_fallback).strip():
+                        names = [str(names_fallback).strip()]
+                if isinstance(orgs_raw, list):
+                    orgs = [str(x).strip() for x in orgs_raw if str(x).strip()]
+                else:
+                    orgs = [str(orgs_raw).strip()] if str(orgs_raw).strip() else []
+                if not orgs:
+                    if isinstance(orgs_fallback, list):
+                        orgs = [str(x).strip() for x in orgs_fallback if str(x).strip()]
+                    elif str(orgs_fallback).strip():
+                        orgs = [str(orgs_fallback).strip()]
+                probe_docs.append({
+                    "doc_id": str(doc_id or "").strip() or None,
+                    "title": str(title or "").strip() or None,
+                    "prtcp_mp_hm_nm": names,
+                    "prtcp_mp_blng_org_nm": orgs,
+                })
                 if any(term in names for term in probe_terms):
                     matched += 1
             if matched == 0:
@@ -6195,6 +6236,7 @@ def _run_rag_with_vectors(
                     values=probe_terms,
                     topN=inspect_topn,
                     matched=matched,
+                    probe_docs=probe_docs,
                  tier="debug")
 
     # build context

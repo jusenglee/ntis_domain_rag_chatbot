@@ -231,14 +231,27 @@ export RAG_LOG_LEVEL=debug
 3) 전략 재작성 지점 단일화(parser/validator/normalizer 정리)
 
 ## openai_compat_llm request_id 점검 샘플
-운영 중 `openai_compat_llm` 로거에서 request_id 전파 여부를 빠르게 확인할 때 아래 포맷을 기준으로 점검합니다.
+운영 중 `openai_compat_llm` 로거에서 request_id/conversation_id 전파 여부를 빠르게 확인할 때 아래 포맷을 기준으로 점검합니다.
 
 ```text
-[openai_compat_llm] non-stream summary: request_id=<conversation_id>-<suffix> model=<model_name> dt_ms=<...> message_n=<...> content_char_n=<...> reasoning_char_n=<...> usage=<...> base_url=<...>
+[openai_compat_llm] non-stream summary: request_id=<conversation_id>-<suffix> conversation_id=<conversation_id> model=<model_name> dt_ms=<...> message_n=<...> content_char_n=<...> reasoning_char_n=<...> usage=<...> base_url=<...>
 ```
 
-- 정상 예시: `request_id=6f7f7d6c-6f0d-4c8c-9f5d-31f9b189d7a9-2a4f1c3e`
+- 정상 예시: `request_id=6f7f7d6c-6f0d-4c8c-9f5d-31f9b189d7a9-2a4f1c3e conversation_id=6f7f7d6c-6f0d-4c8c-9f5d-31f9b189d7a9`
 - 비정상 예시: `request_id=` (빈 문자열)
+
+## FILTER_MISS_SUSPECTED 진단 포인트
+
+`FILTER_MISS_SUSPECTED` 발생 시 아래 필드로 필터 스키마 불일치를 우선 진단합니다.
+
+- `values`, `topN`, `matched`: 탐지 기본 지표
+- `probe_docs[].doc_id`, `probe_docs[].title`: 상위 문서 식별
+- `probe_docs[].prtcp_mp_hm_nm`, `probe_docs[].prtcp_mp_blng_org_nm`: flatten된 참여연구자/소속기관 값
+
+점검 순서:
+1) `prtcp_mp[].hm_nm`와 `prtcp_mp.hm_nm` 혼용 여부 확인
+2) 필터 입력값(`values`)이 topN 원문 데이터(`probe_docs`)와 실제로 맞는지 확인
+3) lookup/hydrate 단계의 payload 키 경로를 동일 규약으로 통일
 
 ## 이벤트 스키마 (Planner/Intent 단일 체계)
 

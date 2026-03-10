@@ -1700,6 +1700,9 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
+        "rendered_context_used": rendered_context_used,
+        "fallback_context_used": bool(state.fallback_context_used),
+        "degraded": bool(state.degraded),
         # legacy compatibility
         "stream_meta": {final_field: stream_metrics},
     }
@@ -1781,7 +1784,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         selected_model = "gemma" if answer_gemma else "solar"
         selected_answer = answer_gemma or answer_solar or DUAL_MODEL_FALLBACK_MESSAGE
 
-    degraded = selected_answer == DUAL_MODEL_FALLBACK_MESSAGE
+    degraded = bool(getattr(state, "degraded", False)) or (selected_answer == DUAL_MODEL_FALLBACK_MESSAGE)
 
     merge_debug = {
         "policy": DUAL_MODEL_MERGE_POLICY,
@@ -1813,6 +1816,7 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "context" : state.context,
         "fallback_context": state.fallback_context,
         "rendered_context_used": rendered_context_used,
+        "fallback_context_used": fallback_context_used,
         "degraded": degraded,
     }
 
