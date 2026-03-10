@@ -79,6 +79,28 @@ export SOLAR_VLLM_TIMEOUT=120
 
 ```
 
+## Planner latency 튜닝
+
+```bash
+# planner 체인에서 thinking 토큰 생성을 비활성화(기본 권장: true)
+export PLANNER_DISABLE_THINKING=true
+
+# planner 체인 1회 호출 timeout(ms)
+export PLANNER_TIMEOUT_MS=4500
+
+# planner 파싱 재시도 횟수(실제 적용값은 PLANNER_V2_RETRY_ATTEMPTS_MAX로 상한 제한)
+export PLANNER_V2_RETRY_ATTEMPTS=1
+export PLANNER_V2_RETRY_ATTEMPTS_MAX=2
+
+# planner retry backoff(초)
+export PLANNER_V2_RETRY_BACKOFF_SEC=0.35
+export PLANNER_V2_BACKOFF_CAP_SEC=0.8
+```
+
+- `PLANNER_DISABLE_THINKING=true`로 두면 planner 응답 지연과 JSON 파싱 실패 확률을 함께 낮출 수 있습니다.
+- timeout은 `PLANNER_TIMEOUT_MS`로 통일하고, 로그 이벤트 `PLANNER.PIPELINE.timeout_ms`와 동일 값으로 관측됩니다.
+- retry는 기본 1회(총 1 attempt)로 두고, 장애 구간에서만 상향합니다. 상향 시 `attempt`, `backoff_sec`를 함께 모니터링하세요.
+
 ## RAG 결과 TopN 로그 설정
 
 ```bash
