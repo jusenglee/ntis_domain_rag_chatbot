@@ -20,8 +20,8 @@ def test_generate_answer_returns_state_flags_for_downstream_nodes() -> None:
     src = ast.get_source_segment(SOURCE, node) or ""
 
     assert '"rendered_context_used": rendered_context_used' in src
-    assert '"fallback_context_used": bool(state.fallback_context_used)' in src
-    assert '"degraded": bool(state.degraded)' in src
+    assert '"fallback_context_used": bool(getattr(state, "fallback_context_used", False))' in src
+    assert '"degraded": bool(getattr(state, "degraded", False))' in src
 
 
 def test_merge_answers_reads_and_returns_all_state_flags() -> None:
