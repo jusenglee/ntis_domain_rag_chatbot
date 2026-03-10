@@ -86,6 +86,24 @@ class OpenAICompatChatModel(BaseChatModel):
             return delta.get(key)
         return getattr(delta, key, None)
 
+    @staticmethod
+    def _resolve_trace_ids(kwargs: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        request_id = kwargs.get("request_id")
+        conversation_id = kwargs.get("conversation_id")
+
+        config = kwargs.get("config")
+        metadata = kwargs.get("metadata")
+        if metadata is None and isinstance(config, dict):
+            metadata = config.get("metadata")
+
+        if isinstance(metadata, dict):
+            request_id = request_id or metadata.get("request_id")
+            conversation_id = conversation_id or metadata.get("conversation_id")
+
+        request_id_str = str(request_id).strip() if request_id is not None else ""
+        conversation_id_str = str(conversation_id).strip() if conversation_id is not None else ""
+        return (request_id_str or None, conversation_id_str or None)
+
     def _to_openai_messages(self, messages: List[BaseMessage]) -> List[dict[str, str]]:
         converted: List[dict[str, str]] = []
         for m in messages:
@@ -178,7 +196,7 @@ class OpenAICompatChatModel(BaseChatModel):
     # ---- non-stream ----
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
         client = self._get_client()
-        request_id = kwargs.get("request_id")
+        request_id, conversation_id = self._resolve_trace_ids(kwargs)
 
         request_kwargs = self._build_openai_request_kwargs(
             request_id=request_id,
@@ -209,8 +227,9 @@ class OpenAICompatChatModel(BaseChatModel):
         usage = response.usage.model_dump() if getattr(response, "usage", None) else None
 
         logger.info(
-            "[openai_compat_llm] non-stream summary: request_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d usage=%s base_url=%s",
+            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d usage=%s base_url=%s",
             request_id,
+            conversation_id,
             self.model_name,
             dt_ms,
             len(messages),
@@ -236,7 +255,7 @@ class OpenAICompatChatModel(BaseChatModel):
             **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         client = self._get_client()
-        request_id = kwargs.get("request_id")
+        request_id, conversation_id = self._resolve_trace_ids(kwargs)
 
         request_kwargs = self._build_openai_request_kwargs(
             request_id=request_id,
@@ -341,10 +360,11 @@ class OpenAICompatChatModel(BaseChatModel):
 
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "[openai_compat_llm] stream summary: request_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
+                "[openai_compat_llm] stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
                 "chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d emitted_reasoning_event_n=%d "
                 "content_char_n=%d reasoning_char_n=%d finish_reason=%s closed=%s model=%s base_url=%s",
                 request_id,
+                conversation_id,
                 dt_ms,
                 f"{ttft_any_ms:.1f}" if ttft_any_ms is not None else "none",
                 f"{ttft_content_ms:.1f}" if ttft_content_ms is not None else "none",

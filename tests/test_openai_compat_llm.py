@@ -157,6 +157,24 @@ def test_aclose_closes_cached_client() -> None:
     asyncio.run(_run())
 
 
+def test_agenerate_uses_request_id_from_config_metadata() -> None:
+    async def _run() -> None:
+        model = OpenAICompatChatModel(model_name="/model", base_url="http://localhost:8000/v1", api_key="EMPTY")
+        fake_client = _FakeClient()
+        model._client = fake_client
+
+        await model._agenerate(
+            [HumanMessage(content="안녕")],
+            config={"metadata": {"request_id": "rid-meta-1", "conversation_id": "cid-meta-1"}},
+        )
+
+        call = fake_client.chat.completions.calls[0]
+        assert call["stream"] is False
+        assert call["extra_headers"] == {"x-request-id": "rid-meta-1"}
+
+    asyncio.run(_run())
+
+
 def test_astream_reasoning_and_content_stream_field() -> None:
     async def _run() -> None:
         model = OpenAICompatChatModel(model_name="/model", base_url="http://localhost:8000/v1", api_key="EMPTY")
