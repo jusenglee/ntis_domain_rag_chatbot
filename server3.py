@@ -509,9 +509,129 @@ class QuestionAnalysisV2(BaseModel):
 
         d["ids_map"] = normalized_ids_map
 
+        # planner가 자주 사용하는 명시적 식별자 키 기준으로 ID 존재 여부를 계산한다.
+        explicit_id_keys = {
+            "pjt_id",
+            "pjt_no",
+            "doi",
+            "perf_id",
+            "rst_id",
+            "paper_id",
+            "patent_reg_no",
+            "patent_app_no",
+        }
+        has_explicit_id = any(
+            bool(normalized_ids_map.get(key))
+            for key in explicit_id_keys
+        )
+
+        relation_norm = str(d.get("relation") or "").strip().lower()
+        action_norm = str(d.get("action") or "").strip().lower()
+        mode_norm = str(d.get("mode") or "").strip().upper()
+        relation_is_project_perf = relation_norm in {"project_perf", "perf_project"}
+        is_keyword_search = mode_norm == "SEARCH" or action_norm in {"list", "topic"}
+
+        # mode/action/relation 공동 신호 기반 보정:
+        # - explicit ID + project<->perf relation => JOIN
+        # - explicit ID + relation 없음          => LOOKUP
+        # - explicit ID 없음 + 키워드 탐색       => SEARCH
+        if has_explicit_id and relation_is_project_perf:
+            d["mode"] = "JOIN"
+        elif has_explicit_id and not relation_norm:
+            d["mode"] = "LOOKUP"
+        elif (not has_explicit_id) and is_keyword_search:
+            d["mode"] = "SEARCH"
+
         # --- filters: dict 보장 ---
         if not isinstance(d.get("filters"), dict):
             d["filters"] = {}
+
+        filters = dict(d.get("filters") or {})
+
+        # --- filters alias -> canonical key 매핑 ---
+        filter_alias_to_canonical = {
+            "performing_org_name": "lead_org_name",
+            "main_org_name": "lead_org_name",
+            "lead_org": "lead_org_name",
+            "participant_org": "participant_org_name",
+            "co_org_name": "participant_org_name",
+            "consortium_org_name": "participant_org_name",
+            "participant_researcher": "participant_researcher_name",
+            "participant_researcher_names": "participant_researcher_name",
+            "researcher_name": "participant_researcher_name",
+            "researcher": "participant_researcher_name",
+            "participant_researcher_no": "participant_researcher_id",
+            "participant_researcher_ids": "participant_researcher_id",
+            "researcher_id": "participant_researcher_id",
+            "affiliation_org_name": "people_affiliation_org_name",
+            "people_affiliation_org": "people_affiliation_org_name",
+            "researcher_affiliation_org_name": "people_affiliation_org_name",
+        }
+
+        def _append_unique(dst: list[str], values: list[str]) -> list[str]:
+            seen = {str(v).strip() for v in dst if str(v).strip()}
+            for item in values:
+                norm_item = str(item).strip()
+                if not norm_item or norm_item in seen:
+                    continue
+                dst.append(norm_item)
+                seen.add(norm_item)
+            return dst
+
+        for raw_key, raw_value in list(filters.items()):
+            key_norm = str(raw_key).strip().lower().replace("-", "_")
+            canonical_key = filter_alias_to_canonical.get(key_norm)
+            if not canonical_key:
+                continue
+            merged_values = _append_unique(
+                _coerce_str_list(filters.get(canonical_key)),
+                _coerce_str_list(raw_value),
+            )
+            filters[canonical_key] = merged_values
+
+        # 질의/필터 텍스트 role hint를 기반으로 기관 슬롯을 강제 분리한다.
+        role_hint_text_chunks: list[str] = []
+        for payload_key in ("query", "question", "user_query", "retrieval_query"):
+            payload_value = d.get(payload_key)
+            if isinstance(payload_value, str) and payload_value.strip():
+                role_hint_text_chunks.append(payload_value.strip())
+
+        for fv in filters.values():
+            if isinstance(fv, str) and fv.strip():
+                role_hint_text_chunks.append(fv.strip())
+            elif isinstance(fv, (list, tuple, set)):
+                role_hint_text_chunks.extend(str(x).strip() for x in fv if str(x).strip())
+
+        role_hint_text = " ".join(role_hint_text_chunks)
+        org_terms_for_routing = _append_unique(
+            [],
+            _coerce_str_list(filters.get("org_name"))
+            + _coerce_str_list(filters.get("organization_name"))
+            + _coerce_str_list(filters.get("organization"))
+            + _coerce_str_list(filters.get("org"))
+            + _coerce_str_list(filters.get("lead_org_name"))
+            + _coerce_str_list(filters.get("participant_org_name"))
+            + _coerce_str_list(filters.get("people_affiliation_org_name")),
+        )
+
+        if org_terms_for_routing:
+            if any(token in role_hint_text for token in ("수행", "주관")):
+                filters["lead_org_name"] = _append_unique(
+                    _coerce_str_list(filters.get("lead_org_name")),
+                    org_terms_for_routing,
+                )
+            if any(token in role_hint_text for token in ("참여", "공동", "컨소시엄")):
+                filters["participant_org_name"] = _append_unique(
+                    _coerce_str_list(filters.get("participant_org_name")),
+                    org_terms_for_routing,
+                )
+            if "소속" in role_hint_text:
+                filters["people_affiliation_org_name"] = _append_unique(
+                    _coerce_str_list(filters.get("people_affiliation_org_name")),
+                    org_terms_for_routing,
+                )
+
+        d["filters"] = filters
 
         # --- target_cols: list[str] 보장 ---
         tc = d.get("target_cols")
@@ -524,6 +644,8 @@ class QuestionAnalysisV2(BaseModel):
 
         # 전략 필드(mode/relation/join_key_mode/target_cols/base_route/action) 자동 보정은
         # 기본 비활성화이며, 명시 플래그로만 허용한다.
+        # 단, 위에서 수행한 정규화(ids_map/filters canonicalize 및 명시 규칙 기반 mode 보정)는
+        # 파서 내 deterministic 정규화로 간주하며 AUTO_CORRECTION 플래그의 휴리스틱 보정 범위와 분리한다.
         if ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
             mode_norm = str(d.get("mode") or "").strip().upper()
             head_norm = str(d.get("head") or "").strip().lower()
