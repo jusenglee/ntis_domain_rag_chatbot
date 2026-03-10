@@ -62,6 +62,7 @@
   - `RAG.PLAN`
   - `RAG.RETRIEVE`
   - `RAG.RESULT.TOP`
+  - `RAG.CONTEXT`
   - `RAG.RESULT`
   - `LLM.RESULT`
   - `REQ.SUMMARY` (`request_id/mode/relation/target_cols/docs_found/selected_model/rendered_context_used/fallback_context_used/degraded/total_ms` 요약)
@@ -72,6 +73,7 @@
 - 디버그(`RAG_LOG_LEVEL=debug`):
   - `STREAM.DONE`(solar/gemma `ttft_any_ms`, `ttft_content_ms`, `elapsed_ms`, `content_chars`, `error_code`)
   - planner→executor diff(`RAG.STRATEGY.DIFF.*`)
+  - 정책/충돌/진단 이벤트(`RAG.STRATEGY.POLICY`, `RAG.PLAN.MODE_CONFLICT`, `RAG.PLAN.JOIN_EXECUTED`, `RAG.PLAN.RELATION_LOOKUP_POLICY`)
   - compiled qdrant filter(`RAG.FILTER.COMPILED.QDRANT`)
   - hop1/hop2 topN(`RAG.JOIN.HOP1.TOP`, `RAG.JOIN.HOP2.TOP`)
   - 중간 merge 상위(`RAG.MERGED_RRF.TOP`)
@@ -91,6 +93,20 @@
 - 판정:
   - 길이 지표는 감소했지만 필수 이벤트가 누락되면 실패로 간주(관측성 회귀).
   - 길이 감소가 20% 미만이면 debug tier 분류 누락 여부를 재점검.
+
+### normal/debug 분류표 (RAG 핵심 이벤트)
+
+| 이벤트 | tier | 비고 |
+|---|---|---|
+| `RAG.PLAN` | normal | 운영 기본 화이트리스트 |
+| `RAG.RETRIEVE` | normal | 운영 기본 화이트리스트 |
+| `RAG.RESULT.TOP` | normal | 운영 기본 화이트리스트 |
+| `RAG.CONTEXT` | normal | 운영 기본 화이트리스트 |
+| `RAG.ERROR.*` | normal | 장애/실패 경로 보존 |
+| `RAG.STRATEGY.POLICY` | debug | 정책 진단성 이벤트 |
+| `RAG.PLAN.MODE_CONFLICT` | debug | 모드 충돌 진단 |
+| `RAG.PLAN.RELATION_LOOKUP_POLICY` | debug | relation+lookup 정책 진단 |
+| `RAG.PLAN.JOIN_EXECUTED` | debug | join 실행 분기 진단 |
 
 ---
 
