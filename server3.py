@@ -3253,16 +3253,18 @@ async def query_debug(payload: QueryRequest):
     request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
     graph = app.state.graph
 
-    started_at = time.perf_counter()
+    request_started_at = time.perf_counter()
+    stage = "debug_request_start"
     try:
         set_log_context(request_id=request_id, conversation_id=conversation_id)
-        _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="debug_request_start", q_len=len(question))
+        _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage=stage, q_len=len(question))
         user_message = HumanMessage(content=question)
 
+        stage = "planner_memory_build"
         inputs = {
             "conversation_id": conversation_id,
             "request_id": request_id,
-            "request_started_at": started_at,
+            "request_started_at": request_started_at,
             "messages": [user_message],
         }
 
@@ -3271,7 +3273,8 @@ async def query_debug(payload: QueryRequest):
         question_analysis = final_state.get("question_analysis")
         knowledge_sufficiency = final_state.get("knowledge_sufficiency")
 
-        _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=_compute_total_ms_from_start(started_at))
+        total_ms = _compute_total_ms_from_start(request_started_at)
+        _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=total_ms)
         return {
             "success": True,
             "conversation_id": conversation_id,
@@ -3282,7 +3285,7 @@ async def query_debug(payload: QueryRequest):
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
             "documents_used": len(final_state.get("context", [])),
             "latencies": final_state.get("latencies", {}),
-            "total_time": _compute_total_ms_from_start(started_at),
+            "total_time": total_ms,
             "processing_strategy": knowledge_sufficiency.requires_new_knowledge if knowledge_sufficiency else "unknown"
         }
 
@@ -3293,11 +3296,10 @@ async def query_debug(payload: QueryRequest):
             "REQ.ERROR",
             request_id=request_id,
             conversation_id=conversation_id,
-            stage="debug",
-            error_code=getattr(e, "error_code", "INTERNAL_ERROR"),
-            reason=getattr(e, "reason", str(e)),
+            stage=stage,
+            error_type=type(e).__name__,
             degraded=int(degraded),
-            total_ms=_compute_total_ms_from_start(started_at),
+            total_ms=_compute_total_ms_from_start(request_started_at),
         )
         return {
             "success": False,
