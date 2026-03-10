@@ -104,6 +104,26 @@ def _log_event(name: str, **fields: Any) -> None:
         payload[k] = v
     logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
 
+
+def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:
+    question_analysis = getattr(state, "question_analysis", None)
+    context = getattr(state, "context", None) or []
+    merge_debug = getattr(state, "merge_debug", None) or {}
+    return {
+        "request_id": getattr(state, "request_id", None),
+        "conversation_id": getattr(state, "conversation_id", None),
+        "stage": "summary",
+        "mode": getattr(question_analysis, "mode", None),
+        "relation": getattr(question_analysis, "relation", None),
+        "target_cols": getattr(question_analysis, "target_cols", None),
+        "docs_found": len(context),
+        "selected_model": merge_debug.get("selected_model"),
+        "rendered_context_used": int(bool(getattr(state, "rendered_context_used", False))),
+        "fallback_context_used": int(bool(getattr(state, "fallback_context_used", False))),
+        "degraded": int(bool(getattr(state, "degraded", False))),
+        "total_ms": total_ms,
+    }
+
 def setup_file_logging(log_path="logs/server3.log"):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
@@ -810,7 +830,7 @@ async def node_analyze_question(state: AgentState) -> Dict[str, Any]:
         conversation_id=state.conversation_id,
         chat_history=state.chat_history,
         prev_context=state.prev_context,
-        request_id=state.request_id,
+        request_id=getattr(state, "request_id", None),
     )
     return {
         "question_analysis": question_analysis,
@@ -1612,10 +1632,10 @@ async def load_system_prompt(path: Path) -> str:
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = _build_llm(model_name=model_name)
 
-    ks = state.knowledge_sufficiency
-    qa = state.question_analysis
+    ks = getattr(state, "knowledge_sufficiency", None)
+    qa = getattr(state, "question_analysis", None)
 
-    docs_for_ctx = state.context or state.prev_context or []
+    docs_for_ctx = getattr(state, "context", None) or getattr(state, "prev_context", None) or []
     is_detail = False
 
     if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
@@ -1644,9 +1664,11 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
+    messages_state = getattr(state, "messages", None) or []
+    last_message = messages_state[-1] if messages_state else HumanMessage(content="")
     human_prompt = (
         f"[제공된 정보]\n{context_text}\n\n"
-        f"[원본 질문]\n{state.messages[-1].content}"
+        f"[원본 질문]\n{getattr(last_message, 'content', '')}"
     )
     log_section("제공 정보", context_text)
 
@@ -1656,7 +1678,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         llm,
         messages,
         max_tokens_hint=max_tokens_hint,
-        request_id=state.request_id,
+        request_id=getattr(state, "request_id", None),
         ttft_deadline_ms=SOLAR_TTFT_DEADLINE_MS if model_name == "solar_vllm_0" else None,
         gen_deadline_ms=SOLAR_GEN_DEADLINE_MS if model_name == "solar_vllm_0" else None,
         max_chars=SOLAR_STREAM_MAX_CHARS if model_name == "solar_vllm_0" else None,
@@ -1669,7 +1691,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
     logger.info(
         "[stream_metrics] request_id=%s model=%s ttft_any_ms=%s ttft_content_ms=%s reasoning_chars=%s content_chars=%s",
-        state.request_id,
+        getattr(state, "request_id", None),
         model_name,
         ttft_any_ms,
         ttft_content_ms,
@@ -1685,7 +1707,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         if ttft_any_ms is None:
             logger.warning(
                 "[solar_stream_guard] request_id=%s category=stream_not_started_or_stalled ttft_any_ms=%s ttft_content_ms=%s ttft_deadline_exceeded=%s deadline_exceeded=%s",
-                state.request_id,
+                getattr(state, "request_id", None),
                 ttft_any_ms,
                 ttft_content_ms,
                 bool(stream_metrics.get("ttft_deadline_exceeded")),
@@ -1694,7 +1716,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         elif ttft_content_ms is None or (content_delay_ms is not None and content_delay_ms >= 500):
             logger.warning(
                 "[solar_stream_guard] request_id=%s category=content_delayed ttft_any_ms=%s ttft_content_ms=%s content_delay_ms=%s reasoning_chars=%s content_chars=%s",
-                state.request_id,
+                getattr(state, "request_id", None),
                 ttft_any_ms,
                 ttft_content_ms,
                 content_delay_ms,
@@ -1704,7 +1726,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         elif stream_metrics.get("gen_deadline_exceeded"):
             logger.warning(
                 "[solar_stream_guard] request_id=%s category=gen_deadline_exceeded gen_deadline_ms=%s truncated_chars=%s emitted_chars=%s",
-                state.request_id,
+                getattr(state, "request_id", None),
                 SOLAR_GEN_DEADLINE_MS,
                 len(final_answer),
                 stream_metrics.get("emitted_chars"),
@@ -1712,25 +1734,25 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             if stream_metrics.get("short_output_guard_triggered"):
                 logger.warning(
                     "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
-                    state.request_id,
+                    getattr(state, "request_id", None),
                     stream_metrics.get("short_output_guard_min_chars"),
                     stream_metrics.get("emitted_chars"),
                 )
         elif stream_metrics.get("char_limited"):
             logger.warning(
                 "[solar_stream_guard] request_id=%s category=char_limited max_chars=%s truncated_chars=%s",
-                state.request_id,
+                getattr(state, "request_id", None),
                 SOLAR_STREAM_MAX_CHARS,
                 len(final_answer),
             )
 
-    _log_event("LLM.GENERATE", request_id=state.request_id, conversation_id=state.conversation_id, stage="generate_answer", model=model_name, ks_level=(ks.requires_new_knowledge if ks else "unknown"), ctx_chars=len(context_text), ctx_sentences=context_sentences, ctx_tokens_est=context_tokens_est, emitted_chars=len(final_answer or ""))
+    _log_event("LLM.GENERATE", request_id=getattr(state, "request_id", None), conversation_id=getattr(state, "conversation_id", None), stage="generate_answer", model=model_name, ks_level=(getattr(ks, "requires_new_knowledge", None) if ks else "unknown"), ctx_chars=len(context_text), ctx_sentences=context_sentences, ctx_tokens_est=context_tokens_est, emitted_chars=len(final_answer or ""))
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
         "rendered_context_used": rendered_context_used,
-        "fallback_context_used": bool(state.fallback_context_used),
-        "degraded": bool(state.degraded),
+        "fallback_context_used": bool(getattr(state, "fallback_context_used", False)),
+        "degraded": bool(getattr(state, "degraded", False)),
         # legacy compatibility
         "stream_meta": {final_field: stream_metrics},
     }
@@ -1754,15 +1776,12 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
     fallback_context_used = bool(getattr(state, "fallback_context_used", False))
     degraded = bool(getattr(state, "degraded", False))
 
-    ks = state.knowledge_sufficiency
-    strategy = ks.requires_new_knowledge if ks else "unknown"
-    gemma_preview = _truncate_text(state.answer_gemma, HISTORY_PREVIEW_LIMIT)
-    solar_preview = _truncate_text(state.answer_solar, HISTORY_PREVIEW_LIMIT)
-
-    answer_gemma = (state.answer_gemma or "").strip()
-    answer_solar_raw = state.answer_solar or ""
+    ks = getattr(state, "knowledge_sufficiency", None)
+    strategy = getattr(ks, "requires_new_knowledge", None) if ks else "unknown"
+    answer_gemma = (getattr(state, "answer_gemma", "") or "").strip()
+    answer_solar_raw = getattr(state, "answer_solar", None) or ""
     answer_solar = answer_solar_raw.strip()
-    solar_meta = state.answer_solar_meta or {}
+    solar_meta = getattr(state, "answer_solar_meta", None) or {}
 
     solar_fail_reasons: List[str] = []
     solar_warning_reasons: List[str] = []
@@ -1826,11 +1845,11 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "min_chars_threshold": SOLAR_MIN_ANSWER_CHARS,
     }
 
-    _log_event("LLM.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="merge_answers", selected_model=selected_model, solar_failed=int(solar_failed), solar_fail_reasons=solar_fail_reasons, gemma_answer_chars=len(answer_gemma), solar_answer_chars=len(answer_solar))
+    _log_event("LLM.RESULT", request_id=getattr(state, "request_id", None), conversation_id=getattr(state, "conversation_id", None), stage="merge_answers", selected_model=selected_model, solar_failed=int(solar_failed), solar_fail_reasons=solar_fail_reasons, gemma_answer_chars=len(answer_gemma), solar_answer_chars=len(answer_solar))
 
     logger.info(
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
-        state.request_id,
+        getattr(state, "request_id", None),
         selected_model,
         solar_fail_reasons,
     )
@@ -1841,8 +1860,8 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
         "answer_solar": answer_solar,
         "answer_solar_raw": answer_solar_raw,
         "merge_debug": merge_debug,
-        "context" : state.context,
-        "fallback_context": state.fallback_context,
+        "context" : getattr(state, "context", None) or [],
+        "fallback_context": getattr(state, "fallback_context", None),
         "rendered_context_used": rendered_context_used,
         "fallback_context_used": fallback_context_used,
         "degraded": degraded,
@@ -1853,11 +1872,11 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 async def node_save_history(state: AgentState) -> Dict[str, Any]:
     """Redis에 대화 저장"""
 
-    cid = state.conversation_id
+    cid = getattr(state, "conversation_id", "")
 
     # state.chat_history는 loaded_history + [current_human] 형태라 AI만 추가 저장한다.
-    ai_turn = state.messages[-1:]  # [AI]
-    full_history = state.chat_history + ai_turn
+    ai_turn = (getattr(state, "messages", None) or [])[-1:]  # [AI]
+    full_history = (getattr(state, "chat_history", None) or []) + ai_turn
     trimmed_history = full_history[-MAX_HISTORY_TURNS:]
 
     serialized_hist = _serialize_history(trimmed_history)
@@ -1869,25 +1888,28 @@ async def node_save_history(state: AgentState) -> Dict[str, Any]:
             ex=REDIS_TTL,
         )
 
-        if state.context:
+        context = getattr(state, "context", None)
+        if context:
             await kv_store.set(
                 f"conversation:{cid}:last_context",
-                json.dumps(state.context, ensure_ascii=False),
+                json.dumps(context, ensure_ascii=False),
                 ex=REDIS_TTL,
             )
 
-        if state.fallback_context:
+        fallback_context = getattr(state, "fallback_context", None)
+        if fallback_context:
             await kv_store.set(
                 f"conversation:{cid}:last_fallback_context",
-                state.fallback_context,
+                fallback_context,
                 ex=REDIS_TTL,
             )
     else:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
 
-    total_ms = _compute_total_ms_from_start(state.request_started_at)
-    _log_event("REQ.SUMMARY", request_id=state.request_id, conversation_id=state.conversation_id, stage="summary", mode=(getattr(state.question_analysis, "mode", None) if state.question_analysis else None), relation=(getattr(state.question_analysis, "relation", None) if state.question_analysis else None), target_cols=(getattr(state.question_analysis, "target_cols", None) if state.question_analysis else None), docs_found=len(state.context or []), selected_model=(state.merge_debug or {}).get("selected_model"), rendered_context_used=int(bool(state.rendered_context_used)), fallback_context_used=int(bool(state.fallback_context_used)), degraded=int(bool(state.degraded)), total_ms=total_ms)
-    _log_event("REQ.END", conversation_id=state.conversation_id, request_id=state.request_id, stage="request_end", total_ms=total_ms, selected_model=(state.merge_debug or {}).get("selected_model"))
+    total_ms = _compute_total_ms_from_start(getattr(state, "request_started_at", None))
+    summary_fields = _state_log_summary_fields(state, total_ms=total_ms)
+    _log_event("REQ.SUMMARY", **summary_fields)
+    _log_event("REQ.END", conversation_id=getattr(state, "conversation_id", None), request_id=getattr(state, "request_id", None), stage="request_end", total_ms=total_ms, selected_model=(getattr(state, "merge_debug", None) or {}).get("selected_model"))
 
     return {}
 
@@ -3301,23 +3323,26 @@ async def query_debug(payload: QueryRequest):
 
         final_state = await graph.ainvoke(inputs)
 
-        question_analysis = final_state.get("question_analysis")
-        knowledge_sufficiency = final_state.get("knowledge_sufficiency")
+        question_analysis = final_state.get("question_analysis") if isinstance(final_state, dict) else None
+        knowledge_sufficiency = final_state.get("knowledge_sufficiency") if isinstance(final_state, dict) else None
 
         total_ms = _compute_total_ms_from_start(request_started_at)
         _log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=total_ms)
+        messages = final_state.get("messages", []) if isinstance(final_state, dict) else []
+        output_message = getattr(messages[-1], "content", "") if messages else ""
+
         return {
             "success": True,
             "conversation_id": conversation_id,
-            "answer_gemma": final_state.get("answer_gemma"),
-            "answer_solar": final_state.get("answer_solar"),
-            "output_message": final_state["messages"][-1].content,
+            "answer_gemma": final_state.get("answer_gemma") if isinstance(final_state, dict) else None,
+            "answer_solar": final_state.get("answer_solar") if isinstance(final_state, dict) else None,
+            "output_message": output_message,
             "question_analysis": question_analysis.model_dump() if question_analysis else None,
             "knowledge_sufficiency": knowledge_sufficiency.model_dump() if knowledge_sufficiency else None,
-            "documents_used": len(final_state.get("context", [])),
-            "latencies": final_state.get("latencies", {}),
+            "documents_used": len(final_state.get("context", []) if isinstance(final_state, dict) else []),
+            "latencies": final_state.get("latencies", {}) if isinstance(final_state, dict) else {},
             "total_time": total_ms,
-            "processing_strategy": knowledge_sufficiency.requires_new_knowledge if knowledge_sufficiency else "unknown"
+            "processing_strategy": getattr(knowledge_sufficiency, "requires_new_knowledge", None) if knowledge_sufficiency else "unknown"
         }
 
     except Exception as e:
