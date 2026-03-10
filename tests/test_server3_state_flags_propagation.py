@@ -19,7 +19,8 @@ def test_generate_answer_returns_state_flags_for_downstream_nodes() -> None:
     node = _find_async_function("_generate_answer")
     src = ast.get_source_segment(SOURCE, node) or ""
 
-    assert '"rendered_context_used": rendered_context_used' in src
+    assert 'rendered_context_key = f"rendered_context_used_{final_field.replace(\'answer_\', \'\')}"' in src
+    assert 'rendered_context_key: rendered_context_used' in src
     assert '"fallback_context_used": bool(getattr(state, "fallback_context_used", False))' in src
     assert '"degraded": bool(getattr(state, "degraded", False))' in src
 
@@ -28,6 +29,8 @@ def test_merge_answers_reads_and_returns_all_state_flags() -> None:
     node = _find_async_function("node_merge_answers")
     src = ast.get_source_segment(SOURCE, node) or ""
 
+    assert 'rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))' in src
     assert 'fallback_context_used = bool(getattr(state, "fallback_context_used", False))' in src
     assert 'degraded = bool(getattr(state, "degraded", False)) or (selected_answer == DUAL_MODEL_FALLBACK_MESSAGE)' in src
+    assert '"rendered_context_used": rendered_context_used' in src
     assert '"fallback_context_used": fallback_context_used' in src
