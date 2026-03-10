@@ -108,6 +108,15 @@
 | `RAG.PLAN.RELATION_LOOKUP_POLICY` | debug | relation+lookup 정책 진단 |
 | `RAG.PLAN.JOIN_EXECUTED` | debug | join 실행 분기 진단 |
 
+
+
+## 코드 버전 불일치(version mismatch) 점검 절차
+- 서버 시작 직후 `CODE.FINGERPRINT` 이벤트에서 `server3_sha256`, `rag_pipeline_sha256`, `stage=startup`를 확인합니다.
+- 요청 단위 이벤트(`REQ.START`, `REQ.END`, `REQ.ERROR`)와 RAG 컨텍스트 이벤트(`REQ.CONTEXT`)에도 동일 fingerprint 필드가 포함되는지 확인합니다.
+- 서로 다른 파드/인스턴스에서 같은 시각의 fingerprint를 비교해 해시가 다르면 롤링 배포 불일치(또는 핫패치 잔존)로 판단합니다.
+- 장애 재현 시에는 `request_id`, `conversation_id`와 함께 두 해시를 티켓에 첨부해 정확히 동일 코드 기준으로 재현합니다.
+- 해시 재계산은 프로세스 시작 시 1회 캐시되므로, 런타임 중 파일 변경(예: 컨테이너 내부 수동 수정)은 fingerprint에 반영되지 않습니다. 반드시 프로세스를 재기동해 다시 확인합니다.
+
 ---
 
 ## 3) 디버그를 켜는 방법(권장)

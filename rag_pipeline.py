@@ -26,7 +26,9 @@ import contextvars
 import unicodedata
 from pprint import pformat
 from dataclasses import fields, replace
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import hashlib
 from rag_parts.pipeline_steps import NormalizedIntent, build_changed_fields
 from schemas import ExecutionContext, QueryPlan, StrategySpec
 from settings import (
@@ -289,9 +291,37 @@ _request_id_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 _conversation_id_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("rag_conversation_id", default=None)
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+_RAG_PIPELINE_FILE_PATH = Path(__file__).resolve()
+_CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
+    "rag_pipeline_sha256": _sha256_file(_RAG_PIPELINE_FILE_PATH),
+}
+
+
+def get_code_fingerprint_fields() -> Dict[str, str]:
+    """프로세스 시작 시 계산한 코드 지문(sha256) 캐시를 반환한다."""
+    return dict(_CODE_FINGERPRINT_FIELDS)
+
+
 def set_log_context(*, request_id: Optional[str] = None, conversation_id: Optional[str] = None) -> None:
     _request_id_ctx.set(request_id)
     _conversation_id_ctx.set(conversation_id)
+    logger.info(
+        "[RAG] %s",
+        json.dumps(
+            {
+                "event": "REQ.CONTEXT",
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                **_CODE_FINGERPRINT_FIELDS,
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
 
 
 def _merge_log_fields(
@@ -335,7 +365,11 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
     body = _clip_text(body, max_chars)
 
     if str(tier or "normal").strip().lower() == "normal":
-        payload = {"event": title, "data": content if content is not None else body}
+        payload = {
+            "event": title,
+            "data": content if content is not None else body,
+            **_CODE_FINGERPRINT_FIELDS,
+        }
         request_id = _request_id_ctx.get()
         conversation_id = _conversation_id_ctx.get()
         if request_id:

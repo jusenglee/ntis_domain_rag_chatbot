@@ -5,6 +5,7 @@ import json
 import time
 import os
 import re
+import hashlib
 from typing import Annotated, Optional, List, Dict, Any, Literal, Tuple
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -35,7 +36,7 @@ from rag_store import build_rag_objects
 from storage import KVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel
-from rag_pipeline import run_rag_ab_compare, set_log_context
+from rag_pipeline import run_rag_ab_compare, set_log_context, get_code_fingerprint_fields
 from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent, build_changed_fields
 from rag_parts.planner_contract import StrategyViolation
@@ -82,8 +83,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("Chatbot_Server")
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+_SERVER3_FILE_PATH = Path(__file__).resolve()
+_CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
+    "server3_sha256": _sha256_file(_SERVER3_FILE_PATH),
+    **get_code_fingerprint_fields(),
+}
+
+
 def _log_event(name: str, **fields: Any) -> None:
-    payload = {"event": name}
+    payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
     if fields.get("policy_mode") is None:
         payload["policy_mode"] = "strict" if str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in ("1", "true", "yes", "y") else "compat"
     for k, v in fields.items():
@@ -2987,6 +2999,7 @@ async def lifespan(app: FastAPI):
     global kv_store
 
     rag_resources = build_rag_objects()
+    _log_event("CODE.FINGERPRINT", stage="startup")
 
     ensure_payload_index_on_boot = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
         "1", "true", "yes", "on"
