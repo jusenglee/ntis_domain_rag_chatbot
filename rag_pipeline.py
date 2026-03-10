@@ -423,6 +423,20 @@ def log_top_points(title: str, points: List[Any], *, topn: int = None, level: st
     log_section(title, arr, level=level, tier=tier)
 
 
+def _resolve_env_topn(primary_key: str, *, default: int, fallback_keys: Optional[List[str]] = None) -> int:
+    """TopN 환경변수를 우선순위에 따라 안전하게 해석한다."""
+    keys = [primary_key] + list(fallback_keys or [])
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None:
+            continue
+        try:
+            return max(0, int(raw))
+        except Exception:
+            continue
+    return max(0, int(default))
+
+
 
 # =====================================================================
 # Timings 규칙
@@ -6107,7 +6121,14 @@ def _run_rag_with_vectors(
         _timing_put(timings, "info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
         _timing_put(timings, "info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
 
-    log_top_points("RAG.RESULT.TOP", reranked, topn=int(os.getenv("RAG_LOG_TOPN_FINAL", "3")), tier="normal")
+    result_topn_normal = _resolve_env_topn(
+        "RAG_LOG_TOPN_NORMAL",
+        default=3,
+        fallback_keys=["RAG_LOG_TOPN_FINAL"],
+    )
+    result_topn_debug = _resolve_env_topn("RAG_LOG_TOPN_DEBUG", default=12)
+    log_top_points("RAG.RESULT.TOP", reranked, topn=result_topn_normal, tier="normal")
+    log_top_points("RAG.RESULT.TOP.DEBUG", reranked, topn=result_topn_debug, tier="debug")
 
     # contract policy (NTIS_RAG_Search_Strategy_v1_1.md 계약: 검색 실패 시 chat fallback 없음)
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
