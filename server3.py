@@ -32,7 +32,7 @@ from langgraph.graph.message import add_messages
 
 # --- User Modules ---
 from rag_store import build_rag_objects
-from storage import KVStore, MemoryKVStore, FileKVStore
+from storage import KVStore
 from triton_llm import TritonChatModel
 from openai_compat_llm import OpenAICompatChatModel
 from rag_pipeline import run_rag_ab_compare, set_log_context
@@ -3037,47 +3037,36 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("[startup][fastembed] skipped by RAG_FASTEMBED_WARMUP_ON_BOOT=%s", os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT"))
 
-    backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower()
-    # MEMORY_BACKEND=redis|memory|file
+    try:
+        r = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+        await r.ping()
 
-    if backend == "redis":
-        try:
-            r = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-            await r.ping()
-            # Redis를 KVStore처럼 쓰기 위한 얇은 어댑터
-            class RedisKVStore(KVStore):
-                def __init__(self, client):
-                    self.client = client
-                async def get(self, key: str) -> Optional[str]:
-                    return await self.client.get(key)
-                async def set(self, key: str, value: str, ex: Optional[int] = None) -> None:
-                    await self.client.set(key, value, ex=ex)
-                async def ping(self) -> bool:
-                    try:
-                        await self.client.ping()
-                        return True
-                    except Exception:
-                        return False
-                async def close(self) -> None:
-                    await self.client.close()
+        # Redis를 KVStore처럼 쓰기 위한 얇은 어댑터
+        class RedisKVStore(KVStore):
+            def __init__(self, client):
+                self.client = client
 
-            kv_store = RedisKVStore(r)
-            logger.info("✅ Redis connected: %s", REDIS_URL)
-        except Exception as e:
-            kv_store = None
-            logger.error("❌ Redis connection failed: %s", e, exc_info=True)
+            async def get(self, key: str) -> Optional[str]:
+                return await self.client.get(key)
 
-    elif backend == "memory":
-        kv_store = MemoryKVStore()
-        logger.info("✅ MemoryKVStore enabled")
+            async def set(self, key: str, value: str, ex: Optional[int] = None) -> None:
+                await self.client.set(key, value, ex=ex)
 
-    elif backend == "file":
-        kv_store = FileKVStore(root_dir=os.getenv("LOCAL_KV_DIR", "local_kvstore"))
-        logger.info("✅ FileKVStore enabled: %s", os.getenv("LOCAL_KV_DIR", "local_kvstore"))
+            async def ping(self) -> bool:
+                try:
+                    await self.client.ping()
+                    return True
+                except Exception:
+                    return False
 
-    else:
-        kv_store = MemoryKVStore()
-        logger.warning("⚠️ Unknown MEMORY_BACKEND=%s, fallback to MemoryKVStore", backend)
+            async def close(self) -> None:
+                await self.client.close()
+
+        kv_store = RedisKVStore(r)
+        logger.info("✅ Redis connected: %s", REDIS_URL)
+    except Exception as e:
+        kv_store = None
+        logger.error("❌ Redis connection failed: %s", e, exc_info=True)
 
     metrics_timeout = httpx.Timeout(METRICS_PROMETHEUS_TIMEOUT)
     app.state.metrics_http = httpx.AsyncClient(timeout=metrics_timeout)
@@ -3325,13 +3314,12 @@ async def query_debug(payload: QueryRequest):
 
 @app.get("/health")
 async def health_check():
-    memory_backend = os.getenv("MEMORY_BACKEND", "memory").strip().lower() or "memory"
     ok = False
     if kv_store:
         ok = await kv_store.ping()
     return {
         "status": "healthy",
-        "memory_backend": memory_backend,
+        "memory_backend": "redis",
         "memory_backend_effective": type(kv_store).__name__ if kv_store else "none",
         "kv": "connected" if ok else "disconnected",
         "graph": "compiled" if hasattr(app.state, "graph") else "not_ready"
