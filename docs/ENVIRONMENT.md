@@ -11,6 +11,22 @@ export GEMMA_MAX_MODEL_LEN=32768
 export GEMMA_MAX_TOKENS=8192
 ```
 
+
+## Redis 메모리 저장소(고정)
+
+서버는 대화 메모리 백엔드를 **Redis로 고정**합니다.
+
+```bash
+# Redis 연결 문자열
+export REDIS_URL=redis://redis8:6379
+
+# 대화/컨텍스트 TTL(초)
+export REDIS_TTL=3600
+```
+
+- `MEMORY_BACKEND`, `LOCAL_KV_DIR` 는 더 이상 사용하지 않습니다.
+- Redis 연결 실패 시 `/health`의 `kv` 값은 `disconnected`로 표시됩니다.
+
 ## 참고
 
 - `MAX_TOKENS`는 모델별 출력 토큰 상한이 지정되지 않았을 때의 기본값입니다.
