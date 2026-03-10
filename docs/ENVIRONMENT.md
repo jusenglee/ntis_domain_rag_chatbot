@@ -79,6 +79,24 @@ export SOLAR_VLLM_TIMEOUT=120
 
 ```
 
+## RAG 결과 TopN 로그 설정
+
+```bash
+# normal tier 결과 TopN (기본 3)
+# 우선순위: RAG_LOG_TOPN_NORMAL > RAG_LOG_TOPN_FINAL(하위호환) > 3
+export RAG_LOG_TOPN_NORMAL=3
+
+# debug tier 결과 TopN (기본 12)
+# 이벤트: RAG.RESULT.TOP.DEBUG
+export RAG_LOG_TOPN_DEBUG=12
+
+# 하위호환 키(legacy): normal 값이 비어 있을 때만 사용
+export RAG_LOG_TOPN_FINAL=3
+```
+
+- `RAG.RESULT.TOP`(normal)는 운영 기본 관측 이벤트입니다.
+- `RAG.RESULT.TOP.DEBUG`(debug)는 상세 점검 시에만 보며 `RAG_LOG_LEVEL=debug` 이상에서 출력됩니다.
+
 ## ORG/TITLE 필터 정책 고정값
 
 ```bash

@@ -87,6 +87,7 @@
   - 요청당 로그 라인 수 중앙값(`median(lines_per_request)`) 20% 이상 감소.
   - 요청당 로그 바이트 수 중앙값(`median(bytes_per_request)`) 20% 이상 감소.
   - 운영 필수 이벤트(`RAG.STRATEGY.POLICY`, `RAG.PLAN*`, `RAG.RETRIEVE`, `RAG.RESULT.TOP|RAG.RESULT`, `RAG.CONTEXT`, `RAG.ERROR.*`) 누락 0건.
+  - debug 전용 이벤트(`RAG.RESULT.TOP.DEBUG`)는 운영 필수 대상에서 제외(필요 시 debug 모드에서만 확인).
 - 판정:
   - 길이 지표는 감소했지만 필수 이벤트가 누락되면 실패로 간주(관측성 회귀).
   - 길이 감소가 20% 미만이면 debug tier 분류 누락 여부를 재점검.
@@ -105,6 +106,24 @@ export RAG_LOG_LEVEL=debug
 ```
 
 ### 3.2 결과 계약 실패 시 fallback 정책
+
+### 3.3 결과 TopN 로그(2단계)
+- normal tier
+  - 이벤트: `RAG.RESULT.TOP`
+  - 개수: `RAG_LOG_TOPN_NORMAL` (기본 3)
+- debug tier
+  - 이벤트: `RAG.RESULT.TOP.DEBUG`
+  - 개수: `RAG_LOG_TOPN_DEBUG` (기본 12, 권장 10 이상)
+- 하위호환(legacy)
+  - `RAG_LOG_TOPN_FINAL`은 normal 키가 없을 때만 사용
+  - 우선순위: `RAG_LOG_TOPN_NORMAL` > `RAG_LOG_TOPN_FINAL` > 기본값(3)
+
+예:
+```bash
+export RAG_LOG_LEVEL=debug
+export RAG_LOG_TOPN_NORMAL=3
+export RAG_LOG_TOPN_DEBUG=12
+```
 - `RAG_FORCE_FALLBACK_CHAT=true`면 계약 실패를 예외로 던지지 않고 reason을 반환(운영 정책용)
 - 스트리밍 실패(`EmptyStreamContentError`, `stream_content_emitted_chunks == 0`) 시에는 non-stream 재시도를 하지 않는다. 장애 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 조합으로 수행한다.
 
