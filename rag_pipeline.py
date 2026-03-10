@@ -3777,7 +3777,7 @@ def _run_rag_with_vectors(
                 planner_mode=planner_mode,
                 planner_mode_source=planner_mode_source,
                 planner_action=planner_action,
-             tier="normal")
+             tier="debug")
         planner_mode = None
         planner_mode_source = None
 
@@ -3853,7 +3853,7 @@ def _run_rag_with_vectors(
         forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
         planner_relation=planner_relation_locked,
         planner_target_cols=planner_target_cols_locked,
-     tier="normal")
+     tier="debug")
     planner_first_applied = bool(planner_mode)
     mode_override_requested = False
     mode_override_reason = None
@@ -3917,7 +3917,7 @@ def _run_rag_with_vectors(
             fallback_policy_reason=fallback_policy_reason,
             fallback_target_cols=list(fallback_plan.target_collections),
             policy_source=policy_source,
-         tier="normal")
+         tier="debug")
         plan = fallback_plan
         ctx.plan = plan
         ctx.target_collections = list(plan.target_collections)
@@ -3997,7 +3997,7 @@ def _run_rag_with_vectors(
             relation=planner_strategy_relation,
             errors=strategy_errors,
             planner_confidence=planner_confidence,
-         tier="normal")
+         tier="debug")
         _apply_planner_invalid_compat_fallback(
             error_code="PLANNER_INVALID_STRATEGY",
             reason=f"invalid planner strategy: {planner_mode_error}",
@@ -4218,7 +4218,7 @@ def _run_rag_with_vectors(
             payload_mode=planner_mode,
             base_route=base_route,
             action=action,
-         tier="normal")
+         tier="debug")
     else:
         log_kv(
             "RAG.PLAN.MODE_CONFLICT",
@@ -4229,7 +4229,7 @@ def _run_rag_with_vectors(
             base_route=base_route,
             action=action,
             conflict=0,
-         tier="normal")
+         tier="debug")
 
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
     if relation_lookup_policy not in ("filter", "join"):
@@ -4269,7 +4269,7 @@ def _run_rag_with_vectors(
             relation=relation,
             enforced=int(relation_lookup_enforce),
             source="planner_filter_contract",
-         tier="normal")
+         tier="debug")
 
 
     compiled_strategy = StrategyCompiler.compile(
@@ -4834,7 +4834,7 @@ def _run_rag_with_vectors(
                 hop1_strategy=hop1_strategy,
                 seed_key_source=join_execution_policy.get("seed_key_source"),
                 seed_key_count=int(join_execution_policy.get("seed_key_count") or 0),
-             tier="normal")
+             tier="debug")
             if join_key_mode == "group" and seed_join_pjt_nos:
                 join_pjt_nos = seed_join_pjt_nos[:]
                 join_key_source = "ids_map"
