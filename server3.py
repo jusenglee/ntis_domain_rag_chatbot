@@ -811,6 +811,8 @@ class AgentState(BaseModel):
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
     rendered_context_used: bool = False
+    rendered_context_used_gemma: bool = False
+    rendered_context_used_solar: bool = False
     fallback_context_used: bool = False
     degraded: bool = False
 
@@ -1778,6 +1780,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         else "없음"
     )
     rendered_context_used = bool(docs_for_ctx) and context_text != "없음"
+    rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
     if is_solar and SOLAR_MAX_CONTEXT_CHARS > 0:
         context_text = context_text[:SOLAR_MAX_CONTEXT_CHARS]
 
@@ -1872,7 +1875,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
-        "rendered_context_used": rendered_context_used,
+        rendered_context_key: rendered_context_used,
         "fallback_context_used": bool(getattr(state, "fallback_context_used", False)),
         "degraded": bool(getattr(state, "degraded", False)),
         # legacy compatibility
@@ -1894,7 +1897,7 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 @measure_latency("merge_answers")
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
-    rendered_context_used = bool(getattr(state, "rendered_context_used", False))
+    rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))
     fallback_context_used = bool(getattr(state, "fallback_context_used", False))
     degraded = bool(getattr(state, "degraded", False))
 
