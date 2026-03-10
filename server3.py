@@ -822,7 +822,7 @@ async def _run_question_analysis(
             return "object_like"
         return "text_like"
 
-    llm = TritonChatModel(model_name="gpt_oss_triton_0")
+    llm = _build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
@@ -1101,7 +1101,11 @@ async def _run_question_analysis(
         ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
     ])
 
-    planner_llm = llm #호환용
+    planner_llm = llm.bind(
+        reasoning_effort="low",       # planner만 깊게
+        include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
+        disable_thinking=False,        # 네 openai_compat_llm에서 chat_template_kwargs 자동-disable 방지용
+    )
 
     invoke_metadata = {
         "request_id": request_id or "",
@@ -1223,7 +1227,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         _log_event("KS.RESULT",
-                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
+                   request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     if action in search_required_actions:
@@ -1234,7 +1238,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
             confidence=1.0,
         )
         _log_event("KS.RESULT",
-                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
+                   request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
         return {"knowledge_sufficiency": result}
 
     llm = TritonChatModel(model_name="gemma_triton_0")
@@ -1295,7 +1299,7 @@ async def node_knowledge_sufficiency(state: AgentState) -> Dict[str, Any]:
         })
 
         _log_event("KS.RESULT",
-                    request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
+                   request_id=state.request_id, conversation_id=state.conversation_id, stage="knowledge_sufficiency", requires_new_knowledge=result.requires_new_knowledge, retrieval_query=result.retrieval_query, confidence=round(float(result.confidence), 2))
 
         return {"knowledge_sufficiency": result}
 
@@ -1616,6 +1620,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         f"[제공된 정보]\n{context_text}\n\n"
         f"[원본 질문]\n{state.messages[-1].content}"
     )
+    log_section("제공 정보", context_text)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     max_tokens_hint = _select_max_tokens_hint(qa)
@@ -1713,6 +1718,10 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 # --- Node 9: Merge Answers ---
 @measure_latency("merge_answers")
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
+
+    rendered_context_used = bool(getattr(state, "rendered_context_used", False))
+    fallback_context_used = bool(getattr(state, "fallback_context_used", False))
+    degraded = bool(getattr(state, "degraded", False))
 
     ks = state.knowledge_sufficiency
     strategy = ks.requires_new_knowledge if ks else "unknown"
@@ -3164,7 +3173,7 @@ async def query_stream(payload: QueryRequest):
 
                 elif kind == "on_chain_end" and node == "analyze_question":
                     output = data.get("output", {})
-                    question_analysis = output.get("question_analysis") or question_analysis
+                    question_analysis = output
 
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
