@@ -297,13 +297,27 @@ export RAG_LOG_TOPN_DEBUG=12
 2) 필터 입력값(`values`)이 topN 원문 데이터(`probe_docs`)와 실제로 맞는지 확인
 3) lookup/hydrate 단계의 payload 키 경로를 동일 규약으로 통일
 
+## Planner latency 튜닝 운영 가이드
+
+1. **기본값 권장**
+   - `PLANNER_DISABLE_THINKING=true`
+   - `PLANNER_TIMEOUT_MS=4500`
+   - `PLANNER_V2_RETRY_ATTEMPTS=1`, `PLANNER_V2_RETRY_ATTEMPTS_MAX=2`
+2. **지연 증가 시 조정 순서**
+   - (1) `timeout_ms` 대비 `final_failed` 비율 확인
+   - (2) timeout 여유가 충분하면 `PLANNER_TIMEOUT_MS`를 500ms 단위로 상향
+   - (3) 파싱 실패가 간헐적이면 `PLANNER_V2_RETRY_ATTEMPTS`를 2로 상향(상한은 `..._MAX`)
+3. **관측 필드(고정)**
+   - `PLANNER.PIPELINE`에서 `timeout_ms`, `disable_thinking`, `attempt`, `backoff_sec`를 표준 필드로 수집
+   - 성공 이벤트에도 `attempt`, `backoff_sec=0.0`을 남겨 샘플링 편향을 제거
+
 ## 이벤트 스키마 (Planner/Intent 단일 체계)
 
 | event | step | status | 필수 필드 | 설명 |
 |---|---|---|---|---|
-| `PLANNER.PIPELINE` | `parse` | `success` | `request_id`, `conversation_id`, `mode`, `head`, `action`, `relation`, `planner_retry_count` | planner 파싱 성공 이벤트 |
-| `PLANNER.PIPELINE` | `parse` | `retry` | `attempt`, `max_attempts`, `retry`, `backoff_sec`, `error_type` | planner 파싱 실패 후 재시도 이벤트 |
-| `PLANNER.PIPELINE` | `parse` | `final_failed` | `attempt`, `max_attempts`, `planner_fallback`, `error_type`, `error` | planner 파싱 최종 실패 이벤트 |
+| `PLANNER.PIPELINE` | `parse` | `success` | `request_id`, `conversation_id`, `mode`, `head`, `action`, `relation`, `planner_retry_count`, `timeout_ms`, `disable_thinking`, `attempt`, `backoff_sec` | planner 파싱 성공 이벤트 |
+| `PLANNER.PIPELINE` | `parse` | `retry` | `attempt`, `max_attempts`, `retry`, `timeout_ms`, `disable_thinking`, `backoff_sec`, `error_type` | planner 파싱 실패 후 재시도 이벤트 |
+| `PLANNER.PIPELINE` | `parse` | `final_failed` | `attempt`, `max_attempts`, `planner_fallback`, `timeout_ms`, `disable_thinking`, `backoff_sec`, `error_type`, `error` | planner 파싱 최종 실패 이벤트 |
 | `PLANNER.PIPELINE` | `intent_merge` | `success` | `applied`, `changed_strategy_fields`, `changed_filter_fields`, `changed_by` | planner→intent 전략 병합 diff 이벤트 |
 | `PLANNER.PIPELINE` | `intent_build` | `success` | `planner_applied`, `planner_failed`, `schema_fields` | 최종 intent_payload.v2 빌드 이벤트 |
 

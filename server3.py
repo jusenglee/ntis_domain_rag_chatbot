@@ -175,8 +175,12 @@ RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
 RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
-PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "2"))
+PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
+PLANNER_TIMEOUT_MS = max(1, int(os.getenv("PLANNER_TIMEOUT_MS", "4500")))
+PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "1"))
+PLANNER_V2_RETRY_ATTEMPTS_MAX = max(1, int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS_MAX", "2")))
 PLANNER_V2_RETRY_BACKOFF_SEC = float(os.getenv("PLANNER_V2_RETRY_BACKOFF_SEC", "0.35"))
+PLANNER_V2_BACKOFF_CAP_SEC = max(0.0, float(os.getenv("PLANNER_V2_BACKOFF_CAP_SEC", "0.8")))
 ALLOW_PARSER_STRATEGY_AUTO_CORRECTION = os.getenv("ALLOW_PARSER_STRATEGY_AUTO_CORRECTION", "0").strip().lower() in {"1", "true", "yes", "on"}
 RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT", "true").strip().lower() in {
     "1", "true", "yes", "on"
@@ -632,7 +636,8 @@ def _validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
 
 
 def _planner_v2_backoff_seconds(attempt_no: int) -> float:
-    return PLANNER_V2_RETRY_BACKOFF_SEC * (2 ** max(0, attempt_no - 1))
+    backoff = PLANNER_V2_RETRY_BACKOFF_SEC * (2 ** max(0, attempt_no - 1))
+    return min(backoff, PLANNER_V2_BACKOFF_CAP_SEC)
 
 
 class KnowledgeSufficiency(BaseModel):
@@ -1116,7 +1121,7 @@ async def _run_question_analysis(
     planner_llm = llm.bind(
         reasoning_effort="low",       # planner만 깊게
         include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
-        disable_thinking=False,        # 네 openai_compat_llm에서 chat_template_kwargs 자동-disable 방지용
+        disable_thinking=PLANNER_DISABLE_THINKING,
     )
 
     invoke_metadata = {
@@ -1124,7 +1129,12 @@ async def _run_question_analysis(
         "conversation_id": conversation_id or "",
     }
     invoke_config = {
-        "metadata": invoke_metadata,
+        "metadata": {
+            **invoke_metadata,
+            "planner_timeout_ms": PLANNER_TIMEOUT_MS,
+            "planner_disable_thinking": PLANNER_DISABLE_THINKING,
+        },
+        "timeout": PLANNER_TIMEOUT_MS / 1000.0,
         "tags": [
             "planner",
             f"conversation_id:{invoke_metadata['conversation_id'] or 'unknown'}",
@@ -1132,7 +1142,7 @@ async def _run_question_analysis(
     }
 
     chain = prompt | planner_llm | sanitize_llm_json | parser
-    max_attempts = max(1, PLANNER_V2_RETRY_ATTEMPTS)
+    max_attempts = max(1, min(PLANNER_V2_RETRY_ATTEMPTS, PLANNER_V2_RETRY_ATTEMPTS_MAX))
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
@@ -1164,6 +1174,10 @@ async def _run_question_analysis(
                 confidence=round(float(result.confidence), 2),
                 planner_retry_count=attempt - 1,
                 planner_fallback=0,
+                timeout_ms=PLANNER_TIMEOUT_MS,
+                disable_thinking=int(PLANNER_DISABLE_THINKING),
+                attempt=attempt,
+                backoff_sec=0.0,
                 strategy_mutation_stage="parser",
                 changed_by="parser",
             )
@@ -1183,6 +1197,8 @@ async def _run_question_analysis(
                 attempt=attempt,
                 max_attempts=max_attempts,
                 retry=int(should_retry),
+                timeout_ms=PLANNER_TIMEOUT_MS,
+                disable_thinking=int(PLANNER_DISABLE_THINKING),
                 backoff_sec=round(backoff_seconds, 3),
                 planner_fallback=int(not should_retry),
                 error_type=type(e).__name__,
