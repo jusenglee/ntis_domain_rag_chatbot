@@ -782,6 +782,11 @@ def _planner_v2_backoff_seconds(attempt_no: int) -> float:
     return min(backoff, PLANNER_V2_BACKOFF_CAP_SEC)
 
 
+def merge_bool_flag(existing: bool, new: bool) -> bool:
+    """병렬 업데이트되는 bool state를 OR로 병합한다."""
+    return bool(existing) or bool(new)
+
+
 class KnowledgeSufficiency(BaseModel):
     """지식 충분성 판단 결과"""
     requires_new_knowledge: Literal["low", "medium", "high"] = Field(
@@ -810,9 +815,11 @@ class AgentState(BaseModel):
     # 처리 데이터
     context: List[Dict] = Field(default_factory=list)
     fallback_context: Optional[str] = None
-    rendered_context_used: bool = False
-    fallback_context_used: bool = False
-    degraded: bool = False
+    rendered_context_used: Annotated[bool, merge_bool_flag] = False
+    rendered_context_used_gemma: bool = False
+    rendered_context_used_solar: bool = False
+    fallback_context_used: Annotated[bool, merge_bool_flag] = False
+    degraded: Annotated[bool, merge_bool_flag] = False
 
     # 각 모델별 답변 저장
     answer_gemma: Optional[str] = None
@@ -1693,13 +1700,12 @@ async def node_rag_search(state: AgentState) -> Dict[str, Any]:
                 json.dumps(doc, ensure_ascii=False, indent=2)
             )
 
-        fallback_context_used = bool(isinstance(fallback_context, str) and fallback_context.strip())
-        _log_event("RAG.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="rag_search", docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_used=int(fallback_context_used))
+        fallback_context_available = bool(isinstance(fallback_context, str) and fallback_context.strip())
+        _log_event("RAG.RESULT", request_id=state.request_id, conversation_id=state.conversation_id, stage="rag_search", docs_found=len(docs), query_len=len(str(search_query or "")), fallback_context_available=int(fallback_context_available))
 
         return {
             "context": docs,
             "fallback_context": fallback_context,
-            "fallback_context_used": fallback_context_used,
         }
 
     except StrategyViolation:
@@ -1778,6 +1784,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
         else "없음"
     )
     rendered_context_used = bool(docs_for_ctx) and context_text != "없음"
+    rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
     if is_solar and SOLAR_MAX_CONTEXT_CHARS > 0:
         context_text = context_text[:SOLAR_MAX_CONTEXT_CHARS]
 
@@ -1872,9 +1879,7 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
-        "rendered_context_used": rendered_context_used,
-        "fallback_context_used": bool(getattr(state, "fallback_context_used", False)),
-        "degraded": bool(getattr(state, "degraded", False)),
+        rendered_context_key: rendered_context_used,
         # legacy compatibility
         "stream_meta": {final_field: stream_metrics},
     }
@@ -1894,8 +1899,10 @@ async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
 @measure_latency("merge_answers")
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
-    rendered_context_used = bool(getattr(state, "rendered_context_used", False))
-    fallback_context_used = bool(getattr(state, "fallback_context_used", False))
+    has_docs_context = bool(getattr(state, "context", None) or getattr(state, "prev_context", None))
+    has_fallback_context = bool(getattr(state, "fallback_context", None))
+    rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))
+    fallback_context_used = (not has_docs_context) and has_fallback_context
     degraded = bool(getattr(state, "degraded", False))
 
     ks = getattr(state, "knowledge_sufficiency", None)
@@ -3339,7 +3346,7 @@ async def query_stream(payload: QueryRequest):
 
                 elif kind == "on_chain_end" and node == "analyze_question":
                     output = data.get("output", {})
-                    question_analysis = output
+                    question_analysis = output.get("question_analysis")
 
                 elif kind == "on_chain_end" and node == "direct_answer":
                     output = data.get("output", {})
