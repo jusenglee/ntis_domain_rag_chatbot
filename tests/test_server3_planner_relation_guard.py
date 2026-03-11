@@ -143,3 +143,34 @@ def test_question_analysis_v2_relation_allowlist_is_project_perf_only() -> None:
     assert '"project_perf"' in segment
     assert '"perf_project"' in segment
     assert "PLANNER_RELATION_INVALID" in segment
+
+
+def test_apply_planner_strategy_allows_join_with_list_when_relation_present_in_strict_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apply_planner_strategy, captured_events = _load_apply_planner_strategy()
+    monkeypatch.setenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+
+    intent = DummyIntent(mode="lookup")
+    qa = type(
+        "QA",
+        (),
+        {
+            "confidence": 0.93,
+            "action": "list",
+            "mode": "join",
+            "relation": "project_perf",
+            "join_key_mode": "instance",
+            "target_cols": ["ntis_project_v1", "ntis_perf_v1"],
+            "ids_map": {"pjt_id": ["1711015550"]},
+            "wants_rank": False,
+            "head": "perf",
+        },
+    )()
+
+    patched, applied = apply_planner_strategy(intent, qa, request_id="req-join", conversation_id="conv-join")
+
+    assert applied is True
+    assert patched.mode == "join"
+    assert patched.relation == ("project", "perf")
+    assert all(event["name"] != "RAG.STRATEGY.ACTION_MODE_MISMATCH" for event in captured_events)

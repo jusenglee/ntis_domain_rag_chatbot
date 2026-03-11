@@ -2163,33 +2163,41 @@ def apply_planner_strategy(
     planner_action = str(getattr(qa, "action", "") or "").strip().lower()
     planner_mode = str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None
     expected_mode = action_mode_map.get(planner_action)
+    relation_raw = getattr(qa, "relation", None)
+    has_join_relation = False
+    if isinstance(relation_raw, (tuple, list)):
+        has_join_relation = len(relation_raw) >= 2 and bool(str(relation_raw[0]).strip()) and bool(str(relation_raw[1]).strip())
+    else:
+        has_join_relation = bool(str(relation_raw or "").strip())
+
     if expected_mode and planner_mode and planner_mode != expected_mode:
-        mismatch_reason = (
-            f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
-        )
-        mismatch_fields = {
-            "request_id": request_id,
-            "conversation_id": conversation_id,
-            "planner_action": planner_action,
-            "original_mode": planner_mode,
-            "corrected_mode": expected_mode,
-            "error_code": "PLANNER_ACTION_MODE_MISMATCH",
-            "reason": mismatch_reason,
-        }
-        if strict_strategy_consistency:
+        if not (planner_mode == "join" and has_join_relation):
+            mismatch_reason = (
+                f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
+            )
+            mismatch_fields = {
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "planner_action": planner_action,
+                "original_mode": planner_mode,
+                "corrected_mode": expected_mode,
+                "error_code": "PLANNER_ACTION_MODE_MISMATCH",
+                "reason": mismatch_reason,
+            }
+            if strict_strategy_consistency:
+                _log_event(
+                    "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                    **mismatch_fields,
+                )
+                raise StrategyViolation(
+                    error_code="PLANNER_ACTION_MODE_MISMATCH",
+                    reason=mismatch_reason,
+                )
             _log_event(
-                "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                "RAG.STRATEGY.ACTION_MODE_CORRECTED",
                 **mismatch_fields,
             )
-            raise StrategyViolation(
-                error_code="PLANNER_ACTION_MODE_MISMATCH",
-                reason=mismatch_reason,
-            )
-        _log_event(
-            "RAG.STRATEGY.ACTION_MODE_CORRECTED",
-            **mismatch_fields,
-        )
-        planner_mode = expected_mode
+            planner_mode = expected_mode
 
     relation_map = {
         "project_perf": ("project", "perf"),
