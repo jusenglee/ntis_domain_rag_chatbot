@@ -196,6 +196,9 @@ RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
+PLANNER_TEMPERATURE = 0.0
+PLANNER_TOP_P = 1.0
+PLANNER_MAX_TOKENS = 450
 PLANNER_TIMEOUT_MS = max(1, int(os.getenv("PLANNER_TIMEOUT_MS", "4500")))
 PLANNER_V2_RETRY_ATTEMPTS = int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS", "1"))
 PLANNER_V2_RETRY_ATTEMPTS_MAX = max(1, int(os.getenv("PLANNER_V2_RETRY_ATTEMPTS_MAX", "2")))
@@ -1155,6 +1158,9 @@ async def _run_question_analysis(
     ])
 
     planner_llm = llm.bind(
+        temperature=PLANNER_TEMPERATURE,
+        top_p=PLANNER_TOP_P,
+        max_tokens=PLANNER_MAX_TOKENS,
         reasoning_effort="low",       # planner만 깊게
         include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
         disable_thinking=PLANNER_DISABLE_THINKING,
@@ -1169,6 +1175,9 @@ async def _run_question_analysis(
             **invoke_metadata,
             "planner_timeout_ms": PLANNER_TIMEOUT_MS,
             "planner_disable_thinking": PLANNER_DISABLE_THINKING,
+            "planner_temperature": PLANNER_TEMPERATURE,
+            "planner_top_p": PLANNER_TOP_P,
+            "planner_max_tokens": PLANNER_MAX_TOKENS,
         },
         "timeout": PLANNER_TIMEOUT_MS / 1000.0,
         "tags": [

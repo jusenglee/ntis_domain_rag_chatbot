@@ -138,6 +138,7 @@ def test_astream_uses_same_request_policy_with_stop_and_max_tokens() -> None:
         assert call["stream"] is True
         assert call["stop"] == ["###"]
         assert call["max_tokens"] == 128
+        assert call["max_completion_tokens"] == 128
         assert call["extra_headers"] == {"x-request-id": "rid-2"}
 
     asyncio.run(_run())
