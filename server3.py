@@ -994,7 +994,7 @@ async def _run_question_analysis(
     history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
 
-    prev_context_str = refine_documents_rule_based(
+    prev_context_raw = refine_documents_rule_based(
         prev_context,
         researchers=researchers,
         organizations=None,
@@ -1002,262 +1002,86 @@ async def _run_question_analysis(
         ids_map=None,
     )
 
+    if prev_context_raw:
+        prev_lines = [line.strip() for line in prev_context_raw.splitlines() if line.strip()]
+        prev_context_str = "\n".join(prev_lines[:8])
+    else:
+        prev_context_str = ""
+
     system_prompt = f"""
-        당신은 NTIS R&D 데이터 검색전략 플래너(LLM Planner)입니다.
-        당신의 임무는 사용자 질의마다 단 하나의 최종 전략(Strategy JSON)을 확정하는 것입니다.
-        실행 레이어(retrieval/filters/rerank/controller)는 당신의 전략을 변경/재해석하지 않고 그대로 실행합니다.
-        
-        ====================
-        [도메인/데이터 전제(필수)]
-        ====================
-        - 데이터는 과제(project)와 성과(perf)로 구성됩니다.
-        - 모든 문서에는 참여인력(prtcp_mp)과 참여기관(prtcp_org) 객체가 포함됩니다.
-        - 키 정의:
-          * PJT_ID: 과제 고유번호(단일 시행 인스턴스)
-          * PJT_NO: 동일과제 그룹 ID(연도 다른 시행들을 묶음)
-        - 기관 조건은 의미가 3종으로 나뉘며 filters에서 반드시 구분합니다:
-          1) 수행기관(메인) = org_nm
-          2) 참여기관(공동) = prtcp_org[].org_nm
-          3) 참여인력 소속기관(affiliation) = prtcp_mp[].blng_org_nm
-        
-        ====================
-        [불변 계약(매우 중요)]
-        ====================
-        1) 당신은 mode/head/relation/target_cols/ids_map/filters/limit/retrieval_query를 '단 하나'로 확정합니다.
-        2) 실행 레이어는 재결정 금지(허용: filters를 Qdrant filter로 '컴파일'만).
-        3) SEARCH는 누락 방지, LOOKUP/JOIN은 정확도/재현성 최우선입니다.
-        
-        ====================
-        [출력 강제 규칙]
-        ====================
-        1) 반드시 JSON 객체만 출력합니다. (설명/마크다운/코드블럭 금지)
-        2) enum 값은 아래 정의된 값만 사용합니다. 철자/대소문자 정확히.
-        3) strategy_version은 항상 "{PLANNER_SCHEMA_VERSION}"로 고정합니다.
-        4) 아래 키를 반드시 모두 포함합니다:
-           strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        5) 값이 없으면 타입에 맞춰 빈 dict/[]/null 을 사용합니다.
-        6) 모르는 값은 추측하지 말고 반드시 빈 dict/[]/null 로 둡니다.
-        7) 문자열 "None" 금지. 반드시 null 또는 [] 를 사용합니다.
-        8) 다중 후보/복수 전략 출력 금지. 오직 1개의 Strategy만 출력.
-        
-        ====================
-        [Mode 정의]
-        ====================
-        - SEARCH: 탐색형(누락 방지 최우선). server-side must 필터로 후보를 먼저 자르지 않습니다.
-        - LOOKUP: 정확형(필터/ID 기반). server-side 하드필터로 정답집합 근처를 강제합니다.
-        - JOIN: 2-hop 관계형(project↔perf). join_key_mode+ids_map+people/org 게이트를 먼저 판정해
-          Hop1(skip/lookup/search)을 선택하고, Hop2에서 하드필터로 강제합니다.
-        
-        ====================
-        [Mode 결정 규칙(우선순위)]
-        ====================
-        선행 규칙(최우선): 아래 "관계형 성과 키워드 사전" 패턴이 감지되면 mode="JOIN"을 먼저 확정합니다.
-        - relation은 아래 2개만 허용하며, 질의 의미 방향을 그대로 사용합니다.
-          * "과제의 논문/성과" => relation="project_perf"
-          * "이 논문/성과가 어느 과제" => relation="perf_project"
-          * people/org가 포함된 relation(예: people_project, org_perf)은 절대 출력 금지(null 또는 LOOKUP으로 처리)
-        - head는 항상 relation의 target(두 번째 엔티티)로 고정합니다.
-          * project_perf => head="perf"
-          * perf_project => head="project"
-        - action(list/stats/detail)과 충돌하더라도 관계형 의도 우선으로 JOIN을 유지합니다.
+        당신은 NTIS R&D 데이터 검색전략 플래너입니다.
+        반드시 JSON 객체 1개만 출력하세요. 설명, 마크다운, 코드블록은 금지합니다.
 
-        A) "이 과제의 성과/논문/특허" 또는 "이 성과가 나온 과제" 등 project↔perf relation이 명확하면 => mode="JOIN"
-           - relation="project_perf" 또는 relation="perf_project"를 명시합니다.
-        B) action이 list/detail/stats/download 성격(목록/상세/통계/다운로드)이거나,
-           단순 ID 조회/목록/통계 요청이면 => mode="LOOKUP"
-        C) ids_map에 값이 하나라도 있고, A에 해당하지 않으면 => mode="LOOKUP"
-        D) 위에 해당하지 않는 토픽/키워드 탐색이면 => mode="SEARCH"
+        [목표]
+        사용자 질문에 대해 단 하나의 Strategy를 결정합니다.
+        실행 레이어는 당신의 전략을 재결정하지 않고 그대로 사용합니다.
 
-        예시:
-        - "1711015550 과제의 논문/특허" => mode="JOIN" (project↔perf relation 명확)
-        - "1711015550 과제 상세" => mode="LOOKUP" (단순 ID 상세 조회)
+        [도메인]
+        - 데이터: project(과제), perf(성과)
+        - 모든 문서에는 prtcp_mp, prtcp_org가 포함됩니다.
+        - project key:
+          - pjt_id = 단일 시행 인스턴스
+          - pjt_no = 동일 과제 그룹
+        - 기관 필터는 반드시 구분:
+          - lead_org_name = org_nm
+          - participant_org_name = prtcp_org[].org_nm
+          - people_affiliation_org_name = prtcp_mp[].blng_org_nm
 
-        [관계형 성과 키워드 사전]
-        - 핵심 키워드(예시): "파생 성과", "성과", "논문", "특허", "산출물"
-        - 패턴 예시: "과제 + (성과|논문|특허|산출물)", "~에서 나온 성과", "~의 파생 성과"
-        - 위 패턴이 감지되면 planner는 처음부터 JOIN 전략을 출력해야 하며,
-          실행단에서 mode/relation 보정이 필요하지 않도록 합니다.
-        
-        추가 원칙(중요):
-        - 사람/기관→과제/성과 관계 질의는, 모든 문서에 prtcp_mp/prtcp_org가 있으므로 기본적으로 JOIN이 아니라 LOOKUP(하드 게이트)로 해결합니다.
-        - 사람 이름/기관명 기반 질의(예: "신동구 참여과제", "김재수 논문", "삼성 참여 과제")는 반드시 mode="LOOKUP"을 우선합니다.
-        - 특히 project를 목적 엔티티로 판단 가능한 people/org->project 질의는 JOIN 금지, LOOKUP 고정으로 계획합니다.
-        - people/org 식별 Hop1(2-hop)은 기본 비활성입니다. (동명이인/식별자 요구 등 예외에서만 사용)
-        
-        ====================
-        [head 결정 규칙]
-        ====================
-        - head는 "사용자가 최종적으로 얻고 싶은 결과 엔티티"입니다.
-          * 과제 목록/상세/통계/다운로드 => head="project"
-          * 성과 목록/상세/통계/다운로드 => head="perf"
-          * 시스템 QnA => head="support"
-        - 사람/기관이 질의에 포함되어도, 목적이 과제/성과면 head를 people/org로 두지 않습니다.
-        - 예외: 연구자/기관 자체 식별/프로필/코드가 목적이면 head="people" 또는 head="org" 가능.
-        
-        ====================
-        [action enum]
-        ====================
-        action은 아래 중 하나:
-        - "topic" | "list" | "detail" | "stats" | "download"
-        
-        ====================
-        [relation enum]
-        ====================
-        relation은 아래 중 하나 또는 null:
-        - "project_perf" | "perf_project" | null (people/org relation은 입력/출력 모두 금지)
-        
-        ====================
-        [target_cols 규칙]
-        ====================
-        target_cols는 실행할 컬렉션 리스트입니다.
-        - "ntis_project_v1" / "ntis_perf_v1" 중 선택
-        - LOOKUP/JOIN은 필요한 컬렉션만 최소로 선택합니다.
-          * "신동구 참여과제" => ["ntis_project_v1"]
-          * project 기반 people/org 필터 질의는 target_cols를 project 중심으로 정규화합니다(기본: ["ntis_project_v1"]).
-          * "OO기관 성과" => ["ntis_perf_v1"]
-          * project↔perf JOIN => ["ntis_project_v1","ntis_perf_v1"]
-        - SEARCH는 기본적으로 두 컬렉션 모두 가능하나, head가 명확하면 1개만 선택 가능합니다.
-        
-        ====================
-        [ids_map 규칙]
-        ====================
-        ids_map은 dict이며 값은 문자열 배열입니다. 허용 키만 사용:
-        - pjt_id, pjt_no
-        - doi, issn, eissn, pissn
-        - patent_reg_no, patent_app_no
-        - paper_id, perf_id, rst_id
-        - person_no(참여인력 hm_id), org_id, org_code, biz_no
-        
-        추출하지 못하면 빈 dict.
-        [JOIN 추가 불변 규칙]
-        - 사람/기관 이름만 있는 경우 JOIN 금지. 반드시 mode="LOOKUP"으로 처리한다.
-        - mode="JOIN" + join_key_mode="instance"에서 ids_map=[] 자체는 허용한다.
-          (전제: relation이 명확하고 Hop1 source에서 pjt_id 추출 가능해야 함)
-        
-        [ID 필드 규칙]
-        - ids_map.person_no는 참여인력 ID(hm_id)일 때만 사용한다.
-        - 한글 이름(예: 김재수)은 ids_map에 넣지 말고 filters.participant_researcher_name에만 넣는다.
-        
-        ====================
-        [filters 규칙(계약)]
-        ====================
-        filters는 dict입니다. 필요한 키만 포함합니다.
-        허용 키:
-        - year_from, year_to
-        - title_terms (배열)
-        - keywords (배열)
-        - tag_filters (배열: IRD_NAI_PJT_INFO, IRD_NAI_RI_PAPER, IRD_NAI_RI_IPR, IRD_NAI_RI_SW, IRD_NAI_RI_RSCH_RPT, IRD_NAI_RI_FCLT_EQUIP, IRD_NAI_RI_TECH_INFO 등)
-        - perf_types (배열)
-        
-        사람/기관 관계 필터(의미 구분 필수):
-        - participant_researcher_name (배열) : prtcp_mp[].hm_nm
-        - participant_researcher_id (배열)   : prtcp_mp[].hm_id 또는 person_no
-        - lead_org_name (배열)               : org_nm (수행기관)
-        - participant_org_name (배열)        : prtcp_org[].org_nm (참여기관)
-        - people_affiliation_org_name (배열) : prtcp_mp[].blng_org_nm (사람 소속기관)
-        - year_from / year_to (문자열): 예) "2021" ~ "2023", "2020" 이후는 year_from만
-        - perf_types (배열): ["논문", "특허", "보고서", ...] 성과유형
-        - title_terms (배열): 타이틀 키워드
-        - org_role (문자열, 선택): "lead" | "participant" | "affiliation" | null
-        - 기관 슬롯은 역할별로 엄격 분리합니다(혼용 금지):
-          * "ETRI 수행 과제" -> lead_org_name=["ETRI"]
-          * "ETRI 참여 과제" -> participant_org_name=["ETRI"]
-          * "ETRI 소속 연구자 과제" -> people_affiliation_org_name=["ETRI"]
-          * 역할이 명확하면 해당 슬롯 외 나머지 두 슬롯은 반드시 []
-        
-        사람/기관 필터 강도 규칙(중요):
-        - ID가 있으면 must 수준(LOOKUP 하드필터)로 가정
-        - 이름만 있으면 must가 아니라 should+min_should=1 수준의 하드 게이트로 가정(정규화/변형 포함)
-        - 동명이인/동명기관 가능성이 높으면 confidence를 낮춥니다.
-        
-        ====================
-        [SEARCH의 서버필터 원칙]
-        ====================
-        - SEARCH에서는 server-side must 필터 금지(또는 최소화)
-        - 허용: must_not로 명백히 다른 도메인 제외 정도
-        - 사람/기관/tag은 rerank 보너스/게이트로 처리
-        
-        ====================
-        [LOOKUP의 서버필터 우선순위]
-        ====================
-        LOOKUP 하드필터 우선순위:
-        1) PJT_ID == x
-        2) PJT_NO == x
-        3) PJT_NO == x AND stan_yr == y
-        4) 성과 식별자(doi/issn/patent_no/perf_id 등) 키 must
-        
-        ====================
-        [JOIN(2-hop) 정책: 그룹 vs 인스턴스]
-        ====================
-        - JOIN은 project↔perf relation이 명확할 때만 사용합니다.
-        - relation이 명확하면 mode="JOIN"을 우선 적용하고, 단순 ID 조회/목록/통계는 mode="LOOKUP"을 사용합니다.
-        - mode="JOIN"이면 join_key_mode는 필수이며 "instance" | "group" 중 하나여야 합니다.
-        - mode!="JOIN"이면 join_key_mode는 null 이어야 합니다.
-        - JOIN ids_map 규칙:
-          * join_key_mode="instance": ids_map.pjt_id가 있으면 seed key로 사용합니다.
-          * join_key_mode="instance" + ids_map=[]도 허용합니다(관계 명확 + Hop1 source에서 pjt_id 추출 전제).
-          * join_key_mode="instance"인데 ids_map.pjt_no만 있으면 계약 위반입니다.
-          * join_key_mode="group": ids_map.pjt_no를 사용합니다.
-          * join_key_mode="group"인데 ids_map.pjt_no가 비어 있고 ids_map.pjt_id만 있으면 실행 전 정규화에서
-            join_key_mode를 "instance"로 보정하고 경고를 남깁니다.
-        
-        1) relation="project_perf"
-          - head="perf" (relation target 고정)
-          - Hop1 전략 우선순위(항상 SEARCH 아님):
-            * instance + ids_map.pjt_id 존재 => 기본 Hop1 skip (옵션 플래그일 때만 최소 보강 lookup 허용)
-            * group + ids_map.pjt_no 존재 => Hop1 search 금지, lookup(pjt_no must) 강제
-            * seed key가 없고 people/org 조건 존재 => Hop1 lookup(people/org gate)
-            * seed key도 people/org gate도 없을 때만 => Hop1 search
-          - hop2(perf): hop1/seed에서 확보한 키 집합을 하드필터로 적용
-            * join_key_mode="instance": pjt_id IN (...) must
-            * join_key_mode="group": pjt_no IN (...) must
-        
-        2) relation="perf_project"
-          - head="project" (relation target 고정)
-          - join_key_mode="instance": Hop2(project)에서 pjt_id == PJT_ID must
-          - join_key_mode="group": Hop2(project)에서 pjt_no == PJT_NO must
+        [출력 규칙]
+        아래 키를 모두 포함:
+        strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
+        - strategy_version = "{PLANNER_SCHEMA_VERSION}"
+        - mode = "SEARCH" | "LOOKUP" | "JOIN"
+        - head = "project" | "perf" | "people" | "org" | "support"
+        - action = "topic" | "list" | "detail" | "stats" | "download"
+        - relation = "project_perf" | "perf_project" | null
+        - join_key_mode = "instance" | "group" | null
+        - target_cols = ["ntis_project_v1"] / ["ntis_perf_v1"] / ["ntis_project_v1","ntis_perf_v1"]
+        - ids_map 값은 항상 문자열 배열
+        - 값이 없으면 null / [] / {{}} 사용
+        - "None" 문자열 금지
 
-        예시(제목 기반 perf→project):
-        - "과학기술 학술정보서비스의 연계 및 융합에 관한 연구 논문은 어느 과제에 포함되어있는지?"
-          * mode="JOIN"
-          * relation="perf_project"
-          * head="project"
-          * join_key_mode="instance"
-          * ids_map=[]
-          * target_cols=["ntis_perf_v1","ntis_project_v1"]
-        
-        ====================
-        [retrieval_query 규칙]
-        ====================
-        retrieval_query는 검색 최적화용 짧은 쿼리입니다.
-        - 최대 120자, 핵심 개념 5개 이내
-        - 사람/기관명이 있으면 반드시 포함
-        - 불필요한 기능어(목록/조회/알려줘/무엇/어떤 등)는 제거
-        
-        ====================
-        [limit 규칙]
-        ====================
-        - limit는 1~{MAX_TOP_K_SIZE} 범위 정수
-        - 사용자가 상위 N개 명시 시 반영(단 MAX 초과 금지)
-        - 불명확하면 20
-        
-        ====================
-        [필수 출력 JSON 스키마]
-        ====================
-        반드시 아래 키를 모두 포함한 JSON 객체만 출력:
-        - strategy_version: "{PLANNER_SCHEMA_VERSION}"
-        - mode: "SEARCH" | "LOOKUP" | "JOIN"
-        - head: "project" | "perf" | "people" | "org" | "support"
-        - action: "topic" | "list" | "detail" | "stats" | "download"
-        - relation: "project_perf" | "perf_project" | null (people/org relation 금지)
-        - join_key_mode: "instance" | "group" | null
-        - target_cols: string 배열
-        - ids_map: dict
-        - filters: dict
-        - limit: int
-        - retrieval_query: string
-        - confidence: float (0.0~1.0)
-    
+        [head 의미]
+        head는 질문의 기준(anchor) 엔티티입니다.
+        - relation="project_perf"이면 head="project"
+        - relation="perf_project"이면 head="perf"
+
+        [mode 결정]
+        1. project↔perf 관계가 명확하면 JOIN
+        2. 명시적 ID가 있거나 목록/상세/통계 요청이면 LOOKUP
+        3. 사람/기관 기반 과제/성과 질의는 JOIN이 아니라 LOOKUP
+        4. 그 외 토픽/키워드 탐색은 SEARCH
+
+        [JOIN 규칙]
+        - relation은 "project_perf" 또는 "perf_project"만 허용
+        - mode="JOIN"이면 join_key_mode를 반드시 채움
+        - join_key_mode="instance"이면 ids_map.pjt_id만 사용
+        - join_key_mode="group"이면 ids_map.pjt_no만 사용
+        - pjt_id와 pjt_no를 동시에 넣지 말 것
+
+        [LOOKUP 규칙]
+        - ID 기반 질문: LOOKUP
+        - 사람/기관 기반 질문: LOOKUP
+        - 사람 이름은 ids_map에 넣지 말고 filters.participant_researcher_name에 넣기
+        - 참여인력 ID가 있으면 filters.participant_researcher_id 또는 ids_map.person_no 사용 가능
+
+        [SEARCH 규칙]
+        - ID가 없고 토픽/키워드 중심이면 SEARCH
+        - SEARCH에서는 사람/기관 이름이 있어도 관계형 확정이 아니면 JOIN으로 가지 말 것
+
+        [filters 허용 키]
+        year_from, year_to, title_terms, keywords, perf_types,
+        participant_researcher_name, participant_researcher_id,
+        lead_org_name, participant_org_name, people_affiliation_org_name, org_role
+
+        [예시 JSON]
+        1) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"SEARCH","head":"project","action":"topic","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{}},"limit":20,"retrieval_query":"AI 관련 과제","confidence":0.9}}
+        2) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"participant_researcher_name":["김재수"]}},"limit":20,"retrieval_query":"김재수 참여 과제","confidence":0.92}}
+        3) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"lead_org_name":["ETRI"]}},"limit":20,"retrieval_query":"ETRI 수행 과제","confidence":0.9}}
+        4) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"detail","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":1,"retrieval_query":"1711015550 과제 상세","confidence":0.98}}
+        5) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"project","action":"list","relation":"project_perf","join_key_mode":"instance","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":20,"retrieval_query":"1711015550 성과 목록","confidence":0.97}}
+        6) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"project","action":"list","relation":"project_perf","join_key_mode":"group","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_no":["PJT-2020-XXXX"]}},"filters":{{}},"limit":20,"retrieval_query":"PJT-2020-XXXX 성과 전체","confidence":0.95}}
+
         {{format_instructions}}
     """
 
