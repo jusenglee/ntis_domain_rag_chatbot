@@ -1073,15 +1073,26 @@ async def _run_question_analysis(
         - relation="project_perf"이면 head="perf"
         - relation="perf_project"이면 head="project"
 
+        [의사결정 순서(고정)]
+        아래 순서를 반드시 지키고, 앞 단계 결정을 뒤집지 마세요.
+        1) action 결정
+        2) head 결정
+        3) ids_map / filters 추출
+        4) mode 결정
+        5) mode="JOIN"일 때만 relation / join_key_mode / target_cols 결정
+
         [mode 결정]
-        1. project↔perf 관계가 명확하면 JOIN
-        2. 명시적 ID가 있거나 목록/상세/통계 요청이면 LOOKUP
-        3. 사람/기관 기반 과제/성과 질의는 JOIN이 아니라 LOOKUP
-        4. 그 외 토픽/키워드 탐색은 SEARCH
+        - JOIN은 예외 경로입니다. project↔perf를 직접 연결해야 하는 목적이 명확하고,
+          조인 기준 키(pjt_id 또는 pjt_no)가 충분히 확정된 경우에만 JOIN을 선택합니다.
+        - 명시적 ID가 있거나 목록/상세/통계 요청이면 기본은 LOOKUP입니다.
+        - 사람/기관 기반 과제/성과 질의는 기본적으로 LOOKUP입니다.
+        - 토픽/키워드 탐색은 SEARCH입니다.
+        - relation 키워드(예: "연계", "관계", "관련")가 문장에 있다는 이유만으로 JOIN을 선택하지 마세요.
 
         [JOIN 규칙]
+        - mode="JOIN"인 경우에만 relation/join_key_mode를 채움
         - relation은 "project_perf" 또는 "perf_project"만 허용
-        - mode="JOIN"이면 join_key_mode를 반드시 채움
+        - mode!="JOIN"이면 relation=null, join_key_mode=null 유지
         - join_key_mode="instance"이면 ids_map.pjt_id만 사용
         - join_key_mode="group"이면 ids_map.pjt_no만 사용
         - pjt_id와 pjt_no를 동시에 넣지 말 것
@@ -1100,6 +1111,25 @@ async def _run_question_analysis(
         year_from, year_to, title_terms, keywords, perf_types,
         participant_researcher_name, participant_researcher_id,
         lead_org_name, participant_org_name, people_affiliation_org_name, org_role
+
+        [anti_patterns]
+        - 금지 규칙은 아래 few-shot을 우선 적용합니다.
+        1) 주제형 성과 질의 오판 금지
+           - bad question: "AI 반도체 관련 성과 알려줘"
+           - bad output: mode="JOIN", relation="project_perf"
+           - fix: mode="SEARCH" 또는 "LOOKUP"(조건 명시 시), relation=null, join_key_mode=null
+        2) 기관명 ids_map 오염 금지
+           - bad question: "ETRI가 수행한 과제 목록"
+           - bad output: ids_map={{"org_nm":["ETRI"]}}
+           - fix: ids_map={{}}, filters.lead_org_name=["ETRI"], mode="LOOKUP"
+        3) 연구자명 ids_map 오염 금지
+           - bad question: "김재수 참여 과제"
+           - bad output: ids_map={{"participant_researcher_name":["김재수"]}}
+           - fix: ids_map={{}}, filters.participant_researcher_name=["김재수"], mode="LOOKUP"
+        4) relation 단어 유도 JOIN 금지
+           - bad question: "과제와 성과의 관계를 설명해줘"
+           - bad output: mode="JOIN"
+           - fix: 설명/요약 목적이면 SEARCH 또는 LOOKUP, relation=null
 
         [예시 JSON]
         1) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"SEARCH","head":"project","action":"topic","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{}},"limit":20,"retrieval_query":"AI 관련 과제","confidence":0.9}}
