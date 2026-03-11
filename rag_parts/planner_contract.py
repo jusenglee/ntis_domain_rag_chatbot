@@ -48,13 +48,19 @@ def planner_contract_mode(
         errors.append(f"invalid_mode:{mode or 'empty'}")
 
     expected_mode = action_mode_map.get(action_value)
+    has_join_relation = False
+    if isinstance(strategy_relation, (tuple, list)):
+        has_join_relation = len(strategy_relation) >= 2 and bool(str(strategy_relation[0]).strip()) and bool(str(strategy_relation[1]).strip())
+    else:
+        has_join_relation = bool(str(strategy_relation or "").strip())
+
     # JOIN relation 전략은 action(list/detail/stats/download)과 공존 가능하므로
     # planner가 처음부터 JOIN을 확정한 경우 action-mode mismatch로 실패시키지 않는다.
     if expected_mode and mode != expected_mode:
-        if not (mode == "join" and strategy_relation):
+        if not (mode == "join" and has_join_relation):
             errors.append(f"action_mode_mismatch:{action_value}->{mode}")
 
-    if mode == "join" and not strategy_relation:
+    if mode == "join" and not has_join_relation:
         errors.append("join_without_relation")
 
     # planner 확정 mode를 보존: 오류가 있어도 mode를 바꾸지 않는다.
