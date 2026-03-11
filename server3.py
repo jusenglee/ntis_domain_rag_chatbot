@@ -1002,6 +1002,13 @@ async def _run_question_analysis(
             normalized_intent=normalized_intent,
             locked_strategy=locked_strategy,
         )
+        locked_strategy = _re_gate_locked_strategy(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            stage1=stage1,
+            stage2=stage2,
+            locked_strategy=locked_strategy,
+        )
         return _assemble_question_analysis(
             question=question,
             conversation_id=conversation_id,
@@ -1131,9 +1138,30 @@ def _has_join_seed_id(ids_map: dict[str, list[str]]) -> bool:
     return any(bool(ids_map.get(k)) for k in keys)
 
 
+def _collect_regate_seed_map(ids_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    allowed_keys = {"pjt_id", "pjt_no", "doi", "issn", "rst_id", "paper_id"}
+    out: dict[str, list[str]] = {}
+    for key, values in (ids_map or {}).items():
+        if key not in allowed_keys and not key.startswith("patent_"):
+            continue
+        normalized = sorted({str(v).strip() for v in (values or []) if str(v).strip()})
+        if normalized:
+            out[key] = normalized
+    return out
+
+
+def _has_new_regate_seed(*, base_seed_map: dict[str, list[str]], stage2_seed_map: dict[str, list[str]]) -> bool:
+    for key, values in stage2_seed_map.items():
+        base_values = set(base_seed_map.get(key) or [])
+        if any(value not in base_values for value in values):
+            return True
+    return False
+
+
 def _determine_locked_strategy(*, question: str, stage1: PlannerStage1Decision, normalized_intent: NormalizedIntent, prev_context: list[dict[str, Any]]) -> dict[str, Any]:
     base_ids_map = dict(getattr(normalized_intent, "ids_map", {}) or {})
     prev_context_seed = _extract_single_project_seed(prev_context)
+    gate_seed_map = _collect_regate_seed_map({**base_ids_map, **prev_context_seed})
     if stage1.action == "topic":
         mode = "SEARCH"
     else:
@@ -1159,9 +1187,60 @@ def _determine_locked_strategy(*, question: str, stage1: PlannerStage1Decision, 
     else:
         target_cols = ["ntis_project_v1"]
 
-    locked = {"mode": mode, "head": stage1.head, "action": stage1.action, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "prev_context_seed": prev_context_seed}
+    locked = {"mode": mode, "head": stage1.head, "action": stage1.action, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "prev_context_seed": prev_context_seed, "gate_seed_map": gate_seed_map}
     _log_event("PLANNER.GATE", stage1_action=stage1.action, stage1_head=stage1.head, stage1_relation_candidate=stage1.relation_candidate, gate_mode=mode, gate_relation=relation, gate_join_key_mode=join_key_mode, gate_target_cols=target_cols, used_prev_context_seed=int(bool(prev_context_seed)))
     return locked
+
+
+def _re_gate_locked_strategy(*, request_id: Optional[str], conversation_id: str, stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: dict[str, Any]) -> dict[str, Any]:
+    stage2_seed_map = _collect_regate_seed_map(stage2.ids_map)
+    base_seed_map = dict(locked_strategy.get("gate_seed_map") or {})
+    can_regate = bool(stage1.relation_candidate) and locked_strategy.get("mode") in {"SEARCH", "LOOKUP"} and _has_new_regate_seed(base_seed_map=base_seed_map, stage2_seed_map=stage2_seed_map)
+
+    updated = dict(locked_strategy)
+    if can_regate:
+        mode = "SEARCH" if stage1.action == "topic" else "LOOKUP"
+        relation = None
+        join_key_mode = None
+        merged_seed_map = {**base_seed_map}
+        for key, values in stage2_seed_map.items():
+            merged = set(merged_seed_map.get(key) or [])
+            merged.update(values)
+            merged_seed_map[key] = sorted(merged)
+
+        if _has_join_seed_id(merged_seed_map) and stage1.action in {"list", "detail", "stats", "download"}:
+            mode = "JOIN"
+            relation = stage1.relation_candidate
+            join_key_mode = "group" if merged_seed_map.get("pjt_no") else "instance"
+
+        if stage1.head == "support":
+            target_cols = ["ntis_supports_v1"]
+        elif mode == "JOIN":
+            target_cols = ["ntis_project_v1", "ntis_perf_v1"]
+        elif stage1.head == "perf":
+            target_cols = ["ntis_perf_v1"]
+        else:
+            target_cols = ["ntis_project_v1"]
+
+        updated.update({"mode": mode, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "gate_seed_map": merged_seed_map})
+
+    changed = any(updated.get(field) != locked_strategy.get(field) for field in ("mode", "relation", "join_key_mode", "target_cols"))
+    _log_event(
+        "PLANNER.REGATE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        regate_eligible=int(can_regate),
+        regate_changed=int(changed),
+        before_mode=locked_strategy.get("mode"),
+        after_mode=updated.get("mode"),
+        before_relation=locked_strategy.get("relation"),
+        after_relation=updated.get("relation"),
+        before_join_key_mode=locked_strategy.get("join_key_mode"),
+        after_join_key_mode=updated.get("join_key_mode"),
+        before_target_cols=locked_strategy.get("target_cols"),
+        after_target_cols=updated.get("target_cols"),
+    )
+    return updated
 
 
 async def _run_planner_stage2(*, question: str, conversation_id: str, request_id: Optional[str], chat_history: list[BaseMessage], prev_context: list[dict[str, Any]], normalized_intent: NormalizedIntent, locked_strategy: dict[str, Any]) -> PlannerStage2Slots:

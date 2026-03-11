@@ -289,6 +289,7 @@ LIMIT 100;
 즉시 확인:
 - `policy_mode`, `planner_invalid_fallback`, `strict_strategy_consistency`, `promotion_mode`, `force_fallback_chat`
 - `strategy_mutation_stage`, `changed_by`, `changed_strategy_fields`, `changed_filter_fields`
+- stagewise planner 사용 시 `PLANNER.GATE`(초기 판정)와 `PLANNER.REGATE`(stage2 seed 반영 후 재판정)의 `before_*`/`after_*` 및 `regate_changed`를 함께 확인
 
 판단 가이드:
 - 문서상 기대(strict): 계약 위반 시 즉시 `StrategyViolation`
@@ -345,6 +346,7 @@ LIMIT 100;
 | `PLANNER.PIPELINE` | `parse` | `final_failed` | `attempt`, `max_attempts`, `planner_fallback`, `timeout_ms`, `disable_thinking`, `backoff_sec`, `error_type`, `error` | planner 파싱 최종 실패 이벤트 |
 | `PLANNER.PIPELINE` | `intent_merge` | `success` | `applied`, `changed_strategy_fields`, `changed_filter_fields`, `changed_by` | planner→intent 전략 병합 diff 이벤트 |
 | `PLANNER.PIPELINE` | `intent_build` | `success` | `planner_applied`, `planner_failed`, `schema_fields` | 최종 intent_payload.v2 빌드 이벤트 |
+| `PLANNER.REGATE` | - | - | `regate_eligible`, `regate_changed`, `before_mode`, `after_mode`, `before_relation`, `after_relation` | stage2 신규 seed로 gate 전략을 최소 재판정한 결과 이벤트 |
 
 ## 로그 키 사전 (공통)
 
