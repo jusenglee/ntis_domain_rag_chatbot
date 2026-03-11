@@ -127,6 +127,7 @@ def validate_planner_contract(
         )
         return violations
 
+    # JOIN 계약: head는 relation의 target(relation[1])과 동일해야 한다.
     if head_norm and relation[1] != head_norm:
         violations.append(
             PlannerContractViolation(
