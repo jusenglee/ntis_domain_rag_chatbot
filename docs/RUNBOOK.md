@@ -152,6 +152,31 @@ export RAG_LOG_TOPN_DEBUG=12
 - `RAG_FORCE_FALLBACK_CHAT=true`면 계약 실패를 예외로 던지지 않고 reason을 반환(운영 정책용)
 - 스트리밍 실패(`EmptyStreamContentError`, `stream_content_emitted_chunks == 0`) 시에는 non-stream 재시도를 하지 않는다. 장애 판정은 `ttft_any_ms`, `ttft_content_ms`, `deadline_exceeded`, `stream_content_emitted_chunks` 조합으로 수행한다.
 
+### 3.4 Planner stagewise 부팅 확인
+
+배포 후 부팅 로그에서 아래 키를 운영 로그 이벤트 기준으로 확인합니다.
+
+- 이벤트: `APP.CONFIG`
+- 키: `planner_stagewise_enabled`
+- 기대값: `1`
+
+예시 쿼리(로그 시스템에서 JSON 필드 검색):
+
+```sql
+SELECT ts, event, planner_stagewise_enabled
+FROM app_logs
+WHERE event = 'APP.CONFIG'
+  AND planner_stagewise_enabled = 1
+ORDER BY ts DESC
+LIMIT 100;
+```
+
+보조 확인 이벤트:
+- `PLANNER.PIPELINE`
+- `PLANNER.ASSEMBLE`
+
+위 이벤트에서도 `planner_stagewise_enabled=1`이 일관되게 관측되어야 합니다.
+
 ---
 
 ## 4) 자주 터지는 패턴과 처방

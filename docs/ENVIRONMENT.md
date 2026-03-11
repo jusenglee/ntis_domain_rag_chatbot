@@ -79,6 +79,21 @@ export SOLAR_VLLM_TIMEOUT=120
 
 ```
 
+
+## Planner Stagewise 기본값(배포 필수)
+
+```bash
+# planner 2-stage 파이프라인 기본 ON
+export PLANNER_STAGEWISE_ENABLED=true
+```
+
+- 기본값은 `true`이며, 미설정 시에도 stagewise 경로를 사용합니다.
+- 배포 템플릿에도 동일하게 고정합니다.
+  - `deploy/env/staging.env.example`
+  - `deploy/env/prod.env.example`
+  - `deploy/helm/values-staging.yaml`
+  - `deploy/helm/values-prod.yaml`
+
 ## Planner latency 튜닝
 
 ```bash
