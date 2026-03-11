@@ -14,15 +14,21 @@ def test_prompt_join_head_examples_use_relation_target_semantics() -> None:
     assert '"mode":"JOIN","head":"perf","action":"list","relation":"project_perf"' in source
 
 
-def test_explicit_id_keys_include_people_org_and_issn_family() -> None:
+def test_join_and_lookup_seed_id_keys_are_split() -> None:
     source = _server3_source()
-    for key in ("issn", "eissn", "pissn", "person_no", "org_id", "org_code", "biz_no"):
+    for key in ("pjt_id", "pjt_no", "doi", "issn", "eissn", "pissn", "perf_id", "rst_id", "paper_id", "patent_reg_no", "patent_app_no"):
         assert f'"{key}"' in source
+    for key in ("person_no", "org_id", "org_code", "biz_no"):
+        assert f'"{key}"' in source
+    assert "join_seed_id_keys" in source
+    assert "lookup_seed_id_keys" in source
 
 
-def test_keyword_search_signal_does_not_treat_list_as_search() -> None:
+def test_mode_correction_uses_join_lookup_topic_conditions() -> None:
     source = _server3_source()
-    assert 'is_keyword_search = mode_norm == "SEARCH" or action_norm == "topic"' in source
+    assert 'if has_join_seed_id and relation_is_project_perf:' in source
+    assert 'elif (action_norm in lookup_actions) and (not relation_is_project_perf):' in source
+    assert 'elif (not has_join_seed_id) and action_norm == "topic":' in source
 
 
 def test_role_hint_routing_clears_other_org_slots_when_single_role_hint() -> None:
