@@ -56,6 +56,10 @@ def planner_contract_mode(
 
     # JOIN relation 전략은 action(list/detail/stats/download)과 공존 가능하므로
     # planner가 처음부터 JOIN을 확정한 경우 action-mode mismatch로 실패시키지 않는다.
+    # mode-action 불일치 탐지 이유:
+    # - planner가 산출한 action과 mode가 어긋나면 조회 전략(정확 매칭 vs 탐색) 자체가 달라져
+    #   재현성/디버깅 가능성이 크게 떨어진다.
+    # - 단, relation JOIN은 list/detail/stats action과 공존 가능하므로 예외 허용.
     if expected_mode and mode != expected_mode:
         if not (mode == "join" and has_join_relation):
             errors.append(f"action_mode_mismatch:{action_value}->{mode}")
@@ -106,6 +110,10 @@ def validate_planner_contract(
     pjt_ids = _as_str_list(normalized_ids_map.get("pjt_id"))
     pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
 
+    # fail-close vs 경고 분리 기준:
+    # - 여기서 수집하는 위반은 실행 불가능/오염 위험이 큰 구조 위반(예: key 혼합, relation 불일치)이다.
+    #   => 상위 레이어에서 StrategyViolation으로 fail-close 대상.
+    # - 반면 표현상의 애매함(파싱 경고 등)은 parsing_warnings로 남기고 진행 가능.
     # planner 입력(ids_map) 계약: lookup/join에서 pjt_id vs pjt_no 는 XOR만 허용한다.
     if pjt_ids and pjt_nos:
         violations.append(

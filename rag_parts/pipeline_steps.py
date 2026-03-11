@@ -189,6 +189,10 @@ def normalize_intent(
         hint_participant_org_terms: Optional[List[str]] = None,
         hint_people_affiliation_org_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
+    # allow_strategy_fallback 운영 기본값을 False로 두는 이유:
+    # - planner가 이미 mode/action/relation 계약을 만든 뒤에 재분류를 허용하면
+    #   실행 전략이 조용히 바뀌어 관측 가능한 원인-결과 연결이 끊긴다.
+    # - 즉, 계약 위반은 fail-close/명시 오류로 드러내고, 자동 우회는 제한적으로만 사용한다.
     ids_map = _normalize_ids_map(getattr(intent, "ids_map", None) or getattr(intent, "ids", None) or {})
     ids_flat = _normalize_terms(getattr(intent, "ids_flat", None) or [])
     if not ids_flat:
@@ -260,6 +264,8 @@ def normalize_intent(
         "content",
         "relation",
     }
+    # 입력값이 유효 route/action 집합을 벗어났을 때만 제한적으로 fallback 허용.
+    # (운영 기본은 False: 계약 기반 실행 일관성 우선)
     if allow_strategy_fallback and (base_route not in valid_routes or action not in valid_actions):
         fallback = classify_query_compat(query, keywords, domain_hint=base_route or None, hint=None)
         if base_route not in valid_routes:

@@ -1658,6 +1658,10 @@ def classify_query(
     if action not in ("support", "id_exact", "id_fuzzy", "list", "stats", "topic", "detail", "content", "relation"):
         action = ""
 
+    # intent 정규화 규칙(입력 → 보정):
+    # - planner 필드(people/org/relation/action)를 우선 사용하되, 누락 시 질의 cue로 보정한다.
+    # - org_role이 지정되면 org_terms를 lead/participant/affiliation 전용 필드로 승격한다.
+    # - relation은 people/org 신호와 project/perf 맥락을 함께 보며 join 가능 형태로만 유지한다.
     people_terms = _normalize_str_list(plan.get("people_terms") or plan.get("researchers"))
     gender_terms = _normalize_str_list(plan.get("gender_terms"))
     plan_filters = plan.get("filters") if isinstance(plan.get("filters"), dict) else {}

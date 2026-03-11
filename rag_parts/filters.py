@@ -570,6 +570,9 @@ def build_year_range_filter(
         year_keys: Optional[List[str]] = None,
         date_keys: Optional[List[str]] = None,
 ) -> Optional[Any]:
+    # 연도 필터는 정확 매칭 누락을 줄이기 위해 should 게이트로 구성한다.
+    # - 문자열 연도(예: "2024")와 숫자/date range 저장 스키마를 동시에 커버
+    # - min_should=1로 최소 하나는 맞아야 통과하도록 강제
     if qmodels is None:
         return None
 
@@ -697,6 +700,10 @@ def _build_prtcp_mp_people_nested_filter(
     nested_must: List[Any] = []
     nested_should: List[Any] = []
 
+    # 사람/기관/식별자 필터의 must/should 기준:
+    # - person_ids(hm_id): 식별자이므로 must (정확도 우선)
+    # - people_terms(hm_nm): 기본 should, 단일 이름+정책시 must 승격 가능
+    # - org/gender: 보조 조건으로 should (재현율 보존)
     if people_terms:
         name_cond = qmodels.FieldCondition(key="hm_nm", match=make_match_any(people_terms))
         if force_one_must:

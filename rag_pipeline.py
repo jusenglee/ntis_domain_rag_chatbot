@@ -764,6 +764,12 @@ def _ensure_join_mode_has_keys(
     mode=join 계약:
     - Hop1는 join key 추출 전용 단계이며, key가 없으면 Hop2를 생략한 성공 응답을 반환하지 않는다.
     - 결과는 "Hop2 실행 성공" 또는 "명시적 실패(StrategyViolation)"만 허용한다.
+
+    입력 → 정규화 → 강제 계약 → 실행 관점:
+    - 입력: Hop1 산출물에서 추출한 join key 존재 여부(has_join_keys)와 key 개수
+    - 정규화: join_key_mode(instance/group)를 기준으로 필수 key 라벨을 확정
+    - 강제 계약: key 누락/불량이면 fail-close(즉시 StrategyViolation)
+    - 실행: key가 있을 때만 Hop2 실행 경로를 허용
     """
     log_kv(
         "RAG.JOIN.HOP2.ENTRY_GUARD",
@@ -2108,6 +2114,12 @@ def _final_rerank(
     score_sample = int(os.getenv("RAG_SCORE_SAMPLE", "200"))
 
     # mode별 가중치 (정규화 스코어 기준)
+    # 입력 → 정규화 → 강제 계약 → 실행:
+    # - 입력: 벡터/키워드/필드(필터) 점수와 도메인 신호(tag/family)
+    # - 정규화: score_norm_policy(minmax 등)로 스케일 편차를 먼저 흡수
+    # - 강제 계약: mode별 가중치로 점수 결합 의도를 고정(운영 중 임의 편향 방지)
+    # - 실행: lookup/join은 정확도(필드·ID 일치) 비중↑, search는 재현율(RRF·키워드) 비중↑
+    #   → 정확도 vs 재현율 균형을 mode별로 다르게 최적화
     if mode == "lookup":
         w_rrf, w_kw, w_f, w_fam, w_tag = 0.30, 0.25, 0.35, 0.05, 0.05
         strict_ids = True
@@ -2357,6 +2369,10 @@ def _resolve_join_execution_policy(
     group_resolve_topk = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_TOPK", "400")))
     group_resolve_keep = max(1, int(os.getenv("RAG_JOIN_GROUP_RESOLVE_KEEP", "50")))
 
+    # JOIN 키 누락 시 보정/차단 정책:
+    # - instance + pjt_id seed가 있으면 Hop1을 건너뛰고 즉시 Hop2로 연결(보정 불필요)
+    # - group + pjt_no seed는 env에 따라 pjt_id 확장 lookup을 허용(보정)하거나 skip(보수)
+    # - seed/게이트가 없으면 search로 키를 생성하고, 이후 key 검증에서 fail-close로 차단
     if join_key_mode == "instance" and seed_join_pjt_ids:
         hop1_strategy = "skip"
         reason = "instance_seed_pjt_id"
@@ -2408,6 +2424,11 @@ def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
     """
     action = it.action
     rel = it.relation
+    # SEARCH/LOOKUP/JOIN 결정 근거:
+    # - relation action은 구조적으로 2-hop 조인이 필요하므로 JOIN을 우선 강제
+    # - 사람/기관명 기반 질의는 SEARCH로 풀면 노이즈가 커져 LOOKUP으로 고정
+    # - id/list/stats/download는 정확 매칭 성격이라 LOOKUP
+    # - topic/search는 재현율 우선이므로 SEARCH 유지
     if action == "relation" and rel:
         return "join", "relation_action"
     if rel == ("people", "project") and list(getattr(it, "people_terms", []) or []):
@@ -2447,6 +2468,11 @@ def _build_plan(
         preferred_mode: Optional[str] = None,
         preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
+    # 입력 → 정규화 → 강제 계약 → 실행:
+    # - 입력: intent(action/relation/base_route) + planner 선호 모드
+    # - 정규화: stats 정책/target collection을 일관 스키마(QueryPlan)로 정리
+    # - 강제 계약: mode는 _select_mode_policy(또는 preferred_mode) 단일 경로로 결정
+    # - 실행: Executor는 QueryPlan만 보고 SEARCH/LOOKUP/JOIN을 수행하도록 분리
     action = it.action
     base_route = it.base_route
     rel = it.relation
