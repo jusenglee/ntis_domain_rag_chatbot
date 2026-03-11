@@ -6,6 +6,7 @@ import time
 import os
 import re
 import hashlib
+import aiofiles
 from typing import Annotated, Optional, List, Dict, Any, Literal, Tuple
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,7 +47,7 @@ from rag_parts.log_keys import (
 )
 
 from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
-from schemas import IntentPayloadV2
+from schemas import IntentPayloadV2, PlannerStage1Decision, PlannerStage2Slots
 from settings import (
     REDIS_URL,
     REDIS_TTL,
@@ -196,7 +197,10 @@ RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
 PLANNER_SCHEMA_VERSION = "v2"
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
-PLANNER_TEMPERATURE = 0.0
+PLANNER_STAGEWISE_ENABLED = os.getenv("PLANNER_STAGEWISE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v1").strip()
+PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v1").strip()
+PLANNER_TEMPERATURE = float(os.getenv("PLANNER_TEMPERATURE", "0.0"))
 PLANNER_TOP_P = 1.0
 PLANNER_MAX_TOKENS = 450
 PLANNER_TIMEOUT_MS = max(1, int(os.getenv("PLANNER_TIMEOUT_MS", "4500")))
@@ -511,47 +515,6 @@ class QuestionAnalysisV2(BaseModel):
                 normalized_ids_map[key_low] = values
 
         d["ids_map"] = normalized_ids_map
-
-        # planner가 자주 사용하는 명시적 식별자 키를 JOIN seed/LOOKUP seed로 분리한다.
-        join_seed_id_keys = {
-            "pjt_id",
-            "pjt_no",
-            "doi",
-            "issn",
-            "eissn",
-            "pissn",
-            "perf_id",
-            "rst_id",
-            "paper_id",
-            "patent_reg_no",
-            "patent_app_no",
-        }
-        lookup_seed_id_keys = {
-            "person_no",
-            "org_id",
-            "org_code",
-            "biz_no",
-        }
-        has_join_seed_id = any(
-            bool(normalized_ids_map.get(key))
-            for key in join_seed_id_keys
-        )
-        relation_norm = str(d.get("relation") or "").strip().lower()
-        action_norm = str(d.get("action") or "").strip().lower()
-        mode_norm = str(d.get("mode") or "").strip().upper()
-        relation_is_project_perf = relation_norm in {"project_perf", "perf_project"}
-        lookup_actions = {"list", "detail", "stats", "download"}
-
-        # mode/action/relation 공동 신호 기반 보정:
-        # - has_join_seed_id && relation_is_project_perf                => JOIN
-        # - action in {list,detail,stats,download} && !relation_is_project_perf => LOOKUP
-        # - !has_join_seed_id && action==topic                          => SEARCH
-        if has_join_seed_id and relation_is_project_perf:
-            d["mode"] = "JOIN"
-        elif (action_norm in lookup_actions) and (not relation_is_project_perf):
-            d["mode"] = "LOOKUP"
-        elif (not has_join_seed_id) and action_norm == "topic":
-            d["mode"] = "SEARCH"
 
         # --- filters: dict 보장 ---
         if not isinstance(d.get("filters"), dict):
@@ -1006,258 +969,265 @@ async def _run_question_analysis(
         prev_context: List[Dict[str, Any]],
         request_id: Optional[str] = None,
         researchers: Optional[List[Any]] = None,
+        normalized_intent_base: Optional[NormalizedIntent] = None,
 ) -> QuestionAnalysis:
-    log_preview_limit = 1500
+    if PLANNER_STAGEWISE_ENABLED:
+        normalized_intent = normalized_intent_base or normalize_intent(
+            classify_query_intent(question, [], hint={}),
+            query=question,
+            keywords=[],
+            allow_strategy_fallback=False,
+        )
+        stage1 = await _run_planner_stage1(
+            question=question,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            chat_history=chat_history,
+            prev_context=prev_context,
+            normalized_intent=normalized_intent,
+        )
+        locked_strategy = _determine_locked_strategy(
+            question=question,
+            stage1=stage1,
+            normalized_intent=normalized_intent,
+            prev_context=prev_context,
+        )
+        stage2 = await _run_planner_stage2(
+            question=question,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            chat_history=chat_history,
+            prev_context=prev_context,
+            normalized_intent=normalized_intent,
+            locked_strategy=locked_strategy,
+        )
+        return _assemble_question_analysis(
+            question=question,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            stage1=stage1,
+            stage2=stage2,
+            locked_strategy=locked_strategy,
+        )
 
-    def _detect_raw_type(text: str) -> str:
-        compact = (text or "").lstrip()
-        if not compact:
-            return "empty"
-        if compact.startswith("["):
-            return "array_like"
-        if compact.startswith("{"):
-            return "object_like"
-        return "text_like"
+    return await _run_question_analysis_legacy(
+        question=question,
+        conversation_id=conversation_id,
+        chat_history=chat_history,
+        prev_context=prev_context,
+        request_id=request_id,
+        researchers=researchers,
+    )
 
+
+async def _run_question_analysis_legacy(
+        *,
+        question: str,
+        conversation_id: str,
+        chat_history: List[BaseMessage],
+        prev_context: List[Dict[str, Any]],
+        request_id: Optional[str] = None,
+        researchers: Optional[List[Any]] = None,
+) -> QuestionAnalysis:
     llm = _build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=QuestionAnalysis)
 
     history = chat_history[-6:]
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in history])
+    prev_context_raw = refine_documents_rule_based(prev_context, researchers=researchers, organizations=None, org_filters=None, ids_map=None)
+    prev_context_str = "\n".join([line.strip() for line in (prev_context_raw or '').splitlines() if line.strip()][:8])
 
-    prev_context_raw = refine_documents_rule_based(
-        prev_context,
-        researchers=researchers,
-        organizations=None,
-        org_filters=None,
-        ids_map=None,
-    )
-
-    if prev_context_raw:
-        prev_lines = [line.strip() for line in prev_context_raw.splitlines() if line.strip()]
-        prev_context_str = "\n".join(prev_lines[:8])
-    else:
-        prev_context_str = ""
-
-    system_prompt = f"""
-        당신은 NTIS R&D 데이터 검색전략 플래너입니다.
-        반드시 JSON 객체 1개만 출력하세요. 설명, 마크다운, 코드블록은 금지합니다.
-
-        [목표]
-        사용자 질문에 대해 단 하나의 Strategy를 결정합니다.
-        실행 레이어는 당신의 전략을 재결정하지 않고 그대로 사용합니다.
-
-        [도메인]
-        - 데이터: project(과제), perf(성과)
-        - 모든 문서에는 prtcp_mp, prtcp_org가 포함됩니다.
-        - project key:
-          - pjt_id = 단일 시행 인스턴스
-          - pjt_no = 동일 과제 그룹
-        - 기관 필터는 반드시 구분:
-          - lead_org_name = org_nm
-          - participant_org_name = prtcp_org[].org_nm
-          - people_affiliation_org_name = prtcp_mp[].blng_org_nm
-
-        [출력 규칙]
-        아래 키를 모두 포함:
-        strategy_version, mode, head, action, relation, join_key_mode, target_cols, ids_map, filters, limit, retrieval_query, confidence
-        - strategy_version = "{PLANNER_SCHEMA_VERSION}"
-        - mode = "SEARCH" | "LOOKUP" | "JOIN"
-        - head = "project" | "perf" | "people" | "org" | "support"
-        - action = "topic" | "list" | "detail" | "stats" | "download"
-        - relation = "project_perf" | "perf_project" | null
-        - join_key_mode = "instance" | "group" | null
-        - target_cols = ["ntis_project_v1"] / ["ntis_perf_v1"] / ["ntis_project_v1","ntis_perf_v1"]
-        - ids_map 값은 항상 문자열 배열
-        - 값이 없으면 null / [] / {{}} 사용
-        - "None" 문자열 금지
-
-        [head 의미]
-        head는 relation의 target(relation[1]) 엔티티입니다.
-        - relation="project_perf"이면 head="perf"
-        - relation="perf_project"이면 head="project"
-
-        [의사결정 순서(고정)]
-        아래 순서를 반드시 지키고, 앞 단계 결정을 뒤집지 마세요.
-        1) action 결정
-        2) head 결정
-        3) ids_map / filters 추출
-        4) mode 결정
-        5) mode="JOIN"일 때만 relation / join_key_mode / target_cols 결정
-
-        [mode 결정]
-        - JOIN은 예외 경로입니다. project↔perf를 직접 연결해야 하는 목적이 명확하고,
-          조인 기준 키(pjt_id 또는 pjt_no)가 충분히 확정된 경우에만 JOIN을 선택합니다.
-        - 명시적 ID가 있거나 목록/상세/통계 요청이면 기본은 LOOKUP입니다.
-        - 사람/기관 기반 과제/성과 질의는 기본적으로 LOOKUP입니다.
-        - 토픽/키워드 탐색은 SEARCH입니다.
-        - relation 키워드(예: "연계", "관계", "관련")가 문장에 있다는 이유만으로 JOIN을 선택하지 마세요.
-
-        [JOIN 규칙]
-        - mode="JOIN"인 경우에만 relation/join_key_mode를 채움
-        - relation은 "project_perf" 또는 "perf_project"만 허용
-        - mode!="JOIN"이면 relation=null, join_key_mode=null 유지
-        - join_key_mode="instance"이면 ids_map.pjt_id만 사용
-        - join_key_mode="group"이면 ids_map.pjt_no만 사용
-        - pjt_id와 pjt_no를 동시에 넣지 말 것
-
-        [LOOKUP 규칙]
-        - ID 기반 질문: LOOKUP
-        - 사람/기관 기반 질문: LOOKUP
-        - 사람 이름은 ids_map에 넣지 말고 filters.participant_researcher_name에 넣기
-        - 참여인력 ID가 있으면 filters.participant_researcher_id 또는 ids_map.person_no 사용 가능
-
-        [SEARCH 규칙]
-        - ID가 없고 토픽/키워드 중심이면 SEARCH
-        - SEARCH에서는 사람/기관 이름이 있어도 관계형 확정이 아니면 JOIN으로 가지 말 것
-
-        [filters 허용 키]
-        year_from, year_to, title_terms, keywords, perf_types,
-        participant_researcher_name, participant_researcher_id,
-        lead_org_name, participant_org_name, people_affiliation_org_name, org_role
-
-        [anti_patterns]
-        - 금지 규칙은 아래 few-shot을 우선 적용합니다.
-        1) 주제형 성과 질의 오판 금지
-           - bad question: "AI 반도체 관련 성과 알려줘"
-           - bad output: mode="JOIN", relation="project_perf"
-           - fix: mode="SEARCH" 또는 "LOOKUP"(조건 명시 시), relation=null, join_key_mode=null
-        2) 기관명 ids_map 오염 금지
-           - bad question: "ETRI가 수행한 과제 목록"
-           - bad output: ids_map={{"org_nm":["ETRI"]}}
-           - fix: ids_map={{}}, filters.lead_org_name=["ETRI"], mode="LOOKUP"
-        3) 연구자명 ids_map 오염 금지
-           - bad question: "김재수 참여 과제"
-           - bad output: ids_map={{"participant_researcher_name":["김재수"]}}
-           - fix: ids_map={{}}, filters.participant_researcher_name=["김재수"], mode="LOOKUP"
-        4) relation 단어 유도 JOIN 금지
-           - bad question: "과제와 성과의 관계를 설명해줘"
-           - bad output: mode="JOIN"
-           - fix: 설명/요약 목적이면 SEARCH 또는 LOOKUP, relation=null
-
-        [예시 JSON]
-        1) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"SEARCH","head":"project","action":"topic","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{}},"limit":20,"retrieval_query":"AI 관련 과제","confidence":0.9}}
-        2) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"participant_researcher_name":["김재수"]}},"limit":20,"retrieval_query":"김재수 참여 과제","confidence":0.92}}
-        3) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"lead_org_name":["ETRI"]}},"limit":20,"retrieval_query":"ETRI 수행 과제","confidence":0.9}}
-        4) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"detail","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":1,"retrieval_query":"1711015550 과제 상세","confidence":0.98}}
-        5) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"perf","action":"list","relation":"project_perf","join_key_mode":"instance","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":20,"retrieval_query":"1711015550 성과 목록","confidence":0.97}}
-        6) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"perf","action":"list","relation":"project_perf","join_key_mode":"group","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_no":["PJT-2020-XXXX"]}},"filters":{{}},"limit":20,"retrieval_query":"PJT-2020-XXXX 성과 전체","confidence":0.95}}
-
-        {{format_instructions}}
-    """
-
-
+    prompt_path = Path("prompts/planner_legacy_v2.md")
+    system_prompt = await load_prompt_file(prompt_path)
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        (
-            "human",
-            "<conversation_history>{history}</conversation_history>\n"
-            "<previous_context>{prev_context}</previous_context>\n"
-            "<user_query>{question}</user_query>\n\n"
-            "JSON 객체 1개만 출력"
-        )
+        ("human", """[format instructions]\n{format_instructions}\n\n[대화 이력]\n{history}\n\n[이전 검색문맥 요약]\n{prev_context}\n\n[질문]\n{question}"""),
     ])
-
-    planner_llm = llm.bind(
-        temperature=PLANNER_TEMPERATURE,
-        top_p=PLANNER_TOP_P,
-        max_tokens=PLANNER_MAX_TOKENS,
-        reasoning_effort="low",       # planner만 깊게
-        include_reasoning=False,       # JSON 깨질까 걱정되면 False 유지(권장)
-        disable_thinking=PLANNER_DISABLE_THINKING,
-    )
-
-    invoke_metadata = {
-        "request_id": request_id or "",
-        "conversation_id": conversation_id or "",
-    }
-    invoke_config = {
-        "metadata": {
-            **invoke_metadata,
-            "planner_timeout_ms": PLANNER_TIMEOUT_MS,
-            "planner_disable_thinking": PLANNER_DISABLE_THINKING,
-            "planner_temperature": PLANNER_TEMPERATURE,
-            "planner_top_p": PLANNER_TOP_P,
-            "planner_max_tokens": PLANNER_MAX_TOKENS,
-        },
-        "timeout": PLANNER_TIMEOUT_MS / 1000.0,
-        "tags": [
-            "planner",
-            f"conversation_id:{invoke_metadata['conversation_id'] or 'unknown'}",
-        ],
-    }
-
+    planner_llm = llm.bind(reasoning_effort="low", include_reasoning=False, disable_thinking=PLANNER_DISABLE_THINKING, temperature=PLANNER_TEMPERATURE, top_p=PLANNER_TOP_P, max_tokens=PLANNER_MAX_TOKENS)
     chain = prompt | planner_llm | sanitize_llm_json | parser
-    max_attempts = max(1, min(PLANNER_V2_RETRY_ATTEMPTS, PLANNER_V2_RETRY_ATTEMPTS_MAX))
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            result: QuestionAnalysis = await chain.ainvoke({
-                "format_instructions": parser.get_format_instructions(),
-                "history": history_str or "없음",
-                "prev_context": prev_context_str or "없음",
-                "question": question
-            }, config=invoke_config)
-            normalized_payload = _normalize_none_string(result.model_dump())
-            _validate_question_analysis_required_keys(normalized_payload)
-            result = QuestionAnalysis.model_validate(normalized_payload)
-            result.limit = min(result.limit, MAX_TOP_K_SIZE)
-
-            _log_event(
-                "PLANNER.PIPELINE",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                step="parse",
-                status="success",
-                stage="planner",
-                mode=result.mode,
-                head=result.head,
-                action=result.action,
-                relation=result.relation,
-                join_key_mode=result.join_key_mode,
-                target_cols=result.target_cols,
-                confidence=round(float(result.confidence), 2),
-                planner_retry_count=attempt - 1,
-                planner_fallback=0,
-                timeout_ms=PLANNER_TIMEOUT_MS,
-                disable_thinking=int(PLANNER_DISABLE_THINKING),
-                attempt=attempt,
-                backoff_sec=0.0,
-                strategy_mutation_stage="parser",
-                changed_by="parser",
-            )
-            return result
-
-        except (ValidationError, LLMJSONExtractionError, PlannerV2ParseError, ValueError) as e:
-            last_error = e
-            should_retry = attempt < max_attempts
-            backoff_seconds = _planner_v2_backoff_seconds(attempt) if should_retry else 0.0
-            _log_event(
-                "PLANNER.PIPELINE",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                step="parse",
-                status=("retry" if should_retry else "final_failed"),
-                stage="planner",
-                attempt=attempt,
-                max_attempts=max_attempts,
-                retry=int(should_retry),
-                timeout_ms=PLANNER_TIMEOUT_MS,
-                disable_thinking=int(PLANNER_DISABLE_THINKING),
-                backoff_sec=round(backoff_seconds, 3),
-                planner_fallback=int(not should_retry),
-                error_type=type(e).__name__,
-                error=str(e),
-            )
-            if should_retry:
-                await asyncio.sleep(backoff_seconds)
-                continue
-
-    raise StrategyViolation(
-        error_code="PLANNER_PARSE_FINAL_FAILED",
-        reason=str(last_error or "planner parse failed"),
+    result: QuestionAnalysis = await chain.ainvoke({
+        "format_instructions": parser.get_format_instructions(),
+        "history": history_str or "없음",
+        "prev_context": prev_context_str or "없음",
+        "question": question,
+    })
+    normalized_payload = _normalize_none_string(result.model_dump())
+    _validate_question_analysis_required_keys(normalized_payload)
+    result = QuestionAnalysis.model_validate(normalized_payload)
+    _log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="parse",
+        status="success",
+        stage="planner_legacy",
+        mode=result.mode,
+        head=result.head,
+        action=result.action,
+        relation=result.relation,
+        join_key_mode=result.join_key_mode,
+        planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED),
+        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
     )
+    return result
+
+
+def _intent_snapshot(normalized_intent: NormalizedIntent) -> dict[str, Any]:
+    return {
+        "action": getattr(normalized_intent, "action", None),
+        "base_route": getattr(normalized_intent, "base_route", None),
+        "is_id_query": bool(getattr(normalized_intent, "is_id_query", False)),
+        "people_terms": list(getattr(normalized_intent, "people_terms", []) or []),
+        "org_terms": list(getattr(normalized_intent, "org_terms", []) or []),
+        "perf_types": list(getattr(normalized_intent, "perf_types", []) or []),
+        "years": list(getattr(normalized_intent, "years", []) or []),
+    }
+
+
+async def _run_planner_stage1(*, question: str, conversation_id: str, request_id: Optional[str], chat_history: list[BaseMessage], prev_context: list[dict[str, Any]], normalized_intent: NormalizedIntent) -> PlannerStage1Decision:
+    llm = _build_llm("solar_vllm_0")
+    parser = PydanticOutputParser(pydantic_object=PlannerStage1Decision)
+    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in chat_history[-4:]])
+    prev_lines = [json.dumps(item, ensure_ascii=False)[:180] for item in (prev_context or [])[:6]]
+    system_prompt = await load_prompt_file(Path(f"prompts/planner_stage1_{PLANNER_STAGE1_PROMPT_VERSION}.md"))
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{format_instructions}\n<user_query>{question}</user_query>\n<history>{history}</history>\n<prev_context>{prev_context}</prev_context>\n<intent_snapshot>{intent_snapshot}</intent_snapshot>")])
+    planner_llm = llm.bind(reasoning_effort="low", include_reasoning=False, disable_thinking=PLANNER_DISABLE_THINKING, temperature=PLANNER_TEMPERATURE, top_p=1.0, max_tokens=250)
+    chain = prompt | planner_llm | sanitize_llm_json | parser
+    stage1: PlannerStage1Decision = await chain.ainvoke({
+        "format_instructions": parser.get_format_instructions(),
+        "question": question,
+        "history": history_str or "없음",
+        "prev_context": "\n".join(prev_lines) or "없음",
+        "intent_snapshot": json.dumps(_intent_snapshot(normalized_intent), ensure_ascii=False),
+    })
+    _log_event("PLANNER.STAGE1", request_id=request_id, conversation_id=conversation_id, action=stage1.action, head=stage1.head, relation_candidate=stage1.relation_candidate, referential_followup=int(stage1.referential_followup), confidence=round(stage1.confidence, 3), planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION)
+    return stage1
+
+
+def _extract_single_project_seed(prev_context: list[dict[str, Any]]) -> dict[str, list[str]]:
+    pjt_ids, pjt_nos = set(), set()
+    for doc in prev_context or []:
+        payload = doc if isinstance(doc, dict) else {}
+        for key in ("pjt_id", "project_id"):
+            val = str(payload.get(key) or "").strip()
+            if val:
+                pjt_ids.add(val)
+        for key in ("pjt_no", "project_no"):
+            val = str(payload.get(key) or "").strip()
+            if val:
+                pjt_nos.add(val)
+    if len(pjt_ids) == 1:
+        return {"pjt_id": [next(iter(pjt_ids))]}
+    if len(pjt_nos) == 1:
+        return {"pjt_no": [next(iter(pjt_nos))]}
+    return {}
+
+
+def _has_join_seed_id(ids_map: dict[str, list[str]]) -> bool:
+    keys = {"pjt_id", "pjt_no", "doi", "issn", "eissn", "pissn", "perf_id", "rst_id", "paper_id", "patent_reg_no", "patent_app_no"}
+    return any(bool(ids_map.get(k)) for k in keys)
+
+
+def _determine_locked_strategy(*, question: str, stage1: PlannerStage1Decision, normalized_intent: NormalizedIntent, prev_context: list[dict[str, Any]]) -> dict[str, Any]:
+    base_ids_map = dict(getattr(normalized_intent, "ids_map", {}) or {})
+    prev_context_seed = _extract_single_project_seed(prev_context)
+    if stage1.action == "topic":
+        mode = "SEARCH"
+    else:
+        mode = "LOOKUP"
+    relation = None
+    join_key_mode = None
+    if stage1.relation_candidate is not None:
+        has_seed = _has_join_seed_id(base_ids_map) or bool(prev_context_seed)
+        if has_seed and stage1.action in {"list", "detail", "stats", "download"}:
+            mode = "JOIN"
+            relation = stage1.relation_candidate
+            if base_ids_map.get("pjt_no") or prev_context_seed.get("pjt_no"):
+                join_key_mode = "group"
+            else:
+                join_key_mode = "instance"
+
+    if stage1.head == "support":
+        target_cols = ["ntis_supports_v1"]
+    elif mode == "JOIN":
+        target_cols = ["ntis_project_v1", "ntis_perf_v1"]
+    elif stage1.head == "perf":
+        target_cols = ["ntis_perf_v1"]
+    else:
+        target_cols = ["ntis_project_v1"]
+
+    locked = {"mode": mode, "head": stage1.head, "action": stage1.action, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "prev_context_seed": prev_context_seed}
+    _log_event("PLANNER.GATE", stage1_action=stage1.action, stage1_head=stage1.head, stage1_relation_candidate=stage1.relation_candidate, gate_mode=mode, gate_relation=relation, gate_join_key_mode=join_key_mode, gate_target_cols=target_cols, used_prev_context_seed=int(bool(prev_context_seed)))
+    return locked
+
+
+async def _run_planner_stage2(*, question: str, conversation_id: str, request_id: Optional[str], chat_history: list[BaseMessage], prev_context: list[dict[str, Any]], normalized_intent: NormalizedIntent, locked_strategy: dict[str, Any]) -> PlannerStage2Slots:
+    llm = _build_llm("solar_vllm_0")
+    parser = PydanticOutputParser(pydantic_object=PlannerStage2Slots)
+    system_prompt = await load_prompt_file(Path(f"prompts/planner_stage2_{PLANNER_STAGE2_PROMPT_VERSION}.md"))
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>")])
+    planner_llm = llm.bind(reasoning_effort="low", include_reasoning=False, disable_thinking=PLANNER_DISABLE_THINKING, temperature=PLANNER_TEMPERATURE, top_p=1.0, max_tokens=300)
+    chain = prompt | planner_llm | sanitize_llm_json | parser
+    slots: PlannerStage2Slots = await chain.ainvoke({"format_instructions": parser.get_format_instructions(), "question": question, "locked_strategy": json.dumps(locked_strategy, ensure_ascii=False)})
+    _log_event("PLANNER.STAGE2", request_id=request_id, conversation_id=conversation_id, confidence=round(slots.confidence, 3), planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
+    return slots
+
+
+def _sanitize_ids_map_semantics(ids_map: dict[str, list[str]]) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    cleaned: dict[str, list[str]] = {}
+    invalid: list[dict[str, Any]] = []
+    patterns = {
+        "pjt_id": re.compile(r"^\d{8,12}$"),
+        "doi": re.compile(r"^10\.\d{4,9}/[-._;()/:A-Z0-9]+$", re.I),
+        "issn": re.compile(r"^\d{4}-\d{3}[\dXx]$"),
+        "eissn": re.compile(r"^\d{4}-\d{3}[\dXx]$"),
+        "pissn": re.compile(r"^\d{4}-\d{3}[\dXx]$"),
+        "patent_reg_no": re.compile(r"^[A-Za-z0-9\-]{6,}$"),
+        "patent_app_no": re.compile(r"^[A-Za-z0-9\-]{6,}$"),
+    }
+    hangul_only = re.compile(r"^[가-힣\s]+$")
+    for key, values in (ids_map or {}).items():
+        out=[]
+        for raw in values or []:
+            value=str(raw).strip()
+            if not value:
+                continue
+            ok=True
+            if key == "pjt_no":
+                ok = not bool(hangul_only.match(value))
+            elif key in patterns:
+                ok = bool(patterns[key].match(value))
+            if not ok:
+                invalid.append({"key": key, "value": value})
+                continue
+            out.append(value)
+        if out:
+            cleaned[key]=out
+    return cleaned, invalid
+
+
+def _assemble_question_analysis(*, question: str, conversation_id: str, request_id: Optional[str], stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: dict[str, Any]) -> QuestionAnalysis:
+    ids_map, invalids = _sanitize_ids_map_semantics(stage2.ids_map)
+    for item in invalids:
+        _log_event("PLANNER.IDS_MAP.INVALID_VALUE", request_id=request_id, conversation_id=conversation_id, key=item["key"], value=item["value"])
+    payload = {
+        "strategy_version": PLANNER_SCHEMA_VERSION,
+        "mode": locked_strategy["mode"],
+        "head": locked_strategy["head"],
+        "action": locked_strategy["action"],
+        "relation": locked_strategy["relation"],
+        "join_key_mode": locked_strategy["join_key_mode"],
+        "target_cols": locked_strategy["target_cols"],
+        "ids_map": ids_map,
+        "filters": stage2.filters,
+        "limit": min(stage2.limit, MAX_TOP_K_SIZE),
+        "retrieval_query": stage2.retrieval_query or question,
+        "confidence": min(stage1.confidence, stage2.confidence),
+    }
+    qa = QuestionAnalysis.model_validate(payload)
+    _log_event("PLANNER.ASSEMBLE", request_id=request_id, conversation_id=conversation_id, mode=qa.mode, action=qa.action, relation=qa.relation, join_key_mode=qa.join_key_mode, target_cols=qa.target_cols, planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED), planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION, planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
+    return qa
 
 
 # --- Node 4: Knowledge Sufficiency Judge ---
@@ -1646,12 +1616,24 @@ def _build_llm(model_name: str):
     _LLM_CACHE[model_name] = llm
     return llm
 
-import aiofiles
+_PROMPT_CACHE: dict[tuple[str, float], str] = {}
+
+
+async def load_prompt_file(path: Path) -> str:
+    stat = path.stat()
+    cache_key = (str(path), stat.st_mtime)
+    cached = _PROMPT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    async with aiofiles.open(path, encoding="utf-8") as f:
+        content = await f.read()
+    _PROMPT_CACHE.clear()
+    _PROMPT_CACHE[cache_key] = content
+    return content
 
 
 async def load_system_prompt(path: Path) -> str:
-    async with aiofiles.open(path, encoding="utf-8") as f:
-        return await f.read()
+    return await load_prompt_file(path)
 
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
@@ -1978,6 +1960,28 @@ async def build_intent_payload(
         request_id: Optional[str] = None,
 ) -> tuple[IntentPayloadV2, Optional[QuestionAnalysis]]:
     precheck = _cheap_precheck(question)
+
+    explicit_only_hint = {
+        "wants_rank": _has_superlative_cue(question),
+        "people_terms": [],
+        "org_terms": normalize_org_terms(re.findall(r"[A-Za-z0-9가-힣]{2,}(?:대학|연구원|연구소|ETRI)", question)),
+        "years": re.findall(r"(19\d{2}|20\d{2})", question),
+    }
+    kws: List[str] = []
+    raw_intent = classify_query_intent(question, kws, hint=explicit_only_hint)
+    normalized_intent_base = normalize_intent(
+        raw_intent,
+        query=question,
+        keywords=kws,
+        allow_strategy_fallback=False,
+        hint_people_terms=list(explicit_only_hint.get("people_terms", [])),
+        hint_org_terms=list(explicit_only_hint.get("org_terms", [])),
+        hint_org_role=None,
+        hint_lead_org_terms=[],
+        hint_participant_org_terms=[],
+        hint_people_affiliation_org_terms=[],
+    )
+
     question_analysis = None
     planner_failed = 0
     if not precheck:
@@ -1987,123 +1991,16 @@ async def build_intent_payload(
             chat_history=chat_history,
             prev_context=prev_context,
             request_id=request_id,
+            normalized_intent_base=normalized_intent_base,
         )
         planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
 
-    kws: List[str] = []
-    hint_people_terms: List[str] = []
-    hint_org_terms: List[str] = []
-    hint_lead_org_terms: List[str] = []
-    hint_participant_org_terms: List[str] = []
-    hint_people_affiliation_org_terms: List[str] = []
-    hint_title_terms: List[str] = []
-    hint_year_from: str | None = None
-    hint_year_to: str | None = None
-    hint_perf_types: List[str] = []
-    hint_org_role = None
-    hint_wants_rank = False
-
-    if question_analysis and isinstance(question_analysis.filters, dict):
-        filters = dict(question_analysis.filters or {})
-
-        raw_keywords = filters.get("keywords")
-        if isinstance(raw_keywords, (list, tuple, set)):
-            kws = [str(term).strip() for term in raw_keywords if str(term).strip()]
-        elif isinstance(raw_keywords, str) and raw_keywords.strip():
-            kws = [raw_keywords.strip()]
-
-        title_hint = filters.get("title_terms") or filters.get("title") or filters.get("name")
-        if title_hint:
-            title_terms = _normalize_hint_terms(title_hint)
-            hint_title_terms = _normalize_hint_terms([*hint_title_terms, *title_terms])
-            kws = list(dict.fromkeys([*kws, *title_terms]))
-
-        hint_year_from = str(filters.get("year_from") or "").strip() or hint_year_from
-        hint_year_to = str(filters.get("year_to") or "").strip() or hint_year_to
-        perf_types_hint = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
-        if perf_types_hint:
-            hint_perf_types = _normalize_hint_terms([*hint_perf_types, *perf_types_hint])
-            kws = list(dict.fromkeys([*kws, *perf_types_hint]))
-
-        hint_org_role = filters.get("org_role")
-        hint_wants_rank = bool(filters.get("wants_rank", False))
-
-        people_terms_hint = _collect_researcher_name_terms(filters)
-        if people_terms_hint:
-            hint_people_terms = _normalize_hint_terms([*hint_people_terms, *people_terms_hint])
-
-        lead_org_terms_hint = normalize_org_terms(_normalize_hint_terms(
-            filters.get("lead_org_name") or filters.get("performing_org_name")
-        ))
-        participant_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("participant_org_name")))
-        people_affiliation_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("people_affiliation_org_name")))
-        generic_org_terms_hint = normalize_org_terms(_normalize_hint_terms(filters.get("org_name") or filters.get("org")))
-
-        if lead_org_terms_hint:
-            hint_lead_org_terms = _normalize_hint_terms([*hint_lead_org_terms, *lead_org_terms_hint])
-        if participant_org_terms_hint:
-            hint_participant_org_terms = _normalize_hint_terms(
-                [*hint_participant_org_terms, *participant_org_terms_hint]
-            )
-        if people_affiliation_org_terms_hint:
-            hint_people_affiliation_org_terms = _normalize_hint_terms(
-                [*hint_people_affiliation_org_terms, *people_affiliation_org_terms_hint]
-            )
-
-        org_terms_hint = normalize_org_terms([
-            *generic_org_terms_hint,
-            *lead_org_terms_hint,
-            *participant_org_terms_hint,
-            *people_affiliation_org_terms_hint,
-        ])
-        if org_terms_hint:
-            hint_org_terms = _normalize_hint_terms([*hint_org_terms, *org_terms_hint])
-
-    hint_wants_rank = hint_wants_rank or _has_superlative_cue(question)
-
-    planner_hint = {
-        "people_terms": hint_people_terms,
-        "org_terms": hint_org_terms,
-        "title_terms": hint_title_terms,
-        "year_from": hint_year_from,
-        "year_to": hint_year_to,
-        "perf_types": hint_perf_types,
-        "org_role": hint_org_role,
-        "lead_org_terms": hint_lead_org_terms,
-        "participant_org_terms": hint_participant_org_terms,
-        "people_affiliation_org_terms": hint_people_affiliation_org_terms,
-        "wants_rank": hint_wants_rank,
-    }
-
-    raw_intent = classify_query_intent(
-        question,
-        kws,
-        hint=planner_hint,
-    )
-
-    normalized_intent = normalize_intent(
-        raw_intent,
-        query=question,
-        keywords=kws,
-        allow_strategy_fallback=False,
-        hint_people_terms=hint_people_terms,
-        hint_org_terms=hint_org_terms,
-        hint_org_role=hint_org_role,
-        hint_lead_org_terms=hint_lead_org_terms,
-        hint_participant_org_terms=hint_participant_org_terms,
-        hint_people_affiliation_org_terms=hint_people_affiliation_org_terms,
-    )
     normalized_intent, planner_applied = apply_planner_v2(
-        normalized_intent,
+        normalized_intent_base,
         question_analysis,
         request_id=request_id,
         conversation_id=conversation_id,
     )
-
-    # 문서(SSoT) 원칙: 전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)는
-    # 단일 지점에서만 변경되어야 한다. 현재 구현에는 parser/validator 단계 보정 경로가 일부 남아 있으므로
-    # apply_planner_strategy를 중심으로 단계적 수렴(정리) 중임을 전제로 본다.
-
     _log_event(
         "PLANNER.PIPELINE",
         request_id=request_id,
@@ -2112,9 +2009,11 @@ async def build_intent_payload(
         status="success",
         planner_applied=int(planner_applied),
         planner_failed=int(planner_failed),
+        planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED),
+        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["normalized_intent"],
     )
-
     return IntentPayloadV2(normalized_intent=normalized_intent), question_analysis
 
 def merge_planner_hints(intent: Any, qa: Optional[QuestionAnalysis]) -> Any:
