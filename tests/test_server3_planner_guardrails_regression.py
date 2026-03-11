@@ -44,3 +44,11 @@ def test_deterministic_rescue_runs_before_auto_correction_gate() -> None:
     rescue_idx = source.index('if self.mode == "SEARCH":')
     gate_idx = source.index('if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:')
     assert rescue_idx < gate_idx
+
+
+def test_stagewise_action_mode_mismatch_is_non_fatal_guardrail() -> None:
+    source = _server3_source()
+    assert '"planner_source": "stagewise"' in source
+    assert 'RAG.STRATEGY.ACTION_MODE_MISMATCH_STAGEWISE' in source
+    assert 'handling="non_fatal_keep_assembled_strategy"' in source
+    assert 'if qa is not None and planner_source == "stagewise":' in source

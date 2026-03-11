@@ -380,6 +380,7 @@ class QuestionAnalysisV2(BaseModel):
     )
     retrieval_query: Optional[str] = Field(default=None, description="벡터 검색용 최적화된 쿼리")
     confidence: float = Field(ge=0.0, le=1.0, description="분석 신뢰도")
+    planner_source: Optional[Literal["legacy", "stagewise"]] = Field(default=None, description="planner 생성 경로 식별자")
 
     _ALLOWED_RELATIONS = {"project_perf", "perf_project"}
     _FORBIDDEN_PEOPLE_ORG_RELATIONS = {
@@ -1052,6 +1053,7 @@ async def _run_question_analysis_legacy(
         "question": question,
     })
     normalized_payload = _normalize_none_string(result.model_dump())
+    normalized_payload.setdefault("planner_source", "legacy")
     _validate_question_analysis_required_keys(normalized_payload)
     result = QuestionAnalysis.model_validate(normalized_payload)
     _log_event(
@@ -1224,6 +1226,7 @@ def _assemble_question_analysis(*, question: str, conversation_id: str, request_
         "limit": min(stage2.limit, MAX_TOP_K_SIZE),
         "retrieval_query": stage2.retrieval_query or question,
         "confidence": min(stage1.confidence, stage2.confidence),
+        "planner_source": "stagewise",
     }
     qa = QuestionAnalysis.model_validate(payload)
     _log_event("PLANNER.ASSEMBLE", request_id=request_id, conversation_id=conversation_id, mode=qa.mode, action=qa.action, relation=qa.relation, join_key_mode=qa.join_key_mode, target_cols=qa.target_cols, planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED), planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION, planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
@@ -2110,6 +2113,7 @@ def apply_planner_strategy(
         return intent, False
 
     strict_strategy_consistency = str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in ("1", "true", "yes", "y")
+    planner_source = str(getattr(qa, "planner_source", "") or "").strip().lower() or None
     planner_action = str(getattr(qa, "action", "") or "").strip().lower()
     planner_mode = str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None
     expected_mode = action_mode_map.get(planner_action)
@@ -2138,19 +2142,33 @@ def apply_planner_strategy(
                 "reason": mismatch_reason,
             }
             if strict_strategy_consistency:
+                if planner_source == "stagewise":
+                    _log_event(
+                        "RAG.STRATEGY.ACTION_MODE_MISMATCH_STAGEWISE",
+                        **mismatch_fields,
+                        handling="non_fatal_keep_assembled_strategy",
+                    )
+                else:
+                    _log_event(
+                        "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                        **mismatch_fields,
+                    )
+                    raise StrategyViolation(
+                        error_code="PLANNER_ACTION_MODE_MISMATCH",
+                        reason=mismatch_reason,
+                    )
+            if planner_source == "stagewise":
                 _log_event(
-                    "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                    "RAG.STRATEGY.ACTION_MODE_CORRECTED",
+                    **mismatch_fields,
+                    handling="kept_assembled_strategy",
+                )
+            else:
+                _log_event(
+                    "RAG.STRATEGY.ACTION_MODE_CORRECTED",
                     **mismatch_fields,
                 )
-                raise StrategyViolation(
-                    error_code="PLANNER_ACTION_MODE_MISMATCH",
-                    reason=mismatch_reason,
-                )
-            _log_event(
-                "RAG.STRATEGY.ACTION_MODE_CORRECTED",
-                **mismatch_fields,
-            )
-            planner_mode = expected_mode
+                planner_mode = expected_mode
 
     relation_map = {
         "project_perf": ("project", "perf"),
@@ -2271,6 +2289,44 @@ def apply_planner_v2(
     # 왜: 1단계(merge_planner_hints)에서 필터/보조 신호를 흡수하고,
     #     2단계(apply_planner_strategy)에서만 전략 축을 확정해야 strict/compat 정책을 일관되게 적용할 수 있다.
     hinted_intent = merge_planner_hints(intent, qa)
+    planner_source = str(getattr(qa, "planner_source", "") or "").strip().lower() if qa else ""
+    if qa is not None and planner_source == "stagewise":
+        relation_map = {
+            "project_perf": ("project", "perf"),
+            "perf_project": ("perf", "project"),
+        }
+
+        def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
+            merged: dict[str, list[str]] = {}
+
+            def _ingest(source: Any, *, overwrite: bool = False) -> None:
+                if not isinstance(source, dict):
+                    return
+                for key, raw_values in source.items():
+                    values = _normalize_hint_terms(raw_values)
+                    if not values:
+                        continue
+                    if overwrite or key not in merged:
+                        merged[key] = list(values)
+                    else:
+                        merged[key] = _normalize_hint_terms([*merged[key], *values])
+
+            _ingest(base_ids)
+            _ingest(planner_ids, overwrite=True)
+            return merged
+
+        stagewise_patched = replace(
+            hinted_intent,
+            base_route=str(getattr(qa, "head", getattr(hinted_intent, "base_route", "project")) or getattr(hinted_intent, "base_route", "project")).strip().lower(),
+            action=str(getattr(qa, "action", getattr(hinted_intent, "action", "topic")) or getattr(hinted_intent, "action", "topic")).strip().lower(),
+            mode=str(getattr(qa, "mode", getattr(hinted_intent, "mode", "search")) or getattr(hinted_intent, "mode", "search")).strip().lower(),
+            relation=relation_map.get(getattr(qa, "relation", None), getattr(hinted_intent, "relation", None)),
+            join_key_mode=getattr(qa, "join_key_mode", None),
+            target_cols=_normalize_hint_terms(getattr(qa, "target_cols", None)) or list(getattr(hinted_intent, "target_cols", []) or []),
+            ids_map=_merge_ids_map(getattr(hinted_intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
+        )
+        return stagewise_patched, bool(stagewise_patched != intent)
+
     return apply_planner_strategy(
         hinted_intent,
         qa,

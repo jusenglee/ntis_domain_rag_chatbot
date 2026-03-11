@@ -22,7 +22,8 @@
 - 실행 레이어는 Strategy를 **여러 지점에서 재작성하지 않는다.**
 - 전략 필드 변경은 `apply_planner_strategy()` 단일 지점에서만 허용한다.
 - 실행 레이어가 할 수 있는 건 오직 **compile(strategy) → 실행** 뿐이다.
-
+- `QuestionAnalysis.planner_source`로 플래너 생성 경로(`legacy|stagewise`)를 기록한다.
+- `planner_source=stagewise`인 경우 action/mode 불일치는 strict에서도 `StrategyViolation` 대신 경고 로그를 남기고 assemble에서 확정된 전략을 우선 유지한다.
 
 ### 1.2 전략/비전략 변경 책임도
 |구분|필드|변경 책임 함수|기본 정책|
