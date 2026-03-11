@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 
+from pydantic import BaseModel, Field
+
 from rag_parts.pipeline_steps import NormalizedIntent
 from rag_parts.planner_contract import normalize_stats_policy_value
 
@@ -13,6 +15,25 @@ class IntentPayloadV2:
     """RAG intent_payload.v2 계약: normalized_intent 단일 필드."""
 
     normalized_intent: NormalizedIntent
+
+
+Stage1Relation = Literal["project_perf", "perf_project"]
+
+
+class PlannerStage1Decision(BaseModel):
+    action: Literal["topic", "list", "detail", "stats", "download"]
+    head: Literal["project", "perf", "people", "org", "support"]
+    relation_candidate: Optional[Stage1Relation] = None
+    referential_followup: bool = False
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class PlannerStage2Slots(BaseModel):
+    ids_map: Dict[str, list[str]] = Field(default_factory=dict)
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    retrieval_query: Optional[str] = None
+    limit: int = Field(default=20, ge=1)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 @dataclass(frozen=True)
