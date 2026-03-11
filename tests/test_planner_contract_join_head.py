@@ -48,3 +48,16 @@ def test_join_instance_allows_empty_ids_map_for_perf_project_title_query_shape()
         join_key_mode="instance",
     )
     assert violations == []
+
+
+def test_join_instance_person_org_ids_do_not_replace_relation_target_contract() -> None:
+    violations = validate_planner_contract(
+        mode="join",
+        head="project",
+        relation=("perf", "project"),
+        target_cols=["ntis_perf_v1", "ntis_project_v1"],
+        ids_map={"person_no": ["P001"], "org_id": ["O001"]},
+        relation_target_cols=("ntis_perf_v1", "ntis_project_v1"),
+        join_key_mode="instance",
+    )
+    assert violations == []

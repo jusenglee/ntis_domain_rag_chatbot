@@ -512,8 +512,8 @@ class QuestionAnalysisV2(BaseModel):
 
         d["ids_map"] = normalized_ids_map
 
-        # planner가 자주 사용하는 명시적 식별자 키 기준으로 ID 존재 여부를 계산한다.
-        explicit_id_keys = {
+        # planner가 자주 사용하는 명시적 식별자 키를 JOIN seed/LOOKUP seed로 분리한다.
+        join_seed_id_keys = {
             "pjt_id",
             "pjt_no",
             "doi",
@@ -525,31 +525,32 @@ class QuestionAnalysisV2(BaseModel):
             "paper_id",
             "patent_reg_no",
             "patent_app_no",
+        }
+        lookup_seed_id_keys = {
             "person_no",
             "org_id",
             "org_code",
             "biz_no",
         }
-        has_explicit_id = any(
+        has_join_seed_id = any(
             bool(normalized_ids_map.get(key))
-            for key in explicit_id_keys
+            for key in join_seed_id_keys
         )
-
         relation_norm = str(d.get("relation") or "").strip().lower()
         action_norm = str(d.get("action") or "").strip().lower()
         mode_norm = str(d.get("mode") or "").strip().upper()
         relation_is_project_perf = relation_norm in {"project_perf", "perf_project"}
-        is_keyword_search = mode_norm == "SEARCH" or action_norm == "topic"
+        lookup_actions = {"list", "detail", "stats", "download"}
 
         # mode/action/relation 공동 신호 기반 보정:
-        # - explicit ID + project<->perf relation => JOIN
-        # - explicit ID + relation 없음          => LOOKUP
-        # - explicit ID 없음 + 키워드 탐색       => SEARCH
-        if has_explicit_id and relation_is_project_perf:
+        # - has_join_seed_id && relation_is_project_perf                => JOIN
+        # - action in {list,detail,stats,download} && !relation_is_project_perf => LOOKUP
+        # - !has_join_seed_id && action==topic                          => SEARCH
+        if has_join_seed_id and relation_is_project_perf:
             d["mode"] = "JOIN"
-        elif has_explicit_id and not relation_norm:
+        elif (action_norm in lookup_actions) and (not relation_is_project_perf):
             d["mode"] = "LOOKUP"
-        elif (not has_explicit_id) and is_keyword_search:
+        elif (not has_join_seed_id) and action_norm == "topic":
             d["mode"] = "SEARCH"
 
         # --- filters: dict 보장 ---
