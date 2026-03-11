@@ -2182,6 +2182,9 @@ async def build_intent_payload(
 
 def merge_planner_hints(intent: Any, qa: Optional[QuestionAnalysis]) -> Any:
     """비전략 필드(year/perf_types/org_terms/title/keywords 등)만 planner 힌트로 병합한다."""
+    # 왜: mode/relation/join_key_mode 같은 전략 축은 응답 경로 자체를 바꾸므로,
+    #     여기서는 검색 조건/필터 같은 비전략 값만 보강해 "의도 해석의 미세 보정" 역할에 한정한다.
+    #     이렇게 분리해야 이후 apply_planner_strategy에서 전략 일관성 검증을 단일 지점에서 수행할 수 있다.
     if qa is None:
         return intent
 
@@ -2245,6 +2248,8 @@ def apply_planner_strategy(
     conversation_id: Optional[str] = None,
 ) -> tuple[Any, bool]:
     """전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)를 단일 지점에서만 반영한다."""
+    # 왜: 전략 필드는 워크플로 라우팅/조회 방식(RAG vs direct, JOIN 여부)을 직접 결정하므로
+    #     여러 단계에서 중복 수정되면 원인 추적이 어려워진다. 이 함수에 책임을 모아 일관성을 강제한다.
     if qa is None:
         return intent, False
 
@@ -2281,6 +2286,9 @@ def apply_planner_strategy(
 
     if expected_mode and planner_mode and planner_mode != expected_mode:
         if not (planner_mode == "join" and has_join_relation):
+            # 왜: action이 암시하는 모드와 planner 모드가 어긋나면 잘못된 파이프라인(예: JOIN인데 SEARCH 경로)으로
+            #     진입할 수 있다. strict는 즉시 실패로 계약 위반을 드러내고,
+            #     compat는 서비스 연속성을 위해 expected_mode로 교정 후 진행한다.
             mismatch_reason = (
                 f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
             )
@@ -2340,6 +2348,39 @@ def apply_planner_strategy(
     planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
     planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
 
+    # 왜: JOIN 모드는 relation(무엇과 무엇을 결합하는지), join_key_mode(어떤 키로 결합하는지),
+    #     mode 자체가 동시에 맞아야 의미가 완성된다. 셋 중 하나라도 비면 잘못된 결합/빈 결과를 만들 수 있어
+    #     아래 검증으로 조기 차단한다.
+    if planner_mode == "join":
+        join_relation = relation if isinstance(relation, (list, tuple)) else None
+        has_relation = bool(join_relation and len(join_relation) >= 2 and all(str(v or "").strip() for v in join_relation[:2]))
+        join_key_mode = str(getattr(qa, "join_key_mode", "") or "").strip().lower()
+        if not has_relation or not join_key_mode:
+            reason = (
+                "planner join strategy requires non-empty relation and join_key_mode"
+                f"(mode={planner_mode}, relation={relation}, join_key_mode={join_key_mode or None})"
+            )
+            if strict_strategy_consistency:
+                _log_event(
+                    "RAG.STRATEGY.JOIN_FIELDS_MISSING",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    error_code="PLANNER_JOIN_FIELDS_MISSING",
+                    reason=reason,
+                    policy_mode="strict",
+                )
+                raise StrategyViolation(error_code="PLANNER_JOIN_FIELDS_MISSING", reason=reason)
+            _log_event(
+                "RAG.STRATEGY.JOIN_FALLBACK",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                error_code="PLANNER_JOIN_FIELDS_MISSING",
+                reason=reason,
+                policy_mode="compat",
+            )
+            planner_mode = str(getattr(intent, "mode", "search") or "search").strip().lower()
+            relation = getattr(intent, "relation", None)
+
     patched = replace(
         intent,
         base_route=planner_head,
@@ -2391,6 +2432,8 @@ def apply_planner_v2(
     conversation_id: Optional[str] = None,
 ) -> tuple[Any, bool]:
     """planner 적용 엔트리포인트. 비전략 병합 후 전략 필드를 단일 지점에서 적용한다."""
+    # 왜: 1단계(merge_planner_hints)에서 필터/보조 신호를 흡수하고,
+    #     2단계(apply_planner_strategy)에서만 전략 축을 확정해야 strict/compat 정책을 일관되게 적용할 수 있다.
     hinted_intent = merge_planner_hints(intent, qa)
     return apply_planner_strategy(
         hinted_intent,
@@ -2444,6 +2487,12 @@ def build_advanced_workflow():
     workflow = StateGraph(AgentState)
 
     # Add Nodes
+    # 왜 이 순서인가:
+    # 1) load_memory: 과거 대화/컨텍스트를 먼저 불러야 이후 규칙/분석이 맥락 기반으로 동작한다.
+    # 2) rule_precheck: 비용 큰 분석/RAG 이전에 차단·직답 규칙을 먼저 적용해 지연과 비용을 줄인다.
+    # 3) analyze_question: 룰을 통과한 질의만 의도/전략 분석을 수행한다.
+    # 4) judge_knowledge_sufficiency: 기존 컨텍스트로 답할 수 있는지 평가해 불필요한 검색을 피한다.
+    # 5) join_analysis 이후 RAG/직답(기존지식 활용) 경로를 최종 분기한다.
     workflow.add_node("load_memory", node_load_memory)
     workflow.add_node("rule_precheck", node_rule_precheck)
     workflow.add_node("analyze_question", node_analyze_question)
@@ -2470,6 +2519,8 @@ def build_advanced_workflow():
     workflow.add_edge("load_memory", "rule_precheck")
 
     def route_after_rule(state: AgentState):
+        # 왜: rule_precheck에서 정책상 즉시 응답 가능한 질의는
+        #      analyze_question/RAG를 생략해 빠르고 예측 가능한 응답을 준다.
         if state.rule_decision and state.rule_decision.action == "direct_answer":
             return "direct_answer"
         return "analyze_question"
@@ -2488,9 +2539,13 @@ def build_advanced_workflow():
     def route_after_join_analysis(state: AgentState):
         ks = state.knowledge_sufficiency
 
+        # 왜: requires_new_knowledge가 low이고 prev_context가 있으면
+        #      이미 확보된 근거로 두 모델 생성만 수행해 응답 시간을 단축한다.
         if ks.requires_new_knowledge == "low" and state.prev_context:
             return ["generate_answer_solar", "generate_answer_gemma"]
 
+        # 왜: 지식이 부족하거나 이전 컨텍스트가 없으면 hallucination 위험이 높아
+        #      반드시 rag_search를 거쳐 최신/근거 문서를 확보한다.
         return "rag_search"
 
     workflow.add_conditional_edges(
@@ -2516,7 +2571,9 @@ def build_advanced_workflow():
     workflow.add_edge("join_answers", "merge_answers")
 
 
-    # Direct answer also goes to save
+    # 왜 direct_answer와 merge_answers를 모두 save_history로 모으는가:
+    # - 대화 히스토리 저장 경로를 단일화해 후속 turn 메모리 일관성을 유지한다.
+    # - 응답 생성 경로가 달라도 관측(로그/지연/메타) 수집 지점을 하나로 고정해 운영 추적을 단순화한다.
     workflow.add_edge("direct_answer", "save_history")
     workflow.add_edge("merge_answers", "save_history")
 
@@ -3309,6 +3366,9 @@ async def query_stream(payload: QueryRequest):
     graph = app.state.graph
 
     async def event_generator():
+        # 왜 SSE는 `data: ...\n\n` 형식을 강제하는가:
+        # 브라우저 EventSource가 이 구분자로 이벤트 경계를 인식하므로,
+        # 줄바꿈 두 개를 누락하면 클라이언트가 버퍼링 상태로 멈춘 것처럼 보일 수 있다.
         yield f"data: {json.dumps({'conversationId': conversation_id})}\n\n"
         _log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage="request_start", q_len=len(question), q_preview=_mask_query_for_log(question) if _is_debug_logging_enabled() else None)
         request_started_at = time.perf_counter()
@@ -3400,6 +3460,9 @@ async def query_stream(payload: QueryRequest):
                 gemma_content_chars=gemma_done.get("content_chars"),
             )
 
+            # 왜 종료 이벤트를 명시적으로 보내는가:
+            # 스트림 연결은 열려있을 수 있으므로, 클라이언트는 status=done을 받아야
+            # 로딩 상태를 종료하고 후처리(참고문헌 렌더링 등)를 안전하게 실행할 수 있다.
             yield f"data: {json.dumps({'status': 'done'})}\n\n"
 
         except Exception as e:
@@ -3419,6 +3482,9 @@ async def query_stream(payload: QueryRequest):
                 total_ms=total_ms,
             )
             if degraded:
+                # 왜 StrategyViolation은 degraded 사용자 메시지로 변환하는가:
+                # 내부 전략 계약 오류를 그대로 노출하면 사용자는 복구 행동을 알기 어렵다.
+                # 친화 메시지로 바꿔 재질문/질문 단순화 같은 다음 행동을 안내한다.
                 user_message = _friendly_strategy_violation_message(
                     error_code=error_code,
                     reason=reason,
@@ -3471,6 +3537,9 @@ async def query_debug(payload: QueryRequest):
         messages = final_state.get("messages", []) if isinstance(final_state, dict) else []
         output_message = getattr(messages[-1], "content", "") if messages else ""
 
+        # 왜 디버그 엔드포인트가 상태 스냅샷을 반환하는가:
+        # 단일 요청에서 planner 결과/지식충분성/latency를 함께 확인해
+        # "어느 노드에서 어떤 분기와 시간이 발생했는지"를 재현 가능한 형태로 점검하기 위함이다.
         return {
             "success": True,
             "conversation_id": conversation_id,
@@ -3508,6 +3577,8 @@ async def query_debug(payload: QueryRequest):
 
 @app.get("/health")
 async def health_check():
+    # 왜 health는 "서비스 가능 최소 조건"(메모리 연결 + 그래프 준비 상태)을 분리해 노출하는가:
+    # 전체 장애와 부분 장애를 구분해 운영자가 즉시 우회/복구 판단을 하도록 돕는다.
     ok = False
     if kv_store:
         ok = await kv_store.ping()
@@ -3522,6 +3593,9 @@ async def health_check():
 @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
 async def get_metrics() -> MetricSnapshot:
     """server3 앱에서 Prometheus 메트릭 스냅샷을 제공한다."""
+    # 왜 pull 방식 스냅샷 API를 별도로 두는가:
+    # 대시보드/알람 시스템이 단발 조회로 현재 상태를 수집하기 쉽고,
+    # SSE 구독 없이도 운영 자동화 스크립트에서 재사용 가능하다.
     return await collect_metrics_snapshot(app.state.metrics_http)
 
 
@@ -3532,10 +3606,14 @@ async def stream_metrics(request: Request) -> StreamingResponse:
     async def event_generator() -> Any:
         while True:
             if await request.is_disconnected():
+                # 왜 즉시 종료하는가:
+                # 연결이 끊긴 클라이언트에 계속 push하면 불필요한 수집/직렬화 비용이 누적된다.
                 break
 
             snapshot = await collect_metrics_snapshot(request.app.state.metrics_http)
             payload = snapshot.model_dump_json(by_alias=True)
+            # 왜 metrics도 SSE 규약(event/data + \n\n)을 지키는가:
+            # 프런트/관측 도구가 동일 파서로 일반 응답 스트림과 메트릭 스트림을 처리할 수 있다.
             yield f"event: metrics\ndata: {payload}\n\n"
 
             await asyncio.sleep(METRICS_STREAM_INTERVAL_SECONDS)
