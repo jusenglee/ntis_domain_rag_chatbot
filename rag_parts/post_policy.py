@@ -49,19 +49,20 @@ def dedup_by_doc_id(points: List[Any], max_keep: Optional[int] = None) -> List[A
             pl = {}
         doc_id = str(pl.get("doc_id") or "")
         col = str(pl.get("_collection") or "")
-        pid = str(getattr(p, "id", ""))
+        pid = str(getattr(p, "pjt_id", ""))
+        pjt_id = str(getattr(p, "pjt_id", ""))
+        pjt_no = str(getattr(p, "pjt_no", ""))
+        rjt_id = str(getattr(p, "rjt_id", ""))
 
-        if doc_id:
-            if doc_id in seen_doc:
-                continue
-            seen_doc.add(doc_id)
-            out.append(p)
-        else:
-            k = (col, pid)
-            if k in seen_fallback:
-                continue
-            seen_fallback.add(k)
-            out.append(p)
+
+        if doc_id in seen_doc:
+            continue
+        seen_doc.add(doc_id)
+        seen_doc.add(pjt_id)
+        seen_doc.add(pjt_no)
+        if rjt_id:
+            seen_doc.add(rjt_id)
+        out.append(p)
 
         if (max_keep is not None) and (len(out) >= max_keep):
             break
