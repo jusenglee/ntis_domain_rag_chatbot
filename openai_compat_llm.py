@@ -131,6 +131,7 @@ class OpenAICompatChatModel(BaseChatModel):
         }
         if max_tokens_hint is not None:
             request_kwargs["max_tokens"] = max_tokens_hint
+            request_kwargs["max_completion_tokens"] = max_tokens_hint
         if stop:
             request_kwargs["stop"] = stop
         if request_id:
@@ -227,7 +228,7 @@ class OpenAICompatChatModel(BaseChatModel):
         usage = response.usage.model_dump() if getattr(response, "usage", None) else None
 
         logger.info(
-            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d usage=%s base_url=%s",
+            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d request_max_tokens=%s usage=%s base_url=%s",
             request_id,
             conversation_id,
             self.model_name,
@@ -235,6 +236,7 @@ class OpenAICompatChatModel(BaseChatModel):
             len(messages),
             len(content),
             len(reasoning),
+            request_kwargs.get("max_tokens"),
             usage,
             self.base_url,
         )
@@ -362,7 +364,7 @@ class OpenAICompatChatModel(BaseChatModel):
             logger.info(
                 "[openai_compat_llm] stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
                 "chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d emitted_reasoning_event_n=%d "
-                "content_char_n=%d reasoning_char_n=%d finish_reason=%s closed=%s model=%s base_url=%s",
+                "content_char_n=%d reasoning_char_n=%d request_max_tokens=%s finish_reason=%s closed=%s model=%s base_url=%s",
                 request_id,
                 conversation_id,
                 dt_ms,
@@ -374,6 +376,7 @@ class OpenAICompatChatModel(BaseChatModel):
                 emitted_reasoning_event_n,
                 content_char_n,
                 reasoning_char_n,
+                request_kwargs.get("max_tokens"),
                 last_finish_reason,
                 closed,
                 self.model_name,
