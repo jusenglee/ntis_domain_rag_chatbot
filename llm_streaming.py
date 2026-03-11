@@ -41,6 +41,13 @@ async def run_llm_streaming(
 ) -> Tuple[str, Dict[str, Any]]:
     """공통 스트리밍 실행 유틸.
 
+    타임아웃 정책:
+      - ``ttft_deadline_ms``: 첫 "의미 있는 토큰"(reasoning/content 포함)을 기다리는 상한.
+        모델이 첫 델타를 전혀 보내지 못하는 구간을 제어한다.
+      - ``gen_deadline_ms``: 첫 청크를 받은 뒤부터 적용되는 "생성 지속 시간" 상한.
+        이미 스트림이 시작된 이후 장시간 늘어지는 tail-latency를 제어한다.
+      - ``deadline_ms``: 하위 호환용 단일 값. ``ttft_deadline_ms``가 없을 때 TTFT 상한으로 사용.
+
     반환:
       - final_text: 최종 텍스트
       - metrics: 실행 메트릭/정책 결과
@@ -109,6 +116,9 @@ async def run_llm_streaming(
                 if gen_deadline_ms is not None:
                     gen_deadline_at = first_chunk_at + (gen_deadline_ms / 1000)
 
+            # reasoning 델타는 사용자 최종 답변 문자열에 합치지 않는다.
+            # 이유: 모델 내부 추론 노출 방지/정책 준수 + UI 최종 답변 오염 방지.
+            # 대신 reasoning_chars 메트릭으로만 누적해 운영 관측 신호로 사용한다.
             if stream_field == "reasoning":
                 reasoning_chars += len(text)
                 continue
@@ -149,7 +159,10 @@ async def run_llm_streaming(
 
     stream_content_emitted_chunks = content_emitted_chunks
 
-    # 생성 제한으로 끊긴 경우, 지나치게 짧은 출력은 별도 정책(재시도/폴백)으로 라우팅할 수 있는 분기 포인트
+    # 생성 제한(시간/길이)으로 잘린 출력이 너무 짧으면, "부분 성공"이 아닌 "품질 위험"으로 분류한다.
+    # short_output_guard_triggered=True는 운영 관점에서
+    # "응답은 나갔지만 사용자가 쓸 수 없을 가능성이 높다"는 신호이며,
+    # 상위 계층에서 재시도/논스트림 폴백/알림 정책을 태우는 트리거로 사용한다.
     short_output_guard_min_chars = 40
     if (gen_deadline_exceeded or char_limited) and 0 < emitted_chars < short_output_guard_min_chars:
         short_output_guard_triggered = True

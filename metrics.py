@@ -34,7 +34,10 @@ class MetricSnapshot(BaseModel):
 
     Fields:
         - requestCount: 현재 시점에 처리 중인 vLLM 요청 수 합계.
+          ``None``이면 해당 시점에서 값을 확정하지 못했다는 의미다.
+          (Prometheus 수집 실패, 응답 파싱 실패, 혹은 빈 시계열)
         - gpuUtilPercent: 현재 시점의 GPU 사용률 평균(0~100).
+          ``None`` 의미는 requestCount와 동일하다.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -188,6 +191,8 @@ async def stream_metrics(request: Request) -> StreamingResponse:
 
     async def event_generator() -> AsyncIterable[str]:
         while True:
+            # FastAPI/ASGI 레벨에서 클라이언트 연결이 끊긴 것이 감지되면 즉시 루프를 종료한다.
+            # (무한 재시도/백그라운드 누수 방지)
             if await request.is_disconnected():
                 break
 
@@ -195,6 +200,8 @@ async def stream_metrics(request: Request) -> StreamingResponse:
             payload = snapshot.model_dump_json(by_alias=True)
             yield f"event: metrics\ndata: {payload}\n\n"
 
+            # SSE 전송 주기: STREAM_INTERVAL_SECONDS(기본 2초)마다 최신 스냅샷을 푸시한다.
+            # snapshot 필드가 None이어도 이벤트 자체는 전송하여 "수집 불가 상태"를 명시적으로 노출한다.
             await asyncio.sleep(STREAM_INTERVAL_SECONDS)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

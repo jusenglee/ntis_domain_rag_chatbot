@@ -26,7 +26,16 @@ class OpenAICompatStreamError(RuntimeError):
 
 
 class EmptyStreamContentError(OpenAICompatStreamError):
-    """스트림에서 실제 텍스트(content) 청크를 수신하지 못했을 때 발생"""
+    """스트림에서 실제 텍스트(content) 청크를 수신하지 못했을 때 발생.
+
+    발생 조건:
+      - 스트림 연결/루프는 정상 종료되었지만 ``emitted_content_chunk_n == 0`` 인 경우.
+      - reasoning-only 청크만 오거나 빈 delta만 오는 경우도 포함된다.
+
+    전파 정책:
+      - 이 예외는 이 레이어에서 복구하지 않고 그대로 상위로 전달(fail-fast)한다.
+      - 재시도/폴백(예: non-stream 전환) 여부는 호출자 정책(예: llm_streaming / API 핸들러)에서 결정한다.
+    """
 
 
 class OpenAICompatChatModel(BaseChatModel):
@@ -343,6 +352,9 @@ class OpenAICompatChatModel(BaseChatModel):
                     )
 
             if emitted_content_chunk_n == 0:
+                # 계약 위반으로 간주: 스트림은 끝났지만 사용자에게 전달 가능한 content 토큰이 0개.
+                # 여기서는 재시도/폴백을 수행하지 않고 EmptyStreamContentError를 상위로 전파한다.
+                # 실제 재시도 횟수/폴백 방식(예: non-stream 호출)은 상위 오케스트레이션 레이어에서 결정한다.
                 raise EmptyStreamContentError(
                     "No content emitted in stream. "
                     f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}, extra_body={extra_body}"
