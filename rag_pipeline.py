@@ -3882,6 +3882,9 @@ def _run_rag_with_vectors(
     # fail-close 기본값: planner 계약 위반은 기본 차단하고, 필요 시 운영자가 env로 완화한다.
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "0")
+    runtime_env = str(os.getenv("APP_ENV", os.getenv("ENV", "")) or "").strip().lower()
+    if runtime_env in {"staging", "debug"}:
+        planner_invalid_fallback = False
     force_fallback_chat = _env_flag("RAG_FORCE_FALLBACK_CHAT", "0")
     planner_mode_locked, planner_relation_locked, planner_target_cols_locked = _derive_planner_locks(plan)
     _assert_allowlist_only(
@@ -3897,6 +3900,7 @@ def _run_rag_with_vectors(
             LOG_KEY_PLANNER_INVALID_FALLBACK: int(planner_invalid_fallback),
             LOG_KEY_FORCE_FALLBACK_CHAT: int(force_fallback_chat),
         },
+        runtime_env=runtime_env or "unknown",
         allowed_branches=["compile_validation_only"],
         forbidden_branches=["hinted_target_cols_redecision", "effective_allow_redecision"],
         planner_relation=planner_relation_locked,

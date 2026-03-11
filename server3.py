@@ -514,11 +514,18 @@ class QuestionAnalysisV2(BaseModel):
             "pjt_id",
             "pjt_no",
             "doi",
+            "issn",
+            "eissn",
+            "pissn",
             "perf_id",
             "rst_id",
             "paper_id",
             "patent_reg_no",
             "patent_app_no",
+            "person_no",
+            "org_id",
+            "org_code",
+            "biz_no",
         }
         has_explicit_id = any(
             bool(normalized_ids_map.get(key))
@@ -529,7 +536,7 @@ class QuestionAnalysisV2(BaseModel):
         action_norm = str(d.get("action") or "").strip().lower()
         mode_norm = str(d.get("mode") or "").strip().upper()
         relation_is_project_perf = relation_norm in {"project_perf", "perf_project"}
-        is_keyword_search = mode_norm == "SEARCH" or action_norm in {"list", "topic"}
+        is_keyword_search = mode_norm == "SEARCH" or action_norm == "topic"
 
         # mode/action/relation 공동 신호 기반 보정:
         # - explicit ID + project<->perf relation => JOIN
@@ -615,21 +622,38 @@ class QuestionAnalysisV2(BaseModel):
         )
 
         if org_terms_for_routing:
-            if any(token in role_hint_text for token in ("수행", "주관")):
+            has_lead_hint = any(token in role_hint_text for token in ("수행", "주관"))
+            has_participant_hint = any(token in role_hint_text for token in ("참여", "공동", "컨소시엄"))
+            has_affiliation_hint = "소속" in role_hint_text
+
+            if has_lead_hint:
                 filters["lead_org_name"] = _append_unique(
                     _coerce_str_list(filters.get("lead_org_name")),
                     org_terms_for_routing,
                 )
-            if any(token in role_hint_text for token in ("참여", "공동", "컨소시엄")):
+            if has_participant_hint:
                 filters["participant_org_name"] = _append_unique(
                     _coerce_str_list(filters.get("participant_org_name")),
                     org_terms_for_routing,
                 )
-            if "소속" in role_hint_text:
+            if has_affiliation_hint:
                 filters["people_affiliation_org_name"] = _append_unique(
                     _coerce_str_list(filters.get("people_affiliation_org_name")),
                     org_terms_for_routing,
                 )
+
+            # 역할 힌트가 명확하면 해당 슬롯만 유지해 기관 역할 혼용을 줄인다.
+            role_hint_count = int(has_lead_hint) + int(has_participant_hint) + int(has_affiliation_hint)
+            if role_hint_count == 1:
+                if has_lead_hint:
+                    filters["participant_org_name"] = []
+                    filters["people_affiliation_org_name"] = []
+                elif has_participant_hint:
+                    filters["lead_org_name"] = []
+                    filters["people_affiliation_org_name"] = []
+                elif has_affiliation_hint:
+                    filters["lead_org_name"] = []
+                    filters["participant_org_name"] = []
 
         d["filters"] = filters
 
@@ -707,26 +731,12 @@ class QuestionAnalysisV2(BaseModel):
             if relation_norm not in self._ALLOWED_RELATIONS:
                 raise ValueError(f"PLANNER_RELATION_INVALID:{relation_norm}")
 
-        if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
-            return self
-
+        # deterministic rescue: 항상 실행되어 SEARCH 오염을 줄인다.
         if self.mode != "JOIN":
             try:
                 object.__setattr__(self, "join_key_mode", None)
             except Exception:
                 pass
-        else:
-            ids_map = dict(self.ids_map or {})
-            pjt_ids = [str(v).strip() for v in ids_map.get("pjt_id", []) if str(v).strip()]
-            pjt_nos = [str(v).strip() for v in ids_map.get("pjt_no", []) if str(v).strip()]
-            if self.join_key_mode == "group" and (not pjt_nos) and pjt_ids:
-                logger.warning(
-                    "[PLANNER] JOIN join_key_mode auto-correction: group->instance (reason=missing_pjt_no has_pjt_id=1)"
-                )
-                try:
-                    object.__setattr__(self, "join_key_mode", "instance")
-                except Exception:
-                    pass
 
         if self.mode == "SEARCH":
             filters = dict(self.filters or {})
@@ -759,6 +769,23 @@ class QuestionAnalysisV2(BaseModel):
             if has_name_lookup_signal:
                 try:
                     object.__setattr__(self, "mode", "LOOKUP")
+                except Exception:
+                    pass
+
+        # heuristic correction: 플래그가 켜졌을 때만 실행
+        if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
+            return self
+
+        if self.mode == "JOIN":
+            ids_map = dict(self.ids_map or {})
+            pjt_ids = [str(v).strip() for v in ids_map.get("pjt_id", []) if str(v).strip()]
+            pjt_nos = [str(v).strip() for v in ids_map.get("pjt_no", []) if str(v).strip()]
+            if self.join_key_mode == "group" and (not pjt_nos) and pjt_ids:
+                logger.warning(
+                    "[PLANNER] JOIN join_key_mode auto-correction: group->instance (reason=missing_pjt_no has_pjt_id=1)"
+                )
+                try:
+                    object.__setattr__(self, "join_key_mode", "instance")
                 except Exception:
                     pass
 
@@ -1042,9 +1069,9 @@ async def _run_question_analysis(
         - "None" 문자열 금지
 
         [head 의미]
-        head는 질문의 기준(anchor) 엔티티입니다.
-        - relation="project_perf"이면 head="project"
-        - relation="perf_project"이면 head="perf"
+        head는 relation의 target(relation[1]) 엔티티입니다.
+        - relation="project_perf"이면 head="perf"
+        - relation="perf_project"이면 head="project"
 
         [mode 결정]
         1. project↔perf 관계가 명확하면 JOIN
@@ -1079,8 +1106,8 @@ async def _run_question_analysis(
         2) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"participant_researcher_name":["김재수"]}},"limit":20,"retrieval_query":"김재수 참여 과제","confidence":0.92}}
         3) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"list","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{}},"filters":{{"lead_org_name":["ETRI"]}},"limit":20,"retrieval_query":"ETRI 수행 과제","confidence":0.9}}
         4) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"LOOKUP","head":"project","action":"detail","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":1,"retrieval_query":"1711015550 과제 상세","confidence":0.98}}
-        5) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"project","action":"list","relation":"project_perf","join_key_mode":"instance","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":20,"retrieval_query":"1711015550 성과 목록","confidence":0.97}}
-        6) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"project","action":"list","relation":"project_perf","join_key_mode":"group","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_no":["PJT-2020-XXXX"]}},"filters":{{}},"limit":20,"retrieval_query":"PJT-2020-XXXX 성과 전체","confidence":0.95}}
+        5) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"perf","action":"list","relation":"project_perf","join_key_mode":"instance","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_id":["1711015550"]}},"filters":{{}},"limit":20,"retrieval_query":"1711015550 성과 목록","confidence":0.97}}
+        6) {{"strategy_version":"{PLANNER_SCHEMA_VERSION}","mode":"JOIN","head":"perf","action":"list","relation":"project_perf","join_key_mode":"group","target_cols":["ntis_project_v1","ntis_perf_v1"],"ids_map":{{"pjt_no":["PJT-2020-XXXX"]}},"filters":{{}},"limit":20,"retrieval_query":"PJT-2020-XXXX 성과 전체","confidence":0.95}}
 
         {{format_instructions}}
     """
@@ -2136,33 +2163,41 @@ def apply_planner_strategy(
     planner_action = str(getattr(qa, "action", "") or "").strip().lower()
     planner_mode = str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None
     expected_mode = action_mode_map.get(planner_action)
+    relation_raw = getattr(qa, "relation", None)
+    has_join_relation = False
+    if isinstance(relation_raw, (tuple, list)):
+        has_join_relation = len(relation_raw) >= 2 and bool(str(relation_raw[0]).strip()) and bool(str(relation_raw[1]).strip())
+    else:
+        has_join_relation = bool(str(relation_raw or "").strip())
+
     if expected_mode and planner_mode and planner_mode != expected_mode:
-        mismatch_reason = (
-            f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
-        )
-        mismatch_fields = {
-            "request_id": request_id,
-            "conversation_id": conversation_id,
-            "planner_action": planner_action,
-            "original_mode": planner_mode,
-            "corrected_mode": expected_mode,
-            "error_code": "PLANNER_ACTION_MODE_MISMATCH",
-            "reason": mismatch_reason,
-        }
-        if strict_strategy_consistency:
+        if not (planner_mode == "join" and has_join_relation):
+            mismatch_reason = (
+                f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
+            )
+            mismatch_fields = {
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "planner_action": planner_action,
+                "original_mode": planner_mode,
+                "corrected_mode": expected_mode,
+                "error_code": "PLANNER_ACTION_MODE_MISMATCH",
+                "reason": mismatch_reason,
+            }
+            if strict_strategy_consistency:
+                _log_event(
+                    "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                    **mismatch_fields,
+                )
+                raise StrategyViolation(
+                    error_code="PLANNER_ACTION_MODE_MISMATCH",
+                    reason=mismatch_reason,
+                )
             _log_event(
-                "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                "RAG.STRATEGY.ACTION_MODE_CORRECTED",
                 **mismatch_fields,
             )
-            raise StrategyViolation(
-                error_code="PLANNER_ACTION_MODE_MISMATCH",
-                reason=mismatch_reason,
-            )
-        _log_event(
-            "RAG.STRATEGY.ACTION_MODE_CORRECTED",
-            **mismatch_fields,
-        )
-        planner_mode = expected_mode
+            planner_mode = expected_mode
 
     relation_map = {
         "project_perf": ("project", "perf"),
