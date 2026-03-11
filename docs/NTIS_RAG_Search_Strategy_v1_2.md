@@ -142,7 +142,6 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 
 ```json
 {
-  "strategy_version": "v2",
   "mode": "SEARCH|LOOKUP|JOIN",
   "head": "project|perf|people|org|support",
   "action": "topic|list|detail|stats|download",
@@ -188,7 +187,6 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
   - 그 외 → `false`
 
 ### 7.2 로깅/응답 반영
-- 로그는 `strategy_version`(플래너 계약 버전)와 `policy_version`(실행 정책 버전)을 분리 기록
 - 응답/디버그 payload에 아래를 함께 노출:
   - `policy_version`
   - `lookup_title_filter_policy`
@@ -203,7 +201,6 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 - [ ] LOOKUP에서 이름 기반 조건이 하드 게이트(`min_should=1`)로 적용되는가
 - [ ] JOIN에서 `join_key_mode`와 ids_map 규칙이 계약대로 검증/보정되는가
 - [ ] 실행 레이어가 전략을 변경하지 않고 컴파일만 수행하는가
-- [ ] `strategy_version`과 `policy_version`이 분리 로깅되는가
 
 ---
 
