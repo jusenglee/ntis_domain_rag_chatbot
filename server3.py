@@ -1145,7 +1145,13 @@ async def _run_question_analysis(
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", "[대화 이력]\n{history}\n\n[이전 정보]\n{prev_context}\n\n[현재 질문]\n{question}")
+        (
+            "human",
+            "<conversation_history>{history}</conversation_history>\n"
+            "<previous_context>{prev_context}</previous_context>\n"
+            "<user_query>{question}</user_query>\n\n"
+            "JSON 객체 1개만 출력"
+        )
     ])
 
     planner_llm = llm.bind(
