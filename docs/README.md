@@ -77,24 +77,25 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 ## 4. 상태/백로그/세션 로그(최근 5개만 유지)
 
 ### 4.1 현재 상태
-- JOIN 계약(`head == relation target`, `join_key_mode` XOR, Hop2 key-only 필터) 자체는 코드/문서 정합이 높은 상태.
-- 다만 실행 기본값은 여전히 compat 성격(`RAG_PLANNER_INVALID_FALLBACK=1`, `RAG_STRICT_STRATEGY_CONSISTENCY=0`)이어서 “문서상 strict 원칙”과 완전 일치하지 않음.
-- 전략 재작성 경로가 `apply_planner_v2` 외에도 parser/validator/normalizer에 분산되어 있어 단일 책임 경계가 아직 미완.
-- people/org relation JOIN 금지는 upstream에서 대부분 차단되지만, executor late guard는 기본 경고 경로가 남아 있음.
+- planner 내부 생성 경로에 **stagewise skeleton** 이 도입됨: `PLANNER_STAGEWISE_ENABLED` 플래그, 외부화된 프롬프트(`planner_stage1_v1.md`, `planner_stage2_v1.md`, `planner_legacy_v2.md`), stage별 스키마(`PlannerStage1Decision`, `PlannerStage2Slots`) 및 stage별 관측 로그(`PLANNER.STAGE1`, `PLANNER.GATE`, `PLANNER.STAGE2`, `PLANNER.ASSEMBLE`)가 추가됨.
+- executor-facing 최종 계약(`QuestionAnalysisV2`)의 shape는 유지되며, stagewise는 **internal planner generation path** 만 변경함.
+- 현재 운영 리스크 1: 기본값이 아직 `PLANNER_STAGEWISE_ENABLED=false`여서, 환경 설정 누락 시 stagewise가 아니라 legacy planner를 탈 수 있음.
+- 현재 운영 리스크 2: stage2에서 새로 추출한 `ids_map`이 최종 전략 재판정(post-stage2 re-gate)에 아직 반영되지 않아, slot은 맞고 strategy는 틀리는 케이스가 남아 있음.
+- 현재 운영 리스크 3: stagewise assembled 결과가 이후 `apply_planner_strategy()`의 action/mode strict mismatch 검사에 의해 다시 실패할 수 있음.
 
 ### 4.2 백로그(Top)
-- [x] **P0 관측성 표준화(1차)**: `policy_mode`(strict/compat)와 `execution_mode`(search/lookup/join)를 분리하고 `REQ.FAIL` 구조화 이벤트를 추가.
-- [ ] **P1 기본값 정합화**: `RAG_PLANNER_INVALID_FALLBACK=0` 기본 전환(호환모드는 opt-in).
-- [ ] **P2 전략 재작성 인벤토리 정리**: `apply_planner_v2` + `normalize_planner_payload` + `validate_join_contract` + `normalize_intent`를 단일 책임 모델로 정리.
-- [ ] **P3 people/org 조기 차단 강화**: parser/intent 단계에서 forbidden relation 확정 차단, executor는 최종 안전장치로 축소.
-- [ ] **P4 회귀 고정**: strict/compat 정책 축 + 복합 질의 축 골든 테스트 분리.
+- [ ] **P0 stagewise 기본 경로 정합화**: staging/prod에서 `PLANNER_STAGEWISE_ENABLED=true`를 기본 적용하거나, `planner_legacy_v2.md`를 예전 full prompt 수준으로 복원.
+- [ ] **P0 stagewise 후단 재실패 차단**: `apply_planner_strategy()`가 stagewise assembled 결과에 대해 `PLANNER_ACTION_MODE_MISMATCH`를 다시 던지지 않도록 경로 분리 또는 검증 우회.
+- [ ] **P1 post-stage2 re-gate**: stage2에서 새로 추출한 `pjt_id/pjt_no/doi/rst_id/patent_*`를 JOIN/LOOKUP 재판정에 반영.
+- [ ] **P1 support target 정합화**: planner gate의 `ntis_supports_v1`와 런타임 상수/실제 컬렉션 설정 일치 점검.
+- [ ] **P2 stage 프롬프트/validator 확장**: stage1 few-shot 보강(support/perf_project/stats/detail), stage2 filter allowlist·역할 슬롯 강화, `ids_map` semantic validator 확장.
 
 ### 4.3 세션 로그(최근 5개만 유지)
-- 2026-03-09: planner_contract/rag_pipeline/filters/query_intent/전략문서 교차 점검 결과를 문서 캐시에 반영. 주요 결론은 “JOIN 계약은 강함, 불변 계약 기본값은 미정합”.
-- 2026-03-09: 문서-주석 정합성 점검 수행. 코드 주석은 “문서상 strict 원칙 vs 현재 compat 경로 존재”를 명시하도록 갱신.
-- 2026-03-09: strict 전환 관련 ADR 초안(단계적 전환 + 조기 차단 우선)을 추가.
-- 2026-03-09: `metrics.py` API 계약 문서화(`/metrics`, `/metrics/stream`, None/로깅 정책, 환경 변수 기본값) + 함수 docstring 보강.
-- 2026-03-03: Solar(vLLM) 스트리밍 “reasoning 먼저/ content 지연” 이슈 원인 정리 + 스트리밍 계약/트리아지 문서 반영.
+- 2026-03-12: planner giant prompt를 external prompt 파일(`planner_stage1_v1.md`, `planner_stage2_v1.md`, `planner_legacy_v2.md`)로 분리하고 prompt cache loader를 추가.
+- 2026-03-12: planner를 stage1 분류 → deterministic gate → stage2 슬롯 추출 → final assemble 구조로 분리하는 stagewise skeleton을 코드에 반영.
+- 2026-03-12: `PlannerStage1Decision`, `PlannerStage2Slots`, `_sanitize_ids_map_semantics()`, `PLANNER.STAGE1/GATE/STAGE2/ASSEMBLE`, `PLANNER.IDS_MAP.INVALID_VALUE` 관측 로그를 추가.
+- 2026-03-12: 후속 검토 결과, 남은 핵심 리스크를 `legacy default`, `post-stage2 re-gate 부재`, `stagewise 후단 mismatch 재실패`, `support target 정합화`로 정리.
+- 2026-03-09: strict/compat 계약 정합성과 fallback/보정 경로 잔존 이슈를 문서 캐시에 반영.
 
 ## 5. 스트리밍 장애 정책(요약)
 - 스트림 실패 시 non-stream fallback 재시도는 하지 않는다(지연 최소화 우선).
