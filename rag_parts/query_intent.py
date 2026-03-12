@@ -574,6 +574,81 @@ def extract_org_role(q: str) -> Optional[str]:
     return ranked[0][0]
 
 
+def extract_people_terms(q: str, kws: List[str], *, max_terms: int = 3) -> List[str]:
+    """질의/키워드에서 사람 이름 후보를 추출한다."""
+    text = " ".join([q or ""] + list(kws or []))
+    if not text.strip() or max_terms <= 0:
+        return []
+
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _append(term: str) -> None:
+        value = str(term or "").strip()
+        if not value:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        out.append(value)
+
+    for name in _extract_people_terms_for_affiliation(text):
+        _append(name)
+        if len(out) >= max_terms:
+            return out[:max_terms]
+
+    for pattern in (_NAME_LABEL_RE, _NAME_NEAR_CUE_RE):
+        for match in pattern.finditer(text):
+            _append(match.group(1) or "")
+            if len(out) >= max_terms:
+                return out[:max_terms]
+
+    return out[:max_terms]
+
+
+def extract_perf_types(q: str, kws: List[str]) -> List[str]:
+    """질의/키워드에서 성과유형 태그 후보를 추출한다."""
+    text = " ".join([q or ""] + list(kws or []))
+    return _normalize_tag_filters(pick_perf_tag_filters(text), PERF_TAGS)
+
+
+def extract_title_terms(q: str, kws: List[str], *, max_terms: int = 4) -> List[str]:
+    """질의/키워드에서 제목성 검색어 후보를 추출한다."""
+    text = " ".join([q or ""] + list(kws or []))
+    if not text.strip() or max_terms <= 0:
+        return []
+
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _append(raw: str) -> None:
+        value = str(raw or "").strip(" \t\n\r\"'“”‘’[]()")
+        if len(value) < 2:
+            return
+        lowered = value.lower()
+        if lowered in seen:
+            return
+        seen.add(lowered)
+        out.append(value)
+
+    for pattern in (r'"([^"\n]{2,80})"', r"'([^'\n]{2,80})'", r"‘([^’\n]{2,80})’", r"“([^”\n]{2,80})”"):
+        for match in re.finditer(pattern, text):
+            _append(match.group(1))
+            if len(out) >= max_terms:
+                return out[:max_terms]
+
+    title_like_pattern = re.compile(
+        r"(?:제목|title|논문명|특허명|보고서명)\s*(?:은|는|이|가|:|\s)*([A-Za-z0-9가-힣][A-Za-z0-9가-힣\-_/ ]{1,80})",
+        re.IGNORECASE,
+    )
+    for match in title_like_pattern.finditer(text):
+        _append(match.group(1))
+        if len(out) >= max_terms:
+            return out[:max_terms]
+
+    return out[:max_terms]
+
+
 def extract_id_candidates(q: str, kws: List[str]) -> Dict[str, List[str]]:
     """타입별 ID 후보 추출."""
     qtext = (q or "")

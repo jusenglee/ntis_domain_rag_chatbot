@@ -188,6 +188,9 @@ def normalize_intent(
         hint_lead_org_terms: Optional[List[str]] = None,
         hint_participant_org_terms: Optional[List[str]] = None,
         hint_people_affiliation_org_terms: Optional[List[str]] = None,
+        hint_years: Optional[List[str]] = None,
+        hint_perf_types: Optional[List[str]] = None,
+        hint_title_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
     # allow_strategy_fallback 운영 기본값을 False로 두는 이유:
     # - planner가 이미 mode/action/relation 계약을 만든 뒤에 재분류를 허용하면
@@ -275,9 +278,12 @@ def normalize_intent(
         if relation is None:
             relation = fallback.relation
 
-    perf_types_raw = _normalize_terms(getattr(intent, "perf_types", None) or [])
+    perf_types_raw = _normalize_terms(hint_perf_types or getattr(intent, "perf_types", None) or [])
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
+
+    years = _normalize_terms(hint_years or getattr(intent, "years", None) or [])
+    title_terms = _normalize_terms(hint_title_terms or getattr(intent, "title", None) or [])
 
     normalized_join_key_mode, join_parsing_warnings, join_contract_violations = normalize_join_key_mode(
         getattr(intent, "join_key_mode", None),
@@ -312,7 +318,7 @@ def normalize_intent(
         planner_limit=getattr(intent, "planner_limit", None),
         retrieval_query=(str(getattr(intent, "retrieval_query", "") or "").strip() or None),
         planner_confidence=getattr(intent, "planner_confidence", None),
-        years=_normalize_terms(getattr(intent, "years", None) or []),
+        years=years,
         year_from=(str(getattr(intent, "year_from", "") or "").strip() or None),
         year_to=(str(getattr(intent, "year_to", "") or "").strip() or None),
         people_terms=people_terms,
@@ -323,6 +329,7 @@ def normalize_intent(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         perf_types=perf_types,
+        title=title_terms,
         keywords=_normalize_terms(getattr(intent, "keywords", None) or keywords or []),
         perf_tag_filters=_normalize_terms(getattr(intent, "perf_tag_filters", None) or []),
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),
