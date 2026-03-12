@@ -7,11 +7,67 @@
 
 
 ## 0) 이번 세션 결론(변경 여부)
-- 계약 변경 여부: **없음** (코드 변경 없이 문서 캐시/정합성 점검만 수행)
+- 계약 변경 여부: **있음 (internal planner generation contract 변경)**  
+  - external executor-facing final strategy contract(`QuestionAnalysisV2`)의 shape는 유지됨
+  - 단, planner 내부 생성 절차는 one-shot giant prompt에서 **stagewise planner(stage1 + deterministic gate + stage2 + assemble)** 로 확장됨
 - 확인된 운영 갭:
   - 문서 원칙은 strict/fail-close 지향이나, 런타임 기본값은 compat fallback 경로가 활성화되어 있음
   - 전략 재작성 경로가 parser/validator/normalizer/executor에 분산되어 단일 책임 경계가 약함
 - 본 문서는 목표 계약(SSoT)을 유지하며, 현재 구현과의 차이는 RUNBOOK/ADR에서 위험으로 관리한다.
+
+## 0-A) Internal Planner Generation Contract (Stagewise)
+
+### 목적
+- giant one-shot planner의 책임을 분리해 `action/head/relation candidate 분류`와 `slot 추출`을 별도 단계로 나눈다.
+- 단, executor에는 여전히 **단 하나의 final strategy** 만 전달한다.
+
+### Stage 1 contract
+- 출력 필드:
+  - `action`
+  - `head`
+  - `relation_candidate`
+  - `referential_followup`
+  - `confidence`
+- Stage 1은 아래를 출력하지 않는다:
+  - `mode`
+  - `join_key_mode`
+  - `target_cols`
+  - `ids_map`
+  - `filters`
+  - `retrieval_query`
+  - `limit`
+
+### Deterministic gate contract
+- 최종 `mode / relation / join_key_mode / target_cols`의 소유권은 **LLM이 아니라 코드 gate** 가 가진다.
+- 기본 규칙:
+  - `action=topic -> mode=SEARCH`
+  - `action in {list,detail,stats,download} -> 기본 mode=LOOKUP`
+  - `JOIN`은 `relation_candidate != null` 이고 join seed가 있을 때만 허용한다.
+
+### Stage 2 contract
+- 출력 필드:
+  - `ids_map`
+  - `filters`
+  - `retrieval_query`
+  - `limit`
+  - `confidence`
+- Stage 2는 아래를 출력/수정하지 않는다:
+  - `mode`
+  - `head`
+  - `action`
+  - `relation`
+  - `join_key_mode`
+  - `target_cols`
+  - `strategy_version`
+
+### Final assembly contract
+- final executor input은 `_assemble_question_analysis()`가 조립한 `QuestionAnalysisV2` 단일 객체만 허용한다.
+- planner 내부가 stagewise여도, executor는 여전히 **single final strategy contract** 만 본다.
+
+### 불변 조건
+- stagewise는 internal implementation detail이며, planner→executor 경계의 “단일 Strategy” 원칙을 깨지 않는다.
+- stage2는 전략 필드를 다시 쓰지 않는다.
+- 최종 mode/action/relation/join_key_mode/target_cols는 LLM 응답이 아니라 gate/assemble 결과를 신뢰한다.
 
 ---
 
