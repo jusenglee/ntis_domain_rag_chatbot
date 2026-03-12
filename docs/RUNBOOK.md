@@ -177,6 +177,72 @@ LIMIT 100;
 
 위 이벤트에서도 `planner_stagewise_enabled=1`이 일관되게 관측되어야 합니다.
 
+### 3.5 Stagewise Planner 전환 RUNBOOK
+
+#### 1) 배경
+- planner 내부 생성 경로가 one-shot giant prompt에서 stagewise(stage1 분류 → deterministic gate → stage2 슬롯 추출 → assemble)로 확장되었다.
+- stagewise는 feature flag(`PLANNER_STAGEWISE_ENABLED`) 뒤에서 운영할 수 있다.
+
+#### 2) 필수 환경 변수
+```bash
+PLANNER_STAGEWISE_ENABLED=true
+PLANNER_STAGE1_PROMPT_VERSION=v1
+PLANNER_STAGE2_PROMPT_VERSION=v1
+PLANNER_TEMPERATURE=0.0
+```
+
+#### 3) 기대 관측성(정상 시)
+요청 1건에 대해 아래 로그가 순서대로 보여야 한다.
+- `PLANNER.STAGE1`
+- `PLANNER.GATE`
+- `PLANNER.STAGE2`
+- `PLANNER.ASSEMBLE`
+
+추가 진단 로그:
+- `PLANNER.IDS_MAP.INVALID_VALUE`
+
+#### 4) 핵심 장애 신호
+아래 중 하나라도 증가하면 canary를 중지하거나 즉시 rollback 검토:
+- `PLANNER_ACTION_MODE_MISMATCH`
+- `PLANNER_PARSE_FINAL_FAILED`
+- `RAG_EMPTY_RESULT_CONTRACT`
+- `mode=JOIN` 이면서 `docs_found=0`
+- `PLANNER.IDS_MAP.INVALID_VALUE` 급증
+
+#### 5) stagewise triage 절차
+##### Step A — stage1 확인
+- `action`, `head`, `relation_candidate`, `referential_followup`, `confidence`를 확인
+- broad topic인데 relation_candidate가 붙었는지 점검
+- 사람/기관 질의에서 head가 `people/org`로 잘못 붙지 않았는지 확인
+
+##### Step B — deterministic gate 확인
+- stage1 결과 대비 최종 `mode / relation / join_key_mode / target_cols`가 어떻게 잠겼는지 확인
+- `action=topic`인데 `mode=LOOKUP` 또는 `action=list`인데 `mode=SEARCH`로 잠겼다면 gate/후단 보정 충돌을 의심
+
+##### Step C — stage2 슬롯 확인
+- `ids_map`에 사람명/기관명이 들어갔는지 확인
+- 기관 role(`lead_org_name / participant_org_name / people_affiliation_org_name`)이 올바른지 확인
+- `retrieval_query`가 locked strategy와 충돌하지 않는지 확인
+
+##### Step D — assemble 이후 후단 재실패 확인
+- `PLANNER.ASSEMBLE` 이후에도 `apply_planner_strategy()`에서 `PLANNER_ACTION_MODE_MISMATCH`가 나는지 확인
+- 이 경우 stagewise 결과가 old strict merge layer에 의해 재검증/재실패하는 구조 문제로 분류
+
+##### Step E — post-stage2 re-gate 누락 확인
+- stage2가 `pjt_id/pjt_no/doi/rst_id/patent_*`를 새로 뽑았는데 final mode가 SEARCH/LOOKUP 그대로라면, `post-stage2 re-gate` 부재 이슈로 분류
+
+#### 6) rollback 기준
+아래 중 하나라도 만족하면 `PLANNER_STAGEWISE_ENABLED=false`로 즉시 복귀:
+- canary 대비 `PLANNER_ACTION_MODE_MISMATCH` 증가
+- `RAG_EMPTY_RESULT_CONTRACT` 증가
+- 평균 planner latency 50% 이상 증가
+- `mode=JOIN & docs_found=0` 빈도 급증
+
+#### 7) 현재 알려진 운영 갭
+- 기본값이 아직 `PLANNER_STAGEWISE_ENABLED=false`라 환경변수 누락 시 legacy planner를 탈 수 있다.
+- stage2에서 새로 추출한 ids가 최종 전략 재판정에 반영되지 않는 `post-stage2 re-gate` 갭이 있다.
+- stagewise assembled 결과가 이후 strict merge layer에 의해 다시 실패할 수 있다.
+
 ---
 
 ## 4) 자주 터지는 패턴과 처방
