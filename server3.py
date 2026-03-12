@@ -1649,8 +1649,11 @@ def _friendly_strategy_violation_message(
     ids_map = getattr(question_analysis, "ids_map", None) or {}
     has_explicit_id = isinstance(ids_map, dict) and any(bool(v) for v in ids_map.values())
 
-    if error_code == "RAG_EMPTY_RESULT_CONTRACT" and mode == "LOOKUP" and (action == "detail" or has_explicit_id):
-        return "요청하신 식별자(ID)에 해당하는 상세 정보를 찾지 못했습니다. ID를 다시 확인해 주세요."
+    if error_code == "RAG_EMPTY_RESULT_CONTRACT" and mode == "LOOKUP":
+        if action == "detail" or has_explicit_id:
+            return "요청하신 식별자(ID)에 해당하는 상세 정보를 찾지 못했습니다. ID를 다시 확인해 주세요."
+        if action == "list":
+            return "조건에 맞는 검색 결과를 찾지 못했습니다. 기관명, 연구자명, 과제명을 다소 바꿔 다시 시도해 주세요."
     return "요청을 처리하는 중 검색 전략 계약 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
 def _resolve_rag_queries(

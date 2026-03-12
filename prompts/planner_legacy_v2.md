@@ -76,6 +76,8 @@ JOIN 금지:
 
 중요:
 사람/기관이 등장해도 목적이 과제/성과면 head는 project 또는 perf다.
+- support는 NTIS/IRIS 서비스 사용법, 회원가입, 로그인, 권한, 오류 안내 같은 도움말 질의일 때만 선택한다.
+- 일반 기술 주제, 개발 작업, 코드 수정, 인프라 운영, 클라우드, Ansible, 스크립트 자동화는 support가 아니다.
 </head_rules>
 
 <slot_rules>
@@ -120,6 +122,11 @@ filters 허용 키:
 - 질문: 김재수 참여 과제
 - 잘못된 출력: ids_map={{{{"person_no":["김재수"]}}}}
 - 올바른 방향: ids_map={{{{}}}}, filters={{{{"participant_researcher_name":["김재수"]}}}}, mode="LOOKUP"
+
+잘못된 예:
+- 질문: 엣지-클라우드 인프라 Ansible 스크립트 자동 수정
+- 잘못된 출력: head="support", target_cols=["ntis_supports_v1"]
+- 올바른 방향: support 금지. NTIS 도움말 질의가 아니므로 일반 topic으로 해석하고 support 컬렉션을 선택하지 않는다.
   </anti_patterns>
 
 <examples>
@@ -162,6 +169,11 @@ filters 허용 키:
 질문: 회원가입 방법
 출력:
 {{{{"strategy_version":"{{{{schema_version}}}}","mode":"LOOKUP","head":"support","action":"detail","relation":null,"join_key_mode":null,"target_cols":["ntis_supports_v1"],"ids_map":{{{{}}}},"filters":{{{{}}}},"limit":1,"retrieval_query":"회원가입 방법","confidence":0.96}}}}
+
+예시 9
+질문: 엣지-클라우드 인프라 Ansible 스크립트 자동 수정
+출력:
+{{{{"strategy_version":"{{{{schema_version}}}}","mode":"SEARCH","head":"project","action":"topic","relation":null,"join_key_mode":null,"target_cols":["ntis_project_v1"],"ids_map":{{{{}}}},"filters":{{{{}}}},"limit":20,"retrieval_query":"엣지-클라우드 인프라 Ansible 스크립트 자동 수정","confidence":0.45}}}}
 </examples>
 
 <final_check>

@@ -85,6 +85,9 @@ head는 사용자가 최종적으로 얻고 싶은 엔티티다.
 - "ETRI 수행 과제" -> head="project"
 - "ETRI 논문" -> head="perf"
 - "홍길동 연구자 프로필" -> head="people"
+- support는 NTIS/IRIS 서비스 사용법, 로그인, 회원가입, 권한, 오류 안내처럼 "서비스 도움말"일 때만 선택한다.
+- 일반 기술 주제, 개발 작업, 코드 수정, 인프라 운영, 클라우드, Ansible, API 개발, 스크립트 자동화는 support가 아니다.
+- "엣지-클라우드 인프라 Ansible 스크립트 자동 수정" -> head="support" 금지
   </head_rules>
 
 <relation_rules>
@@ -162,6 +165,11 @@ confidence는 다음 기준으로 준다.
 - 올바른 방향: head="project", relation_candidate=null
 
 잘못된 예:
+- 질문: "엣지-클라우드 인프라 Ansible 스크립트 자동 수정"
+- 잘못된 출력: head="support"
+- 올바른 방향: 일반 기술 질의이므로 support로 분류하지 않는다. NTIS 과제/성과 anchor가 없으면 head는 query target에 맞는 project/perf로만 판단한다.
+
+잘못된 예:
 - 질문: "이 논문이 나온 과제"
 - 잘못된 출력: relation_candidate=null
 - 올바른 방향: head="project", relation_candidate="perf_project", referential_followup=true
@@ -207,6 +215,11 @@ confidence는 다음 기준으로 준다.
 입력: 회원가입 방법
 출력:
 {{{{"action":"detail","head":"support","relation_candidate":null,"referential_followup":false,"confidence":0.96}}}}
+
+예시 9
+입력: 엣지-클라우드 인프라 Ansible 스크립트 자동 수정
+출력:
+{{{{"action":"topic","head":"project","relation_candidate":null,"referential_followup":false,"confidence":0.45}}}}
 </examples>
 
 <final_check>

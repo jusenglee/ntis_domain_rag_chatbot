@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 응답 스키마(alias 포함)와 실패 시 `None` 처리 정책을 코드 주석으로 남겨둔다.
 """
 
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090").rstrip("/")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:8004").rstrip("/")
 PROMETHEUS_TIMEOUT = float(os.getenv("PROMETHEUS_TIMEOUT", "5"))
 STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 
