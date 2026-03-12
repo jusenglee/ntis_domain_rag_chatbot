@@ -2345,9 +2345,15 @@ def _resolve_join_execution_policy(
 
     우선순위:
     1) instance + ids_map.pjt_id   -> hop1_strategy="skip" (옵션 시 최소 lookup 보강)
-    2) group + ids_map.pjt_no      -> hop1_strategy="lookup"
+    2) group + ids_map.pjt_no      -> RAG_JOIN_GROUP_RESOLVE_PROJECT_IDS 값에 따라
+                                      hop1_strategy="lookup"(1/true 계열) 또는 "skip"(그 외)
+                                      로 분기
     3) people/org 조건 존재        -> hop1_strategy="lookup"
     4) 그 외                        -> hop1_strategy="search"
+
+    참고:
+    - RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_TOPK 는
+      group resolve 정책 계산값으로 함께 반환되어 후속 lookup 확장 상한/검색 top-k에 사용된다.
     """
     is_join_mode = bool(relation and mode == "join")
     if not is_join_mode:
