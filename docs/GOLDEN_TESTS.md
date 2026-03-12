@@ -134,12 +134,75 @@
 - people/org relation JOIN late guard는 기본 warning 경로가 남아 있지만, 정상 경로의 주 방어선은 upstream(`query_intent`, parser) 차단임.
 - 따라서 회귀 테스트는 executor late guard 단독보다 upstream 차단 + executor 안전장치를 함께 검증해야 함.
 
-## 8) 이력(History)
+## 8) Stagewise Planner Invariants
+
+### G-SP-001 — stage1 출력 범위 제한
+- stage1은 아래 필드만 출력해야 한다.
+  - `action`
+  - `head`
+  - `relation_candidate`
+  - `referential_followup`
+  - `confidence`
+- stage1은 전략 필드(`mode`, `join_key_mode`, `target_cols`, `ids_map`, `filters`)를 출력하면 안 된다.
+
+### G-SP-002 — stage2 출력 범위 제한
+- stage2는 아래 필드만 출력해야 한다.
+  - `ids_map`
+  - `filters`
+  - `retrieval_query`
+  - `limit`
+  - `confidence`
+- stage2는 전략 필드(`mode`, `head`, `action`, `relation`, `join_key_mode`, `target_cols`, `strategy_version`)를 출력하면 안 된다.
+
+### G-SP-003 — action 우선 invariant
+- `action=topic`이면 final `mode=SEARCH`
+- `action in {list,detail,stats,download}`이면 기본 final `mode=LOOKUP`
+- JOIN은 relation candidate + join seed가 있는 경우에만 허용
+
+### G-SP-004 — broad perf topic blind JOIN 금지
+질의:
+- `스마트 제조 관련 특허 성과`
+기대:
+- final `head=perf`
+- final `action=topic`
+- final `relation=null`
+- blind `JOIN` 금지
+
+### G-SP-005 — 기관/사람 텍스트 ids_map 오염 금지
+질의:
+- `ETRI 수행 과제`
+- `김재수 참여 과제`
+기대:
+- `ids_map`는 비워도 됨
+- 각각 `filters.lead_org_name=["ETRI"]`, `filters.participant_researcher_name=["김재수"]`
+- `ids_map.pjt_id=["ETRI"]`, `ids_map.person_no=["김재수"]` 금지
+
+### G-SP-006 — referential follow-up + seed가 있을 때만 JOIN 허용
+질의:
+- `이 과제의 논문`
+기대:
+- `prev_context`에서 단일 `pjt_id` 또는 `pjt_no` seed가 있을 때만 `JOIN` 허용
+- seed가 없으면 blind JOIN 금지
+
+### G-SP-007 — support target invariant
+질의:
+- `회원가입 방법`
+기대:
+- final `head=support`
+- support 컬렉션(`ntis_supports_v1`) 사용
+
+### G-SP-008 — stage2 IDs는 후속 전략 재판정 후보
+질의:
+- stage1 시점에는 seed가 없었으나 stage2가 `doi/issn/rst_id/pjt_id/pjt_no`를 새로 추출한 케이스
+기대:
+- 현재 구현상 open issue로 관리하되, 향후 `post-stage2 re-gate` 대상임을 회귀 메모에 남긴다.
+
+## 9) 이력(History)
 
 |일자|변경유형|내용|
 |---|---|---|
+|2026-03-12|추가|stagewise planner invariants(G-SP-001~008) 추가|
 |2026-03-09|추가|정책 축(`strict/planner_invalid_fallback/promotion_mode/force_fallback_chat`)과 질의 축 분리 정의 추가|
 |2026-03-09|추가|최소 골든 5케이스(G-MIN-001~005) 단계별 기대 산출 고정|
 |2026-03-09|추가|strict/compat 동일 입력 비교 테스트(`예외 vs 보정`) 회귀 기준 반영|
 |2026-03-09|추가|people/org relation 금지의 영향 범위 메모(upstream 차단 우세, executor는 안전장치) 추가|
-
