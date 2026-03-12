@@ -7,8 +7,8 @@
 
 ## v1.2 개정 이력
 
-- 플래너 출력 계약에 `lookup_title_filter_policy`, `title_match_mode`, `relation_lookup_enforce`, `policy_version` 항목을 추가했다.
-- 실행 컴파일 정책 섹션을 신설하여, 위 항목의 해석/강제 규칙(soft↔hard, EXACT|TEXT|CONTAINS, bool 게이트, 로깅 반영)을 명시했다.
+- 플래너 최종 계약에 `output_type`를 명시하고, stagewise planner에서는 deterministic gate/composer가 이를 결정하도록 정리했다.
+- 실행 컴파일 정책 섹션을 코드 기준으로 정리하여, `lookup_title_filter_policy`/`title_match_mode`는 실행 컴파일 결과와 로깅 필드로 해석된다는 점을 명시했다.
 - JOIN `join_key_mode` 문구를 코드 동작과 1:1로 동기화했다.
   - `group + pjt_no 없음` + `pjt_id 존재` 시 `instance` 보정 + 경고 로그.
   - `instance + pjt_no only`는 계약 위반.
@@ -147,10 +147,11 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
   "action": "topic|list|detail|stats|download",
   "relation": "project_perf|perf_project|null",
   "join_key_mode": "instance|group|null",
-  "target_cols": ["project","perf"],
+  "target_cols": ["ntis_project_v1","ntis_perf_v1"],
+  "output_type": "summary|list|detail|stats|relation",
   "ids_map": {},
   "filters": {
-    "lookup_title_filter_policy": "soft|hard",
+    "lookup_title_filter_policy": "soft",
     "relation_lookup_enforce": true
   },
   "limit": 20,
@@ -162,12 +163,13 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 추가 계약:
 - `mode=JOIN`이면 `join_key_mode`는 `instance|group` 중 하나
 - `mode!=JOIN`이면 `join_key_mode=null`
+- `output_type`은 LLM 자유 생성보다 deterministic compose 결과를 우선한다.
 - `lookup_title_filter_policy`:
-  - `soft`: title은 server-side must로 강제하지 않음(soft signal)
-  - `hard`: title server-side 적용(단 detail lookup에서만 최종 유지)
+  - 현재 구현 기본값은 `soft`
+  - title은 server-side must로 강제하지 않고 soft signal로 사용
 - `relation_lookup_enforce`:
   - bool로 해석되며 `true`일 때 relation 기반 lookup 필터 강제
-- `title_match_mode`는 실행 컴파일 결과 필드로 확정 (`EXACT|TEXT|CONTAINS`)
+- `title_match_mode`는 실행 컴파일 결과/로깅 필드로 확정되며, 현재 운영 경로에서는 `CONTAINS` 중심으로 해석한다
 - `policy_version`은 플래너가 결정하지 않고 실행 정책 버전(`SEARCH_POLICY_VERSION`)으로 로깅/응답에 반영
 
 ---
@@ -175,13 +177,12 @@ LLM 플래너가 **단 하나의 Strategy(JSON 계약)** 를 확정하면 실행
 ## 7. 실행 컴파일 정책 (Execution Compile Policy)
 
 ### 7.1 정책 필드 해석
-- `lookup_title_filter_policy`: `soft|hard`
+- `lookup_title_filter_policy`: 현재 구현 기본값은 `soft`
   - 유효하지 않은 값은 `soft`로 정규화
-  - detail lookup이 아닌 경우 `hard`는 `soft`로 강등
-- `title_match_mode`: `EXACT|TEXT|CONTAINS`
-  - `hard` + text 인덱스 지원 시 `TEXT`
-  - `hard` + text 인덱스 미지원 시 `EXACT`
-  - `soft`면 `CONTAINS`
+  - title은 server-side hard gate 대신 soft ranking signal로 사용
+- `title_match_mode`: 실행 컴파일/로깅 필드
+  - 현재 운영 경로에서는 `CONTAINS` 중심으로 사용
+  - `EXACT|TEXT|CONTAINS`는 설계상 가능한 해석값이지만, 현재 기본 구현 계약과 동일시하면 안 됨
 - `relation_lookup_enforce`:
   - `1,true,yes,y` → `true`
   - 그 외 → `false`

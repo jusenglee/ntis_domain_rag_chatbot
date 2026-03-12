@@ -2,6 +2,14 @@ from typing import Dict, Any, List
 from copy import deepcopy
 from rag_mapper.mapping_config import get_schema_registry, DataTag, TagSchema
 
+"""원본 NTIS/QnA payload를 RAG 친화적인 평탄 구조로 바꾸는 매퍼.
+
+핵심 규칙:
+- tag별 스키마에 따라 자연어 라벨로 키를 변환한다.
+- title은 가능하면 top-level로 승격해 context builder가 일관되게 사용하게 한다.
+- 원본에 이미 유효한 title이 있으면 보존한다.
+"""
+
 
 class MappingError(Exception):
     """매핑 처리 중 발생하는 에러"""
@@ -9,6 +17,7 @@ class MappingError(Exception):
 
 
 class RagMapper:
+    """도메인별 `TagSchema`를 이용해 원본 문서를 RAG 표시용 구조로 변환한다."""
     """
     RAG(Retrieval-Augmented Generation) 시스템용 데이터 매퍼
     기존 중첩 구조를 유지하면서 매칭되는 key만 자연어로 변환
@@ -20,6 +29,11 @@ class RagMapper:
 
     @classmethod
     def map(cls, item: dict) -> dict:
+        """단일 문서를 RAG 표준 형태로 매핑한다.
+
+        title 보존/생성, meta_basic/meta_detail 평탄화, label 매핑이 모두 여기서 일어난다.
+        회귀 위험이 큰 함수라 관련 테스트(`test_rag_mapper_title_preserve.py`)와 같이 봐야 한다.
+        """
         """
         item의 기존 중첩 구조를 유지하면서 매칭되는 필드만 자연어 라벨로 변환
         title 필드는 top-level로 추출하고 meta에서 제거
@@ -150,6 +164,7 @@ class RagMapper:
 
     @classmethod
     def _get_schema(cls, item: dict) -> TagSchema:
+        """입력 tag에 맞는 스키마를 레지스트리에서 찾는다."""
         """
         item의 tag에 해당하는 스키마 조회
         
@@ -209,6 +224,7 @@ class RagMapper:
 
     @classmethod
     def _process_title(cls, result: dict, schema: TagSchema) -> None:
+        """유효한 기존 title이 없을 때만 schema 규칙으로 title을 생성한다."""
         """
         title 추출 및 데이터 필드에서 제거
         
@@ -240,6 +256,7 @@ class RagMapper:
 
     @classmethod
     def _map_data_fields(cls, result: dict, schema: TagSchema) -> None:
+        """schema의 label_map을 사용해 meta 계층 키를 자연어 라벨로 변환한다."""
         """
         모든 데이터 필드의 key를 자연어 라벨로 변환
         

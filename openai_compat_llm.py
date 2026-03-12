@@ -17,6 +17,10 @@ from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
+# 이 래퍼는 vLLM/OpenAI-compat 응답을 LangChain 메시지로 정규화한다.
+# 특히 reasoning delta를 content와 분리해 downstream 스트리밍 계층이
+# 안전하게 필터링할 수 있도록 `stream_field` 규약을 붙여주는 것이 중요하다.
+
 STREAM_FIELD_KEY = "stream_field"          # "content" | "reasoning"
 STREAM_REASONING_KEY = "reasoning_text"    # additional_kwargs에만 저장
 
@@ -39,6 +43,7 @@ class EmptyStreamContentError(OpenAICompatStreamError):
 
 
 class OpenAICompatChatModel(BaseChatModel):
+    """OpenAI 호환 chat completion API를 LangChain 모델로 감싼 구현체."""
     """OpenAI 호환 API(vLLM 등)용 LangChain 래퍼"""
 
     # 기본 연결 설정

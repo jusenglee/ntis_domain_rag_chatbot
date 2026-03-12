@@ -191,11 +191,25 @@
 - final `head=support`
 - support 컬렉션(`ntis_supports_v1`) 사용
 
-### G-SP-008 — stage2 IDs는 후속 전략 재판정 후보
+### G-SP-008 — stage2 IDs는 `PLANNER.REGATE`로 재판정된다
 질의:
 - stage1 시점에는 seed가 없었으나 stage2가 `doi/issn/rst_id/pjt_id/pjt_no`를 새로 추출한 케이스
 기대:
-- 현재 구현상 open issue로 관리하되, 향후 `post-stage2 re-gate` 대상임을 회귀 메모에 남긴다.
+- `PLANNER.REGATE`에서 `regate_eligible`, `regate_changed`, `before_*`, `after_*`가 관측된다.
+- relation candidate와 신규 seed가 모두 충족되면 LOOKUP/SEARCH에서 JOIN으로 최소 재판정될 수 있다.
+
+### G-SP-009 — runtime immutability
+질의:
+- planner가 이미 `mode=JOIN`, `relation=project_perf`, `join_key_mode=instance`, `target_cols=[ntis_project_v1, ntis_perf_v1]`를 조립한 케이스
+기대:
+- `apply_planner_v2()`는 stagewise assembled strategy를 다시 재결정하지 않는다.
+- runtime 기본 경로에서는 invalid planner fallback이나 promotion 재실행으로 strategy를 바꾸지 않는다.
+
+### G-SP-010 — output_type propagation
+질의:
+- `detail`, `stats`, `list`, relation JOIN, broad topic SEARCH 케이스
+기대:
+- planner 최종 결과의 `output_type`가 `NormalizedIntent` -> `ExecutionContext` -> `QueryPlan` -> context builder까지 그대로 전달된다.
 
 ## 9) 이력(History)
 

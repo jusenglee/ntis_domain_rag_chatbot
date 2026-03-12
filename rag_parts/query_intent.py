@@ -39,6 +39,10 @@ from .constants import (
 )
 logger = logging.getLogger(__name__)
 
+# 이 모듈은 "질의 문장 -> 정규화된 intent" 변환을 담당한다.
+# planner가 추가 보정을 하더라도, 사람/기관/연도/ID/성과유형 같은 기본 슬롯 추출은
+# 여기서 최대한 안정적으로 끝내는 것이 downstream 변동성을 줄이는 핵심이다.
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -1126,6 +1130,7 @@ class QueryIntent:
     year_to: Optional[str] = None
     perf_types: List[str] = field(default_factory=list)
     title: List[str] = field(default_factory=list)
+    keywords: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
     ids_flat: List[str] = field(default_factory=list)
     # tag filters
@@ -1174,6 +1179,7 @@ class QueryIntent:
             "year_to": self.year_to,
             "perf_types": self.perf_types,
             "title": self.title,
+            "keywords": self.keywords,
             "ids_map": self.ids_map,
             "ids_flat": self.ids_flat,
             "project_tag_filters": self.project_tag_filters,
@@ -1484,6 +1490,8 @@ def _classify_query_heuristic(
     org_terms = normalize_org_terms(extract_org_terms(q, kws))
     org_role = extract_org_role(q)
     years = extract_years(q)
+    year_from = years[0] if years else None
+    year_to = years[-1] if years else None
     lead_org_terms: List[str] = []
     participant_org_terms: List[str] = []
     people_affiliation_org_terms: List[str] = []
@@ -1604,10 +1612,11 @@ def _classify_query_heuristic(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
-        year_from=None,
-        year_to=None,
+        year_from=year_from,
+        year_to=year_to,
         perf_types=[],
         title=[],
+        keywords=list(kws or []),
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,
@@ -1634,6 +1643,11 @@ def classify_query(
         domain_hint: Optional[str] = None,
         hint: Optional[Any] = None,
 ) -> QueryIntent:
+    """질의 원문에서 route/action/relation/slot을 추출해 `QueryIntent`로 정규화한다.
+
+    server3와 planner 모두 이 결과를 출발점으로 사용하므로,
+    이 함수가 흔들리면 mode 결정과 필터 컴파일이 연쇄적으로 바뀐다.
+    """
     q = (q or "").strip()
     tl = q.lower()
 
@@ -1761,6 +1775,7 @@ def classify_query(
     year_to = str(plan.get("year_to") or "").strip() or None
     perf_types = _normalize_str_list(plan.get("perf_types"))
     title_terms = _normalize_str_list(plan.get("title") or plan.get("title_terms"))
+    keywords = _normalize_str_list(plan.get("keywords") or kws)
 
     if not gender_terms:
         gender_terms = extract_gender_terms(q, kws)
@@ -1886,10 +1901,11 @@ def classify_query(
         participant_org_terms=participant_org_terms,
         people_affiliation_org_terms=people_affiliation_org_terms,
         years=years,
-        year_from=None,
-        year_to=None,
-        perf_types=[],
-        title=[],
+        year_from=year_from,
+        year_to=year_to,
+        perf_types=perf_types,
+        title=title_terms,
+        keywords=keywords,
         ids_map=ids_map,
         ids_flat=ids_flat,
         project_tag_filters=project_tag_filters,

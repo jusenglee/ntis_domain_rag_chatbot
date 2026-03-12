@@ -83,16 +83,37 @@ export SOLAR_VLLM_TIMEOUT=120
 ## Planner Stagewise 기본값(배포 필수)
 
 ```bash
+# planner pipeline 기본값
+export RAG_PLANNER_PIPELINE=staged
+
 # planner 2-stage 파이프라인 기본 ON
 export PLANNER_STAGEWISE_ENABLED=true
 ```
 
-- 기본값은 `true`이며, 미설정 시에도 stagewise 경로를 사용합니다.
+- 기본 경로는 `RAG_PLANNER_PIPELINE=staged`입니다.
+- `PLANNER_STAGEWISE_ENABLED=true`이면 staged planner를 사용하고, `RAG_PLANNER_PIPELINE=legacy`이면 legacy one-shot fallback 경로를 사용합니다.
 - 배포 템플릿에도 동일하게 고정합니다.
   - `deploy/env/staging.env.example`
   - `deploy/env/prod.env.example`
   - `deploy/helm/values-staging.yaml`
   - `deploy/helm/values-prod.yaml`
+
+## Planner / Runtime 전략 잠금 기본값
+
+```bash
+# invalid planner strategy fallback 기본 OFF
+export RAG_PLANNER_INVALID_FALLBACK=0
+
+# staged planner 경로에서는 promotion 재실행 기본 OFF
+export RAG_PROMOTION_MODE=disable
+
+# startup 시 payload index 보장
+export RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=true
+```
+
+- staged 경로에서는 invalid strategy 시 fallback plan을 새로 만들지 않고 `StrategyViolation`으로 종료하는 것을 기본 정책으로 둡니다.
+- promotion은 staged 경로에서 강제 비활성화되며, legacy/experimental 경로에서만 별도 활성화를 검토합니다.
+- startup에서는 `RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT=true`일 때 payload index 생성/보장 로직을 수행합니다.
 
 ## Planner latency 튜닝
 

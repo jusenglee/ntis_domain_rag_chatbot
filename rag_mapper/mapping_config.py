@@ -2,6 +2,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Callable, Any
 from enum import Enum
 
+"""RAG mapper용 태그 스키마 레지스트리.
+
+도메인별 원본 payload가 제각각이라서,
+여기서는 "어떤 tag가 어떤 제목 규칙/라벨 매핑/참조 필드를 가지는지"를 중앙에서 관리한다.
+"""
+
 
 class DataTag(str, Enum):
     """데이터 태그 정의 (콘텐츠 타입)"""
@@ -120,6 +126,7 @@ class TagSchema:
 
 
 class SchemaRegistry:
+    """도메인별 `TagSchema`를 등록하고 조회하는 중앙 레지스트리."""
     """스키마 레지스트리 관리 클래스"""
 
     def __init__(self):

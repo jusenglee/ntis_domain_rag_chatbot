@@ -147,6 +147,17 @@ except Exception:
     qmodels = None
 
 
+"""RAG 실행 파이프라인의 핵심 모듈.
+
+책임 범위:
+- intent_payload.v2를 받아 실행용 `QueryPlan`으로 정규화
+- mode별(SEARCH/LOOKUP/JOIN) 필터와 retrieval 전략 구성
+- dense/sparse 검색, rerank, context 빌드, 결과 계약 검증 수행
+
+이 파일은 크지만 역할은 명확하다.
+"planner가 정한 전략을 바꾸지 않고 실행 스펙으로 컴파일한다"가 핵심 규칙이다.
+"""
+
 def _normalize_tag_value(tag: object) -> str:
     if tag is None:
         return ""
@@ -2417,6 +2428,11 @@ def _resolve_join_execution_policy(
     }
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
+    """정규화된 intent를 SEARCH/LOOKUP/JOIN 중 하나로 고정한다.
+
+    이 함수는 heuristic처럼 보이지만 실제로는 문서 계약을 코드화한 규칙 집합이다.
+    downstream에서는 이 결과를 다시 추측하지 않는 것이 중요하다.
+    """
     """action/intent 기반 모드 결정 정책 (강제 규칙 포함).
 
     우선순위(강제):
@@ -2474,6 +2490,11 @@ def _build_plan(
         preferred_mode: Optional[str] = None,
         preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
+    """NormalizedIntent를 executor가 소비할 `QueryPlan`으로 변환한다.
+
+    여기서 하는 일은 "전략 재판단"이 아니라,
+    이미 정해진 mode/relation/action을 실행에 필요한 스키마로 정리하는 것이다.
+    """
     # 입력 → 정규화 → 강제 계약 → 실행:
     # - 입력: intent(action/relation/base_route) + planner 선호 모드
     # - 정규화: stats 정책/target collection을 일관 스키마(QueryPlan)로 정리
@@ -3913,7 +3934,10 @@ def _run_rag_with_vectors(
      tier="debug")
     # fail-close 기본값: planner 계약 위반은 기본 차단하고, 필요 시 운영자가 env로 완화한다.
     strict_strategy_consistency = _env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1")
+    planner_pipeline = str(os.getenv("RAG_PLANNER_PIPELINE", "staged") or "staged").strip().lower()
     planner_invalid_fallback = _env_flag("RAG_PLANNER_INVALID_FALLBACK", "0")
+    if planner_pipeline == "staged":
+        planner_invalid_fallback = False
     runtime_env = str(os.getenv("APP_ENV", os.getenv("ENV", "")) or "").strip().lower()
     if runtime_env in {"staging", "debug"}:
         planner_invalid_fallback = False
@@ -3956,6 +3980,8 @@ def _run_rag_with_vectors(
         nonlocal planner_strategy_mode, planner_strategy_action, planner_strategy_relation
         nonlocal strategy_snapshot, planner_recalled, mode_override_requested
         nonlocal mode_override_reason, mode_override_from, mode_override_to
+        if planner_pipeline == "staged":
+            raise StrategyViolation(error_code=error_code, reason=reason, violations=violations)
         if not planner_invalid_fallback:
             raise StrategyViolation(error_code=error_code, reason=reason, violations=violations)
 
@@ -6052,6 +6078,8 @@ def _run_rag_with_vectors(
     promotion_intent = it
     promotion_feature_mode = str(os.getenv("RAG_PROMOTION_MODE", "disable") or "disable").strip().lower()
     promotion_enabled = promotion_feature_mode in ("enable", "enabled", "on", "1", "true", "yes", "y")
+    if planner_pipeline == "staged":
+        promotion_enabled = False
     promotion_max_depth = max(0, int(os.getenv("RAG_PROMOTION_MAX_DEPTH", "1") or "1"))
 
     if promotion_enabled and mode == "search" and promotion_depth < promotion_max_depth:
@@ -6417,6 +6445,7 @@ def run_rag_once(
         model_name: str = DEFAULT_MODEL_NAME,
         intent_payload: Any = None,
 ) -> RagResult:
+    """단일 질의에 대한 RAG 실행 공개 엔트리포인트."""
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
     vector_names = [v.strip() for v in vector_names_env.split(",") if v.strip()]

@@ -1,6 +1,6 @@
 # CONTRACT — Strategy/Planner/Executor 불변 계약
 
-> 이 문서는 `NTIS_RAG_Search_Strategy_v1_1.md`(설계 원문) + 실제 코드의 “강제 지점”을 합쳐서,
+> 이 문서는 `docs/NTIS_RAG_Search_Strategy_v1_2.md`(설계 원문) + 실제 코드의 “강제 지점”을 합쳐서,
 > 구현/운영에서 흔들리지 않게 만든 **실행 가능한 계약(Contract)** 입니다.
 
 ---
@@ -11,8 +11,8 @@
   - external executor-facing final strategy contract(`QuestionAnalysisV2`)의 shape는 유지됨
   - 단, planner 내부 생성 절차는 one-shot giant prompt에서 **stagewise planner(stage1 + deterministic gate + stage2 + assemble)** 로 확장됨
 - 확인된 운영 갭:
-  - 문서 원칙은 strict/fail-close 지향이나, 런타임 기본값은 compat fallback 경로가 활성화되어 있음
-  - 전략 재작성 경로가 parser/validator/normalizer/executor에 분산되어 단일 책임 경계가 약함
+  - strict/fail-close 기본값은 코드에 반영됐지만, legacy fallback machinery가 일부 코드 경로에 남아 있음
+  - 전략 재작성 경로를 더 줄이는 cleanup 여지가 parser/guardrail/runtime 일부에 남아 있음
 - 본 문서는 목표 계약(SSoT)을 유지하며, 현재 구현과의 차이는 RUNBOOK/ADR에서 위험으로 관리한다.
 
 ## 0-A) Internal Planner Generation Contract (Stagewise)
@@ -36,6 +36,9 @@
   - `filters`
   - `retrieval_query`
   - `limit`
+- 구현 원칙:
+  - stage schema는 extra field를 허용하지 않는다(`extra=forbid`).
+  - 즉, Stage 1이 전략 필드를 추가로 내보내면 파싱 단계에서 실패해야 한다.
 
 ### Deterministic gate contract
 - 최종 `mode / relation / join_key_mode / target_cols`의 소유권은 **LLM이 아니라 코드 gate** 가 가진다.
@@ -59,6 +62,9 @@
   - `join_key_mode`
   - `target_cols`
   - `strategy_version`
+- 구현 원칙:
+  - stage schema는 extra field를 허용하지 않는다(`extra=forbid`).
+  - 즉, Stage 2가 전략 축 필드를 내보내면 파싱 단계에서 실패해야 한다.
 
 ### Final assembly contract
 - final executor input은 `_assemble_question_analysis()`가 조립한 `QuestionAnalysisV2` 단일 객체만 허용한다.
@@ -76,7 +82,9 @@
 ### 1.1 Planner 단일 Strategy 원칙
 - 플래너는 질의마다 **단 하나의 Strategy**를 확정한다.
 - 실행 레이어는 Strategy를 **여러 지점에서 재작성하지 않는다.**
-- 전략 필드 변경은 `apply_planner_strategy()` 단일 지점에서만 허용한다.
+- legacy planner 경로의 전략 필드 변경은 `apply_planner_strategy()` 단일 지점에서만 허용한다.
+- stagewise planner 경로의 전략 필드 확정은 `apply_planner_v2()`가 `QuestionAnalysisV2(planner_source=stagewise)`의 assembled strategy를 intent에 반영하는 단계에서 수행한다.
+- stagewise 경로에서는 assembled strategy를 후단에서 다시 재결정하지 않는 것이 우선이며, `apply_planner_strategy()`는 strict mismatch 관측/legacy 보정 책임과 분리한다.
 - 실행 레이어가 할 수 있는 건 오직 **compile(strategy) → 실행** 뿐이다.
 - `QuestionAnalysis.planner_source`로 플래너 생성 경로(`legacy|stagewise`)를 기록한다.
 - `planner_source=stagewise`인 경우 action/mode 불일치는 strict에서도 `StrategyViolation` 대신 경고 로그를 남기고 assemble에서 확정된 전략을 우선 유지한다.
@@ -84,10 +92,11 @@
 ### 1.2 전략/비전략 변경 책임도
 |구분|필드|변경 책임 함수|기본 정책|
 |---|---|---|---|
-|전략|`mode`, `relation`, `join_key_mode`, `target_cols`, `base_route`, `action`|`server3.py::apply_planner_strategy()`|단일 지점에서만 변경|
+|전략(legacy)|`mode`, `relation`, `join_key_mode`, `target_cols`, `base_route`, `action`|`server3.py::apply_planner_strategy()`|단일 지점에서만 변경|
+|전략(stagewise)|`mode`, `relation`, `join_key_mode`, `target_cols`, `base_route`, `action`, `output_type`, `ids_map`|`server3.py::apply_planner_v2()`|assemble 결과를 그대로 반영, 후단 재결정 금지|
 |비전략|`year`, `perf_types`, `org_terms`, `title_terms`, `keywords` 등|`server3.py::merge_planner_hints()`|planner hint 병합 허용|
 |파싱 보정(선택)|전략 자동 보정(`group→instance`, `SEARCH→LOOKUP` 등)|`QuestionAnalysisV2.normalize_planner_payload()`, `validate_join_contract()`|기본 비활성, `ALLOW_PARSER_STRATEGY_AUTO_CORRECTION=1`일 때만 허용|
-|fallback 보정(선택)|`normalize_intent()`의 route/action fallback|`rag_parts/pipeline_steps.py::normalize_intent()`|기본 비활성(`allow_strategy_fallback=False`)|
+|fallback 보정(선택)|`normalize_intent()`의 route/action fallback|`rag_parts/pipeline_steps.py::normalize_intent()`|기본 비활성(`allow_strategy_fallback=False`)이며 staged 기본 경로에서는 classifier 재호출을 하지 않음|
 
 ### 1.3 계층형 방어 모델 (upstream 차단 > executor 안전장치)
 - 1차(upstream): planner prompt + parser(`QuestionAnalysisV2`)에서 relation 허용값을 `project_perf|perf_project|null`로 강제한다.
@@ -145,6 +154,19 @@
 |ids_map|Dict[str, List[str]]|
 |ids_flat|List[str]|
 |lookup_filter_policy|Optional[str]|
+
+### 2.3 QueryPlan(실행 계획)
+|필드(QueryPlan)|타입|
+|---|---|
+|mode|str|
+|base_route|str|
+|action|str|
+|relation|Optional[Tuple[str, str]]|
+|join_key_mode|Optional[str]|
+|output_type|Optional[str]|
+|target_collections|Tuple[str, ...]|
+
+`output_type`는 planner final contract -> `NormalizedIntent` -> `ExecutionContext` -> `QueryPlan`으로 전달되며, context builder fieldset 선택 기준으로 사용한다.
 
 
 > **권장**: 운영 로그/트레이스에 `NormalizedIntent`와 `StrategySpec`를 “그대로” 남기면,
@@ -285,10 +307,10 @@
 ---
 
 ## 7) 구현 체크리스트(문서↔코드 동기화)
-- [ ] `NTIS_RAG_Search_Strategy_v1_1.md`의 규칙이 코드의 단일 지점에서 강제되는가?
+- [ ] `docs/NTIS_RAG_Search_Strategy_v1_2.md`의 규칙이 코드의 단일 지점에서 강제되는가?
 - [ ] JOIN key 관련 에러가 “조용히 fallback” 되지 않고, 명시적으로 드러나는가?
 - [ ] SEARCH에서 사람/기관이 must로 들어가면 즉시 계약 위반으로 실패하는가?
-- [ ] 결과가 0일 때(혹은 점수가 낮을 때) 어떤 정책으로 fallback 하는지 명문화돼 있는가?
+- [ ] staged 경로에서 invalid planner strategy / promotion 재실행이 기본 비활성이라는 점이 문서에 명문화돼 있는가?
 
 
 

@@ -1,3 +1,15 @@
+"""FastAPI 엔트리포인트와 LangGraph 워크플로를 묶는 메인 서버 모듈.
+
+문서 기준 핵심 흐름은 아래와 같다.
+1. HTTP 요청을 받아 대화 이력/이전 컨텍스트를 로드한다.
+2. 질의를 intent + planner 결과로 정규화한다.
+3. `rag_pipeline.run_rag_once()`에 전달할 intent_payload.v2를 조립한다.
+4. 검색 결과를 바탕으로 Solar/Gemma 응답을 생성하고 로그/이력을 남긴다.
+
+변경 전에는 `docs/CONTRACT.md`, `docs/RUNBOOK.md`,
+`docs/intent_payload_v2_schema.md`를 먼저 확인하는 것이 안전하다.
+"""
+
 import logging
 import asyncio
 import uuid
@@ -41,6 +53,13 @@ from rag_pipeline import run_rag_ab_compare, set_log_context, get_code_fingerpri
 from retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from rag_parts.pipeline_steps import NormalizedIntent, normalize_intent, build_changed_fields
 from rag_parts.planner_contract import StrategyViolation
+from rag_parts.planner_staged import (
+    LockedStrategy,
+    collect_regate_seed_map,
+    compose_locked_strategy,
+    has_join_seed as _planner_has_join_seed,
+    merge_locked_strategy_slots,
+)
 from rag_parts.log_keys import (
     LOG_KEY_POLICY_MODE,
     CHANGED_BY_PLANNER_MERGE,
@@ -206,9 +225,14 @@ RAG_RENDER_TEXT_FIELDS = tuple(
 RAG_RENDER_TEXT_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_MAX_CHARS", "1200"))
 RAG_RENDER_TEXT_TOTAL_MAX_CHARS = int(os.getenv("RAG_RENDER_TEXT_TOTAL_MAX_CHARS", "2400"))
 RAG_RENDER_SAMPLE_SIZE = int(os.getenv("RAG_RENDER_SAMPLE_SIZE", "5"))
-PLANNER_SCHEMA_VERSION = "v2"
+RAG_PLANNER_PIPELINE = str(os.getenv("RAG_PLANNER_PIPELINE", "staged") or "staged").strip().lower()
+PLANNER_SCHEMA_VERSION = "v3-staged" if RAG_PLANNER_PIPELINE != "legacy" else "v2"
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
-PLANNER_STAGEWISE_ENABLED = os.getenv("PLANNER_STAGEWISE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+_PLANNER_STAGEWISE_ENV = os.getenv("PLANNER_STAGEWISE_ENABLED")
+PLANNER_STAGEWISE_ENABLED = (
+    RAG_PLANNER_PIPELINE != "legacy"
+    and str(_PLANNER_STAGEWISE_ENV or "true").strip().lower() in {"1", "true", "yes", "on"}
+)
 PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v1").strip()
 PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v1").strip()
 PLANNER_TEMPERATURE = float(os.getenv("PLANNER_TEMPERATURE", "0.0"))
@@ -242,6 +266,22 @@ PLANNER_STAGE2_IDS_MAP_ALLOWED_KEYS = {
     "org_code",
     "org_id",
 }
+
+
+def _validate_project_key_env_contract() -> tuple[str, str]:
+    pjt_id_key = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
+    pjt_no_key = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+    if pjt_id_key == pjt_no_key:
+        raise RuntimeError(
+            "RAG_KEY_PJT_ID and RAG_KEY_PJT_NO must differ "
+            f"(got {pjt_id_key!r})"
+        )
+    logger.info(
+        "[startup][key-mapping] RAG_KEY_PJT_ID=%s, RAG_KEY_PJT_NO=%s",
+        pjt_id_key,
+        pjt_no_key,
+    )
+    return pjt_id_key, pjt_no_key
 PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS = {
     "pjt_id",
     "pjt_no",
@@ -406,6 +446,7 @@ class QuestionAnalysisV2(BaseModel):
     action: Action
     relation: Optional[str] = None
     join_key_mode: Literal["instance", "group"] | None = None
+    output_type: Optional[str] = Field(default=None, description="summary|list|detail|stats|relation")
     ids_map: dict[str, list[str]] = Field(default_factory=dict, description="ID 추출 결과")
     filters: dict[str, Any] = Field(default_factory=dict, description="필터 파라미터")
     target_cols: list[str] = Field(default_factory=list, description="실행 대상 컬렉션")
@@ -674,23 +715,9 @@ class QuestionAnalysisV2(BaseModel):
         # 기본 비활성화이며, 명시 플래그로만 허용한다.
         # 단, 위에서 수행한 정규화(ids_map/filters canonicalize 및 명시 규칙 기반 mode 보정)는
         # 파서 내 deterministic 정규화로 간주하며 AUTO_CORRECTION 플래그의 휴리스틱 보정 범위와 분리한다.
-        if ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
-            mode_norm = str(d.get("mode") or "").strip().upper()
-            head_norm = str(d.get("head") or "").strip().lower()
-            filters = d.get("filters") if isinstance(d.get("filters"), dict) else {}
-            has_people_org_filters = any(
-                bool(filters.get(k))
-                for k in (
-                    "participant_researcher_name",
-                    "participant_researcher_id",
-                    "lead_org_name",
-                    "participant_org_name",
-                    "people_affiliation_org_name",
-                    "org_name",
-                )
-            )
-            if mode_norm == "LOOKUP" and (head_norm == "project" or (head_norm in ("people", "org") and has_people_org_filters)):
-                d["target_cols"] = ["ntis_project_v1"]
+        if "output_type" in d and isinstance(d.get("output_type"), str):
+            output_type = str(d.get("output_type") or "").strip().lower()
+            d["output_type"] = output_type or None
 
         # --- limit/confidence coercion (파싱 실패 방지) ---
         if "limit" in d and not isinstance(d.get("limit"), int):
@@ -742,39 +769,8 @@ class QuestionAnalysisV2(BaseModel):
             except Exception:
                 pass
 
-        if self.mode == "SEARCH":
-            filters = dict(self.filters or {})
-            name_lookup_keys = (
-                "participant_researcher_name",
-                "participant_researcher_names",
-                "participant_researcher",
-                "participant_researchers",
-                "researcher_name",
-                "researcher_names",
-                "researcher",
-                "people_name",
-                "lead_org_name",
-                "participant_org_name",
-                "people_affiliation_org_name",
-                "org_name",
-                "org",
-            )
-
-            def _has_non_empty(v: Any) -> bool:
-                if v is None:
-                    return False
-                if isinstance(v, str):
-                    return bool(v.strip())
-                if isinstance(v, (list, tuple, set)):
-                    return any(str(x).strip() for x in v if x is not None)
-                return bool(str(v).strip())
-
-            has_name_lookup_signal = any(_has_non_empty(filters.get(k)) for k in name_lookup_keys)
-            if has_name_lookup_signal:
-                try:
-                    object.__setattr__(self, "mode", "LOOKUP")
-                except Exception:
-                    pass
+        # SEARCH -> LOOKUP parser rescue is intentionally disabled.
+        # Stage1/stage2 planner + deterministic composer must decide the mode.
 
         # heuristic correction: 플래그가 켜졌을 때만 실행
         if not ALLOW_PARSER_STRATEGY_AUTO_CORRECTION:
@@ -1008,7 +1004,7 @@ async def _run_question_analysis(
         researchers: Optional[List[Any]] = None,
         normalized_intent_base: Optional[NormalizedIntent] = None,
 ) -> QuestionAnalysis:
-    if PLANNER_STAGEWISE_ENABLED:
+    if RAG_PLANNER_PIPELINE != "legacy" and PLANNER_STAGEWISE_ENABLED:
         normalized_intent = normalized_intent_base or normalize_intent(
             classify_query_intent(question, [], hint={}),
             query=question,
@@ -1170,19 +1166,39 @@ def _extract_single_project_seed(prev_context: list[dict[str, Any]]) -> dict[str
 
 
 def _has_join_seed_id(ids_map: dict[str, list[str]]) -> bool:
-    keys = {"pjt_id", "pjt_no", "doi", "issn", "eissn", "pissn", "perf_id", "rst_id", "paper_id", "patent_reg_no", "patent_app_no"}
-    return any(bool(ids_map.get(k)) for k in keys)
+    try:
+        return _planner_has_join_seed(ids_map)
+    except NameError:
+        ids_map = ids_map if isinstance(ids_map, dict) else {}
+        perf_seed_keys = (
+            "doi",
+            "issn",
+            "eissn",
+            "pissn",
+            "perf_id",
+            "rst_id",
+            "paper_id",
+            "patent_reg_no",
+            "patent_app_no",
+        )
+        return bool(ids_map.get("pjt_id") or ids_map.get("pjt_no") or any(ids_map.get(key) for key in perf_seed_keys))
 
 
 def _collect_regate_seed_map(ids_map: dict[str, list[str]]) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
-    for key, values in (ids_map or {}).items():
-        if key not in PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS and not key.startswith("patent_"):
-            continue
-        normalized = sorted({str(v).strip() for v in (values or []) if str(v).strip()})
-        if normalized:
-            out[key] = normalized
-    return out
+    try:
+        return collect_regate_seed_map(
+            ids_map,
+            allowed_keys=PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS,
+        )
+    except NameError:
+        out: dict[str, list[str]] = {}
+        for key, values in (ids_map or {}).items():
+            if key not in PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS and not str(key).startswith("patent_"):
+                continue
+            normalized = sorted({str(v).strip() for v in (values or []) if str(v).strip()})
+            if normalized:
+                out[str(key)] = normalized
+        return out
 
 
 def _has_new_regate_seed(*, base_seed_map: dict[str, list[str]], stage2_seed_map: dict[str, list[str]]) -> bool:
@@ -1193,99 +1209,92 @@ def _has_new_regate_seed(*, base_seed_map: dict[str, list[str]], stage2_seed_map
     return False
 
 
-def _determine_locked_strategy(*, question: str, stage1: PlannerStage1Decision, normalized_intent: NormalizedIntent, prev_context: list[dict[str, Any]]) -> dict[str, Any]:
+def _determine_locked_strategy(*, question: str, stage1: PlannerStage1Decision, normalized_intent: NormalizedIntent, prev_context: list[dict[str, Any]]) -> LockedStrategy:
     base_ids_map = dict(getattr(normalized_intent, "ids_map", {}) or {})
     prev_context_seed = _extract_single_project_seed(prev_context)
     gate_seed_map = _collect_regate_seed_map({**base_ids_map, **prev_context_seed})
-    if stage1.action == "topic":
-        mode = "SEARCH"
-    else:
-        mode = "LOOKUP"
-    relation = None
-    join_key_mode = None
-    if stage1.relation_candidate is not None:
-        has_seed = _has_join_seed_id(base_ids_map) or bool(prev_context_seed)
-        if has_seed and stage1.action in {"list", "detail", "stats", "download"}:
-            mode = "JOIN"
-            relation = stage1.relation_candidate
-            if base_ids_map.get("pjt_no") or prev_context_seed.get("pjt_no"):
-                join_key_mode = "group"
-            else:
-                join_key_mode = "instance"
-
-    if stage1.head == "support":
-        target_cols = ["ntis_supports_v1"]
-    elif mode == "JOIN":
-        target_cols = ["ntis_project_v1", "ntis_perf_v1"]
-    elif stage1.head == "perf":
-        target_cols = ["ntis_perf_v1"]
-    else:
-        target_cols = ["ntis_project_v1"]
-
-    locked = {"mode": mode, "head": stage1.head, "action": stage1.action, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "prev_context_seed": prev_context_seed, "gate_seed_map": gate_seed_map}
-    _log_event("PLANNER.GATE", stage1_action=stage1.action, stage1_head=stage1.head, stage1_relation_candidate=stage1.relation_candidate, gate_mode=mode, gate_relation=relation, gate_join_key_mode=join_key_mode, gate_target_cols=target_cols, used_prev_context_seed=int(bool(prev_context_seed)))
+    stage1_payload = stage1.model_dump() if hasattr(stage1, "model_dump") else {
+        "action": getattr(stage1, "action", None),
+        "head": getattr(stage1, "head", None),
+        "relation_candidate": getattr(stage1, "relation_candidate", None),
+        "referential_followup": getattr(stage1, "referential_followup", None),
+        "confidence": getattr(stage1, "confidence", None),
+    }
+    locked = compose_locked_strategy(
+        stage1=stage1_payload,
+        ids_map={**base_ids_map, **prev_context_seed},
+        has_prev_anchor=bool(prev_context_seed),
+        prev_context_seed=prev_context_seed,
+        gate_seed_map=gate_seed_map,
+    )
+    _log_event("PLANNER.GATE", stage1_action=stage1.action, stage1_head=stage1.head, stage1_relation_candidate=stage1.relation_candidate, gate_mode=locked.mode, gate_relation=locked.relation, gate_join_key_mode=locked.join_key_mode, gate_target_cols=locked.target_cols, used_prev_context_seed=int(bool(prev_context_seed)))
     return locked
 
 
-def _re_gate_locked_strategy(*, request_id: Optional[str], conversation_id: str, stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: dict[str, Any]) -> dict[str, Any]:
+def _re_gate_locked_strategy(*, request_id: Optional[str], conversation_id: str, stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: LockedStrategy) -> LockedStrategy:
     stage2_seed_map = _collect_regate_seed_map(stage2.ids_map)
-    base_seed_map = dict(locked_strategy.get("gate_seed_map") or {})
-    can_regate = bool(stage1.relation_candidate) and locked_strategy.get("mode") in {"SEARCH", "LOOKUP"} and _has_new_regate_seed(base_seed_map=base_seed_map, stage2_seed_map=stage2_seed_map)
+    locked_mode = locked_strategy.get("mode") if isinstance(locked_strategy, dict) else locked_strategy.mode
+    locked_relation = locked_strategy.get("relation") if isinstance(locked_strategy, dict) else locked_strategy.relation
+    locked_join_key_mode = locked_strategy.get("join_key_mode") if isinstance(locked_strategy, dict) else locked_strategy.join_key_mode
+    locked_target_cols = locked_strategy.get("target_cols") if isinstance(locked_strategy, dict) else locked_strategy.target_cols
+    locked_prev_context_seed = locked_strategy.get("prev_context_seed") if isinstance(locked_strategy, dict) else locked_strategy.prev_context_seed
+    base_seed_map = dict((locked_strategy.get("gate_seed_map") if isinstance(locked_strategy, dict) else locked_strategy.gate_seed_map) or {})
+    can_regate = bool(stage1.relation_candidate) and locked_mode in {"SEARCH", "LOOKUP"} and _has_new_regate_seed(base_seed_map=base_seed_map, stage2_seed_map=stage2_seed_map)
 
-    updated = dict(locked_strategy)
+    updated = locked_strategy
     if can_regate:
-        mode = "SEARCH" if stage1.action == "topic" else "LOOKUP"
-        relation = None
-        join_key_mode = None
         merged_seed_map = {**base_seed_map}
         for key, values in stage2_seed_map.items():
             merged = set(merged_seed_map.get(key) or [])
             merged.update(values)
             merged_seed_map[key] = sorted(merged)
+        stage1_payload = stage1.model_dump() if hasattr(stage1, "model_dump") else {
+            "action": getattr(stage1, "action", None),
+            "head": getattr(stage1, "head", None),
+            "relation_candidate": getattr(stage1, "relation_candidate", None),
+            "referential_followup": getattr(stage1, "referential_followup", None),
+            "confidence": getattr(stage1, "confidence", None),
+        }
+        updated = compose_locked_strategy(
+            stage1=stage1_payload,
+            ids_map=merged_seed_map,
+            has_prev_anchor=bool(locked_prev_context_seed),
+            prev_context_seed=locked_prev_context_seed,
+            gate_seed_map=merged_seed_map,
+        )
+        if isinstance(locked_strategy, dict):
+            updated = updated.to_prompt_payload()
 
-        if _has_join_seed_id(merged_seed_map) and stage1.action in {"list", "detail", "stats", "download"}:
-            mode = "JOIN"
-            relation = stage1.relation_candidate
-            join_key_mode = "group" if merged_seed_map.get("pjt_no") else "instance"
+    def _locked_field(value: Any, field: str) -> Any:
+        return value.get(field) if isinstance(value, dict) else getattr(value, field)
 
-        if stage1.head == "support":
-            target_cols = ["ntis_supports_v1"]
-        elif mode == "JOIN":
-            target_cols = ["ntis_project_v1", "ntis_perf_v1"]
-        elif stage1.head == "perf":
-            target_cols = ["ntis_perf_v1"]
-        else:
-            target_cols = ["ntis_project_v1"]
-
-        updated.update({"mode": mode, "relation": relation, "join_key_mode": join_key_mode, "target_cols": target_cols, "gate_seed_map": merged_seed_map})
-
-    changed = any(updated.get(field) != locked_strategy.get(field) for field in ("mode", "relation", "join_key_mode", "target_cols"))
+    changed = any(_locked_field(updated, field) != _locked_field(locked_strategy, field) for field in ("mode", "relation", "join_key_mode", "target_cols"))
     _log_event(
         "PLANNER.REGATE",
         request_id=request_id,
         conversation_id=conversation_id,
         regate_eligible=int(can_regate),
         regate_changed=int(changed),
-        before_mode=locked_strategy.get("mode"),
-        after_mode=updated.get("mode"),
-        before_relation=locked_strategy.get("relation"),
-        after_relation=updated.get("relation"),
-        before_join_key_mode=locked_strategy.get("join_key_mode"),
-        after_join_key_mode=updated.get("join_key_mode"),
-        before_target_cols=locked_strategy.get("target_cols"),
-        after_target_cols=updated.get("target_cols"),
+        before_mode=locked_mode,
+        after_mode=_locked_field(updated, "mode"),
+        before_relation=locked_relation,
+        after_relation=_locked_field(updated, "relation"),
+        before_join_key_mode=locked_join_key_mode,
+        after_join_key_mode=_locked_field(updated, "join_key_mode"),
+        before_target_cols=locked_target_cols,
+        after_target_cols=_locked_field(updated, "target_cols"),
     )
     return updated
 
 
-async def _run_planner_stage2(*, question: str, conversation_id: str, request_id: Optional[str], chat_history: list[BaseMessage], prev_context: list[dict[str, Any]], normalized_intent: NormalizedIntent, locked_strategy: dict[str, Any]) -> PlannerStage2Slots:
+async def _run_planner_stage2(*, question: str, conversation_id: str, request_id: Optional[str], chat_history: list[BaseMessage], prev_context: list[dict[str, Any]], normalized_intent: NormalizedIntent, locked_strategy: LockedStrategy) -> PlannerStage2Slots:
     llm = _build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=PlannerStage2Slots)
     system_prompt = await load_prompt_file(Path(f"prompts/planner_stage2_{PLANNER_STAGE2_PROMPT_VERSION}.md"))
     prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>")])
     planner_llm = llm.bind(reasoning_effort="low", include_reasoning=False, disable_thinking=PLANNER_DISABLE_THINKING, temperature=PLANNER_TEMPERATURE, top_p=1.0, max_tokens=300)
     chain = prompt | planner_llm | sanitize_llm_json | parser
-    slots: PlannerStage2Slots = await chain.ainvoke({"format_instructions": parser.get_format_instructions(), "question": question, "locked_strategy": json.dumps(locked_strategy, ensure_ascii=False)})
+    slots: PlannerStage2Slots = await chain.ainvoke({"format_instructions": parser.get_format_instructions(), "question": question, "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False)})
     _log_event("PLANNER.STAGE2", request_id=request_id, conversation_id=conversation_id, confidence=round(slots.confidence, 3), planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
     return slots
 
@@ -1336,25 +1345,23 @@ def _sanitize_ids_map_semantics(ids_map: dict[str, list[str]]) -> tuple[dict[str
     return cleaned, invalid
 
 
-def _assemble_question_analysis(*, question: str, conversation_id: str, request_id: Optional[str], stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: dict[str, Any]) -> QuestionAnalysis:
+def _assemble_question_analysis(*, question: str, conversation_id: str, request_id: Optional[str], stage1: PlannerStage1Decision, stage2: PlannerStage2Slots, locked_strategy: LockedStrategy) -> QuestionAnalysis:
     ids_map, invalids = _sanitize_ids_map_semantics(stage2.ids_map)
     for item in invalids:
         _log_event("PLANNER.IDS_MAP.INVALID_VALUE", request_id=request_id, conversation_id=conversation_id, key=item["key"], value=item["value"])
-    payload = {
-        "strategy_version": PLANNER_SCHEMA_VERSION,
-        "mode": locked_strategy["mode"],
-        "head": locked_strategy["head"],
-        "action": locked_strategy["action"],
-        "relation": locked_strategy["relation"],
-        "join_key_mode": locked_strategy["join_key_mode"],
-        "target_cols": locked_strategy["target_cols"],
-        "ids_map": ids_map,
-        "filters": stage2.filters,
-        "limit": min(stage2.limit, MAX_TOP_K_SIZE),
-        "retrieval_query": stage2.retrieval_query or question,
-        "confidence": min(stage1.confidence, stage2.confidence),
-        "planner_source": "stagewise",
-    }
+    payload = merge_locked_strategy_slots(
+        schema_version=PLANNER_SCHEMA_VERSION,
+        locked=locked_strategy,
+        slots={
+            "ids_map": ids_map,
+            "filters": stage2.filters,
+            "limit": min(stage2.limit, MAX_TOP_K_SIZE),
+            "retrieval_query": stage2.retrieval_query or question,
+            "confidence": min(stage1.confidence, stage2.confidence),
+        },
+        default_query=question,
+    )
+    payload["planner_source"] = "stagewise"
     qa = QuestionAnalysis.model_validate(payload)
     _log_event("PLANNER.ASSEMBLE", request_id=request_id, conversation_id=conversation_id, mode=qa.mode, action=qa.action, relation=qa.relation, join_key_mode=qa.join_key_mode, target_cols=qa.target_cols, planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED), planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION, planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
     return qa
@@ -1508,9 +1515,9 @@ class CustomRAGRetriever(BaseModel):
             return str(tag)
 
         collection = str(hit_data.get("_collection") or "").strip().lower()
-        if collection.startswith("ntis_project"):
+        if collection.startswith("ntis_project_v1"):
             return "IRD_NAI_PJT_INFO"
-        if collection.startswith("ntis_perf"):
+        if collection.startswith("ntis_perf_v1"):
             # 성과 컬렉션에서 태그가 누락된 경우 기본 성과 스키마로 보정
             return "IRD_NAI_RI_PAPER"
 
@@ -1518,9 +1525,9 @@ class CustomRAGRetriever(BaseModel):
         target_cols = getattr(normalized_intent, "target_cols", None) if normalized_intent else None
         if isinstance(target_cols, list):
             lowered = [str(c).strip().lower() for c in target_cols]
-            if any(c.startswith("ntis_project") for c in lowered):
+            if any(c.startswith("ntis_project_v1") for c in lowered):
                 return "IRD_NAI_PJT_INFO"
-            if any(c.startswith("ntis_perf") for c in lowered):
+            if any(c.startswith("ntis_perf_v1") for c in lowered):
                 return "IRD_NAI_RI_PAPER"
 
         return None
@@ -2228,6 +2235,17 @@ def apply_planner_strategy(
     request_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
 ) -> tuple[Any, bool]:
+    """Planner 결과 병합의 상위 래퍼.
+
+    stagewise planner는 assemble된 전략을 그대로 유지하고,
+    legacy planner는 `apply_planner_strategy()`의 strict 검증을 거친다.
+    """
+    """Planner 전략 필드를 intent에 반영하는 단일 진입점.
+
+    hint성 필드는 `merge_planner_hints()`에서 먼저 병합하고,
+    전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)는
+    여기서만 덮어쓴다. strict 모드에서 발생하는 계약 위반도 이 함수가 최종 차단한다.
+    """
     """전략 필드(mode/relation/join_key_mode/target_cols/base_route/action)를 단일 지점에서만 반영한다."""
     # 왜: 전략 필드는 워크플로 라우팅/조회 방식(RAG vs direct, JOIN 여부)을 직접 결정하므로
     #     여러 단계에서 중복 수정되면 원인 추적이 어려워진다. 이 함수에 책임을 모아 일관성을 강제한다.
@@ -2338,11 +2356,20 @@ def apply_planner_strategy(
         return merged
 
     planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
-    planner_wants_rank = bool(getattr(qa, "wants_rank", False))
-    if not planner_wants_rank:
-        planner_wants_rank = str(getattr(qa, "action", "") or "").strip().lower() in {"rank", "stats"}
     planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
-    planner_wants_rank = planner_wants_rank and planner_head in {"people", "org"}
+    planner_output_type = str(getattr(qa, "output_type", "") or "").strip().lower() or None
+    if planner_output_type not in {"summary", "list", "detail", "stats", "relation"}:
+        qa_action = str(getattr(qa, "action", "") or "").strip().lower()
+        if qa_action == "detail":
+            planner_output_type = "detail"
+        elif qa_action == "stats":
+            planner_output_type = "stats"
+        elif qa_action == "list":
+            planner_output_type = "list"
+        elif relation:
+            planner_output_type = "relation"
+        else:
+            planner_output_type = getattr(intent, "output_type", None)
 
     # 왜: JOIN 모드는 relation(무엇과 무엇을 결합하는지), join_key_mode(어떤 키로 결합하는지),
     #     mode 자체가 동시에 맞아야 의미가 완성된다. 셋 중 하나라도 비면 잘못된 결합/빈 결과를 만들 수 있어
@@ -2380,13 +2407,13 @@ def apply_planner_strategy(
     patched = replace(
         intent,
         base_route=planner_head,
-        action=("stats" if planner_wants_rank else str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower()),
+        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
         mode=planner_mode,
         relation=relation,
         join_key_mode=getattr(qa, "join_key_mode", None),
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
         ids_map=_merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
-        wants_rank=planner_wants_rank or bool(getattr(intent, "wants_rank", False)),
+        output_type=planner_output_type,
     )
 
     after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
@@ -2466,6 +2493,7 @@ def apply_planner_v2(
             join_key_mode=getattr(qa, "join_key_mode", None),
             target_cols=_normalize_hint_terms(getattr(qa, "target_cols", None)) or list(getattr(hinted_intent, "target_cols", []) or []),
             ids_map=_merge_ids_map(getattr(hinted_intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {}),
+            output_type=str(getattr(qa, "output_type", getattr(hinted_intent, "output_type", None)) or getattr(hinted_intent, "output_type", None)).strip().lower() or getattr(hinted_intent, "output_type", None),
         )
         return stagewise_patched, bool(stagewise_patched != intent)
 
@@ -2518,6 +2546,11 @@ def _normalize_hint_terms(values: Any) -> list[str]:
 
 # --- Graph Construction ---
 def build_advanced_workflow():
+    """요청 처리용 LangGraph 상태 머신을 조립한다.
+
+    노드 순서를 바꿀 때는 각 노드가 읽고 쓰는 `AgentState` 필드와
+    `analyze_question -> rag_search -> merge_answers` 경로가 유지되는지 함께 확인한다.
+    """
     workflow = StateGraph(AgentState)
 
     # Add Nodes
@@ -3267,6 +3300,7 @@ def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bo
 async def lifespan(app: FastAPI):
     global kv_store
 
+    _validate_project_key_env_contract()
     rag_resources = build_rag_objects()
     _log_event("CODE.FINGERPRINT", stage="startup")
     _log_event("APP.CONFIG", stage="startup", planner_stagewise_enabled=int(PLANNER_STAGEWISE_ENABLED), planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION, planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION)
@@ -3277,12 +3311,12 @@ async def lifespan(app: FastAPI):
 
     if ensure_payload_index_on_boot:
         keyword_index_targets = {
-            "ntis_project": ["pjt_id", "pjt_no"],
-            "ntis_perf": ["pjt_id", "pjt_no"],
+            "ntis_project_v1": ["pjt_id", "pjt_no"],
+            "ntis_perf_v1": ["pjt_id", "pjt_no"],
         }
         text_index_targets = {
-            "ntis_project": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
-            "ntis_perf": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
+            "ntis_project_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
+            "ntis_perf_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
         }
 
         client = rag_resources.qdrant_client

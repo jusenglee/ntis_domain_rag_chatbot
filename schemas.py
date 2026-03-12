@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+"""서버, planner, rag_pipeline 사이에서 공유하는 핵심 스키마 모음.
+
+이 파일은 단순 타입 선언처럼 보이지만 실제로는 계약 문서의 코드 버전이다.
+- `IntentPayloadV2`: server3 -> rag_pipeline 전달 스키마
+- `PlannerStage1Decision` / `PlannerStage2Slots`: stagewise planner 단계별 출력 범위
+- `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor 내부 표준 표현
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from rag_parts.pipeline_steps import NormalizedIntent
 from rag_parts.planner_contract import normalize_stats_policy_value
@@ -12,6 +20,7 @@ from rag_parts.planner_contract import normalize_stats_policy_value
 
 @dataclass(frozen=True)
 class IntentPayloadV2:
+    """RAG 실행 레이어로 넘기는 최상위 payload."""
     """RAG intent_payload.v2 계약: normalized_intent 단일 필드."""
 
     normalized_intent: NormalizedIntent
@@ -21,6 +30,12 @@ Stage1Relation = Literal["project_perf", "perf_project"]
 
 
 class PlannerStage1Decision(BaseModel):
+    """Stage 1 planner 출력 스키마.
+
+    전략 필드(mode/join_key_mode/target_cols/ids_map 등)를 여기 넣지 않는 것이 핵심 불변식이다.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     action: Literal["topic", "list", "detail", "stats", "download"]
     head: Literal["project", "perf", "people", "org", "support"]
     relation_candidate: Optional[Stage1Relation] = None
@@ -29,6 +44,12 @@ class PlannerStage1Decision(BaseModel):
 
 
 class PlannerStage2Slots(BaseModel):
+    """Stage 2 planner 출력 스키마.
+
+    슬롯 추출(ids_map/filters/query/limit)에만 집중하고 전략 필드는 수정하지 않는다.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     ids_map: Dict[str, list[str]] = Field(default_factory=dict)
     filters: Dict[str, Any] = Field(default_factory=dict)
     retrieval_query: Optional[str] = None
@@ -38,6 +59,7 @@ class PlannerStage2Slots(BaseModel):
 
 @dataclass(frozen=True)
 class StrategySpec:
+    """Planner 결과가 executor 안에서 소비되는 전략 스냅샷."""
     mode: str
     action: str
     relation: Optional[Tuple[str, str]]
@@ -63,6 +85,7 @@ class StrategySpec:
 
 @dataclass(frozen=True)
 class QueryPlan:
+    """실제 retrieval/rerank 코드가 읽는 실행 계획 객체."""
     mode: str  # "search" | "lookup" | "join"
     base_route: str
     action: str
@@ -81,6 +104,7 @@ class QueryPlan:
 
 @dataclass
 class ExecutionContext:
+    """정규화된 intent를 실행 중 누적/보정하기 위한 가변 컨텍스트."""
     intent: Any
     base_route: str
     action: str
@@ -125,6 +149,7 @@ class ExecutionContext:
     target_collections: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """통계 질의 관련 기본값을 한 곳에서 정규화한다."""
         policy = normalize_stats_policy_value(
             stats_metric=self.stats_metric,
             window_years=self.window_years,
@@ -140,6 +165,7 @@ class ExecutionContext:
 
     @classmethod
     def from_intent(cls, intent: Any) -> "ExecutionContext":
+        """NormalizedIntent 계열 객체를 ExecutionContext로 승격한다."""
         return cls(
             intent=intent,
             base_route=intent.base_route,
@@ -229,6 +255,7 @@ class ExecutionContext:
 
 
 def to_strategy_spec(raw: Any) -> StrategySpec:
+    """dict/객체 형태의 strategy를 `StrategySpec`으로 정규화한다."""
     """dict/객체 형태의 strategy를 StrategySpec으로 정규화한다."""
 
     if isinstance(raw, StrategySpec):

@@ -4,6 +4,10 @@ import ast
 from pathlib import Path
 from typing import Any, Optional
 
+from rag_parts.planner_staged import LockedStrategy, compose_locked_strategy
+
+"""Stage2에서 새 seed를 찾았을 때 re-gate가 최소 재판정되는지 확인하는 테스트."""
+
 
 def _load_regate_functions():
     source = Path("server3.py").read_text(encoding="utf-8")
@@ -34,6 +38,8 @@ def _load_regate_functions():
         "Optional": Optional,
         "PlannerStage1Decision": Any,
         "PlannerStage2Slots": Any,
+        "LockedStrategy": LockedStrategy,
+        "compose_locked_strategy": compose_locked_strategy,
         "_log_event": _log_event,
     }
     exec(compile(module, filename="server3.py", mode="exec"), ns, ns)
@@ -41,6 +47,7 @@ def _load_regate_functions():
 
 
 def test_re_gate_locked_strategy_promotes_lookup_to_join_with_new_seed() -> None:
+    """relation 후보와 신규 seed가 함께 생기면 LOOKUP -> JOIN 승격이 가능해야 한다."""
     ns, captured_events = _load_regate_functions()
     re_gate = ns["_re_gate_locked_strategy"]
 
@@ -74,6 +81,7 @@ def test_re_gate_locked_strategy_promotes_lookup_to_join_with_new_seed() -> None
 
 
 def test_re_gate_locked_strategy_keeps_strategy_when_not_eligible() -> None:
+    """relation 후보가 없으면 seed가 있어도 re-gate가 전략을 바꾸면 안 된다."""
     ns, captured_events = _load_regate_functions()
     re_gate = ns["_re_gate_locked_strategy"]
 

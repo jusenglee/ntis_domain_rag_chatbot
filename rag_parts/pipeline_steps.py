@@ -269,14 +269,11 @@ def normalize_intent(
     }
     # 입력값이 유효 route/action 집합을 벗어났을 때만 제한적으로 fallback 허용.
     # (운영 기본은 False: 계약 기반 실행 일관성 우선)
-    if allow_strategy_fallback and (base_route not in valid_routes or action not in valid_actions):
-        fallback = classify_query_compat(query, keywords, domain_hint=base_route or None, hint=None)
-        if base_route not in valid_routes:
-            base_route = fallback.base_route
-        if action not in valid_actions:
-            action = fallback.action
-        if relation is None:
-            relation = fallback.relation
+    normalization_warnings: List[str] = []
+    if base_route not in valid_routes:
+        normalization_warnings.append(f"invalid_base_route:{base_route or 'empty'}")
+    if action not in valid_actions:
+        normalization_warnings.append(f"invalid_action:{action or 'empty'}")
 
     perf_types_raw = _normalize_terms(hint_perf_types or getattr(intent, "perf_types", None) or [])
     perf_type_norm = normalize_perf_types(perf_types_raw)
@@ -290,7 +287,9 @@ def normalize_intent(
         ids_map,
     )
     join_parsing_warnings = _normalize_terms(
-        list(getattr(intent, "parsing_warnings", None) or []) + join_parsing_warnings
+        list(getattr(intent, "parsing_warnings", None) or [])
+        + join_parsing_warnings
+        + normalization_warnings
     )
     join_contract_violations = _normalize_terms(
         list(getattr(intent, "contract_violations", None) or []) + join_contract_violations

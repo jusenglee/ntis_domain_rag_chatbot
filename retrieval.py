@@ -38,6 +38,10 @@ _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 _SPARSE_ENCODERS: dict[str, Any] = {}
 _SPARSE_LOCK = threading.Lock()
 
+# retrieval 계층은 "검색 품질"뿐 아니라 "계약 준수"도 책임진다.
+# SEARCH/LOOKUP/JOIN에서 어떤 필터를 받았는지에 따라 결과 해석이 달라지므로,
+# 이 모듈을 수정할 때는 문서상의 mode별 금지/허용 규칙을 함께 봐야 한다.
+
 
 def _is_debug_logging_enabled() -> bool:
     return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -115,6 +119,7 @@ def _get_sparse_encoder(model_id: str = "Qdrant/bm25"):
 
 
 def warmup_sparse_encoder(model_id: Optional[str] = None) -> bool:
+    """서버 부팅 시 BM25 sparse encoder를 미리 로드해 첫 요청 지연을 줄인다."""
     """서버 시작 시 sparse encoder를 1회 로드/고정한다."""
     resolved_model_id = str(model_id or os.getenv("RAG_SPARSE_EMBED_MODEL", "Qdrant/bm25")).strip() or "Qdrant/bm25"
     try:
@@ -853,6 +858,12 @@ def dense_retrieve_hybrid_multi(
         require_hybrid_both_sides: bool = False,
         contract_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Dense + sparse(BM25) 후보를 수집한 뒤 RRF로 합치는 핵심 검색 함수.
+
+    `rag_pipeline`은 mode별 전략을 이미 결정한 상태에서 이 함수를 호출한다.
+    따라서 이 계층의 책임은 전략 변경이 아니라, Qdrant 질의를 정확히 수행하고
+    dense/lexical 쪽 타이밍과 후보 수를 관측 가능하게 남기는 것이다.
+    """
     """Run dense retrieval for multiple named vectors + sparse retrieval."""
     timings = timings if timings is not None else {}
     timings.setdefault("dense_queries", 0.0)

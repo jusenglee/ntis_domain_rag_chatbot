@@ -228,20 +228,21 @@ PLANNER_TEMPERATURE=0.0
 - `PLANNER.ASSEMBLE` 이후에도 `apply_planner_strategy()`에서 `PLANNER_ACTION_MODE_MISMATCH`가 나는지 확인
 - 이 경우 stagewise 결과가 old strict merge layer에 의해 재검증/재실패하는 구조 문제로 분류
 
-##### Step E — post-stage2 re-gate 누락 확인
-- stage2가 `pjt_id/pjt_no/doi/rst_id/patent_*`를 새로 뽑았는데 final mode가 SEARCH/LOOKUP 그대로라면, `post-stage2 re-gate` 부재 이슈로 분류
+##### Step E — post-stage2 re-gate 동작 확인
+- stage2가 `pjt_id/pjt_no/doi/rst_id/patent_*`를 새로 뽑았을 때 `PLANNER.REGATE`의 `regate_eligible`, `regate_changed`, `before_*`, `after_*`를 함께 확인
+- `regate_eligible=1`인데도 기대한 JOIN 전환이 일어나지 않으면, 구현 부재가 아니라 gate 조건/seed mapping/회귀 버그로 분류
 
 #### 6) rollback 기준
-아래 중 하나라도 만족하면 `PLANNER_STAGEWISE_ENABLED=false`로 즉시 복귀:
+아래 중 하나라도 만족하면 우선 `RAG_PLANNER_PIPELINE=legacy` 또는 `PLANNER_STAGEWISE_ENABLED=false`를 검토:
 - canary 대비 `PLANNER_ACTION_MODE_MISMATCH` 증가
 - `RAG_EMPTY_RESULT_CONTRACT` 증가
 - 평균 planner latency 50% 이상 증가
 - `mode=JOIN & docs_found=0` 빈도 급증
 
 #### 7) 현재 알려진 운영 갭
-- 기본값이 아직 `PLANNER_STAGEWISE_ENABLED=false`라 환경변수 누락 시 legacy planner를 탈 수 있다.
-- stage2에서 새로 추출한 ids가 최종 전략 재판정에 반영되지 않는 `post-stage2 re-gate` 갭이 있다.
-- stagewise assembled 결과가 이후 strict merge layer에 의해 다시 실패할 수 있다.
+- 기본 경로는 `RAG_PLANNER_PIPELINE=staged`이지만, 배포 설정이 분산돼 있으면 legacy fallback 경로가 혼입될 수 있다.
+- `PLANNER.REGATE`는 구현돼 있으므로, 현재 이슈는 “부재”보다 “조건/효과 검증 부족”에 가깝다.
+- stagewise assembled 결과가 이후 strict merge layer와 충돌하지 않도록 회귀 테스트를 유지해야 한다.
 
 ---
 
@@ -359,11 +360,11 @@ PLANNER_TEMPERATURE=0.0
 
 판단 가이드:
 - 문서상 기대(strict): 계약 위반 시 즉시 `StrategyViolation`
-- 현재 운영(compat 가능): fallback/promotion 경로로 보정될 수 있음
+- 현재 운영 기본값: staged 경로에서는 invalid fallback과 promotion 재실행을 비활성화하고, 계약 위반은 `StrategyViolation`으로 종료하는 방향이다.
 
 처방 우선순위:
 1) 관측성 고정(로그 키 표준화)
-2) 기본값 정합화(`RAG_PLANNER_INVALID_FALLBACK=0`)
+2) 기본값 정합화(`RAG_PLANNER_PIPELINE=staged`, `RAG_PLANNER_INVALID_FALLBACK=0`)
 3) 전략 재작성 지점 단일화(parser/validator/normalizer 정리)
 
 ## openai_compat_llm request_id 점검 샘플
@@ -422,7 +423,7 @@ PLANNER_TEMPERATURE=0.0
 | `execution_mode` | 실행 전략 모드 | `search`, `lookup`, `join` | 특정 모드 편향(예: `lookup` 90%+) |
 | `planner_invalid_fallback` | planner 무효 전략 fallback 허용 여부 | `0`, `1` | `1` 상태에서 `RAG.PLAN.FALLBACK_ON_INVALID_PLANNER` 급증 |
 | `strict_strategy_consistency` | 전략 불일치 시 fail-fast 여부 | `0`, `1` | `0` 상태에서 mismatch 누적 증가 |
-| `promotion_mode` | 최종 rerank/contract 적용 모드 | `search`, `lookup`, `join` | 특정 모드 편향(예: `lookup` 90%+) |
+| `promotion_mode` | 최종 rerank/contract 적용 모드 | `search`, `lookup`, `join` | staged 경로에서는 promotion이 강제 비활성화되므로 legacy/experimental 경로에서만 해석 |
 | `force_fallback_chat` | 결과 계약 실패를 chat fallback으로 전환 | `0`, `1` | `1` 상태에서 계약 실패(reason) 증가 |
 | `strategy_mutation_stage` | 전략 변형 발생 단계 | `parser`, `validator`, `normalizer`, `planner_merge`, `executor` | `validator`/`executor` 단계 변형 급증 |
 | `changed_by` | 변형 주체 태그 | `parser` 등 | 특정 주체의 변형 비율 급증 |

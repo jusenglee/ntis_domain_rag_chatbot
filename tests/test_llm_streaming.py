@@ -8,6 +8,12 @@ from langchain_core.messages import HumanMessage
 from llm_streaming import run_llm_streaming
 from openai_compat_llm import EmptyStreamContentError
 
+"""LLM 스트리밍 계약을 고정하는 테스트.
+
+핵심은 "무엇을 답했는가"보다
+"reasoning/content 분리, timeout 계측, empty stream 처리"가 유지되는가다.
+"""
+
 
 class _Chunk:
     def __init__(self, content: str, stream_field: str | None = None):
@@ -39,6 +45,7 @@ class _FakeLLM:
 
 
 def test_run_llm_streaming_collects_chunks() -> None:
+    """일반 content 청크는 순서대로 합쳐지고 fallback 없이 종료돼야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(chunks=["안", "녕"])
         text, metrics = await run_llm_streaming(llm, [HumanMessage(content="hi")])
@@ -50,6 +57,7 @@ def test_run_llm_streaming_collects_chunks() -> None:
 
 
 def test_run_llm_streaming_empty_stream_error_fail_fast() -> None:
+    """content가 한 번도 오지 않으면 fail-fast로 상위에 예외를 넘겨야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(raises_empty=True, fallback_text="완성 응답")
         try:
@@ -62,6 +70,7 @@ def test_run_llm_streaming_empty_stream_error_fail_fast() -> None:
 
 
 def test_run_llm_streaming_ttft_timeout_phase() -> None:
+    """첫 청크 전 timeout은 TTFT 단계 장애로 기록돼야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(chunks=["늦게도착"], sleep_before_chunks=[0.03])
         text, metrics = await run_llm_streaming(
@@ -79,6 +88,7 @@ def test_run_llm_streaming_ttft_timeout_phase() -> None:
 
 
 def test_run_llm_streaming_gen_timeout_phase_and_short_output_guard() -> None:
+    """첫 청크 이후 timeout은 generation 단계 장애로 분리 계측해야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(chunks=["짧다", "뒤늦게"], sleep_before_chunks=[0.0, 0.03])
         text, metrics = await run_llm_streaming(
@@ -98,6 +108,7 @@ def test_run_llm_streaming_gen_timeout_phase_and_short_output_guard() -> None:
 
 
 def test_run_llm_streaming_reasoning_filtered_and_metrics() -> None:
+    """reasoning 청크는 숨기고 메트릭에만 반영해야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(chunks=[("생각중", "reasoning"), ("정답", "content")])
         text, metrics = await run_llm_streaming(llm, [HumanMessage(content="hi")])
@@ -112,6 +123,7 @@ def test_run_llm_streaming_reasoning_filtered_and_metrics() -> None:
 
 
 def test_run_llm_streaming_deadline_on_reasoning_only_returns_empty_result() -> None:
+    """reasoning만 오다 종료되면 사용자 응답은 빈 문자열이어야 한다."""
     async def _run() -> None:
         llm = _FakeLLM(chunks=[("사고", "reasoning")], fallback_text="완성형")
         text, metrics = await run_llm_streaming(

@@ -11,7 +11,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://203.250.234.159:8004").rstrip("/")
+"""Prometheus 지표를 HTTP JSON과 SSE로 노출하는 별도 API 모듈.
+
+애플리케이션 본체와 독립적으로 읽히는 파일이라,
+응답 스키마(alias 포함)와 실패 시 `None` 처리 정책을 코드 주석으로 남겨둔다.
+"""
+
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090").rstrip("/")
 PROMETHEUS_TIMEOUT = float(os.getenv("PROMETHEUS_TIMEOUT", "5"))
 STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 
@@ -19,7 +25,7 @@ STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 VLLM_QUERY = os.getenv("VLLM_QUERY", "vllm:num_requests_running")
 GPU_UTIL_QUERY = os.getenv(
     "GPU_UTIL_QUERY",
-    'DCGM_FI_DEV_GPU_UTIL{gpu=~"0|2"}'
+    'avg(DCGM_FI_DEV_GPU_UTIL{job=~"$dcgm_job", gpu=~"0|2"})'
 )
 
 

@@ -16,6 +16,7 @@ JOIN/LOOKUP 결과가 오염될 수 있습니다. 이를 방지하기 위해 아
 - `RAG_JOIN_GROUP_RESOLVE_KEEP=50` (group JOIN resolve 입력 후보 keep; `max(RAG_HOP1_KEEP, min(RAG_JOIN_GROUP_RESOLVE_MAX_IDS, RAG_JOIN_GROUP_RESOLVE_KEEP))`로 보정)
 
 서버(`server3.py`)는 초기화 시점에 위 두 값을 읽어 key mapping으로 사용합니다.
+같은 값이면 startup에서 즉시 `RuntimeError`로 중단합니다.
 
 
 ## JOIN group resolve 운영 정책

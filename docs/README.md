@@ -43,7 +43,7 @@
 - `docs/CONTRACT.md`
 - `docs/RUNBOOK.md`
 - `docs/GOLDEN_TESTS.md`
-- `NTIS_RAG_Search_Strategy_v1_1.md` (원문 정책)
+- `docs/NTIS_RAG_Search_Strategy_v1_2.md` (원문 정책)
 - (코드 레퍼런스) `rag_pipeline.py`, `rag_parts/planner_contract.py`, `rag_parts/filters.py`, `rag_parts/query_intent.py`, `schemas.py`
 
 ### 2.2 세션 시작 프롬프트(복붙)
@@ -72,29 +72,30 @@ docs/README.md와 docs/CONTRACT.md를 기준으로
 
 ## 3. 빠른 링크
 - 운영 환경 변수: `ENVIRONMENT.md`
-- 검색전략 원문: `NTIS_RAG_Search_Strategy_v1_1.md`
+- 검색전략 원문: `docs/NTIS_RAG_Search_Strategy_v1_2.md`
 
 ## 4. 상태/백로그/세션 로그(최근 5개만 유지)
 
 ### 4.1 현재 상태
-- planner 내부 생성 경로에 **stagewise skeleton** 이 도입됨: `PLANNER_STAGEWISE_ENABLED` 플래그, 외부화된 프롬프트(`planner_stage1_v1.md`, `planner_stage2_v1.md`, `planner_legacy_v2.md`), stage별 스키마(`PlannerStage1Decision`, `PlannerStage2Slots`) 및 stage별 관측 로그(`PLANNER.STAGE1`, `PLANNER.GATE`, `PLANNER.STAGE2`, `PLANNER.ASSEMBLE`)가 추가됨.
+- planner 내부 생성 경로는 기본적으로 **stagewise** 이다: `RAG_PLANNER_PIPELINE=staged` 기본값, 외부화된 프롬프트(`planner_stage1_v1.md`, `planner_stage2_v1.md`, `planner_legacy_v2.md`), stage별 스키마(`PlannerStage1Decision`, `PlannerStage2Slots`) 및 stage별 관측 로그(`PLANNER.STAGE1`, `PLANNER.GATE`, `PLANNER.STAGE2`, `PLANNER.REGATE`, `PLANNER.ASSEMBLE`)가 코드에 연결되어 있다.
 - executor-facing 최종 계약(`QuestionAnalysisV2`)의 shape는 유지되며, stagewise는 **internal planner generation path** 만 변경함.
-- 현재 운영 리스크 1: 기본값이 아직 `PLANNER_STAGEWISE_ENABLED=false`여서, 환경 설정 누락 시 stagewise가 아니라 legacy planner를 탈 수 있음.
-- 현재 운영 리스크 2: stage2에서 새로 추출한 `ids_map`이 최종 전략 재판정(post-stage2 re-gate)에 아직 반영되지 않아, slot은 맞고 strategy는 틀리는 케이스가 남아 있음.
-- 현재 운영 리스크 3: stagewise assembled 결과가 이후 `apply_planner_strategy()`의 action/mode strict mismatch 검사에 의해 다시 실패할 수 있음.
+- 현재 운영 리스크 1: stagewise가 기본 경로이지만, `RAG_PLANNER_PIPELINE=legacy` 또는 `PLANNER_STAGEWISE_ENABLED=false`로 여전히 legacy fallback을 탈 수 있으므로 배포 설정 일관성이 필요함.
+- 현재 운영 리스크 2: `apply_planner_v2()`가 반영한 stagewise assembled strategy와 `rag_pipeline.py`의 strict/guardrail 코드가 충돌하지 않는지 회귀 테스트로 계속 고정해야 함.
+- 현재 운영 리스크 3: 문서와 운영 설명이 아직 compat/legacy 중심 표현을 일부 유지하고 있어 실제 기본값(`staged`, strict, promotion off)과 혼동될 수 있음.
 
 ### 4.2 백로그(Top)
-- [ ] **P0 stagewise 기본 경로 정합화**: staging/prod에서 `PLANNER_STAGEWISE_ENABLED=true`를 기본 적용하거나, `planner_legacy_v2.md`를 예전 full prompt 수준으로 복원.
-- [ ] **P0 stagewise 후단 재실패 차단**: `apply_planner_strategy()`가 stagewise assembled 결과에 대해 `PLANNER_ACTION_MODE_MISMATCH`를 다시 던지지 않도록 경로 분리 또는 검증 우회.
-- [ ] **P1 post-stage2 re-gate**: stage2에서 새로 추출한 `pjt_id/pjt_no/doi/rst_id/patent_*`를 JOIN/LOOKUP 재판정에 반영.
-- [ ] **P1 support target 정합화**: planner gate의 `ntis_supports_v1`와 런타임 상수/실제 컬렉션 설정 일치 점검.
+- [ ] **P0 문서/운영 정합화**: `RAG_PLANNER_PIPELINE=staged` 기본값, `PLANNER.REGATE` 존재, staged runtime fallback/promotion 차단을 운영 문서에 반영.
+- [ ] **P0 stagewise 후단 guardrail 회귀 고정**: `apply_planner_v2()`/runtime plan 경로에서 stagewise assembled strategy가 다시 바뀌지 않도록 테스트를 보강.
+- [ ] **P1 planner cleanup**: legacy fallback machinery와 staged 기본 경로를 더 명확히 분리하고, dead compat 경로를 축소.
+- [ ] **P1 support/startup 정합화**: planner gate의 `ntis_supports_v1`와 startup/bootstrap 컬렉션 설정 일치 여부를 최종 점검.
 - [ ] **P2 stage 프롬프트/validator 확장**: stage1 few-shot 보강(support/perf_project/stats/detail), stage2 filter allowlist·역할 슬롯 강화, `ids_map` semantic validator 확장.
 
 ### 4.3 세션 로그(최근 5개만 유지)
 - 2026-03-12: planner giant prompt를 external prompt 파일(`planner_stage1_v1.md`, `planner_stage2_v1.md`, `planner_legacy_v2.md`)로 분리하고 prompt cache loader를 추가.
 - 2026-03-12: planner를 stage1 분류 → deterministic gate → stage2 슬롯 추출 → final assemble 구조로 분리하는 stagewise skeleton을 코드에 반영.
-- 2026-03-12: `PlannerStage1Decision`, `PlannerStage2Slots`, `_sanitize_ids_map_semantics()`, `PLANNER.STAGE1/GATE/STAGE2/ASSEMBLE`, `PLANNER.IDS_MAP.INVALID_VALUE` 관측 로그를 추가.
-- 2026-03-12: 후속 검토 결과, 남은 핵심 리스크를 `legacy default`, `post-stage2 re-gate 부재`, `stagewise 후단 mismatch 재실패`, `support target 정합화`로 정리.
+- 2026-03-12: `PlannerStage1Decision`, `PlannerStage2Slots`, `_sanitize_ids_map_semantics()`, `PLANNER.STAGE1/GATE/STAGE2/REGATE/ASSEMBLE`, `PLANNER.IDS_MAP.INVALID_VALUE` 관측 로그를 추가.
+- 2026-03-12: 후속 점검 결과, `RAG_PLANNER_PIPELINE=staged` 기본화, `PLANNER.REGATE` 반영, staged runtime invalid fallback/promotion 차단, `output_type` 전파, extractor slot 보존이 코드에 적용됨. 남은 이슈는 문서 정합화와 회귀 테스트 보강 중심으로 재정의.
+- 2026-03-12: staged planner compose/regate, `output_type` propagation, runtime strategy lock 관련 회귀 테스트 파일을 추가.
 - 2026-03-09: strict/compat 계약 정합성과 fallback/보정 경로 잔존 이슈를 문서 캐시에 반영.
 
 ## 5. 스트리밍 장애 정책(요약)

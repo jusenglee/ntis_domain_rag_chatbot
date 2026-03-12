@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Planner와 executor 사이의 불변 계약을 검사하는 모듈.
+
+문서상 전략 계약을 코드에서 마지막으로 강제하는 계층이라서,
+새 규칙을 추가할 때는 반드시 `docs/CONTRACT.md`와 여기 구현을 같이 맞춰야 한다.
+"""
+
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
 
@@ -11,6 +17,7 @@ class PlannerContractViolation:
 
 
 class StrategyViolation(RuntimeError):
+    """Planner 계약 위반을 상위 레이어로 명시적으로 전달하는 예외."""
     """Planner/Strategy 계약 위반을 상위 레이어로 전파하기 위한 명시적 예외."""
 
     def __init__(self, error_code: str, reason: str, violations: Optional[list[PlannerContractViolation]] = None):
@@ -26,6 +33,11 @@ def planner_contract_mode(
         strategy_relation: Optional[Tuple[str, str]],
         fallback_mode: Optional[str],
 ) -> tuple[str, list[str]]:
+    """Planner가 제안한 mode/action/relation 조합이 계약에 맞는지 점검한다.
+
+    반환값은 `(정규화된 mode, 오류 코드 목록)`이며,
+    여기서는 mode를 조용히 교정하지 않고 "무엇이 잘못됐는지"만 수집한다.
+    """
     """planner 계약: planner가 고른 mode를 실행 mode로 유지하고 오류만 보고한다."""
     errors: list[str] = []
 
@@ -81,6 +93,11 @@ def validate_planner_contract(
         relation_target_cols: Optional[tuple[str, str]],
         join_key_mode: Optional[str],
 ) -> list[PlannerContractViolation]:
+    """실행 직전 planner payload의 구조적 위반을 수집한다.
+
+    특히 `pjt_id/pjt_no` 혼용, JOIN relation/head/target_cols 불일치,
+    join_key_mode와 ids_map 불일치를 fail-close 대상으로 본다.
+    """
     """실행 직전 planner 계약 위반을 에러 코드로 수집한다."""
     violations: list[PlannerContractViolation] = []
     mode_norm = str(mode or "").strip().lower()
@@ -136,13 +153,14 @@ def validate_planner_contract(
         return violations
 
     # JOIN 계약: head는 relation의 target(relation[1])과 동일해야 한다.
-    if head_norm and relation[1] != head_norm:
+    expected_target_head = relation[1]
+    if head_norm and expected_target_head != head_norm:
         violations.append(
             PlannerContractViolation(
                 error_code="PLANNER_JOIN_RELATION_HEAD_TARGET_MISMATCH",
                 reason=(
                     "JOIN head must equal relation target(relation[1])"
-                    f"(head={head_norm}, relation={relation}, expected={relation[1]})"
+                    f"(expected_target={expected_target_head}, head={head_norm}, relation={relation})"
                 ),
             )
         )

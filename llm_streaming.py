@@ -10,6 +10,10 @@ from openai_compat_llm import EmptyStreamContentError
 
 logger = logging.getLogger(__name__)
 
+# 스트리밍 계층은 "사용자에게 무엇을 내보낼 것인가"를 최종 결정한다.
+# reasoning 토큰은 관측용으로만 집계하고, 실제 응답에는 content만 포함하는 것이
+# ADR-0001과 CONTRACT 문서의 핵심 규칙이다.
+
 
 def _parse_chunk_fields(chunk: Any) -> Tuple[str, Optional[str]]:
     msg = getattr(chunk, "message", None) or chunk
@@ -39,6 +43,13 @@ async def run_llm_streaming(
     fallback_policy: Optional[StreamFallbackPolicy] = None,
     astream_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
+    """공통 스트리밍 실행기.
+
+    핵심 정책:
+    - reasoning 청크는 사용자 응답에 섞지 않는다.
+    - TTFT와 생성 구간 deadline을 분리해 관측한다.
+    - content를 한 번도 받지 못하면 조용한 non-stream 재시도를 하지 않는다.
+    """
     """공통 스트리밍 실행 유틸.
 
     타임아웃 정책:
