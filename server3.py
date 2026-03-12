@@ -46,7 +46,18 @@ from rag_parts.log_keys import (
     CHANGED_BY_PLANNER_MERGE,
 )
 
-from rag_parts.query_intent import classify_query as classify_query_intent, _cheap_precheck, normalize_org_terms, SUPERLATIVE_CUES
+from rag_parts.query_intent import (
+    classify_query as classify_query_intent,
+    _cheap_precheck,
+    normalize_org_terms,
+    SUPERLATIVE_CUES,
+    extract_people_terms,
+    extract_org_terms,
+    extract_org_role,
+    extract_years,
+    extract_perf_types,
+    extract_title_terms,
+)
 from schemas import IntentPayloadV2, PlannerStage1Decision, PlannerStage2Slots
 from settings import (
     REDIS_URL,
@@ -2045,10 +2056,22 @@ async def build_intent_payload(
 
     explicit_only_hint = {
         "wants_rank": _has_superlative_cue(question),
-        "people_terms": [],
-        "org_terms": normalize_org_terms(re.findall(r"[A-Za-z0-9가-힣]{2,}(?:대학|연구원|연구소|ETRI)", question)),
-        "years": re.findall(r"(19\d{2}|20\d{2})", question),
+        "people_terms": extract_people_terms(question, []),
+        "org_terms": normalize_org_terms(extract_org_terms(question, [])),
+        "org_role": extract_org_role(question),
+        "lead_org_terms": [],
+        "participant_org_terms": [],
+        "people_affiliation_org_terms": [],
+        "years": extract_years(question),
+        "perf_types": extract_perf_types(question, []),
+        "title_terms": extract_title_terms(question, []),
     }
+    if explicit_only_hint["org_role"] in ("lead", "performer", "performing"):
+        explicit_only_hint["lead_org_terms"] = list(explicit_only_hint["org_terms"])
+    elif explicit_only_hint["org_role"] == "participant":
+        explicit_only_hint["participant_org_terms"] = list(explicit_only_hint["org_terms"])
+    elif explicit_only_hint["org_role"] == "affiliation":
+        explicit_only_hint["people_affiliation_org_terms"] = list(explicit_only_hint["org_terms"])
     kws: List[str] = []
     raw_intent = classify_query_intent(question, kws, hint=explicit_only_hint)
     normalized_intent_base = normalize_intent(
@@ -2058,10 +2081,13 @@ async def build_intent_payload(
         allow_strategy_fallback=False,
         hint_people_terms=list(explicit_only_hint.get("people_terms", [])),
         hint_org_terms=list(explicit_only_hint.get("org_terms", [])),
-        hint_org_role=None,
-        hint_lead_org_terms=[],
-        hint_participant_org_terms=[],
-        hint_people_affiliation_org_terms=[],
+        hint_org_role=explicit_only_hint.get("org_role"),
+        hint_lead_org_terms=list(explicit_only_hint.get("lead_org_terms", [])),
+        hint_participant_org_terms=list(explicit_only_hint.get("participant_org_terms", [])),
+        hint_people_affiliation_org_terms=list(explicit_only_hint.get("people_affiliation_org_terms", [])),
+        hint_years=list(explicit_only_hint.get("years", [])),
+        hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
+        hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
     )
 
     question_analysis = None
