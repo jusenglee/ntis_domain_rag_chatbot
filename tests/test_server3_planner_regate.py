@@ -14,11 +14,14 @@ def _load_regate_functions():
         "_has_new_regate_seed",
         "_re_gate_locked_strategy",
     }
-    selected = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in target_names
-    ]
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            target_ids = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if target_ids & {"PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS"}:
+                selected.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in target_names:
+            selected.append(node)
     module = ast.Module(body=selected, type_ignores=[])
 
     captured_events: list[dict[str, Any]] = []

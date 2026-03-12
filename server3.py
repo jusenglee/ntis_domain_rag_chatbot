@@ -225,6 +225,31 @@ RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT",
 }
 RAG_KEY_PJT_ID = str(os.getenv("RAG_KEY_PJT_ID", "pjt_id")).strip() or "pjt_id"
 RAG_KEY_PJT_NO = str(os.getenv("RAG_KEY_PJT_NO", "pjt_no")).strip() or "pjt_no"
+PLANNER_STAGE2_IDS_MAP_ALLOWED_KEYS = {
+    "pjt_id",
+    "pjt_no",
+    "doi",
+    "issn",
+    "eissn",
+    "pissn",
+    "rst_id",
+    "perf_id",
+    "paper_id",
+    "patent_reg_no",
+    "patent_app_no",
+    "person_no",
+    "biz_no",
+    "org_code",
+    "org_id",
+}
+PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS = {
+    "pjt_id",
+    "pjt_no",
+    "doi",
+    "issn",
+    "rst_id",
+    "paper_id",
+}
 
 
 def _has_superlative_cue(text: str) -> bool:
@@ -1150,10 +1175,9 @@ def _has_join_seed_id(ids_map: dict[str, list[str]]) -> bool:
 
 
 def _collect_regate_seed_map(ids_map: dict[str, list[str]]) -> dict[str, list[str]]:
-    allowed_keys = {"pjt_id", "pjt_no", "doi", "issn", "rst_id", "paper_id"}
     out: dict[str, list[str]] = {}
     for key, values in (ids_map or {}).items():
-        if key not in allowed_keys and not key.startswith("patent_"):
+        if key not in PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS and not key.startswith("patent_"):
             continue
         normalized = sorted({str(v).strip() for v in (values or []) if str(v).strip()})
         if normalized:
@@ -1277,9 +1301,22 @@ def _sanitize_ids_map_semantics(ids_map: dict[str, list[str]]) -> tuple[dict[str
         "pissn": re.compile(r"^\d{4}-\d{3}[\dXx]$"),
         "patent_reg_no": re.compile(r"^[A-Za-z0-9\-]{6,}$"),
         "patent_app_no": re.compile(r"^[A-Za-z0-9\-]{6,}$"),
+        "rst_id": re.compile(r"^(?:RPT|RST)-?[A-Za-z0-9\-]{2,}$", re.I),
+        "perf_id": re.compile(r"^(?:PERF|PFM)-?[A-Za-z0-9\-]{2,}$", re.I),
+        "paper_id": re.compile(r"^(?:PAP|PAPER)-?[A-Za-z0-9\-]{2,}$", re.I),
+        "person_no": re.compile(r"^\d{6,12}$"),
+        "biz_no": re.compile(r"^\d{3}-?\d{2}-?\d{5}$"),
+        "org_code": re.compile(r"^[A-Z][A-Z0-9_\-]{2,15}$"),
+        "org_id": re.compile(r"^[A-Za-z][A-Za-z0-9_\-]{2,31}$"),
     }
     hangul_only = re.compile(r"^[가-힣\s]+$")
     for key, values in (ids_map or {}).items():
+        if key not in PLANNER_STAGE2_IDS_MAP_ALLOWED_KEYS:
+            for raw in values or []:
+                value = str(raw).strip()
+                if value:
+                    invalid.append({"key": key, "value": value})
+            continue
         out=[]
         for raw in values or []:
             value=str(raw).strip()
