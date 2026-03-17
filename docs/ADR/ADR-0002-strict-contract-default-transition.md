@@ -1,35 +1,48 @@
-# ADR-0002: Strategy 불변 계약 strict 기본값 전환(단계적)
+﻿# ADR-0002: Strict Strategy Contract를 현재 Baseline으로 채택
 
-- 상태: Draft
-- 날짜: 2026-03-09
-- 관련 문서: `docs/CONTRACT.md`, `docs/RUNBOOK.md`, `docs/GOLDEN_TESTS.md`, `docs/NTIS_RAG_Search_Strategy_v1_2.md`
+- 상태: Accepted
+- 최초 작성: 2026-03-09
+- 수정일: 2026-03-16
+- 관련 문서: `docs/CONTRACT.md`, `docs/RUNBOOK.md`, `docs/GOLDEN_TESTS.md`, `docs/ENVIRONMENT.md`
 
 ## 배경
-현행 구현은 JOIN 계약 검증과 필터 컴파일이 견고하나, 실행 기본값은 compat 경로(`planner invalid fallback`, 일부 late-stage warning)가 활성화되어 있다.
-문서 원칙(실행 레이어 전략 재결정 금지, fail-close)과 런타임 기본값 간 정합성이 완전하지 않다.
 
-## 결정(초안)
-1. 기본 운영 원칙은 strict/fail-close를 목표 상태로 유지한다.
-2. 다만 운영 안정성을 위해 전환은 단계적으로 수행한다.
-   - 1단계: 관측성 표준화(정책/변형 로그 고정)
-   - 2단계: `RAG_PLANNER_INVALID_FALLBACK` 기본값 0 전환
-   - 3단계: parser/validator/normalizer의 전략 자동 보정 경로 단일화
-   - 4단계: people/org forbidden relation의 upstream 조기 차단 강화
+planner / executor / runtime 계약은 실행 레이어가 전략을 다시 만들어내지 못하게 하고, 계약 위반은 명시적인 오류로 드러나야 한다.
+현재 저장소의 운영 기본 경로는 staged-only runtime이며, planner invalid fallback이나 후단 promotion 재실행에 의존하지 않는다.
+
+이 ADR은 더 이상 "strict로 전환할지"를 논의하는 문서가 아니다.
+현재 기본 경로 자체가 strict / fail-close라는 점을 기준선으로 고정하기 위한 문서다.
+
+## 결정
+
+1. 운영 기본값은 strict / fail-close로 둔다.
+2. planner invalid / contract violation은 `StrategyViolation`으로 종료한다.
+3. 하위 execution layer는 planner fallback strategy를 새로 만들지 않는다.
+4. promotion은 실행 mode를 재결정하는 경로가 아니며, 현재 전략 내 정책 해석으로만 다룬다.
+5. 문서와 테스트는 strict를 예외 경로가 아니라 기본 경로로 가정한다.
 
 ## 근거
-- planner_contract/rag_pipeline/query_intent/filters 교차 점검에서,
-  - 계약 검증 강도는 높음
-  - 불변 계약 측면에서는 fallback/보정 통로가 잔존
-- people/org relation 금지 가드는 executor에도 있으나, 정상 경로 주 방어선은 upstream 차단임
 
-## 영향
-- 장점: 계약-실행 정합성 향상, 디버깅 복잡도 감소, 회귀 기준 명확화
-- 리스크: strict 전환 시 기존 compat 의존 질의의 실패율 증가 가능
+- `docs/CONTRACT.md`는 final strategy 소유권을 gate / assemble에 두고 실행 레이어의 재결정을 금지한다.
+- `docs/RUNBOOK.md`는 운영 triage를 strict 기본 경로 기준으로 설명한다.
+- `docs/GOLDEN_TESTS.md`는 strict 경로에서 유지되어야 하는 `mode`, `relation`, `join_key_mode`, `ids_map` invariant를 고정한다.
 
-## 대응
-- strict/compat 이원 테스트를 병행한다.
-- 골든 질의를 정책 축( strict/fallback/promotion/chat )과 질의 축( ID/relation/복합 )으로 분리해 회귀를 관리한다.
+## 결과
 
-## 오픈 이슈
-- 전략 필드 자동 보정의 허용 범위를 어디까지 둘지(운영 플래그 vs 완전 제거)
-- fallback/promotion/chat fallback 간 상호작용 로깅 표준의 최종 스키마
+### 긍정적 효과
+
+- 계약 위반을 warning이나 silent correction으로 넘기지 않는다.
+- planner와 executor의 책임 경계가 더 분명해진다.
+- 추가 테스트와 운영 로그를 해석하기 쉬워진다.
+
+### 남아 있는 리스크
+
+- `apps/core/rag_pipeline.py`가 아직 크기 때문에 strict 기준선이 여러 함수에 흩어져 있다.
+- strict 기준선의 실제 소유 코드가 계속 `apps/*` 전반에 퍼져 있다.
+- 검증 기준선은 여전히 `tests/` 쪽 확장이 필요하다.
+
+## 후속 작업
+
+1. `apps/core/rag_pipeline.py`에서 compile / filter / join / result 정책을 단계적으로 분리한다.
+2. 문서와 테스트에서 strict를 전제한 기준선을 유지하고, 옛 compat 서술은 더 이상 확대하지 않는다.
+

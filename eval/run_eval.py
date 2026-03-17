@@ -6,7 +6,7 @@ import argparse
 import json
 from typing import Iterable, List, Tuple
 
-from rag_pipeline import run_rag_once
+from apps.core.rag_pipeline import run_rag_once
 
 
 def _load_queries(path: str) -> List[dict]:
