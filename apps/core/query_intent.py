@@ -35,11 +35,14 @@ _PJT_NO_LABEL_RE = re.compile(r"(?:과제\s*그룹\s*번호|pjt[_\s-]*no|project
 _AMBIGUOUS_PROJECT_KEY_RE = re.compile(r"(?:과제번호|과제\s*번호|project\s*number)", re.IGNORECASE)
 _LABELED_ALNUM_VALUE_RE = re.compile(r"[=:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{3,63})|\s+([A-Za-z0-9][A-Za-z0-9_-]{3,63})")
 _TITLE_QUOTE_RE = re.compile(r'"([^"\n]{2,80})"|\'([^\'\n]{2,80})\'')
+_MIN_COUNT_RE = re.compile("(\\d+)\\s*(?:\\uac74|\\uac1c)?\\s*(?:\\uc774\\uc0c1|\\uc774\\uc0c1\\uc778|\\uc774\\uc0c1\\ub9cc|\\uc774\\uc0c1\\s+\\ub098\\uc628)", re.IGNORECASE)
 
 SUPERLATIVE_CUES = ["\ucd5c\uace0", "\ucd5c\ub300", "top", "\uac00\uc7a5", "1\uc704", "best", "most"]
 DETAIL_CUES = ["\uc0c1\uc138", "\uc815\ubcf4", "\uc124\uba85", "\ub0b4\uc6a9", "\ubcf4\uae30"]
 LIST_CUES = ["\ubaa9\ub85d", "\ub9ac\uc2a4\ud2b8", "\ub098\uc5f4", "\ubcf4\uc5ec\uc918", "\uc815\ub9ac"]
 COUNT_CUES = ["\uac1c\uc218", "\uac74\uc218", "\uc218", "count", "\uba87"]
+COMPARISON_CUES = ["\ube44\uad50", "compare", "\uc774\uc0c1", "\ucd5c\ub2e4", "\uac00\uc7a5 \ub9ce\uc740", "\ub9ce\uc740"]
+SERIES_CUES = ["\uc5f0\ucc28", "\uacfc\uc81c\uad70", "\uac19\uc740 \uacfc\uc81c\ubc88\ud638 \uacc4\uc5f4", "\ud6c4\uc18d\uacfc\uc81c", "\uc5f0\ub3c4\ubcc4", "\ud750\ub984"]
 TOPIC_CUES = ["\ub3d9\ud5a5", "\uc8fc\uc81c", "\uc694\uc57d", "\uac1c\uc694", "\uc124\uba85", "\uc5f0\uad6c", "\uae30\uc220", "r&d", "rd"]
 PEOPLE_CUES = ["\uc5f0\uad6c\uc790", "\uc5f0\uad6c\uc6d0", "\uc5f0\uad6c\ucc45\uc784\uc790", "\ucc38\uc5ec\uc5f0\uad6c\uc6d0", "\ucc38\uc5ec\uc790", "\uc774\ub984", "\uc131\uba85"]
 ORG_CUES = ["\uae30\uad00", "\uc18c\uc18d\uae30\uad00", "\ucc38\uc5ec\uae30\uad00", "\uc8fc\uad00\uae30\uad00", "\uc218\ud589\uae30\uad00", "\uae30\uad00\uba85", "\uc0ac\uc5c5\uc790\ubc88\ud638", "\uae30\uad00\ucf54\ub4dc"]
@@ -121,7 +124,11 @@ class QueryIntent:
     wants_list: bool = False
     wants_detail: bool = False
     wants_rank: bool = False
+    min_metric_count: Optional[int] = None
+    stats_metric: Optional[str] = None
     output_type: str = "summary"
+    reverse_trace_followup: bool = False
+    followup_relation_hint: Optional[str] = None
     limit: Optional[int] = None
     retrieval_query: Optional[str] = None
     confidence: float = 0.0
@@ -249,6 +256,31 @@ def extract_perf_types(q: str, kws: Optional[List[str]] = None) -> List[str]:
     normalized = normalize_perf_types(values)
     return list(normalized.get("categories") or values)
 
+
+def extract_min_metric_count(q: str) -> Optional[int]:
+    """Extract simple numeric thresholds such as `2? ??` for aggregation queries."""
+    match = _MIN_COUNT_RE.search(q or "")
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except Exception:
+        return None
+    return max(1, value)
+
+
+def extract_stats_metric(q: str) -> Optional[str]:
+    """Map simple Korean and English aggregation phrases to runtime metrics."""
+    lowered = (q or "").lower()
+    if "\ub17c\ubb38 \uc218" in lowered or "paper count" in lowered or "\ub17c\ubb38\uc774" in lowered:
+        return "paper_count"
+    if "\ud2b9\ud5c8 \uc218" in lowered or "patent count" in lowered or "\ud2b9\ud5c8\uac00" in lowered:
+        return "patent_count"
+    if "\ubcf4\uace0\uc11c \uc218" in lowered or "report count" in lowered:
+        return "report_count"
+    if "\uc131\uacfc \uc218" in lowered or "\uc131\uacfc\uac00 \uac00\uc7a5 \ub9ce\uc740" in lowered or "\uc131\uacfc \uac1c\uc218" in lowered:
+        return "perf_total_count"
+    return None
 
 def pick_perf_tag_filters(q: str) -> List[str]:
     """질의 단어를 perf tag 필터로 낮춰 서버 필터 입력으로 만든다."""
@@ -401,11 +433,15 @@ def classify_query(
     wants_detail = any(cue in lowered for cue in DETAIL_CUES)
     wants_list = any(cue in lowered for cue in LIST_CUES)
     wants_rank = _has_superlative_cue(lowered)
+    wants_comparison = any(cue in lowered for cue in COMPARISON_CUES)
+    wants_series = any(cue in lowered for cue in SERIES_CUES)
+    min_metric_count = extract_min_metric_count(text)
+    stats_metric = extract_stats_metric(text)
 
-    if relation:
-        action = "list"
-    elif wants_count:
+    if wants_count or wants_comparison or min_metric_count is not None or stats_metric is not None:
         action = "stats"
+    elif relation:
+        action = "list"
     elif wants_detail or ids_map:
         action = "detail"
     elif wants_list or ((has_people_focus or has_org_focus) and (has_project or has_perf)):
@@ -413,14 +449,15 @@ def classify_query(
     else:
         action = "topic"
 
-    output_type = "relation" if relation else "summary"
-    if not relation:
-        if action == "detail":
-            output_type = "detail"
-        elif action == "list":
-            output_type = "list"
-        elif action == "stats":
-            output_type = "stats"
+    output_type = "series" if wants_series else "summary"
+    if action == "detail":
+        output_type = "detail"
+    elif wants_series:
+        output_type = "series"
+    elif action == "list":
+        output_type = "relation" if relation else "list"
+    elif action == "stats":
+        output_type = "comparison" if (wants_comparison or wants_rank or min_metric_count is not None or stats_metric is not None) else "stats"
 
     join_key_mode = None
     if relation:
@@ -456,6 +493,8 @@ def classify_query(
         wants_list=wants_list,
         wants_detail=wants_detail,
         wants_rank=wants_rank,
+        min_metric_count=min_metric_count,
+        stats_metric=stats_metric,
         output_type=output_type,
         limit=None,
         retrieval_query=text.strip() or None,

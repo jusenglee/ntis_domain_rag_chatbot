@@ -5,7 +5,8 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from apps.core.pipeline_steps import NormalizedIntent
-from apps.core.schemas import ExecutionContext, StrategySpec
+from apps.core.anchor_resolution import build_anchor_execution_inputs
+from apps.core.schemas import ExecutionContext, StrategySpec, summarize_anchor_set
 from apps.core.settings import get_ctx_token_budget, get_model_max_output_tokens
 from apps.core.query_intent import get_relation_route, normalize_categories, normalize_org_terms, pick_perf_tag_filters
 from apps.core.planner_locking import resolve_planner_locked_plan
@@ -139,6 +140,9 @@ class RuntimePreludeResult:
     perf_tag_filter: Any
     year_range_filter: Any
     perf_type_filter: Any
+    resolved_anchors: Any
+    reverse_trace_followup: bool
+    followup_relation_hint: Optional[str]
 
 
 def build_runtime_prelude_result(**kwargs: Any) -> RuntimePreludeResult:
@@ -296,18 +300,26 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
 
     runtime.timing_put_fn(timings, "info.ctx_budget", float(get_ctx_token_budget(request.model_name, max_output_tokens=get_model_max_output_tokens(request.model_name))))
 
-    org_terms = normalize_org_terms(list(ctx.org_terms or []))
-    org_role = str(ctx.org_role or "").strip().lower() or None
-    people_terms = [t.strip() for t in (list(ctx.people_terms or []) or []) if str(t).strip()]
-    people_ids = list((ctx.ids_map or {}).get("person_no") or [])
+    anchor_inputs = build_anchor_execution_inputs(it)
+    resolved_anchors = anchor_inputs.anchor_set
+    org_terms = normalize_org_terms(list(anchor_inputs.org_terms or []))
+    org_role = anchor_inputs.org_role
+    people_terms = [t.strip() for t in (list(anchor_inputs.people_terms or []) or []) if str(t).strip()]
+    people_ids = list(anchor_inputs.people_ids or [])
     gender_terms = [t.strip() for t in (list(ctx.gender_terms or []) or []) if str(t).strip()]
-    people_org_terms = normalize_org_terms(list(getattr(ctx, "people_affiliation_org_terms", []) or []))
+    people_org_terms = normalize_org_terms(list(anchor_inputs.people_affiliation_org_terms or []))
     people_match_mode = str(getattr(ctx, "people_terms_match_mode", "") or "").strip().lower() or None
     people_min_should = None if people_match_mode == "and" and len(people_terms) >= 2 else (getattr(ctx, "people_terms_min_should", None) if getattr(ctx, "people_terms_min_should", None) is not None else (1 if len(people_terms) >= 2 else None))
     people_promote_one_must = False
-    planner_org_filter_present = bool(getattr(ctx, "lead_org_terms", None) or getattr(ctx, "participant_org_terms", None) or getattr(ctx, "people_affiliation_org_terms", None))
-    org_filter = build_org_filter(OrgFilterInput(normalize_org_terms(list(getattr(ctx, "lead_org_terms", []) or [])), role="lead")) if getattr(ctx, "lead_org_terms", None) else None
-    participant_org_filter = build_prtcp_org_nested_filter(OrgFilterInput(normalize_org_terms(list(getattr(ctx, "participant_org_terms", []) or [])), role="participant")) if getattr(ctx, "participant_org_terms", None) else None
+    planner_org_filter_present = bool(anchor_inputs.planner_org_filter_present)
+    lead_org_terms = normalize_org_terms(list(anchor_inputs.lead_org_terms or []))
+    participant_org_terms = normalize_org_terms(list(anchor_inputs.participant_org_terms or []))
+    org_filter = None
+    if lead_org_terms:
+        org_filter = build_org_filter(OrgFilterInput(lead_org_terms, role="lead"))
+    elif org_terms:
+        org_filter = build_org_filter(OrgFilterInput(org_terms, role=None if org_role in (None, "lead", "performer", "performing") else org_role))
+    participant_org_filter = build_prtcp_org_nested_filter(OrgFilterInput(participant_org_terms, role="participant")) if participant_org_terms else None
     people_filter = build_people_filter(PeopleFilterInput(people_terms=people_terms, person_ids=people_ids, gender_terms=gender_terms, org_terms=people_org_terms, filter_spec=None, min_should=people_min_should, promote_one_must=people_promote_one_must)) if (people_terms or people_ids or gender_terms or people_org_terms) else None
 
     year_from = str(ctx.year_from or "").strip() or None
@@ -416,7 +428,10 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     if runtime.diff_filter_spec_fn(planner_filter_spec=planner_filter_spec, executed_filter_spec=filter_spec).get("changed", {}):
         strategy_consistency_or_violation(strict=True, mismatch_kind="filter_spec", planner_value=planner_filter_spec, executed_value=filter_spec, log_kv=runtime.log_kv_fn, context={"phase": "compile"})
 
-    strategy = StrategySpec(mode=plan.mode, action=ctx.action, relation=ctx.relation, join_key_mode=resolved_join_key_mode, people_terms=tuple(people_terms or []), target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), lookup_filter_policy=lookup_filter_policy, lookup_filter_min_should=people_min_should, lookup_filter_gate=people_match_mode, lookup_filter_promote_one_must=people_promote_one_must, lookup_title_filter_policy=lookup_title_filter_policy, title_match_mode=title_match_mode, search_filter_server_policy=search_filter_server_policy)
+    anchor_summary = summarize_anchor_set(resolved_anchors)
+    reverse_trace_followup = bool(getattr(plan, "reverse_trace_followup", False))
+    followup_relation_hint = (str(getattr(plan, "followup_relation_hint", "") or "").strip().lower() or None)
+    strategy = StrategySpec(mode=plan.mode, action=ctx.action, relation=ctx.relation, join_key_mode=resolved_join_key_mode, people_terms=tuple(people_terms or []), target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), lookup_filter_policy=lookup_filter_policy, lookup_filter_min_should=people_min_should, lookup_filter_gate=people_match_mode, lookup_filter_promote_one_must=people_promote_one_must, lookup_title_filter_policy=lookup_title_filter_policy, title_match_mode=title_match_mode, search_filter_server_policy=search_filter_server_policy, query_graph_kind=getattr(getattr(plan, "query_graph", None), "kind", None), anchor_summary=anchor_summary, anchor_resolution_status=resolved_anchors.resolution_status, ambiguity_codes=tuple(resolved_anchors.ambiguities), resolved_researcher_count=len(resolved_anchors.researcher_names), resolved_org_count=len({term for values in resolved_anchors.org_terms_by_role.values() for term in values}), aggregation_kind=(getattr(getattr(plan, "aggregation_plan", None), "comparison_mode", None) if getattr(plan, "aggregation_plan", None) is not None else None), series_kind=(getattr(getattr(plan, "project_series_plan", None), "series_key_kind", None) if getattr(plan, "project_series_plan", None) is not None else None), reverse_trace_enabled=bool(reverse_trace_followup), reverse_trace_hop_count=(3 if reverse_trace_followup else None), followup_relation_hint=followup_relation_hint)
     plan = replace(plan, relation=ctx.relation, join_key_mode=resolved_join_key_mode, target_collections=tuple(compiled_strategy.target_cols or tuple(ctx.target_collections or [])), filters=filter_spec)
     ctx.plan = plan
     ctx.strategy = strategy
@@ -435,4 +450,4 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     use_dense_threshold_policy = bool(policy_topk.get("use_dense_threshold", preset.use_dense_threshold))
     min_dense_score_policy = float(policy_topk.get("min_dense_score", preset.min_dense_score))
 
-    return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_join_key_mode=resolved_join_key_mode, planner_raw_join_key_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter)
+    return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_join_key_mode=resolved_join_key_mode, planner_raw_join_key_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter, resolved_anchors=resolved_anchors, reverse_trace_followup=bool(reverse_trace_followup), followup_relation_hint=followup_relation_hint)

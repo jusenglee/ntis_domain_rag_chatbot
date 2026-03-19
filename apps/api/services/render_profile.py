@@ -45,6 +45,10 @@ def resolve_render_profile(
     profile_name = normalized_output_type
     if normalized_output_type == "summary" and str(action or "").strip().lower() in {"list", "stats", "download"}:
         profile_name = str(action or "").strip().lower()
+    if normalized_output_type == "comparison":
+        context_kind = "project" if context_kind in {"project", "people", "org"} else context_kind
+    if normalized_output_type == "series":
+        context_kind = "project"
 
     return RenderProfile(
         name=profile_name,

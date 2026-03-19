@@ -46,7 +46,7 @@ class QuestionAnalysisV2(BaseModel):
     action: Action
     relation: Optional[str] = None
     join_key_mode: Literal["instance", "group"] | None = None
-    output_type: Optional[str] = Field(default=None, description="summary|list|detail|stats|relation")
+    output_type: Optional[str] = Field(default=None, description="summary|list|detail|stats|relation|comparison|series")
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
     target_cols: list[str] = Field(default_factory=list)

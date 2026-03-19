@@ -105,6 +105,12 @@ flowchart TD
 - `org_terms`
 - `org_role`가 `lead | performer | performing | participant | affiliation`
 
+### project key 모호성
+
+- `과제고유번호`, `PJT_ID`, `project id`처럼 slot 라벨이 있으면 `pjt_id` seed로 볼 수 있습니다.
+- `PJT_NO`, `과제 그룹번호`처럼 group 라벨이 있으면 `pjt_no` seed로 볼 수 있습니다.
+- `과제번호` 단독은 `pjt_id`/`pjt_no`를 확정하지 않는 모호 표현입니다. 이 경우 strict JOIN seed로 바로 승격하지 않고 planner와 post-sanitize re-gate를 거칩니다.
+
 ### 자주 헷갈리는 경우
 
 - LOOKUP은 id query만 의미하지 않습니다.
@@ -134,6 +140,7 @@ flowchart TD
 ### relation과 join seed
 
 - relation만 있고 join seed가 없으면 strict 기본 경로에서는 JOIN 실행이 성립하지 않습니다.
+- `과제번호`처럼 모호한 project key 표현만 있을 때도 join seed가 없는 것으로 간주합니다.
 - `join_key_mode=instance`는 `pjt_id`
 - `join_key_mode=group`는 `pjt_no`
 - `group + pjt_no 없음`은 planner contract 위반입니다.

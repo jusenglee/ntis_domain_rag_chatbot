@@ -112,6 +112,8 @@
   - `pjt_no`는 과제 group key입니다.
   - 같은 lookup/join seed에 둘을 동시에 넣으면 안 됩니다.
   - 사람 이름, 기관 이름을 `ids_map`에 임의로 넣지 않습니다.
+- 영문+숫자 식별자는 slot 라벨 또는 slot별 강한 패턴이 있을 때만 seed로 승격합니다.
+- `과제번호` 단독 표현은 `pjt_id`/`pjt_no` 미확정 상태로 남기고, sanitize 이후 post-sanitize re-gate가 다시 판단합니다.
 
 ### `filters`
 

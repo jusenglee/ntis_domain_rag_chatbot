@@ -395,22 +395,74 @@ def refine_documents_rule_based(
         doc_max_tokens = max_doc_tokens if max_doc_tokens is not None else default_max_doc_tokens
 
     for doc in docs:
+        if str(doc.get("source_type", "")).strip().lower() == "series":
+            series_item = doc.get("series_item") or {}
+            bucket_lines = []
+            for bucket in list(doc.get("year_buckets") or [])[:4]:
+                bucket_lines.append(
+                    f"- bucket {bucket.get('year')}: projects={bucket.get('project_count', 0)}, papers={bucket.get('paper_count', 0)}, patents={bucket.get('patent_count', 0)}, reports={bucket.get('report_count', 0)}"
+                )
+            context_chunks.append(
+                f"## Source {doc.get('source_index')}. {series_item.get('project_title') or series_item.get('pjt_id') or 'project'}\n"
+                f"- year: {series_item.get('year') or '-'}\n"
+                + (f"- pjt_id: {series_item.get('pjt_id')}\n" if series_item.get('pjt_id') else "")
+                + (f"- pjt_no: {series_item.get('pjt_no')}\n" if series_item.get('pjt_no') else "")
+                + (f"- lead_org_name: {series_item.get('lead_org_name')}\n" if series_item.get('lead_org_name') else "")
+                + ("" if not bucket_lines else "\n".join(bucket_lines) + "\n")
+            )
+            continue
+
+        if str(doc.get("source_type", "")).strip().lower() == "reverse_trace":
+            origin_project = doc.get("origin_project") or {}
+            followup_perf = list(doc.get("followup_perf") or [])
+            origin_perf = list(doc.get("origin_perf") or [])
+            context_chunks.append(
+                f"## Source {doc.get('source_index')}. {origin_project.get('project_title') or origin_project.get('pjt_id') or origin_project.get('pjt_no') or 'project'}\n"
+                + (f"- pjt_id: {origin_project.get('pjt_id')}\n" if origin_project.get('pjt_id') else "")
+                + (f"- pjt_no: {origin_project.get('pjt_no')}\n" if origin_project.get('pjt_no') else "")
+                + ("" if not origin_perf else "- origin_perf: " + ", ".join(str(item.get('perf_title') or item.get('doc_id') or 'perf').strip() for item in origin_perf[:4]) + "\n")
+                + ("" if not followup_perf else "- followup_perf: " + ", ".join(str(item.get('perf_title') or item.get('doc_id') or 'perf').strip() for item in followup_perf[:6]) + "\n")
+            )
+            continue
         if str(doc.get("source_type", "")).strip().lower() == "aggregation":
             rank_item = doc.get("rank_item") or {}
             metric = str(doc.get("metric") or "project_participation_count")
-            metric_value = rank_item.get(metric, rank_item.get("score", 0))
-            perf_count = rank_item.get("performance_count", 0)
             candidate_docs = int(doc.get("candidate_docs") or 0)
-            window_years = doc.get("window_years") or {}
-            year_from = (window_years.get("from") if isinstance(window_years, dict) else None) or "-"
-            year_to = (window_years.get("to") if isinstance(window_years, dict) else None) or "-"
-            person_name = rank_item.get("hm_nm") or rank_item.get("hm_id") or rank_item.get("person_key") or "unknown"
+            if metric == "project_participation_count":
+                metric_value = rank_item.get(metric, rank_item.get("score", 0))
+                perf_count = rank_item.get("performance_count", 0)
+                window_years = doc.get("window_years") or {}
+                year_from = (window_years.get("from") if isinstance(window_years, dict) else None) or "-"
+                year_to = (window_years.get("to") if isinstance(window_years, dict) else None) or "-"
+                person_name = rank_item.get("hm_nm") or rank_item.get("hm_id") or rank_item.get("person_key") or "unknown"
+                context_chunks.append(
+                    f"## Source {doc.get('source_index')}. {person_name}\n"
+                    f"- {metric}: {metric_value}\n"
+                    f"- performance_count: {perf_count}\n"
+                    f"- candidate_docs: {candidate_docs}\n"
+                    f"- window_years: {year_from} ~ {year_to}\n"
+                )
+                continue
+
+            metric_value = int(rank_item.get("metric_value") or 0)
+            project_title = str(rank_item.get("project_title") or rank_item.get("group_key") or "project").strip()
+            group_by = str(doc.get("group_by") or "project")
+            threshold = doc.get("threshold")
+            supporting_perf_count = int(rank_item.get("supporting_perf_count") or metric_value)
+            key_lines = []
+            if rank_item.get("pjt_id"):
+                key_lines.append(f"- pjt_id: {rank_item.get('pjt_id')}")
+            if rank_item.get("pjt_no"):
+                key_lines.append(f"- pjt_no: {rank_item.get('pjt_no')}")
             context_chunks.append(
-                f"## Source {doc.get('source_index')}. {person_name}\n"
-                f"- {metric}: {metric_value}\n"
-                f"- performance_count: {perf_count}\n"
-                f"- candidate_docs: {candidate_docs}\n"
-                f"- window_years: {year_from} ~ {year_to}\n"
+                f"## Source {doc.get('source_index')}. {project_title}\n"
+                f"- metric: {metric}\n"
+                f"- metric_value: {metric_value}\n"
+                f"- supporting_perf_count: {supporting_perf_count}\n"
+                f"- group_by: {group_by}\n"
+                + (f"- threshold: {threshold}\n" if threshold is not None else "")
+                + f"- candidate_docs: {candidate_docs}\n"
+                + ("" if not key_lines else "\n".join(key_lines) + "\n")
             )
             continue
 

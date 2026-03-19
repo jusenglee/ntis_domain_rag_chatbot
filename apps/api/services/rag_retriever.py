@@ -113,6 +113,23 @@ class CustomRAGRetriever(BaseModel):
             return None
         return {"normalized_intent": normalized_intent}
 
+    @staticmethod
+    def _format_aggregation_title(item: Dict[str, Any], metric: str, index: int) -> str:
+        """Build a human-readable title for aggregation rows."""
+        if metric == "project_participation_count":
+            return f"{index}. {item.get('hm_nm') or item.get('hm_id') or item.get('person_key')}"
+        project_title = str(item.get("project_title") or item.get("group_key") or "project").strip()
+        metric_value = int(item.get("metric_value") or 0)
+        return f"{index}. {project_title} ({metric_value})"
+
+
+    @staticmethod
+    def _format_series_title(item: Dict[str, Any], index: int) -> str:
+        """Build a human-readable title for series rows."""
+        project_title = str(item.get("project_title") or item.get("pjt_id") or item.get("pjt_no") or "project").strip()
+        year = str(item.get("year") or "").strip()
+        return f"{index}. {project_title}" + (f" ({year})" if year else "")
+
     def retrieve(self, query: str) -> Dict[str, Any]:
         """AB 비교 RAG 실행 결과에서 사용자가 보기 쉬운 documents/canonical_evidence/render_profile 구조를 만든다.
         aggregation rank_items와 일반 hit 경로를 구분해 서비스 뷰에 맞는 열린 dict 형태로 재포장한다.
@@ -126,6 +143,7 @@ class CustomRAGRetriever(BaseModel):
 
         hits = getattr(res_m, "reranked_hits", []) or []
         aggregation = getattr(res_m, "aggregation", None) or {}
+        series = getattr(res_m, "series", None) or {}
         canonical_evidence = getattr(res_m, "canonical_evidence", None) or []
         render_profile = getattr(res_m, "render_profile", None) or {}
         timings = getattr(res_m, "timings", None) or {}
@@ -145,19 +163,74 @@ class CustomRAGRetriever(BaseModel):
                     ),
                 )
 
+        series_items = series.get("instance_projects") if isinstance(series, dict) else None
+        if isinstance(series_items, list) and series_items:
+            documents = []
+            for idx, item in enumerate(series_items[: self.top_k], start=1):
+                documents.append({
+                    "title": self._format_series_title(item, idx),
+                    "source_index": idx,
+                    "source_type": "series",
+                    "series_key_kind": series.get("series_key_kind"),
+                    "series_key": series.get("series_key"),
+                    "series_item": dict(item),
+                    "year_buckets": list(series.get("year_buckets") or []),
+                    "candidate_docs": int(series.get("candidate_docs") or 0),
+                })
+            return {"documents": documents, "canonical_evidence": canonical_evidence, "render_profile": render_profile, "no_result_message": no_result_message}
+        reverse_trace = getattr(res_m, "reverse_trace", None) or {}
+        if isinstance(reverse_trace, dict) and (reverse_trace.get("origin_projects") or reverse_trace.get("followup_perf") or reverse_trace.get("origin_perf")):
+            documents = []
+            for idx, item in enumerate(list(reverse_trace.get("origin_projects") or [])[: self.top_k], start=1):
+                documents.append(
+                    {
+                        "title": str(item.get("project_title") or item.get("pjt_id") or item.get("pjt_no") or "project").strip(),
+                        "source_index": idx,
+                        "source_type": "reverse_trace",
+                        "relation_chain": list(reverse_trace.get("relation_chain") or []),
+                        "origin_perf": list(reverse_trace.get("origin_perf") or []),
+                        "origin_project": dict(item),
+                        "followup_perf": list(reverse_trace.get("followup_perf") or []),
+                    }
+                )
+            if not documents:
+                documents.append(
+                    {
+                        "title": "reverse trace",
+                        "source_index": 1,
+                        "source_type": "reverse_trace",
+                        "relation_chain": list(reverse_trace.get("relation_chain") or []),
+                        "origin_perf": list(reverse_trace.get("origin_perf") or []),
+                        "origin_project": None,
+                        "followup_perf": list(reverse_trace.get("followup_perf") or []),
+                    }
+                )
+            return {
+                "documents": documents,
+                "canonical_evidence": canonical_evidence,
+                "render_profile": render_profile,
+                "no_result_message": no_result_message,
+            }
+
         rank_items = aggregation.get("rank_items") if isinstance(aggregation, dict) else None
         if isinstance(rank_items, list) and rank_items:
             agg_metric = str(aggregation.get("metric") or "project_participation_count")
             agg_candidate_docs = int(aggregation.get("candidate_docs") or 0)
             agg_window_years = aggregation.get("window_years") or {}
+            agg_group_by = str(aggregation.get("group_by") or "").strip() or None
+            agg_threshold = aggregation.get("threshold")
+            agg_sort_order = aggregation.get("sort_order")
             documents = []
             for idx, item in enumerate(rank_items[: self.top_k], start=1):
                 documents.append(
                     {
-                        "title": f"{idx}. {item.get('hm_nm') or item.get('hm_id') or item.get('person_key')}",
+                        "title": self._format_aggregation_title(item, agg_metric, idx),
                         "source_index": idx,
                         "source_type": "aggregation",
                         "metric": agg_metric,
+                        "group_by": agg_group_by,
+                        "threshold": agg_threshold,
+                        "sort_order": agg_sort_order,
                         "window_years": agg_window_years,
                         "candidate_docs": agg_candidate_docs,
                         "rank_item": dict(item),

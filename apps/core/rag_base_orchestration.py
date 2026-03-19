@@ -97,6 +97,7 @@ class BaseOrchestrationRuntime:
     payload_get_fn: Callable[..., Any]
     hit_key_fn: Callable[..., Any]
     title_match_mode_contains: str
+    series_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 @dataclass(frozen=True)
@@ -316,5 +317,6 @@ def execute_base_orchestration(*, request: BaseOrchestrationRequest, runtime: Ba
         title_terms=request.title_terms,
         lookup_title_filter_policy=request.lookup_title_filter_policy,
         aggregation_builder=runtime.aggregation_builder_fn,
+        series_builder=runtime.series_builder_fn,
     )
     return BaseOrchestrationOutcome(result=result, followup_used=bool(perf_followup_join_ids_count), followup_join_ids_count=perf_followup_join_ids_count)

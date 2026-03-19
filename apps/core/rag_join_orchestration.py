@@ -121,7 +121,8 @@ class JoinOrchestrationRequest:
     timings: Dict[str, Any]
     intent_item: Any
     target_keep_hop2: int
-
+    reverse_trace_followup: bool = False
+    followup_relation_hint: Optional[str] = None
 
 @dataclass(frozen=True)
 class JoinOrchestrationRuntime:
@@ -166,6 +167,8 @@ class JoinOrchestrationRuntime:
     validate_resolved_join_keys_fn: Callable[..., None]
     get_relation_route_fn: Callable[[Tuple[str, str]], Any]
     context_builder: Callable[..., Any]
+    payload_get_fn: Optional[Callable[..., Any]] = None
+    series_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +247,72 @@ def _run_ranked_hop(*, collection: str, query_text: str, keywords: List[str], qu
     if len(reranked) > ctx_hard_limit:
         reranked = reranked[:ctx_hard_limit]
     return reranked, local_timings
+
+
+def _reverse_trace_point_payload(point: Any) -> Dict[str, Any]:
+    """Return the point payload when available so reverse-trace summaries stay payload-driven."""
+    payload = getattr(point, "payload", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _summarize_reverse_trace_perf(point: Any, *, payload_get_fn: Optional[Callable[..., Any]]) -> Dict[str, Any]:
+    """Build a compact perf summary for reverse-trace evidence."""
+    payload = _reverse_trace_point_payload(point)
+    payload_get = payload_get_fn or (lambda data, key: data.get(key) if isinstance(data, dict) else None)
+    return {
+        "doc_id": payload_get(payload, "doc_id") or payload_get(payload, "id"),
+        "perf_title": payload_get(payload, "meta_basic.title") or payload_get(payload, "title") or payload_get(payload, "title_text"),
+        "perf_type": payload_get(payload, "perf_type") or payload_get(payload, "meta_basic.perf_type") or payload_get(payload, "tag"),
+        "published_year": payload_get(payload, "published_year") or payload_get(payload, "meta_basic.pblcn_ymd") or payload_get(payload, "meta_detail.pblcn_ymd"),
+        "pjt_id": payload_get(payload, "pjt_id") or payload_get(payload, "meta_basic.pjt_id") or payload_get(payload, "meta_detail.pjt_id"),
+        "pjt_no": payload_get(payload, "pjt_no") or payload_get(payload, "meta_basic.pjt_no") or payload_get(payload, "meta_detail.pjt_no"),
+    }
+
+
+def _summarize_reverse_trace_project(point: Any, *, payload_get_fn: Optional[Callable[..., Any]]) -> Dict[str, Any]:
+    """Build a compact project summary for reverse-trace evidence."""
+    payload = _reverse_trace_point_payload(point)
+    payload_get = payload_get_fn or (lambda data, key: data.get(key) if isinstance(data, dict) else None)
+    return {
+        "pjt_id": payload_get(payload, "pjt_id") or payload_get(payload, "meta_basic.pjt_id") or payload_get(payload, "meta_detail.pjt_id"),
+        "pjt_no": payload_get(payload, "pjt_no") or payload_get(payload, "meta_basic.pjt_no") or payload_get(payload, "meta_detail.pjt_no"),
+        "project_title": payload_get(payload, "meta_basic.kor_pjt_nm") or payload_get(payload, "title") or payload_get(payload, "title_text"),
+    }
+
+
+def _dedupe_reverse_trace_followup(origin_perf_points: List[Any], followup_perf_points: List[Any], *, payload_get_fn: Optional[Callable[..., Any]]) -> List[Any]:
+    """Drop hop3 perf hits that describe the same seed perf evidence already returned by hop1."""
+    origin_keys: set[tuple[str, str]] = set()
+    for point in origin_perf_points:
+        summary = _summarize_reverse_trace_perf(point, payload_get_fn=payload_get_fn)
+        origin_keys.add((str(summary.get("doc_id") or "").strip().lower(), str(summary.get("perf_title") or "").strip().lower()))
+
+    deduped: List[Any] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for point in followup_perf_points:
+        summary = _summarize_reverse_trace_perf(point, payload_get_fn=payload_get_fn)
+        key = (str(summary.get("doc_id") or "").strip().lower(), str(summary.get("perf_title") or "").strip().lower())
+        if key in origin_keys or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(point)
+    return deduped
+
+
+def _build_reverse_trace_payload(*, origin_perf_points: List[Any], origin_project_points: List[Any], followup_perf_points: List[Any], followup_relation_hint: Optional[str], payload_get_fn: Optional[Callable[..., Any]]) -> Dict[str, Any]:
+    """Assemble the perf -> project -> perf traversal payload exposed to renderers and debug views."""
+    origin_perf = [_summarize_reverse_trace_perf(point, payload_get_fn=payload_get_fn) for point in origin_perf_points]
+    origin_projects = [_summarize_reverse_trace_project(point, payload_get_fn=payload_get_fn) for point in origin_project_points]
+    followup_perf = [_summarize_reverse_trace_perf(point, payload_get_fn=payload_get_fn) for point in followup_perf_points]
+    status = "ok" if followup_perf else "partial"
+    return {
+        "status": status,
+        "relation_chain": ["perf", "project", "perf"],
+        "followup_relation_hint": followup_relation_hint,
+        "origin_perf": origin_perf,
+        "origin_projects": origin_projects,
+        "followup_perf": followup_perf,
+    }
 
 
 def resolve_perf_followup_join_ids(*, request: PerfFollowupRequest, runtime: PerfFollowupRuntime) -> List[str]:
@@ -494,11 +563,86 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
     t0 = time.time()
     hydrate_limit = min(max(1, hop2_keep), request.ctx_hard_limit)
     runtime.hydrate_points_fn(hop2_reranked[:hydrate_limit], chunk_size=int(os.getenv("RAG_HYDRATE_FULL_CHUNK", "64")))
+    reverse_trace = None
+    followup_perf_top: List[Any] = []
+    if request.reverse_trace_followup and request.relation == ("perf", "project") and join_pjt_ids:
+        followup_filter = runtime.build_collection_join_filter_fn(
+            hop2_col=COL_PERF,
+            join_key_mode="instance",
+            join_ids=join_pjt_ids,
+            pjt_nos=[],
+            query=request.query_text,
+            apply_query_tag_inference=False,
+        )
+        if request.perf_tag_filter:
+            followup_filter = runtime.and_filter_fn(followup_filter, request.perf_tag_filter)
+        if request.perf_type_filter:
+            followup_filter = runtime.and_filter_fn(followup_filter, request.perf_type_filter)
+        if request.year_range_filter:
+            followup_filter = runtime.and_filter_fn(followup_filter, request.year_range_filter)
+        followup_keep = int(os.getenv("RAG_REVERSE_TRACE_KEEP", str(max(1, hop2_keep))))
+        followup_reranked, local_timings_h3 = _run_ranked_hop(
+            collection=COL_PERF,
+            query_text=request.query_text,
+            keywords=request.keywords,
+            query_filter=followup_filter,
+            k_base=max(hop2_k_base, int(os.getenv("RAG_REVERSE_TRACE_TOPK_BASE", str(hop2_k_base)))),
+            dense_topk=request.topk_dense,
+            sparse_vector_name_eff=request.sparse_vector_name_eff,
+            sparse_weight_eff=request.sparse_weight_eff,
+            vector_names=request.vector_names,
+            w_dense_map=request.w_dense_map,
+            fallback_emb=request.fallback_emb,
+            qdr=runtime.qdr,
+            preset=runtime.preset,
+            contract_scope="reverse_trace_hop3",
+            rerank_mode="join",
+            rerank_base_route="perf",
+            rerank_keep=followup_keep,
+            intent_item=request.intent_item,
+            lex_w_eff=request.lex_w_eff,
+            ctx_hard_limit=request.ctx_hard_limit,
+            log_prefix="RAG.DENSE.THRESHOLD.HOP3",
+            action=request.action,
+            base_route=request.base_route,
+            relation=("project", "perf"),
+            runtime=runtime,
+        )
+        followup_perf_top = _dedupe_reverse_trace_followup(list(hop1_top or []), list(followup_reranked[: max(1, followup_keep)]), payload_get_fn=runtime.payload_get_fn)
+        if followup_perf_top:
+            runtime.hydrate_points_fn(followup_perf_top[: min(len(followup_perf_top), request.ctx_hard_limit)], chunk_size=int(os.getenv("RAG_HYDRATE_FULL_CHUNK", "64")))
+        reverse_trace = _build_reverse_trace_payload(
+            origin_perf_points=list(hop1_top or []),
+            origin_project_points=list(hop2_top or []),
+            followup_perf_points=followup_perf_top,
+            followup_relation_hint=request.followup_relation_hint,
+            payload_get_fn=runtime.payload_get_fn,
+        )
+        runtime.log_top_points("RAG.REVERSE_TRACE.HOP3.TOP", followup_perf_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")), tier="debug")
+        runtime.log_kv(
+            "RAG.REVERSE_TRACE.HOP3.TIMINGS",
+            tier="debug",
+            **build_join_hop_timing_payload(merge_log_fields=runtime.merge_log_fields_fn, local_timings=local_timings_h3),
+        )
+        runtime.timing_put_fn(request.timings, "info.origin_project_count", len(hop2_top or []))
+        runtime.timing_put_fn(request.timings, "info.followup_perf_count", len(followup_perf_top or []))
+        runtime.timing_put_fn(request.timings, "info.reverse_trace_hop_count", 3)
+        if not followup_perf_top:
+            runtime.timing_put_fn(request.timings, "info.failed_step", "reverse_trace_partial")
     runtime.timing_put_fn(request.timings, "phase.hydrate_full_payload", time.time() - t0)
     runtime.timing_put_fn(request.timings, "phase.hop_total", time.time() - t_hop0)
-    hits = (hop1_top or []) + (hop2_top or [])
-    debug_meta = {"join": {"join_key_mode": join_key_mode, "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "hop2_key_strategy": hop2_key_strategy, "resolved_runtime_key_kind": resolved_runtime_key_kind, "join_compile_selection": join_compile_selection, "join_keys_used_count": join_keys_used_count, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}}
-    result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=hop1_top, hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=hop2_top, hop2_label=hop2_label, effective_join_mode=effective_join_mode, join_pjt_ids=join_pjt_ids, join_pjt_nos=join_pjt_nos, preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=hits, debug_meta=debug_meta, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
+    hits = (hop1_top or []) + (hop2_top or []) + (followup_perf_top or [])
+    debug_meta = {"join": {"join_key_mode": join_key_mode, "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "hop2_key_strategy": hop2_key_strategy, "resolved_runtime_key_kind": resolved_runtime_key_kind, "join_compile_selection": join_compile_selection, "join_keys_used_count": join_keys_used_count, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}, "reverse_trace": {"enabled": bool(request.reverse_trace_followup and request.relation == ("perf", "project")), "hop_count": (3 if request.reverse_trace_followup and request.relation == ("perf", "project") else 2), "origin_project_count": len(hop2_top or []), "followup_perf_count": len(followup_perf_top or []), "followup_relation_hint": request.followup_relation_hint}}
+    series = None
+    if callable(runtime.series_builder_fn):
+        series = runtime.series_builder_fn(
+            reranked=hits,
+            intent=request.intent_item,
+            hinted_limit=hop2_keep,
+            policy_limit=request.ctx_hard_limit,
+            payload_get_fn=runtime.payload_get_fn,
+        )
+    result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=hop1_top, hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=hop2_top, hop2_label=hop2_label, effective_join_mode=effective_join_mode, join_pjt_ids=join_pjt_ids, join_pjt_nos=join_pjt_nos, preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=hits, series=series, reverse_trace=reverse_trace, debug_meta=debug_meta, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
     return JoinOrchestrationOutcome(
         result=result,
         join_key_source=join_key_source,

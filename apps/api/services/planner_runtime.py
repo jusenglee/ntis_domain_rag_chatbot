@@ -311,6 +311,16 @@ def assemble_question_analysis(
     project_key_ambiguity = bool(has_ambiguous_project_key_label(question))
     has_explicit_pjt_id_label = bool(has_explicit_project_id_label(question))
     has_explicit_pjt_no_label = bool(has_explicit_project_no_label(question))
+    stage2_filters = dict(stage2.filters or {})
+    researcher_gate_terms = [
+        str(value).strip()
+        for key in ("participant_researcher_name", "participant_researcher_names", "participant_researcher", "participant_researchers", "researcher_name", "researcher_names", "researcher", "people_name")
+        for value in ((stage2_filters.get(key) or []) if isinstance(stage2_filters.get(key), list) else [stage2_filters.get(key)] if stage2_filters.get(key) else [])
+        if str(value).strip()
+    ]
+    generic_org_gate = bool(stage2_filters.get("org_name"))
+    role_scoped_org_gate = bool(stage2_filters.get("org_role") or stage2_filters.get("lead_org_name") or stage2_filters.get("performing_org_name") or stage2_filters.get("participant_org_name") or stage2_filters.get("people_affiliation_org_name"))
+    unresolved_anchor_pair = bool(researcher_gate_terms and generic_org_gate and not role_scoped_org_gate)
     regate_reason = None
     payload_mode = str(payload.get("mode") or "").strip().lower()
     payload_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
@@ -320,7 +330,7 @@ def assemble_question_analysis(
         if payload_join_key_mode == "instance" and not has_pjt_id_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
-            regate_reason = "sanitized_instance_seed_missing"
+            regate_reason = "sanitized_instance_seed_unresolved_anchor_pair" if unresolved_anchor_pair else "sanitized_instance_seed_missing"
         elif payload_join_key_mode == "group" and not has_pjt_no_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
@@ -340,6 +350,7 @@ def assemble_question_analysis(
             project_key_ambiguity=int(project_key_ambiguity),
             has_explicit_pjt_id_label=int(has_explicit_pjt_id_label),
             has_explicit_pjt_no_label=int(has_explicit_pjt_no_label),
+            unresolved_anchor_pair=int(unresolved_anchor_pair),
         )
     payload["planner_source"] = "stagewise"
     qa = question_analysis_cls.model_validate(payload)

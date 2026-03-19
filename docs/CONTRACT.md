@@ -245,3 +245,56 @@ MUST NOT:
 
 Fail-close / downgrade:
 - raw nested를 볼 수 없으면 diagnostic 결과는 `unknown`으로 남겨야 하며 warning으로 승격하면 안 됩니다.
+
+## 7. Query Graph / Extended Output Contract
+
+### MUST
+
+- Runtime must preserve `query_graph_kind`, `anchor_summary`, `aggregation_kind`, and `series_kind` alongside the existing strategy fields.
+- `comparison` and `series` are evidence presentation shapes, not answer style hints.
+- Extended output types must still respect the raw -> canonical -> prompt boundary.
+
+### MUST NOT
+
+- Runtime must not re-infer query-graph metadata from scratch after planner/prelude already fixed the plan.
+- Aggregation or series intent must not be silently delegated to answer wording logic.
+
+## Comparison Runtime Baseline
+
+- `output_type=comparison` now has active runtime behavior, not metadata-only reservation.
+- `action=stats` may coexist with `relation=(project, perf)` when the question asks for project-level perf counts or ranking.
+- Runtime aggregation is computed before answer generation and must not be delegated to prompt-only reasoning.
+- `AggregationPlan.threshold` is sourced from `min_metric_count` when the query includes threshold language such as `2+ results`.
+- Current supported comparison metrics are `paper_count`, `patent_count`, `report_count`, and `perf_total_count`.
+- Current supported comparison groupings are `project` and `project_group`.
+
+## Series Runtime Baseline
+
+- `output_type=series` now has active runtime behavior and must not be treated as metadata-only.
+- Current supported series axes are `pjt_no` and year-window expansion.
+- Series runtime may combine project-group expansion with project-to-performance follow-up, but it must preserve `pjt_id` and `pjt_no` semantics without auto-conversion.
+- Series payloads must expose `series_key_kind`, `series_key`, `instance_projects`, `linked_perf`, and `year_buckets` before answer generation.
+- Summary/debug observability must record `series_result_count`, `series_bucket_count`, and `failed_step` when series runtime is active.
+
+## Anchor Summary Baseline
+
+- `anchor_summary` must distinguish generic organization anchors from role-specific organization anchors.
+- `anchor_summary.org_role_counts.generic` and `anchor_summary.generic_org_count` are observability fields only; they must not erase `lead` / `participant` / `affiliation` semantics.
+- `anchor_summary.ambiguities` may include labels such as `org_role_unspecified` or `researcher_org_pair_unresolved` when planner truth contains name-level anchors without a fully fixed role pairing.
+- Anchor summaries must not invent new ids or reinterpret `pjt_id` as `pjt_no`.
+
+
+## Reverse Trace Contract
+
+- `QueryGraphPlan.kind=perf_to_project_to_perf` means runtime executes `lookup_perf -> join_perf_to_project -> followup_project_to_perf`.
+- Reverse trace activation must come from planner truth, not query-text regex extraction.
+- Runtime preserves `origin_project_count`, `followup_perf_count`, and `reverse_trace_hop_count` in summary/debug metadata.
+- Hop3 empty is partial success, not a strict join failure.
+## Anchor Resolution Contract
+
+- `ResolvedAnchorSet` is the planner-first execution contract for researcher/org anchors after normalization and contract checks.
+- Runtime prelude must compile people/org filters from `ResolvedAnchorSet`, not by re-interpreting raw planner fields downstream.
+- Generic organization anchors remain observable as generic anchors. They may only be routed into a role-specific filter when planner truth already fixed `org_role`.
+- `anchor_resolution_status` may be `none`, `resolved`, `partial`, or `ambiguous`.
+- `ambiguity_codes` may include `researcher_name_only`, `org_role_unspecified`, or `researcher_org_pair_unresolved`.
+- Seedless `JOIN(instance)` with only an unresolved researcher/org pair must downgrade to `lookup` instead of forcing strict join execution.

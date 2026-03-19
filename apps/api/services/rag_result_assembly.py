@@ -15,6 +15,56 @@ HitKey = Callable[[Any], Tuple[str, str]]
 TimingPut = Callable[[str, Any], None]
 
 
+def _render_series_context(series: Optional[Dict[str, Any]]) -> str:
+    """Render a compact text view for series payloads."""
+    if not isinstance(series, dict):
+        return ""
+    projects = list(series.get("instance_projects") or [])
+    buckets = list(series.get("year_buckets") or [])
+    if not projects and not buckets:
+        return ""
+    lines = [f"- series_key_kind: {series.get('series_key_kind') or 'unknown'}"]
+    if series.get("series_key"):
+        lines.append(f"- series_key: {series.get('series_key')}")
+    if series.get("relation_hint"):
+        lines.append(f"- relation_hint: {series.get('relation_hint')}")
+    for item in projects[:8]:
+        title = str(item.get("project_title") or item.get("pjt_id") or item.get("pjt_no") or "project").strip()
+        year = str(item.get("year") or "-")
+        pjt_id = str(item.get("pjt_id") or "").strip()
+        pjt_no = str(item.get("pjt_no") or "").strip()
+        suffix = ", ".join(part for part in [f"year={year}" if year else "", f"pjt_id={pjt_id}" if pjt_id else "", f"pjt_no={pjt_no}" if pjt_no else ""] if part)
+        lines.append(f"- project: {title}" + (f" ({suffix})" if suffix else ""))
+    for bucket in buckets[:8]:
+        lines.append(
+            f"- bucket {bucket.get('year')}: projects={bucket.get('project_count', 0)}, papers={bucket.get('paper_count', 0)}, patents={bucket.get('patent_count', 0)}, reports={bucket.get('report_count', 0)}"
+        )
+    return "\n".join(lines)
+def _render_reverse_trace_context(reverse_trace: Optional[Dict[str, Any]]) -> str:
+    """Render a compact text view for perf -> project -> perf reverse traces."""
+    if not isinstance(reverse_trace, dict):
+        return ""
+    origin_perf = list(reverse_trace.get("origin_perf") or [])
+    origin_projects = list(reverse_trace.get("origin_projects") or [])
+    followup_perf = list(reverse_trace.get("followup_perf") or [])
+    if not origin_perf and not origin_projects and not followup_perf:
+        return ""
+    lines = ["- relation_chain: perf -> project -> perf"]
+    for item in origin_perf[:4]:
+        title = str(item.get("perf_title") or item.get("title") or item.get("doc_id") or "perf").strip()
+        perf_type = str(item.get("perf_type") or "unknown").strip()
+        lines.append(f"- origin_perf: {title} ({perf_type})")
+    for item in origin_projects[:6]:
+        title = str(item.get("project_title") or item.get("pjt_id") or item.get("pjt_no") or "project").strip()
+        suffix = ", ".join(part for part in [f"pjt_id={item.get('pjt_id')}" if item.get("pjt_id") else "", f"pjt_no={item.get('pjt_no')}" if item.get("pjt_no") else ""] if part)
+        lines.append(f"- origin_project: {title}" + (f" ({suffix})" if suffix else ""))
+    for item in followup_perf[:8]:
+        title = str(item.get("perf_title") or item.get("title") or item.get("doc_id") or "perf").strip()
+        perf_type = str(item.get("perf_type") or "unknown").strip()
+        year = str(item.get("published_year") or "").strip()
+        lines.append(f"- followup_perf: {title} ({perf_type}" + (f", year={year}" if year else "") + ")")
+    return "\n".join(lines)
+
 @dataclass(frozen=True)
 class ResultAssemblyRequest:
     """RAG 결과 조립에 필요한 요청 컨텍스트를 묶어 두는 구조체다.
@@ -79,6 +129,7 @@ class ResultAssemblyRuntime:
     hydrate_points_payload: Callable[..., None]
     soft_title_contains: Callable[..., bool]
     aggregation_builder: Callable[..., Optional[Dict[str, Any]]]
+    series_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 def collect_filter_probe_terms(*, people_terms: Optional[List[str]], people_ids: Optional[List[str]], mode: str) -> List[str]:
@@ -246,6 +297,7 @@ def assemble_rag_result(
     relation: Any,
     keywords: List[str],
     aggregation: Optional[Dict[str, Any]],
+    series: Optional[Dict[str, Any]],
     contract_fail_reason: Any,
     hit_key: HitKey,
     timing_put: TimingPut,
@@ -272,6 +324,8 @@ def assemble_rag_result(
         org_role=org_role,
     )
     context = context_bundle["context"]
+    if str(output_type or "").strip().lower() == "series" and isinstance(series, dict) and str(series.get("status") or "").strip().lower() == "ok":
+        context = _render_series_context(series) or context
     refs = context_bundle["refs"]
     ctx_fieldset = context_bundle["fieldset"]
     render_profile = context_bundle.get("render_profile")
@@ -331,6 +385,7 @@ def assemble_rag_result(
         refs=refs,
         timings=timings,
         aggregation=aggregation,
+        series=series,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,
     )
@@ -408,9 +463,31 @@ class SearchLookupResultOrchestrator:
             policy_limit=int(getattr(self.policy.preset, "max_ctx_items", 10) or 10),
             payload_get_fn=self.runtime.payload_get,
         )
+        series = None
+        if callable(self.runtime.series_builder):
+            series = self.runtime.series_builder(
+                reranked=reranked,
+                intent=self.query_intent,
+                hinted_limit=self.policy.hinted_limit,
+                policy_limit=int(getattr(self.policy.preset, "max_ctx_items", 10) or 10),
+                payload_get_fn=self.runtime.payload_get,
+            )
         if aggregation:
             self.runtime.timing_put("info.aggregation_candidate_docs", int(aggregation.get("candidate_docs", 0) or 0))
             self.runtime.timing_put("info.aggregation_rank_items", len(aggregation.get("rank_items", []) or []))
+            self.runtime.timing_put("info.aggregation_metric", str(aggregation.get("metric") or ""))
+            self.runtime.timing_put("info.aggregation_group_by", str(aggregation.get("group_by") or ""))
+            self.runtime.timing_put("info.aggregation_threshold", aggregation.get("threshold"))
+            self.runtime.timing_put("info.aggregation_result_count", len(aggregation.get("rank_items", []) or []))
+            status = str(aggregation.get("status") or "").strip().lower()
+            if status in {"unsupported", "empty_result"}:
+                self.runtime.timing_put("info.failed_step", f"aggregation_{status}")
+        if series:
+            self.runtime.timing_put("info.series_result_count", len(series.get("instance_projects", []) or []))
+            self.runtime.timing_put("info.series_bucket_count", len(series.get("year_buckets", []) or []))
+            status = str(series.get("status") or "").strip().lower()
+            if status in {"unsupported", "empty_result"}:
+                self.runtime.timing_put("info.failed_step", f"series_{status}")
 
         result_topn_normal = self.runtime.resolve_env_topn(
             "RAG_LOG_TOPN_NORMAL",
@@ -520,6 +597,7 @@ class SearchLookupResultOrchestrator:
             relation=self.request.relation,
             keywords=self.request.keywords,
             aggregation=aggregation,
+            series=series,
             contract_fail_reason=contract_fail_reason,
             hit_key=self.runtime.hit_key,
             timing_put=self.runtime.timing_put,
@@ -578,6 +656,7 @@ def finalize_rag_result(
     title_terms: List[str],
     lookup_title_filter_policy: str,
     aggregation_builder: Callable[..., Optional[Dict[str, Any]]],
+    series_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> RagResult:
     """request/policy/runtime을 받아 base RAG 결과 조립 전체를 실행한다.
     ResultAssemblyRequest·Policy·Runtime를 입력으로 받는 파사드로, 실제 조립 함수의 긴 인자 목록을 증발시키지 않게 한다.
@@ -632,6 +711,7 @@ def finalize_rag_result(
         hydrate_points_payload=hydrate_points_payload,
         soft_title_contains=soft_title_contains,
         aggregation_builder=aggregation_builder,
+        series_builder=series_builder,
     )
     return SearchLookupResultOrchestrator(
         merged_rrf=merged_rrf,
@@ -673,6 +753,8 @@ def assemble_join_rag_result(
     keywords: List[str],
     hits: Sequence[Any],
     aggregation: Optional[Dict[str, Any]] = None,
+    series: Optional[Dict[str, Any]] = None,
+    reverse_trace: Optional[Dict[str, Any]] = None,
     debug_meta: Optional[Dict[str, Any]] = None,
     timing_put: TimingPut = lambda key, value: None,
     log_kv: Callable[..., None] = lambda *args, **kwargs: None,
@@ -712,6 +794,10 @@ def assemble_join_rag_result(
         org_role=org_role,
     )
     hop2_ctx = context_bundle["context"]
+    if str(output_type or "").strip().lower() == "series" and isinstance(series, dict) and str(series.get("status") or "").strip().lower() == "ok":
+        hop2_ctx = _render_series_context(series) or hop2_ctx
+    elif isinstance(reverse_trace, dict) and str(reverse_trace.get("status") or "").strip().lower() in {"ok", "partial"}:
+        hop2_ctx = _render_reverse_trace_context(reverse_trace) or hop2_ctx
     hop2_refs = context_bundle["refs"]
     render_profile = context_bundle.get("render_profile")
     canonical_evidence = context_bundle.get("canonical_evidence")
@@ -766,6 +852,8 @@ def assemble_join_rag_result(
         refs=refs,
         timings=timings,
         aggregation=aggregation,
+        series=series,
+        reverse_trace=reverse_trace,
         debug_meta=debug_meta,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,

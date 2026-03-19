@@ -97,3 +97,37 @@
 - 사람 이름 miss diagnostic은 raw nested `prtcp_mp[]` 기준으로만 판정해야 합니다.
 - `payload_get("a[].b")`의 flatten 결과나 `prtcp_mp_hm_nm` 같은 집계 preview는 diagnostic evidence로 승격하면 안 됩니다.
 - raw nested evidence가 없으면 `FILTER_MISS_SUSPECTED` warning 대신 `unknown` 처리되어야 합니다.
+
+### 6. Query Graph / Extended Render Invariants
+
+- `comparison` and `series` must survive as valid `output_type` values.
+- `project -> perf` relation queries must report `query_graph_kind=project_to_perf`.
+- `perf -> project` relation queries must report `query_graph_kind=perf_to_project`.
+- Stats or comparison requests must not leave `aggregation_kind` empty.
+- Project-series questions must not leave `series_kind` empty.
+
+## Comparison Output Invariants
+
+- Comparison aggregation payloads must expose `metric`, `group_by`, `candidate_docs`, `threshold`, `sort_order`, and `rank_items`.
+- Each comparison `rank_item` must preserve `group_key`, `pjt_id`, `pjt_no`, `project_title`, `metric_value`, and `supporting_perf_count` when available.
+- Comparison rendering must present aggregation payloads without re-counting inside the answer layer.
+- Thresholded comparison queries such as `papers >= 2` must record the threshold in both runtime payload and summary observability.
+
+## Series Output Invariants
+
+- `output_type=series` must produce runtime evidence, not planner metadata only.
+- Series payloads must preserve `series_key_kind`, `series_key`, `instance_projects`, `linked_perf`, and `year_buckets`.
+- `pjt_no`-based series expansion must keep group-key meaning separate from instance-level `pjt_id` keys.
+- Series rendering must use the precomputed runtime payload and must not rebuild year buckets inside the answer layer.
+
+
+## Reverse Trace Invariants
+
+- `perf -> project -> perf` questions must keep the relation chain in runtime payloads and logs.
+- Hop3 follow-up performance evidence must de-duplicate the origin performance hit from hop1.
+- Reverse trace meaning must come from planner truth, not regex extraction from the raw user query.
+## Anchor Resolution Golden Cases
+
+- Researcher + generic org + topic queries must preserve the ambiguity in summary/debug metadata instead of silently coercing the org into a lead/participant role.
+- Researcher + org-role queries may compile role-specific filters from resolved anchors without inventing new ids.
+- Seedless `JOIN(instance)` with only an unresolved researcher/org pair must downgrade to `lookup`.

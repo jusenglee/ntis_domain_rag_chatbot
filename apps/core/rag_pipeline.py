@@ -62,6 +62,7 @@ from apps.core.rag_runtime_observability import build_runtime_observability
 from apps.core.rag_dispatch_runtime import build_dispatch_runtime_support
 from apps.core.rag_runtime_safety import (
     build_people_superlative_aggregation as _build_people_superlative_aggregation,
+    build_project_series_payload as _build_project_series_payload,
     debug_force_join_keys_enabled as _debug_force_join_keys_enabled,
     get_ctx_hard_limit as _get_ctx_hard_limit,
     with_org_must_gate as _with_org_must_gate_base,
@@ -335,7 +336,7 @@ def _diff_filter_spec(
         list_mode = "exact"
 
     def _semantic_subset_equal(planner_val: Any, exec_val: Any) -> bool:
-        """subset ?? ??? ??? planner ??? executor ??? ????? ????."""
+        """Check whether the planner value is a semantic subset of the executor value."""
         # Planner values may describe only a required subtree when subset matching is enabled.
         if isinstance(planner_val, Mapping):
             if not isinstance(exec_val, Mapping):
@@ -548,7 +549,7 @@ def _run_rag_with_vectors(
     normalized_pjt_nos = [str(x).strip() for x in (normalized_ids_map.get("pjt_no") or []) if str(x).strip()]
 
     def _with_org_must_gate(base_filter: Any, *, col: str, mode_override: Optional[str] = None) -> Any:
-        """?? ??? ???? ??? ???? must gate? ????."""
+        """Apply an organization must-gate only to collections that require server-side enforcement."""
         return _with_org_must_gate_base(
             base_filter,
             col=col,
@@ -609,6 +610,7 @@ def _run_rag_with_vectors(
         hydrate_reranked_payloads_fn=hydrate_reranked_payloads,
         soft_title_contains_fn=soft_title_contains,
         aggregation_builder_fn=_build_people_superlative_aggregation,
+        series_builder_fn=_build_project_series_payload,
         payload_get_fn=_payload_get,
         hit_key_fn=_hit_key,
         title_match_mode_contains=TITLE_MATCH_MODE_CONTAINS,
@@ -643,7 +645,7 @@ def _run_rag_with_vectors(
     pre_vecs = _get_pre_vecs(q)
 
     def _maybe_followup_perf_hop_from_project() -> List[str]:
-        """strict JOIN? ?? ?? project ???? perf followup seed? ????."""
+        """When strict JOIN is not active, derive perf followup seeds from project results."""
         target_cols = list(target_collections or _default_target_collections())
         return dispatch_runtime.resolve_perf_followup_join_ids_fn(
             request=PerfFollowupRequest(
@@ -728,6 +730,8 @@ def _run_rag_with_vectors(
                 timings=timings,
                 intent_item=it,
                 target_keep_hop2=int(os.getenv("RAG_HOP2_KEEP", "10")),
+                reverse_trace_followup=bool(getattr(prelude, "reverse_trace_followup", False)),
+                followup_relation_hint=getattr(prelude, "followup_relation_hint", None),
             ),
             runtime=dispatch_runtime.build_join_runtime_fn(preset=preset),
         )

@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from apps.core.metrics import MetricSnapshot
 from apps.core.schemas import strategy_spec_to_response
@@ -19,7 +19,15 @@ class QueryRequest(BaseModel):
     """`/query/*` 요청에 일관되게 쓰는 HTTP 입력 모델이다."""
     question: str
     conversation_id: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, alias="Temperature")
+    top_p: Optional[float] = Field(default=None, alias="Top-P")
+    max_tokens: Optional[int] = Field(default=None, alias="Max-Token")
+    top_k: Optional[int] = Field(default=None, alias="Top-K")
 
+    rag_min_dense_score: Optional[float] = Field(default=None, alias="RAG_MIN_DENSE_SCORE")
+    rag_topk_dense: Optional[int] = Field(default=None, alias="RAG_TOPK_DENSE")
+    rag_w_lex: Optional[float] = Field(default=None, alias="RAG_W_LEX")
+    rag_topk_lex_cand: Optional[int] = Field(default=None, alias="RAG_TOPK_LEX_CAND")
 
 @dataclass(frozen=True)
 class RouteDeps:
@@ -140,6 +148,31 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         result["title"] = _resolve_reference_title(result, doc)
         return result
 
+    #외부 요청에서 동적 파라미터가 있을경우 내부에 세팅 하는 함수
+    def _build_request_overrides(payload: QueryRequest) -> dict[str, Any]:
+        overrides: dict[str, Any] = {}
+
+        if payload.temperature is not None:
+            overrides["temperature"] = float(payload.temperature)
+        if payload.top_p is not None:
+            overrides["top_p"] = float(payload.top_p)
+        if payload.max_tokens is not None:
+            overrides["max_tokens"] = int(payload.max_tokens)
+        if payload.top_k is not None:
+            overrides["top_k"] = int(payload.top_k)
+
+        if payload.rag_min_dense_score is not None:
+            overrides["RAG_MIN_DENSE_SCORE"] = float(payload.rag_min_dense_score)
+        if payload.rag_topk_dense is not None:
+            overrides["RAG_TOPK_DENSE"] = int(payload.rag_topk_dense)
+        if payload.rag_w_lex is not None:
+            overrides["RAG_W_LEX"] = float(payload.rag_w_lex)
+        if payload.rag_topk_lex_cand is not None:
+            overrides["RAG_TOPK_LEX_CAND"] = int(payload.rag_topk_lex_cand)
+
+        return overrides
+
+
     async def _runtime_status(request: Request) -> dict[str, Any]:
         """graph, kv, metrics 상태를 합쳐 health payload로 만든다."""
         kv_store = _get_kv_store(request)
@@ -176,6 +209,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
+
+        request_overrides = _build_request_overrides(payload)
         graph = _get_graph(request)
 
         async def event_generator():

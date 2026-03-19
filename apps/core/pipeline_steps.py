@@ -129,6 +129,8 @@ class NormalizedIntent:
     is_id_query: bool
     mode: Optional[str] = None
     output_type: Optional[str] = None
+    reverse_trace_followup: bool = False
+    followup_relation_hint: Optional[str] = None
     join_key_mode: Optional[Literal["instance", "group"]] = None
     parsing_warnings: List[str] = field(default_factory=list)
     contract_violations: List[str] = field(default_factory=list)
@@ -161,6 +163,7 @@ class NormalizedIntent:
     lookup_filter_policy_hint: Optional[str] = None
     target_cols: List[str] = field(default_factory=list)
     wants_rank: bool = False
+    min_metric_count: Optional[int] = None
     stats_metric: str = "project_participation_count"
     window_years: int = 3
     candidate_n: int = 50
@@ -271,7 +274,7 @@ def normalize_intent(
     output_type = str(getattr(intent, "output_type", "") or "").strip().lower() or None
     if output_type == "rank":
         output_type = "stats"
-    if output_type not in ("stats", "list", "detail", "relation", "summary"):
+    if output_type not in ("stats", "list", "detail", "relation", "summary", "comparison", "series"):
         if wants_count or wants_rank:
             output_type = "stats"
         elif wants_list:
@@ -361,6 +364,9 @@ def normalize_intent(
         lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
         wants_rank=wants_rank,
+        reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
+        followup_relation_hint=(str(getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None),
+        min_metric_count=getattr(intent, "min_metric_count", None),
         stats_metric=stats_policy["stats_metric"],
         window_years=stats_policy["window_years"],
         candidate_n=stats_policy["candidate_n"],

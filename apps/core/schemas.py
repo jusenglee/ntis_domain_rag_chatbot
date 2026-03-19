@@ -57,8 +57,9 @@ class PlannerStage2Slots(BaseModel):
 
 @dataclass(frozen=True)
 class StrategySpec:
-    """planner 결과와 runtime policy를 합친 executor 전용 전략 계약이다.
-    JOIN key source, follow-up 선택, lookup filter policy, target collection 같은 실행 truth를 응답 메타와 로그까지 일관되게 전파한다.
+    """Executor-facing strategy contract composed from planner truth and runtime policy.
+    Join metadata, filter policy, target collections, and query-graph summaries stay together so
+    response metadata and operational logs can report the same execution truth.
     """
 
     mode: str
@@ -84,12 +85,86 @@ class StrategySpec:
     lookup_title_filter_policy: Optional[str] = None
     title_match_mode: Optional[str] = None
     search_filter_server_policy: Optional[str] = None
+    query_graph_kind: Optional[str] = None
+    anchor_summary: Dict[str, Any] = field(default_factory=dict)
+    anchor_resolution_status: Optional[str] = None
+    ambiguity_codes: Tuple[str, ...] = field(default_factory=tuple)
+    resolved_researcher_count: Optional[int] = None
+    resolved_org_count: Optional[int] = None
+    aggregation_kind: Optional[str] = None
+    series_kind: Optional[str] = None
+    reverse_trace_enabled: bool = False
+    reverse_trace_hop_count: Optional[int] = None
+    followup_relation_hint: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ResolvedAnchorSet:
+    """Resolved identifier and name anchors that can seed traversal planning.
+
+    This structure stays intentionally deterministic: it summarizes anchors already present in
+    `NormalizedIntent` without inventing new identifiers or silently changing role semantics.
+    """
+
+    researcher_names: Tuple[str, ...] = field(default_factory=tuple)
+    org_terms_by_role: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    project_instance_ids: Tuple[str, ...] = field(default_factory=tuple)
+    project_group_ids: Tuple[str, ...] = field(default_factory=tuple)
+    perf_ids: Tuple[str, ...] = field(default_factory=tuple)
+    ambiguities: Tuple[str, ...] = field(default_factory=tuple)
+    resolution_status: str = "none"
+
+
+@dataclass(frozen=True)
+class AggregationPlan:
+    """Aggregation intent that retrieval runtime can execute after retrieval completes."""
+
+    metric: str
+    group_by: str
+    comparison_mode: str
+    threshold: Optional[int] = None
+    top_k: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TemporalConstraint:
+    """Normalized time constraint that can be reused across runtime stages."""
+
+    year_from: Optional[str] = None
+    year_to: Optional[str] = None
+    window_years: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ProjectSeriesPlan:
+    """Minimal series metadata for project-group or yearly flow questions."""
+
+    series_key_kind: str
+    relation_hint: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """Single step inside a retrieval graph plan."""
+
+    kind: str
+    head: str
+    relation: Optional[Tuple[str, str]] = None
+
+
+@dataclass(frozen=True)
+class QueryGraphPlan:
+    """High-level retrieval graph summary that is more specific than mode alone."""
+
+    kind: str
+    steps: Tuple[PlanStep, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class QueryPlan:
-    """retrieval과 rerank 런타임이 직접 소비하는 구체 실행 계획이다.
-    mode, output_type, stats policy, target collections, filters를 하나로 고정해 후속 레이어가 다시 정책을 재판단하지 않게 한다.
+    """Concrete execution plan consumed by retrieval and rerank runtime.
+    Query-graph, aggregation, and series metadata travel with the usual mode/output_type/filter
+    fields so planner and runtime observability can share the same plan vocabulary.
     """
 
     mode: str
@@ -105,6 +180,12 @@ class QueryPlan:
     tie_break: str
     target_collections: Tuple[str, ...]
     filters: Dict[str, Any]
+    query_graph: Optional[QueryGraphPlan] = None
+    aggregation_plan: Optional[AggregationPlan] = None
+    temporal_constraint: Optional[TemporalConstraint] = None
+    project_series_plan: Optional[ProjectSeriesPlan] = None
+    reverse_trace_followup: bool = False
+    followup_relation_hint: Optional[str] = None
 
 
 @dataclass
@@ -121,6 +202,8 @@ class ExecutionContext:
     join_key_mode: Optional[str]
     is_id_query: bool
     output_type: Optional[str]
+    reverse_trace_followup: bool
+    followup_relation_hint: Optional[str]
     categories: list[str]
     planner_limit: Optional[int]
     retrieval_query: Optional[str]
@@ -189,6 +272,8 @@ class ExecutionContext:
             join_key_mode=getattr(intent, "join_key_mode", None),
             is_id_query=intent.is_id_query,
             output_type=intent.output_type,
+            reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
+            followup_relation_hint=getattr(intent, "followup_relation_hint", None),
             categories=list(intent.categories),
             planner_limit=intent.planner_limit,
             retrieval_query=intent.retrieval_query,
@@ -237,6 +322,8 @@ class ExecutionContext:
             join_key_mode=self.join_key_mode,
             is_id_query=self.is_id_query,
             output_type=self.output_type,
+            reverse_trace_followup=bool(self.reverse_trace_followup),
+            followup_relation_hint=self.followup_relation_hint,
             categories=list(self.categories),
             planner_limit=self.planner_limit,
             retrieval_query=self.retrieval_query,
@@ -269,6 +356,195 @@ class ExecutionContext:
             top_k=self.top_k,
             tie_break=self.tie_break,
         )
+
+
+def derive_resolved_anchor_set(intent: NormalizedIntent) -> ResolvedAnchorSet:
+    """Build deterministic anchor metadata from `NormalizedIntent`.
+
+    The resolver only normalizes anchors that already survived planner and contract handling.
+    It preserves `pjt_id` versus `pjt_no`, keeps organization roles separate, and records common
+    ambiguity states so logs can distinguish weak name-only anchors from fully resolved seeds.
+    """
+    ids_map = getattr(intent, "ids_map", {}) or {}
+    perf_ids: list[str] = []
+    for key in ("doi", "paper_id", "rst_id", "patent_no"):
+        perf_ids.extend(str(value).strip() for value in (ids_map.get(key) or []) if str(value).strip())
+
+    researcher_names = tuple(
+        str(value).strip() for value in (getattr(intent, "people_terms", []) or []) if str(value).strip()
+    )
+    lead_terms = tuple(
+        str(value).strip() for value in (getattr(intent, "lead_org_terms", []) or []) if str(value).strip()
+    )
+    participant_terms = tuple(
+        str(value).strip() for value in (getattr(intent, "participant_org_terms", []) or []) if str(value).strip()
+    )
+    affiliation_terms = tuple(
+        str(value).strip() for value in (getattr(intent, "people_affiliation_org_terms", []) or []) if str(value).strip()
+    )
+    generic_org_terms = tuple(
+        str(value).strip() for value in (getattr(intent, "org_terms", []) or []) if str(value).strip()
+    )
+
+    role_seen = {*(lead_terms or ()), *(participant_terms or ()), *(affiliation_terms or ())}
+    generic_only_terms = tuple(term for term in generic_org_terms if term not in role_seen)
+    org_terms_by_role = {
+        "generic": generic_only_terms,
+        "lead": lead_terms,
+        "participant": participant_terms,
+        "affiliation": affiliation_terms,
+    }
+
+    ambiguities: list[str] = []
+    if researcher_names and not any(org_terms_by_role.values()) and not (ids_map.get("person_no") or []):
+        ambiguities.append("researcher_name_only")
+    if generic_only_terms and not str(getattr(intent, "org_role", "") or "").strip():
+        ambiguities.append("org_role_unspecified")
+    if researcher_names and generic_only_terms:
+        ambiguities.append("researcher_org_pair_unresolved")
+
+    has_any_anchor = bool(researcher_names or any(org_terms_by_role.values()) or ids_map)
+    if not has_any_anchor:
+        resolution_status = "none"
+    elif ambiguities and not (ids_map.get("pjt_id") or ids_map.get("pjt_no") or perf_ids):
+        resolution_status = "ambiguous"
+    elif ambiguities:
+        resolution_status = "partial"
+    else:
+        resolution_status = "resolved"
+
+    return ResolvedAnchorSet(
+        researcher_names=researcher_names,
+        org_terms_by_role={key: value for key, value in org_terms_by_role.items() if value},
+        project_instance_ids=tuple(str(value).strip() for value in (ids_map.get("pjt_id") or []) if str(value).strip()),
+        project_group_ids=tuple(str(value).strip() for value in (ids_map.get("pjt_no") or []) if str(value).strip()),
+        perf_ids=tuple(perf_ids),
+        ambiguities=tuple(ambiguities),
+        resolution_status=resolution_status,
+    )
+
+
+def summarize_anchor_set(anchor_set: ResolvedAnchorSet) -> Dict[str, Any]:
+    """Create a compact anchor summary for logs and strategy responses."""
+    all_org_terms = {term for values in anchor_set.org_terms_by_role.values() for term in values}
+    return {
+        "researcher_count": len(anchor_set.researcher_names),
+        "org_role_counts": {key: len(values) for key, values in anchor_set.org_terms_by_role.items()},
+        "generic_org_count": len(anchor_set.org_terms_by_role.get("generic", ())),
+        "project_instance_seed_count": len(anchor_set.project_instance_ids),
+        "project_group_seed_count": len(anchor_set.project_group_ids),
+        "perf_seed_count": len(anchor_set.perf_ids),
+        "ambiguity_count": len(anchor_set.ambiguities),
+        "ambiguities": list(anchor_set.ambiguities),
+        "anchor_resolution_status": anchor_set.resolution_status,
+        "resolved_researcher_count": len(anchor_set.researcher_names),
+        "resolved_org_count": len(all_org_terms),
+    }
+
+
+def derive_temporal_constraint(intent: NormalizedIntent) -> Optional[TemporalConstraint]:
+    """Summarize explicit year ranges or relative windows as temporal metadata."""
+    year_from = str(getattr(intent, "year_from", "") or "").strip() or None
+    year_to = str(getattr(intent, "year_to", "") or "").strip() or None
+    years = [str(value).strip() for value in (getattr(intent, "years", []) or []) if str(value).strip()]
+    if not year_from and years:
+        year_from = years[0]
+    if not year_to and years:
+        year_to = years[-1]
+    window_years = getattr(intent, "window_years", None)
+    if year_from or year_to or window_years:
+        return TemporalConstraint(year_from=year_from, year_to=year_to, window_years=window_years)
+    return None
+
+
+def derive_aggregation_plan(intent: NormalizedIntent, output_type: Optional[str]) -> Optional[AggregationPlan]:
+    """Detect whether the current intent already implies aggregation or comparison."""
+    output_type_norm = str(output_type or "").strip().lower() or None
+    action = str(getattr(intent, "action", "") or "").strip().lower()
+    wants_rank = bool(getattr(intent, "wants_rank", False))
+    if action != "stats" and output_type_norm != "comparison" and not wants_rank:
+        return None
+    comparison_mode = "top_k" if wants_rank else ("comparison" if output_type_norm == "comparison" else "stats")
+    group_by = "project_group" if bool(getattr(intent, "ids_map", {}).get("pjt_no")) else "project"
+    return AggregationPlan(
+        metric=str(getattr(intent, "stats_metric", "project_participation_count") or "project_participation_count"),
+        group_by=group_by,
+        comparison_mode=comparison_mode,
+        threshold=getattr(intent, "min_metric_count", None),
+        top_k=int(getattr(intent, "top_k", 1) or 1),
+    )
+
+
+def derive_project_series_plan(intent: NormalizedIntent, output_type: Optional[str]) -> Optional[ProjectSeriesPlan]:
+    """Create minimal project-series metadata when the query implies yearly or group flow."""
+    output_type_norm = str(output_type or "").strip().lower() or None
+    ids_map = getattr(intent, "ids_map", {}) or {}
+    if output_type_norm != "series" and not ids_map.get("pjt_no"):
+        return None
+    return ProjectSeriesPlan(
+        series_key_kind="pjt_no" if ids_map.get("pjt_no") else "year_window",
+        relation_hint="_".join(getattr(intent, "relation", ()) or ()) or None,
+    )
+
+
+def derive_query_graph_plan(
+    intent: NormalizedIntent,
+    *,
+    mode: str,
+    relation: Optional[Tuple[str, str]],
+    output_type: Optional[str],
+    aggregation_plan: Optional[AggregationPlan],
+    project_series_plan: Optional[ProjectSeriesPlan],
+) -> QueryGraphPlan:
+    """Derive a retrieval-graph skeleton without changing existing mode/relation policy."""
+    base_route = str(getattr(intent, "base_route", "") or "").strip().lower() or "project"
+    output_type_norm = str(output_type or "").strip().lower() or "summary"
+    if project_series_plan is not None:
+        return QueryGraphPlan(
+            kind="project_series",
+            steps=(
+                PlanStep(kind="lookup_projects", head=base_route),
+                PlanStep(kind="series", head="project", relation=relation),
+            ),
+        )
+    if aggregation_plan is not None:
+        return QueryGraphPlan(
+            kind="aggregate_comparison",
+            steps=(
+                PlanStep(kind="lookup_projects" if base_route != "perf" else "lookup_perf", head=base_route),
+                PlanStep(kind="aggregate", head=aggregation_plan.group_by, relation=relation),
+            ),
+        )
+    if relation == ("project", "perf"):
+        return QueryGraphPlan(
+            kind="project_to_perf",
+            steps=(
+                PlanStep(kind="lookup_projects", head="project"),
+                PlanStep(kind="join_project_to_perf", head="perf", relation=relation),
+            ),
+        )
+    if relation == ("perf", "project"):
+        if bool(getattr(intent, "reverse_trace_followup", False)):
+            return QueryGraphPlan(
+                kind="perf_to_project_to_perf",
+                steps=(
+                    PlanStep(kind="lookup_perf", head="perf"),
+                    PlanStep(kind="join_perf_to_project", head="project", relation=relation),
+                    PlanStep(kind="followup_project_to_perf", head="perf", relation=("project", "perf")),
+                ),
+            )
+        return QueryGraphPlan(
+            kind="perf_to_project",
+            steps=(
+                PlanStep(kind="lookup_perf", head="perf"),
+                PlanStep(kind="join_perf_to_project", head="project", relation=relation),
+            ),
+        )
+    if output_type_norm == "comparison":
+        return QueryGraphPlan(kind="aggregate_comparison", steps=(PlanStep(kind="aggregate", head=base_route),))
+    if output_type_norm == "series":
+        return QueryGraphPlan(kind="project_series", steps=(PlanStep(kind="series", head=base_route),))
+    return QueryGraphPlan(kind=f"{mode}_single_route", steps=(PlanStep(kind=("lookup" if mode == "lookup" else mode), head=base_route),))
 
 
 def to_strategy_spec(raw: Any) -> StrategySpec:
@@ -305,6 +581,17 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
             "lookup_title_filter_policy": getattr(raw, "lookup_title_filter_policy", None),
             "title_match_mode": getattr(raw, "title_match_mode", None),
             "search_filter_server_policy": getattr(raw, "search_filter_server_policy", None),
+            "query_graph_kind": getattr(raw, "query_graph_kind", None),
+            "anchor_summary": getattr(raw, "anchor_summary", None),
+            "anchor_resolution_status": getattr(raw, "anchor_resolution_status", None),
+            "ambiguity_codes": getattr(raw, "ambiguity_codes", None),
+            "resolved_researcher_count": getattr(raw, "resolved_researcher_count", None),
+            "resolved_org_count": getattr(raw, "resolved_org_count", None),
+            "aggregation_kind": getattr(raw, "aggregation_kind", None),
+            "series_kind": getattr(raw, "series_kind", None),
+            "reverse_trace_enabled": getattr(raw, "reverse_trace_enabled", False),
+            "reverse_trace_hop_count": getattr(raw, "reverse_trace_hop_count", None),
+            "followup_relation_hint": getattr(raw, "followup_relation_hint", None),
         }
 
     relation = data.get("relation")
@@ -334,6 +621,17 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
         lookup_title_filter_policy=data.get("lookup_title_filter_policy"),
         title_match_mode=data.get("title_match_mode"),
         search_filter_server_policy=data.get("search_filter_server_policy"),
+        query_graph_kind=(str(data.get("query_graph_kind")).strip().lower() or None) if data.get("query_graph_kind") is not None else None,
+        anchor_summary=dict(data.get("anchor_summary") or {}),
+        anchor_resolution_status=(str(data.get("anchor_resolution_status")).strip().lower() or None) if data.get("anchor_resolution_status") is not None else None,
+        ambiguity_codes=tuple(data.get("ambiguity_codes") or tuple()),
+        resolved_researcher_count=(int(data.get("resolved_researcher_count")) if data.get("resolved_researcher_count") is not None else None),
+        resolved_org_count=(int(data.get("resolved_org_count")) if data.get("resolved_org_count") is not None else None),
+        aggregation_kind=(str(data.get("aggregation_kind")).strip().lower() or None) if data.get("aggregation_kind") is not None else None,
+        series_kind=(str(data.get("series_kind")).strip().lower() or None) if data.get("series_kind") is not None else None,
+        reverse_trace_enabled=bool(data.get("reverse_trace_enabled", False)),
+        reverse_trace_hop_count=(int(data.get("reverse_trace_hop_count")) if data.get("reverse_trace_hop_count") is not None else None),
+        followup_relation_hint=(str(data.get("followup_relation_hint")).strip().lower() or None) if data.get("followup_relation_hint") is not None else None,
     )
 
 
@@ -367,6 +665,17 @@ def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any
         "lookup_title_filter_policy": spec.lookup_title_filter_policy,
         "title_match_mode": spec.title_match_mode,
         "search_filter_server_policy": spec.search_filter_server_policy,
+        "query_graph_kind": spec.query_graph_kind,
+        "anchor_summary": dict(spec.anchor_summary or {}),
+        "anchor_resolution_status": spec.anchor_resolution_status,
+        "ambiguity_codes": list(spec.ambiguity_codes),
+        "resolved_researcher_count": spec.resolved_researcher_count,
+        "resolved_org_count": spec.resolved_org_count,
+        "aggregation_kind": spec.aggregation_kind,
+        "series_kind": spec.series_kind,
+        "reverse_trace_enabled": bool(spec.reverse_trace_enabled),
+        "reverse_trace_hop_count": spec.reverse_trace_hop_count,
+        "followup_relation_hint": spec.followup_relation_hint,
     }
 
 
@@ -477,6 +786,18 @@ def build_query_plan(
     else:
         target_cols = default_target_collections_for_route(base_route, intent)
 
+    aggregation_plan = derive_aggregation_plan(intent, output_type)
+    project_series_plan = derive_project_series_plan(intent, output_type)
+    temporal_constraint = derive_temporal_constraint(intent)
+    query_graph = derive_query_graph_plan(
+        intent,
+        mode=mode,
+        relation=relation,
+        output_type=output_type,
+        aggregation_plan=aggregation_plan,
+        project_series_plan=project_series_plan,
+    )
+
     return QueryPlan(
         mode=mode,
         base_route=base_route,
@@ -491,6 +812,12 @@ def build_query_plan(
         tie_break=stats_policy["tie_break"],
         target_collections=tuple(target_cols),
         filters={},
+        query_graph=query_graph,
+        aggregation_plan=aggregation_plan,
+        temporal_constraint=temporal_constraint,
+        project_series_plan=project_series_plan,
+        reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
+        followup_relation_hint=(str(getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None),
     ), mode_reason
 
 

@@ -241,8 +241,8 @@ PLANNER_TEMPERATURE=0.0
 - `PLANNER_ACTION_MODE_MISMATCH`
 - `PLANNER_PARSE_FINAL_FAILED`
 - `PLANNER_JOIN_FIELDS_MISSING`
-- `RAG_EMPTY_RESULT_CONTRACT`
-- `mode=JOIN`인데 `docs_found=0`
+- `RAG_EMPTY_RESULT_CONTRACT` (`search` 또는 진짜 contract failure일 때만)
+- `mode=JOIN`인데 `docs_found=0`이고 `PLANNER.REGATE`도 없으며 no-result 정책과 맞지 않음
 
 ### triage 절차
 
@@ -297,7 +297,7 @@ PLANNER_TEMPERATURE=0.0
 - `apps/api/services/rag_retriever.py`의 no-result 메시지 short-circuit 확인
 - `apps/api/services/answer_generation.py`의 no-result short-circuit 확인
 
-### (B) SEARCH인데 결과가 지나치게 좁아짐
+### (C) SEARCH인데 결과가 지나치게 좁아짐
 
 증상:
 - broad query인데 결과가 지나치게 적음
@@ -317,7 +317,7 @@ PLANNER_TEMPERATURE=0.0
 다음 액션:
 - SEARCH hard filter 금지 규칙이 validator에서 유지되는지 확인합니다.
 
-### (C) LOOKUP인데 결과가 너무 넓거나 엉뚱함
+### (D) LOOKUP인데 결과가 너무 넓거나 엉뚱함
 
 증상:
 - LOOKUP인데 결과가 넓거나 엉뚱함
@@ -393,3 +393,45 @@ PLANNER_TEMPERATURE=0.0
 ## Empty Result / JOIN Triage
 - `RAG_EMPTY_RESULT_CONTRACT`가 발생하면 `info.contract_fail_reason`, `info.empty_result_policy`, `info.reranked_count`를 먼저 확인한다. 현재 정책은 `lookup/join`은 `fail_close`, `search`는 `strict_search`로 기록된다.
 - `JOIN_KEYS_MISSING`는 planner가 관계형 질의로 해석했지만 Hop1에서 `pjt_id`/`pjt_no`를 만들지 못한 경우다. seed 없는 `JOIN(instance)`는 merge 단계에서 `lookup`으로 downgrade되므로, 여전히 이 오류가 나면 Hop1 filter 또는 key extraction 경로를 우선 본다.
+
+## Query Graph Observability
+
+Inspect these fields in `REQ.SUMMARY` and `/query/debug` when triaging complex traversal questions.
+
+- `query_graph_kind`: `project_to_perf`, `perf_to_project`, `aggregate_comparison`, `project_series`, or a single-route plan
+- `anchor_summary`: how many researcher, org, project, and perf anchors survived into execution
+- `aggregation_kind`: whether runtime treated the request as plain stats or comparison
+- `series_kind`: whether the series axis is `pjt_no` or a time window
+- `anchor_summary.generic_org_count`: number of generic org anchors that were not resolved into a specific role
+- `anchor_summary.ambiguities`: ambiguity labels such as `org_role_unspecified` or `researcher_org_pair_unresolved`
+
+These fields do not replace planner truth. They help distinguish unsupported traversal shapes from ordinary no-result outcomes.
+
+## Aggregation Runtime Triage
+
+- `aggregation_kind=comparison` means the retrieval runtime produced project/perf aggregation payloads.
+- Summary/debug fields to inspect are `aggregation_metric`, `aggregation_group_by`, `aggregation_threshold`, `aggregation_result_count`, and `failed_step`.
+- `failed_step=aggregation_empty_result` means comparison planning was accepted but no grouped items survived filtering or thresholding.
+- `failed_step=aggregation_unsupported` means the request fell back to ordinary relation/list rendering instead of hard-failing.
+- Aggregation failures must be distinguished from `no_reranked` and other retrieval contract failures.
+
+## Series Runtime Triage
+
+- `output_type=series` means retrieval/runtime already built project-series evidence before answer generation.
+- Summary/debug fields to inspect are `series_kind`, `series_result_count`, `series_bucket_count`, and `failed_step`.
+- `failed_step=series_empty_result` means the series plan was accepted but no instance projects or buckets survived.
+- `failed_step=series_unsupported` means runtime degraded to ordinary relation/list rendering instead of hard-failing.
+- Series triage still respects `pjt_id` versus `pjt_no`; a series payload must not silently reinterpret one key kind as the other.
+
+
+## Reverse Trace Triage
+
+- Check `reverse_trace_enabled`, `reverse_trace_hop_count`, `origin_project_count`, and `followup_perf_count` in `REQ.SUMMARY`.
+- `failed_step=reverse_trace_partial` means the origin project was resolved but no additional follow-up performance evidence survived hop3.
+- Reverse trace is planner-first. If the traversal did not activate, inspect planner stage2 `filters.reverse_trace_followup` before looking at runtime retrieval.
+## Anchor Resolution Triage
+
+- Inspect `anchor_resolution_status`, `ambiguity_codes`, `resolved_researcher_count`, and `resolved_org_count` in `REQ.SUMMARY` and `/query/debug`.
+- `anchor_resolution_status=ambiguous` means execution kept name-level anchors without enough role or id information to promote a stricter traversal.
+- `researcher_org_pair_unresolved` means a researcher name and a generic org term survived together, but planner truth did not fix the organization role pairing.
+- Seedless `JOIN(instance)` with that ambiguity now downgrades before execution and logs `RAG.STRATEGY.JOIN_DOWNGRADED` with `reason=seedless_instance_join_with_unresolved_anchor_pair`.

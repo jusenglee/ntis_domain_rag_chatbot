@@ -59,7 +59,8 @@ def enforce_reranked_contract(
 ) -> Optional[str]:
     """rerank 결과 계약을 강제한다.
 
-    현재 정책은 search/lookup/join을 모두 strict로 유지하되, 관측 로그에는 어떤 empty-result 정책이 적용됐는지 함께 남긴다.
+    `search`는 0건을 strict 예외로 유지하고, `lookup`/`join`의 `no_reranked`는
+    deterministic no-result outcome으로 내려 observability 필드만 남긴다.
     """
     normalized_mode = str(mode or "").strip().lower() or None
     empty_result_policy = "strict_search"

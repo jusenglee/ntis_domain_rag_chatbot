@@ -6,6 +6,14 @@ from dataclasses import replace
 from typing import Any, Optional
 
 
+def _planner_truthy_flag(value: Any) -> bool:
+    """Normalize planner-emitted truthy flags without re-parsing the user query."""
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
 def normalize_hint_terms(values: Any) -> list[str]:
     """Planner가 준 hint 값을 문자열 목록으로 정규화한다.
 
@@ -101,6 +109,8 @@ def merge_planner_hints(
     planner_keywords = normalize_hint_terms(filters.get("keywords"))
     planner_people_terms = collect_researcher_name_terms(filters)
     planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
+    planner_reverse_trace_followup = _planner_truthy_flag(filters.get("reverse_trace_followup")) or bool(getattr(intent, "reverse_trace_followup", False))
+    planner_followup_relation_hint = str(filters.get("followup_relation_hint") or getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None
 
     if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
         planner_people_terms = []
@@ -122,6 +132,8 @@ def merge_planner_hints(
         perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
         keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
         title=planner_title_terms or list(getattr(intent, "title", []) or []),
+        reverse_trace_followup=bool(planner_reverse_trace_followup),
+        followup_relation_hint=planner_followup_relation_hint or getattr(intent, "followup_relation_hint", None),
     )
 
 
@@ -279,9 +291,14 @@ def apply_planner_strategy(
                 qa_filters.get("people_affiliation_org_name"),
                 qa_filters.get("org_name"),
             ])
+        planner_org_role = str(qa_filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
+        lead_org_gate_terms = normalize_hint_terms(getattr(intent, "lead_org_terms", None) or [qa_filters.get("lead_org_name"), qa_filters.get("performing_org_name")])
+        participant_org_gate_terms = normalize_hint_terms(getattr(intent, "participant_org_terms", None) or qa_filters.get("participant_org_name"))
+        affiliation_org_gate_terms = normalize_hint_terms(getattr(intent, "people_affiliation_org_terms", None) or qa_filters.get("people_affiliation_org_name"))
         has_people_org_gate = bool(people_gate_terms or org_gate_terms)
+        unresolved_anchor_pair = bool(people_gate_terms and org_gate_terms and not (planner_org_role or lead_org_gate_terms or participant_org_gate_terms or affiliation_org_gate_terms))
 
-        if planner_join_key_mode == "instance" and not has_instance_seed and not has_people_org_gate:
+        if planner_join_key_mode == "instance" and not has_instance_seed and (not has_people_org_gate or unresolved_anchor_pair):
             downgraded_mode = str(getattr(intent, "mode", "") or "").strip().lower() or "lookup"
             if downgraded_mode == "join":
                 downgraded_mode = "lookup"
@@ -294,9 +311,10 @@ def apply_planner_strategy(
                 downgraded_mode=downgraded_mode,
                 relation=relation,
                 original_join_key_mode=planner_join_key_mode,
-                reason="seedless_instance_join_without_gate",
+                reason=("seedless_instance_join_with_unresolved_anchor_pair" if unresolved_anchor_pair else "seedless_instance_join_without_gate"),
                 has_instance_seed=0,
                 has_people_org_gate=int(has_people_org_gate),
+                unresolved_anchor_pair=int(unresolved_anchor_pair),
             )
             planner_mode = downgraded_mode
             planner_join_key_mode = None

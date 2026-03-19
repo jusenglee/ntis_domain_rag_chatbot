@@ -15,6 +15,8 @@ _OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
     "stats": ("aggregation_keys",),
     "summary": ("title_text", "meta_basic", "summary", "content"),
     "relation": ("title_text", "relation", "id"),
+    "comparison": ("title_text", "aggregation_keys", "meta_basic", "summary"),
+    "series": ("title_text", "year", "relation", "meta_basic", "summary"),
 }
 
 
@@ -301,7 +303,7 @@ def resolve_output_fieldset(output_type: Optional[str]) -> Tuple[str, ...]:
 def should_use_list_context(*, action: str, base_route: str, output_type: Optional[str]) -> bool:
     """action, route, output_type를 보고 line-oriented list context를 썼지 판단한다."""
     normalized = normalize_output_type(output_type)
-    if normalized in ("list", "stats"):
+    if normalized in ("list", "stats", "comparison", "series"):
         return base_route in ("project", "perf", "people", "org")
     return action in ("list", "stats", "download") and base_route in ("project", "perf", "people", "org")
 

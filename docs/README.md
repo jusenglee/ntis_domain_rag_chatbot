@@ -86,3 +86,30 @@
 - `README`는 입구 문서, `ARCHITECTURE`는 구조 문서, `SYSTEM_FLOW`는 순서 문서, `CONTRACT`는 규칙 문서, `RUNBOOK`는 체크리스트 문서 역할을 유지합니다.
 - 단계 설명에는 입력, 출력, source of truth, fail-close 지점을 함께 적되 문서 역할과 겹치지 않게 배치합니다.
 - 신규 참여자가 코드 없이도 mode 결정과 파라미터 의미를 찾을 수 있게 문서 진입점을 분산시키지 않습니다.
+
+## Query Graph Plan Metadata
+
+- Runtime now preserves `QueryGraphPlan`, `ResolvedAnchorSet`, `AggregationPlan`, `TemporalConstraint`, and `ProjectSeriesPlan` metadata.
+- These fields do not replace planner truth. They let `strategy_summary` and operational logs use the same traversal vocabulary.
+- `comparison` and `series` now have active runtime behavior. Retrieval/runtime must preserve those evidence shapes instead of leaving them as metadata-only reservations.
+
+## Comparison Queries
+
+The current runtime now supports a first comparison/aggregation slice for project-performance questions. Supported examples include project-level paper/patent/report counts, threshold filters such as `>= N`, and descending comparison output over project or project-group keys. This aggregation is still retrieval-first: runtime computes the grouped counts and the answer layer only summarizes the precomputed result.
+
+The current runtime also supports a first project-series slice for `output_type=series`. Supported examples include `pjt_no`-anchored project-group expansion, year-window buckets, and optional project-to-performance follow-up that preserves project instance keys, linked performance titles, and year-bucket counts before answer generation.
+
+Anchor summaries now distinguish generic organization anchors from role-specific organization anchors and surface ambiguity labels such as `org_role_unspecified` when a question carries only a broad org term. This metadata is observability-only: it does not rewrite planner truth or invent new identifiers.
+
+
+## Reverse Trace Runtime
+
+- `perf -> project -> perf` reverse trace is now an active runtime path.
+- Activation is planner-first: stage2 may set `filters.reverse_trace_followup=true` and `followup_relation_hint`.
+- Runtime does not use regex to recover reverse-trace meaning from raw user queries.
+## Anchor Resolution Runtime
+
+- Runtime now has a planner-first anchor resolution layer before filter compilation.
+- `ResolvedAnchorSet` is no longer summary-only metadata. Prelude uses it to build researcher and organization filter inputs.
+- Generic org anchors remain visible in `anchor_summary`, but role-constrained execution routes them to the matching filter input when planner truth already fixed `org_role`.
+- New summary/debug fields: `anchor_resolution_status`, `ambiguity_codes`, `resolved_researcher_count`, `resolved_org_count`.

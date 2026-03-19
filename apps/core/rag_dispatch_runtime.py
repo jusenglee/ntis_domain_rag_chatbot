@@ -98,6 +98,7 @@ def build_dispatch_runtime_support(
     point_summary_get_meta_fn: Callable[[dict], dict],
     point_summary_resolve_collection_fn: Callable[[Any, dict], str],
     precomputed_embedding_cls: type,
+    series_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> DispatchRuntimeSupport:
     """dispatch 레이어에서 쓸 runtime helper들을 현재 자원과 설정으로 조립한다.
     join/base orchestration이 공통으로 쓸 포인트 hydration, dense precompute, collection normalization, perf follow-up runtime를 이 함수에서 묶어 만든다.
@@ -312,6 +313,8 @@ def build_dispatch_runtime_support(
             validate_resolved_join_keys_fn=validate_resolved_join_keys_fn,
             get_relation_route_fn=get_relation_route_fn,
             context_builder=context_builder_fn,
+            series_builder_fn=series_builder_fn,
+            payload_get_fn=payload_get_fn,
         )
 
     def build_base_runtime() -> BaseOrchestrationRuntime:
@@ -357,6 +360,7 @@ def build_dispatch_runtime_support(
             hydrate_points_payload_fn=hydrate_points,
             soft_title_contains_fn=soft_title_contains_fn,
             aggregation_builder_fn=aggregation_builder_fn,
+            series_builder_fn=series_builder_fn,
             payload_get_fn=payload_get_fn,
             hit_key_fn=hit_key_fn,
             title_match_mode_contains=title_match_mode_contains,
