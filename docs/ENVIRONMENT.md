@@ -1,4 +1,4 @@
-﻿# 환경 (ENVIRONMENT)
+# 환경 (ENVIRONMENT)
 
 이 문서는 staged-only NTIS RAG baseline의 runtime environment 기본값, validation entrypoint, deploy-facing knob를 기록합니다.
 

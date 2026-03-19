@@ -1,28 +1,28 @@
+"""원천 NTIS/QnA payload를 tag별 schema 규칙에 맞는 RAG 친화 구조로 바꾸는 mapper다.
+
+원천 의미를 재해석하지 않고, title 추출과 field label 변환만 수행해
+후속 context builder가 예측 가능한 canonical shape를 받게 만든다.
+"""
+
 from typing import Dict, Any, List
 from copy import deepcopy
 from apps.api.rag_mapper.mapping_config import get_schema_registry
 from apps.api.rag_mapper.schema_types import DataTag, TagSchema
 
-"""원본 NTIS/QnA payload를 RAG 친화적인 평탄 구조로 바꾸는 매퍼.
-
-핵심 규칙:
-- tag별 스키마에 따라 자연어 라벨로 키를 변환한다.
-- title은 가능하면 top-level로 승격해 context builder가 일관되게 사용하게 한다.
-- 원본에 이미 유효한 title이 있으면 보존한다.
-"""
+"""원본 NTIS/QnA payload를 RAG 친화적인 평탄 구조로 바꾸는 매퍼.\n\n핵심 규칙:\n- tag별 스키마에 따라 자연어 라벨로 키를 변환한다.\n- title은 가능하면 top-level로 승격해 context builder가 일관되게 사용하게 한다.\n- 원본에 이미 유효한 title이 있으면 보존한다.\n"""
 
 
 class MappingError(Exception):
-    """매핑 처리 중 발생하는 에러"""
+    """원천 payload를 RAG mapper 규칙으로 변환하는 과정에서 나는 오류다."""
     pass
 
 
 class RagMapper:
-    """도메인별 `TagSchema`를 이용해 원본 문서를 RAG 표시용 구조로 변환한다."""
+    """원천 NTIS/QnA payload를 tag별 TagSchema에 따라 canonical RAG 필드로 바꾼다.
+
+    title을 top-level로 끌어올리고 data field key를 label로 바꾸되, 원천 의미를 임의 보정하지 않고 schema 규칙만 적용한다.
     """
-    RAG(Retrieval-Augmented Generation) 시스템용 데이터 매퍼
-    기존 중첩 구조를 유지하면서 매칭되는 key만 자연어로 변환
-    """
+    """\n    RAG(Retrieval-Augmented Generation) 시스템용 데이터 매퍼\n    기존 중첩 구조를 유지하면서 매칭되는 key만 자연어로 변환\n    """
     # 매칭되지 않는 필드 포함 여부 설정
     # True: 매칭되지 않는 필드도 원본 key 그대로 포함
     # False: 매칭되는 필드만 포함 (매칭되지 않는 필드는 제외)
@@ -30,32 +30,9 @@ class RagMapper:
 
     @classmethod
     def map(cls, item: dict) -> dict:
-        """단일 문서를 RAG 표준 형태로 매핑한다.
+        """원천 item 하나를 RAG mapper 규칙에 맞는 새 dict로 변환한다.
 
-        title 보존/생성, meta_basic/meta_detail 평탄화, label 매핑이 모두 여기서 일어난다.
-        회귀 위험이 큰 함수라 관련 테스트(`test_rag_mapper_title_preserve.py`)와 같이 봐야 한다.
-        """
-        """
-        item의 기존 중첩 구조를 유지하면서 매칭되는 필드만 자연어 라벨로 변환
-        title 필드는 top-level로 추출하고 meta에서 제거
-        
-        Args:
-            item: 변환할 원본 데이터
-            
-        Returns:
-            변환된 데이터
-            
-        Raises:
-            MappingError: 매핑 처리 중 에러 발생
-            
-        Example:
-            >>> item = {
-            ...     "tag": "IRD_NAI_PJT_INFO",
-            ...     "meta_basic": {"pjt_id": "PJT-001", "kor_pjt_nm": "프로젝트명"}
-            ... }
-            >>> mapped = RagMapper.map(item)
-            >>> print(mapped["title"])
-            프로젝트명(2023)
+        기존 title이 유효하면 유지하고, 없으면 schema 기반 title을 추출한 뒤 data field key를 canonical label로 바꾼다.
         """
         cls._validate_item(item)
 
@@ -76,7 +53,7 @@ class RagMapper:
 
     @staticmethod
     def _has_valid_title(title: Any) -> bool:
-        """기존 title 값의 유효성 검증."""
+        """기존 title 값이 fallback 없이 그대로 써도 되는지 판정한다."""
         if title is None:
             return False
 
@@ -91,9 +68,7 @@ class RagMapper:
 
     @classmethod
     def get_researcher_info(cls, item: dict) -> List[str]:
-        """
-        연구원 정보를 (이름, 소속) 기준 엔트리로 분리해서 반환
-        """
+        """참여연구자 목록을 사람이 읽기 쉬운 이름(소속) 문자열 목록으로 정리한다."""
         researchers = item.get("prtcp_mp", [])
         results: List[str] = []
 
@@ -110,24 +85,7 @@ class RagMapper:
 
     @classmethod
     def get_references(cls, item: dict) -> Dict[str, str]:
-        """
-        tag에 따라 reference 값을 추출
-        
-        Args:
-            item: reference를 추출할 원본 데이터
-            
-        Returns:
-            reference 딕셔너리 (tag, id, title 등)
-            
-        Raises:
-            MappingError: reference 추출 중 에러 발생
-            
-        Example:
-            >>> item = {"tag": "IRD_NAI_PJT_INFO", "meta_basic": {"pjt_id": "PJT-001"}}
-            >>> refs = RagMapper.get_references(item)
-            >>> print(refs["id"])
-            PJT-001
-        """
+        """item에서 외부 링크나 식별에 필요한 reference 필드만 추려 돌려준다."""
         cls._validate_item(item)
         schema = cls._get_schema(item)
         data = cls._extract_data(item, schema)
@@ -148,14 +106,9 @@ class RagMapper:
 
     @classmethod
     def _validate_item(cls, item: Any) -> None:
-        """
-        item 유효성 검증
-        
-        Args:
-            item: 검증할 데이터
-            
-        Raises:
-            MappingError: item이 유효하지 않은 경우
+        """mapper가 처리할 최소 입력 계약을 검사한다.
+
+        현재는 dict 여부와 tag 존재만 강제해, 이후 schema 조회가 전제 없이 동작하게 만든다.
         """
         if not isinstance(item, dict):
             raise MappingError("item은 dict여야 합니다")
@@ -165,18 +118,9 @@ class RagMapper:
 
     @classmethod
     def _get_schema(cls, item: dict) -> TagSchema:
-        """입력 tag에 맞는 스키마를 레지스트리에서 찾는다."""
-        """
-        item의 tag에 해당하는 스키마 조회
-        
-        Args:
-            item: tag를 포함한 데이터
-            
-        Returns:
-            TagSchema 인스턴스
-            
-        Raises:
-            MappingError: 지원하지 않는 tag이거나 스키마가 없는 경우
+        """item의 tag에 해당하는 TagSchema를 registry에서 찾는다.
+
+        지원하지 않는 tag이거나 schema가 등록되지 않았으면 MappingError를 던져 mapper 범위를 명확히 한다.
         """
         tag_value = item["tag"]
 
@@ -196,19 +140,7 @@ class RagMapper:
 
     @classmethod
     def _extract_data(cls, item: dict, schema: TagSchema) -> dict:
-        """
-        item에서 데이터 필드를 찾아 반환
-        
-        Args:
-            item: 원본 데이터
-            schema: TagSchema 인스턴스
-            
-        Returns:
-            추출된 데이터 딕셔너리
-            
-        Raises:
-            MappingError: 데이터 필드를 찾을 수 없는 경우
-        """
+        """schema가 지정한 data field들 중 실제 payload 본문으로 쓸 dict를 찾는다."""
         data_fields = schema.get_data_fields()
 
         for field_name in data_fields:
@@ -225,13 +157,9 @@ class RagMapper:
 
     @classmethod
     def _process_title(cls, result: dict, schema: TagSchema) -> None:
-        """유효한 기존 title이 없을 때만 schema 규칙으로 title을 생성한다."""
-        """
-        title 추출 및 데이터 필드에서 제거
-        
-        Args:
-            result: 결과 데이터 (in-place 수정)
-            schema: TagSchema 인스턴스
+        """schema formatter로 title을 만들고, title을 구성한 원천 필드는 data field에서 제거한다.
+
+        이렇게 해야 title이 top-level과 본문에 중복 노출되지 않고 context builder가 일관된 위치에서 제목을 읽을 수 있다.
         """
         title_fields = schema.get_title_fields()
         if not title_fields:
@@ -257,14 +185,7 @@ class RagMapper:
 
     @classmethod
     def _map_data_fields(cls, result: dict, schema: TagSchema) -> None:
-        """schema의 label_map을 사용해 meta 계층 키를 자연어 라벨로 변환한다."""
-        """
-        모든 데이터 필드의 key를 자연어 라벨로 변환
-        
-        Args:
-            result: 결과 데이터 (in-place 수정)
-            schema: TagSchema 인스턴스
-        """
+        """schema가 가리키는 각 data field의 key를 canonical label로 변환한다."""
         data_fields = schema.get_data_fields()
 
         for data_field in data_fields:
@@ -277,19 +198,11 @@ class RagMapper:
 
     @staticmethod
     def _map_fields(data: dict, label_map: dict, include_unmapped: bool = None) -> dict:
-        """
-        data의 key를 label_map의 자연어로 변환
-        
-        Args:
-            data: 변환할 데이터
-            label_map: 필드명 -> 라벨 매핑
-            include_unmapped: 매칭되지 않는 필드 포함 여부
-                             None이면 클래스 설정값(include_unmapped_fields) 사용
-            
-        Returns:
-            변환된 데이터
-        """
         # include_unmapped가 명시되지 않으면 클래스 설정값 사용
+        """원천 dict의 key를 label_map 기준 canonical 이름으로 바꾼다.
+
+        include_unmapped 옵션이 켜진 경우에만 미매핑 필드를 남겨, mapper 출력 폭을 호출자가 제어하게 한다.
+        """
         if include_unmapped is None:
             include_unmapped = RagMapper.include_unmapped_fields
 

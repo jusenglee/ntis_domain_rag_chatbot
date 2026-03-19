@@ -1,35 +1,20 @@
-"""
-소프트웨어 도메인 스키마
-
-소프트웨어 데이터의 매핑 규칙과 reference 추출 규칙을 정의합니다.
-"""
+"""소프트웨어 domain payload를 TagSchema로 정의하는 mapper 규칙이다."""
 
 from typing import Dict, Any
 from apps.api.rag_mapper.schema_types import TagSchema, DataTag
 
 
 def _format_software_title(values: Dict[str, Any]) -> str:
-    """
-    소프트웨어 title 포맷팅
-    
-    Args:
-        values: title 생성에 필요한 필드값 딕셔너리
-                - sw_nm: 소프트웨어명
-    
-    Returns:
-        sw_nm
-    """
+    """소프트웨어 payload에서 title로 쓸 문자열을 조합한다."""
     name = values.get("sw_nm", "소프트웨어명 미상")
     
     return name
 
 
 def get_software_schema() -> TagSchema:
-    """
-    소프트웨어 스키마 생성
-    
-    Returns:
-        소프트웨어용 TagSchema 인스턴스
+    """소프트웨어 tag에 대한 TagSchema를 반환한다.
+
+    label_map, reference_map, title 규칙을 한곳에 묶어 mapper registry가 이 domain을 같은 방식으로 읽게 한다.
     """
     return TagSchema(
         tag=DataTag.SOFTWARE,

@@ -1,4 +1,4 @@
-﻿# ADR-0003: Deterministic Gate를 포함한 Stagewise Planner 채택
+# ADR-0003: Deterministic Gate를 포함한 Stagewise Planner 채택
 
 - 상태: Accepted
 - 작성일: 2026-03-12

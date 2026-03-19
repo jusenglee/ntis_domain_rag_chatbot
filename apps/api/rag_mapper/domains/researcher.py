@@ -1,27 +1,11 @@
-"""
-연구자 도메인 스키마
-
-연구자 데이터의 매핑 규칙과 reference 추출 규칙을 정의합니다.
-"""
+"""연구자 domain payload를 TagSchema로 정의하는 mapper 규칙이다."""
 
 from typing import Dict, Any
 from apps.api.rag_mapper.schema_types import TagSchema, DataTag
 
 
 def _format_researcher_title(values: Dict[str, Any]) -> str:
-    """
-    연구자 title 포맷팅
-    
-    이름과 소속을 조합하여 "이름(소속)" 형태로 반환합니다.
-    
-    Args:
-        values: title 생성에 필요한 필드값 딕셔너리
-                - name: 연구자명
-                - org: 소속기관
-    
-    Returns:
-        포맷된 title 문자열 (예: "김연구(한국해양연구원)")
-    """
+    """연구자 payload에서 title로 쓸 문자열을 조합한다."""
     name = values.get("name", "미상")
     org = values.get("org", "소속 미상")
     
@@ -29,11 +13,9 @@ def _format_researcher_title(values: Dict[str, Any]) -> str:
 
 
 def get_researcher_schema() -> TagSchema:
-    """
-    연구자 스키마 생성
-    
-    Returns:
-        연구자용 TagSchema 인스턴스
+    """연구자 tag에 대한 TagSchema를 반환한다.
+
+    label_map, reference_map, title 규칙을 한곳에 묶어 mapper registry가 이 domain을 같은 방식으로 읽게 한다.
     """
     return TagSchema(
         tag=DataTag.RESEARCHER,

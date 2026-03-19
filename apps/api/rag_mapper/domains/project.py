@@ -1,25 +1,11 @@
-"""
-프로젝트(과제) 도메인 스키마
-
-프로젝트 데이터의 매핑 규칙과 reference 추출 규칙을 정의합니다.
-"""
+"""과제 domain payload를 TagSchema로 정의하는 mapper 규칙이다."""
 
 from typing import Dict, Any
 from apps.api.rag_mapper.schema_types import TagSchema, DataTag
 
 
 def _format_project_title(values: Dict[str, Any]) -> str:
-    """
-    프로젝트 title 포맷팅
-    
-    Args:
-        values: title 생성에 필요한 필드값 딕셔너리
-                - kor_pjt_nm: 국문과제명
-                - stan_yr: 기준년도
-    
-    Returns:
-        포맷된 title 문자열 (예: "해양 생태계 변화 예측 모델 개발(2023)")
-    """
+    """과제 payload에서 title로 쓸 문자열을 조합한다."""
     kor_pjt_nm = values.get("kor_pjt_nm", "과제명 미상")
     stan_yr = values.get("stan_yr", "")
     
@@ -29,11 +15,9 @@ def _format_project_title(values: Dict[str, Any]) -> str:
 
 
 def get_project_schema() -> TagSchema:
-    """
-    프로젝트 마스터 스키마 생성
-    
-    Returns:
-        프로젝트용 TagSchema 인스턴스
+    """과제 tag에 대한 TagSchema를 반환한다.
+
+    label_map, reference_map, title 규칙을 한곳에 묶어 mapper registry가 이 domain을 같은 방식으로 읽게 한다.
     """
     return TagSchema(
         tag=DataTag.PROJECT,

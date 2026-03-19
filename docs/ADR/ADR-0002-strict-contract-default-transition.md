@@ -1,4 +1,4 @@
-﻿# ADR-0002: Strict Strategy Contract를 현재 Baseline으로 채택
+# ADR-0002: Strict Strategy Contract를 현재 Baseline으로 채택
 
 - 상태: Accepted
 - 최초 작성: 2026-03-09

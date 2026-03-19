@@ -6,19 +6,23 @@ from apps.api.rag_mapper.schema_types import DataTag, TagSchema
 
 
 class SchemaRegistry:
-    """Registers and resolves tag schemas lazily."""
+    """RAG mapper용 TagSchema를 lazy 초기화하고 조회하는 중앙 registry다."""
 
     def __init__(self) -> None:
+        """비어 있는 schema 저장소와 초기화 플래그를 준비한다."""
         self._schemas: Dict[DataTag, TagSchema] = {}
         self._initialized = False
 
     def register(self, schema: TagSchema) -> None:
+        """tag별 schema를 registry에 등록한다."""
         self._schemas[schema.tag] = schema
 
     def get(self, tag: DataTag) -> Optional[TagSchema]:
+        """주어진 DataTag에 해당하는 schema를 돌려준다."""
         return self._schemas.get(tag)
 
     def initialize(self) -> None:
+        """domain별 schema 팩토리를 한 번만 불러 registry를 채운다."""
         if self._initialized:
             return
 
@@ -54,6 +58,7 @@ class SchemaRegistry:
         self._initialized = True
 
     def is_initialized(self) -> bool:
+        """registry가 이미 초기화되었는지 알려준다."""
         return self._initialized
 
 
@@ -62,8 +67,9 @@ _registry.initialize()
 
 
 def get_schema_registry() -> SchemaRegistry:
+    """프로세스 전역에서 공유하는 schema registry를 돌려준다."""
     return _registry
 
 
-# Backward-compatible direct access for legacy callers.
+# 기존 호출부 호환을 위한 direct access입니다.
 SCHEMA_REGISTRY = _registry._schemas

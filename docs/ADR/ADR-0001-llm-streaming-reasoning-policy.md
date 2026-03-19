@@ -1,4 +1,4 @@
-﻿# ADR-0001 — LLM 스트리밍 Reasoning 분리 및 Stage별 Thinking Policy
+# ADR-0001 — LLM 스트리밍 Reasoning 분리 및 Stage별 Thinking Policy
 
 - 작성일: 2026-03-03 (Asia/Seoul)
 - 상태: Proposed

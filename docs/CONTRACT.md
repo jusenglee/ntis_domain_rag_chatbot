@@ -1,27 +1,66 @@
-﻿# 계약 (CONTRACT)
+# 계약 (CONTRACT)
 
-이 문서는 planner, executor, runtime의 현재 실행 계약을 기록합니다.
+이 문서는 NTIS Domain RAG의 retrieval-first 실행 계약을 기록합니다.
+
+파라미터 정의는 `docs/PLANNER_PARAMETER_REFERENCE.md`,
+SEARCH / LOOKUP / JOIN 결정 규칙은 `docs/MODE_DECISION_GUIDE.md`,
+단계별 시스템 흐름은 `docs/SYSTEM_FLOW_RETRIEVAL_FIRST.md`를 함께 봅니다.
 
 ## 현재 기준선
 
-- Runtime entry point: `apps/api/main.py`
-- App assembly / workflow DI: `apps/api/app_factory.py`
-- Workflow graph definition: `apps/api/services/workflow_builder.py`
-- Planner, intent, executor의 기준 구현: `apps/core/*`
+- 시스템 정체성: `retrieval-first search system with chat UX`
 - Runtime baseline: staged-only + strict
+- planner invalid / contract violation: fail-close
+- lower layer fallback / promotion re-execution: 비활성
 
-## Stagewise Planner 계약
+## 1. Retrieval Intent Contract
 
-### Stage 1 output
+### 목적
 
-허용 필드:
+retrieval intent는 answer 스타일보다 먼저 확정되어야 하며, 이후 레이어는 이 intent를 재해석하지 않고 소비해야 합니다.
+
+### 허용 / 소유 필드
+
+- `mode`: `search | lookup | join`
+- `action`: `topic | list | detail | stats | download`
+- `relation`: `('project', 'perf') | ('perf', 'project') | None`
+- `join_key_mode`: `instance | group | None`
+- `target_cols`
+- `ids_map`
+- `output_type`
+
+### MUST
+
+- `SEARCH`는 탐색과 recall 우선 모드여야 합니다.
+- `LOOKUP`은 identifier 또는 강한 제약 기반 정확 조회 모드여야 합니다.
+- `JOIN`은 관계형 2-hop retrieval 모드여야 합니다.
+- `output_type`은 answer wording이 아니라 evidence presentation shape를 뜻해야 합니다.
+
+### MUST NOT
+
+- `pjt_id`와 `pjt_no`를 같은 의미로 취급하면 안 됩니다.
+- 같은 lookup/join seed에 `pjt_id`와 `pjt_no`를 동시에 넣으면 안 됩니다.
+
+### Fail-close 조건
+
+- identifier semantics가 충돌하면 fail-close 해야 합니다.
+
+## 2. Strategy Assembly Contract
+
+### 목적
+
+planner와 gate는 하나의 최종 strategy만 만들어야 하며, assembly 이후 하위 레이어는 이를 재추론하면 안 됩니다.
+
+### Stage 1 허용 필드
+
 - `action`
 - `head`
 - `relation_candidate`
 - `referential_followup`
 - `confidence`
 
-금지 필드:
+### Stage 1 금지 필드
+
 - `mode`
 - `join_key_mode`
 - `target_cols`
@@ -30,30 +69,24 @@
 - `retrieval_query`
 - `limit`
 
-### Deterministic gate
+### Deterministic gate 소유 필드
 
-Deterministic gate가 소유하는 필드:
 - `mode`
 - `relation`
 - `join_key_mode`
 - `target_cols`
 - `output_type`
 
-규칙:
-- `action=topic`이면 기본 `SEARCH`
-- `action in {list, detail, stats, download}`이면 기본 `LOOKUP`
-- `JOIN`은 relation intent와 join seed가 모두 있을 때만 허용
+### Stage 2 허용 필드
 
-### Stage 2 output
-
-허용 필드:
 - `ids_map`
 - `filters`
 - `retrieval_query`
 - `limit`
 - `confidence`
 
-금지 필드:
+### Stage 2 금지 필드
+
 - `mode`
 - `head`
 - `action`
@@ -62,65 +95,153 @@ Deterministic gate가 소유하는 필드:
 - `target_cols`
 - `strategy_version`
 
-### Final assembly
+### MUST
 
-- Executor가 받는 입력은 최종 조립된 strategy object 하나만 유지합니다.
-- Executor는 하나의 final strategy만 소비해야 합니다.
-- 하위 레이어는 assembly 이후 planner strategy를 다시 추론하면 안 됩니다.
+- planner 전단 explicit hint는 구조적 신호만 소유해야 합니다.
+- `과제번호` 단독 표현은 `pjt_id`/`pjt_no` 중 하나로 즉시 확정하지 않고 모호 표현으로 다뤄야 합니다.
+- 영문+숫자 project key는 slot 라벨 또는 slot별 강한 패턴이 있을 때만 seed로 승격해야 합니다.
+- 사람 이름, 기관명, 기관 역할 의미는 regex/keyword heuristic로 복원하지 않고 planner가 해석해야 합니다.
+- `target_cols` 기본값은 공용 policy source와 문서 기준선을 따라야 합니다.
+- executor가 받는 입력은 최종 strategy object 하나여야 합니다.
 
-## Strategy 소유권
+### MUST NOT
 
-- `apps/api/services/planner_service.py`가 planner merge와 final planner application을 담당합니다.
-- `apps/core/planner_contract.py`가 planner contract validation을 담당합니다.
-- `apps/core/query_intent.py`는 heuristic을 파생할 수 있지만 planner contract 규칙을 우회하면 안 됩니다.
-- `apps/api/services/request_facade.py`가 request understanding assembly와 explicit-precheck gating을 담당합니다.
-- Planner skip은 `ids_map`에 explicit identifier seed가 이미 있을 때만 허용합니다. org/person term, year, perf type, title term 같은 non-id heuristic hint는 planner input으로 남아야 하며 planner skip 조건이 되면 안 됩니다.
-- `apps/core/rag_pipeline.py`는 final plan을 실행해야 하며 새 plan을 발명하면 안 됩니다. 세부 흐름은 다음 모듈을 따라야 합니다.
-  - runtime prelude normalization / planner-runtime contract enforcement / pre-dispatch compile output: `apps/core/rag_runtime_prelude.py`
-  - 기본 SEARCH/LOOKUP orchestration: `apps/core/rag_base_orchestration.py`
-  - collection-level LOOKUP server filter: `apps/core/rag_filter_policy.py`
-  - JOIN hop / follow-up orchestration: `apps/core/rag_join_orchestration.py`
-  - rerank text scoring / title-soft helper: `apps/core/rag_rerank_support.py`
-  - runtime logging / timing / request context / code fingerprint: `apps/core/rag_runtime_observability.py`
-  - dense retrieval / hybrid-call compatibility / dense-threshold filtering / dense-score weighting: `apps/core/rag_dense_runtime_support.py`
-  - payload/meta merge / filter-log serialization / join-key support: `apps/core/rag_executor_support.py`
-  - dispatcher helper / request-local embedding cache / join/base runtime bundle wiring: `apps/core/rag_dispatch_runtime.py`
-  - shared runtime integrity helper: `apps/core/rag_runtime_safety.py`
-- Runtime prelude output은 명시적 `RuntimePreludeResult` 계약으로만 소비해야 하며, `rag_pipeline.py`는 prelude 시절의 로컬 helper나 반환되지 않은 값을 직접 참조하면 안 됩니다.
+- stagewise gate가 별도 기본 collection 규칙을 들고 있으면 안 됩니다.
+- parser, merge, runtime prelude가 전략 의미를 자동 보정하면 안 됩니다.
+- assembly 이후 하위 레이어가 planner strategy를 다시 추론하거나 보정하면 안 됩니다.
 
-## Join Key 규칙
+### Fail-close 조건
 
-- 같은 lookup/join seed에 `pjt_id`와 `pjt_no`를 동시에 넣으면 안 됩니다.
-- `join_key_mode=instance`는 `pjt_id` 같은 instance identifier를 사용합니다.
-- `join_key_mode=group`는 `pjt_no` 같은 group identifier를 사용합니다.
+- planner contract를 위반한 strategy는 fail-close 해야 합니다.
+
+## 3. Runtime Enforcement Contract
+
+### 목적
+
+runtime은 planner가 확정한 strategy를 검증하고 실행할 뿐, 새 전략을 만들지 않습니다.
+
+### 소유 레이어
+
+- `apps/api/services/planner_service.py`
+- `apps/core/planner_contract.py`
+- `apps/core/rag_runtime_prelude.py`
+- `apps/core/rag_pipeline.py`
+
+### MUST
+
+- planner invalid / contract violation은 `StrategyViolation`으로 종료해야 합니다.
+- Runtime prelude output은 명시적 `RuntimePreludeResult` 계약으로만 소비해야 합니다.
+- evidence assembly는 raw retrieval payload를 canonical evidence로 정규화해야 합니다.
+- chat UX는 canonical evidence와 render profile를 우선 사용해야 합니다.
+
+### MUST NOT
+
+- 하위 runtime layer는 fallback plan을 만들면 안 됩니다.
+- compat branch나 silent correction은 운영 기본 경로에 포함되면 안 됩니다.
+- `rag_pipeline.py`는 prelude 시절의 로컬 helper나 반환되지 않은 값을 직접 참조하면 안 됩니다.
+
+### JOIN MUST
+
+- `mode=join`이면 `join_key_mode`가 존재해야 합니다.
+- `join_key_mode`와 `ids_map`은 일치해야 합니다.
+- executor는 planner intent를 다시 해석하지 않고 runtime key materialization만 검증해야 합니다.
+
+### JOIN Fail-close 조건
+
+- `mode=join`인데 `join_key_mode`가 비어 있으면 fail-close 합니다.
+- `mode!=join`인데 `join_key_mode`가 존재하면 fail-close 합니다.
+- `join_key_mode`와 `ids_map`이 불일치하면 fail-close 합니다.
 - 필수 key를 해석할 수 없으면 JOIN은 fail-close 해야 합니다.
 
-## Runtime 구조 메모
+## 4. Evidence / Render Contract
 
-- `apps/api/main.py`는 얇게 유지해야 합니다.
-- Workflow routing 변경은 `apps/api/services/workflow_builder.py`에 둡니다.
-- 기존 `join_analysis` pass-through 단계는 제거되었습니다. 분기는 이제 knowledge sufficiency 직후에 직접 일어납니다.
+### 목적
 
-## Canonical Evidence 와 Rendering
+raw retrieval payload는 canonical evidence와 render profile로 분리 정규화되어야 합니다.
 
-- Retrieval payload는 이후 rendering, answer generation, debugging 전에 canonical evidence로 정규화될 수 있습니다.
-- Canonical evidence는 `pjt_id`, `pjt_no`, `rst_id` 같은 identifier의 source semantics를 보존해야 합니다.
-- Canonical evidence는 `lead_org_name`, `participant_org_name`, `people_affiliation_org_name` 같은 role-bearing organization/person field semantics를 보존해야 합니다.
-- Output shaping은 raw retrieval payload 구조를 레이어 사이에 누수시키는 대신 `output_type`과 route/mode hint에서 render profile을 결정해야 합니다.
-- Answer generation은 canonical evidence text만 사용해야 합니다. 요청 시점 문서만 있고 canonical evidence가 없다면 prompting 전에 runtime이 canonicalize 해야 합니다.
-- Knowledge sufficiency도 cached context document에서 재구성할 수 있다면 canonicalized previous context를 우선 사용해야 합니다.
-- Conversation memory는 canonical evidence와 render profile만 저장합니다. previous-context loading은 더 이상 legacy cached context snapshot을 읽지 않습니다.
-- Stagewise planner는 previous-context prompting과 previous-anchor seed extraction에서 canonical evidence가 있으면 그것을 사용해야 합니다.
+### MUST
 
-## JOIN head 의미
+- canonical evidence는 `pjt_id`, `pjt_no`, `rst_id`의 source semantics를 보존해야 합니다.
+- canonical evidence는 `lead_org_name`, `participant_org_name`, `people_affiliation_org_name`의 역할 의미를 보존해야 합니다.
+- output shaping은 `output_type`과 route/mode hint에서 render profile을 결정해야 합니다.
+- `summary`, `detail`, `list`, `stats`, `relation`은 같은 context shape를 재사용하면 안 됩니다.
+- `mode=join`일 때 `head`는 `relation[1]`과 같아야 합니다.
 
-- `action=relation`은 유효한 runtime strategy dialect가 아닙니다. relation query는 `action=list`와 `output_type=relation`으로 정규화해야 합니다.
-- `mode=join`일 때 `head`는 relation target, 즉 `relation[1]`과 같아야 합니다.
-- Stagewise gate, planner merge, runtime validator는 동일한 JOIN head semantics를 강제해야 합니다.
+### MUST NOT
 
-## Runtime 실패 의미
+- raw retrieval payload를 prompt에 그대로 넣으면 안 됩니다.
+- retrieval view와 prompt view를 같은 것으로 취급하면 안 됩니다.
+- `action=relation`을 runtime dialect로 쓰면 안 됩니다.
+
+### Fail-close 조건
+
+- JOIN head semantics가 깨지면 fail-close 해야 합니다.
+
+## 5. Chat UX Boundary
+
+### 목적
+
+chat UX는 retrieval result를 표현하고 대화 흐름을 관리하지만 retrieval contract를 바꾸지 않습니다.
+
+### chat UX가 할 수 있는 것
+
+- canonical evidence를 기반으로 답변을 생성합니다.
+- memory와 follow-up UX를 제공합니다.
+- streaming과 answer merge를 수행합니다.
+
+### chat UX가 하면 안 되는 것
+
+- retrieval contract를 바꾸지 않습니다.
+- canonical evidence 없이 raw payload를 prompt에 dump하지 않습니다.
+- retrieval failure를 `context=[]` 성공 payload처럼 숨기지 않습니다.
+- `question_analysis`를 final execution strategy처럼 노출하지 않습니다.
+- retrieval workflow와 answer generation은 `question_analysis`를 direct truth로 사용하지 않습니다.
+- `planner_runtime`의 stagewise 로그와 `PLANNER.ASSEMBLE`은 execution truth가 아닙니다.
+
+### memory 규칙
+
+목적:
+- conversation memory의 저장 범위와 retrieval anchor source of truth를 분리합니다.
+
+저장 범위:
+- conversation memory는 chat history와 canonical context snapshot을 함께 저장할 수 있습니다.
+- canonical context snapshot은 `canonical_evidence`와 `render_profile`입니다.
+- memory load contract는 `(history, canonical_evidence, render_profile)` 3-tuple입니다.
+
+- planner가 `mode=join`, `join_key_mode=instance`를 제안하더라도 sanitize 이후 `ids_map.pjt_id` seed가 비고 사람/기관 gate도 없으면 runtime merge 단계에서 `lookup`으로 downgrade한다. 이 경우 relation은 유지해 followup 경로를 열어 둔다.
+- `과제번호`처럼 instance/group이 모호한 표현만 있을 때는 `pjt_id`/`pjt_no` 어느 쪽도 seed로 고정하지 않고 post-sanitize re-gate를 다시 태운다.
+- `lookup`/`join`에서 `reranked=0`과 `reason=no_reranked`는 strict exception 대신 정상 no-result outcome으로 내리고, observability에는 `info.contract_fail_reason`, `info.empty_result_policy`, `info.reranked_count`를 함께 남긴다.
+
+MUST:
+- previous-context loading은 legacy cached context snapshot을 읽지 않아야 합니다.
+- stagewise planner는 previous-context prompting과 previous-anchor seed extraction에서 canonical evidence와 render profile를 우선 사용해야 합니다.
+
+MUST NOT:
+- history만으로 retrieval anchor를 재구성하면 안 됩니다.
+- history가 canonical evidence / render profile source of truth를 대체하면 안 됩니다.
+
+## 6. Runtime 실패 의미
+
+### MUST
 
 - Retrieval 실행 실패를 `context=[]` 형태의 성공 payload로 바꾸면 안 됩니다.
-- `/health`는 compiled graph 기준 readiness를 보고합니다. Redis/KV degradation은 payload에 계속 노출해야 하지만, graph-ready 인스턴스를 그 이유만으로 readiness failure로 만들면 안 됩니다.
-- Direct-answer streaming은 하나의 answer stream만 내보내야 하며, 같은 답을 여러 model label로 중복 송출하면 안 됩니다.
+- `/health`는 compiled graph 기준 readiness를 보고해야 합니다.
+- Redis/KV degradation은 payload에 계속 노출해야 합니다.
+- direct-answer streaming은 하나의 answer stream만 내보내야 합니다.
 
+### MUST NOT
+
+- graph-ready 인스턴스를 Redis/KV degradation만으로 readiness failure로 만들면 안 됩니다.
+- 같은 답을 여러 model label로 중복 송출하면 안 됩니다.
+
+### Diagnostic Probe Boundary
+
+MUST:
+- `FILTER_MISS_SUSPECTED`는 raw nested payload 검증이 가능할 때만 발생해야 합니다.
+
+MUST NOT:
+- `prtcp_mp[]` 같은 raw array object를 직접 읽지 못하면 사람 이름 miss를 추정하면 안 됩니다.
+- `payload_get("prtcp_mp[].hm_nm")`처럼 flatten/space-join helper를 거친 값은 diagnostic miss 판정의 근거로 쓰면 안 됩니다.
+
+Fail-close / downgrade:
+- raw nested를 볼 수 없으면 diagnostic 결과는 `unknown`으로 남겨야 하며 warning으로 승격하면 안 됩니다.

@@ -1,35 +1,20 @@
-"""
-연구보고서 도메인 스키마
-
-연구보고서 데이터의 매핑 규칙과 reference 추출 규칙을 정의합니다.
-"""
+"""연구보고서 domain payload를 TagSchema로 정의하는 mapper 규칙이다."""
 
 from typing import Dict, Any
 from apps.api.rag_mapper.schema_types import TagSchema, DataTag
 
 
 def _format_report_title(values: Dict[str, Any]) -> str:
-    """
-    연구보고서 title 포맷팅
-    
-    Args:
-        values: title 생성에 필요한 필드값 딕셔너리
-                - kor_rpt_title_nm: 연구보고서명
-    
-    Returns:
-        kor_rpt_title_nm
-    """
+    """연구보고서 payload에서 title로 쓸 문자열을 조합한다."""
     name = values.get("kor_rpt_title_nm", "연구보고서명 미상")
     
     return name
 
 
 def get_report_schema() -> TagSchema:
-    """
-    연구보고서 스키마 생성
-    
-    Returns:
-        연구보고서용 TagSchema 인스턴스
+    """연구보고서 tag에 대한 TagSchema를 반환한다.
+
+    label_map, reference_map, title 규칙을 한곳에 묶어 mapper registry가 이 domain을 같은 방식으로 읽게 한다.
     """
     return TagSchema(
         tag=DataTag.REPORT,

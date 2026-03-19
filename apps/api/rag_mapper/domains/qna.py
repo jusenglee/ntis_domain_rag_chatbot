@@ -1,35 +1,20 @@
-"""
-QNA 도메인 스키마
-
-QNA 데이터의 매핑 규칙과 reference 추출 규칙을 정의합니다.
-"""
+"""QnA domain payload를 TagSchema로 정의하는 mapper 규칙이다."""
 
 from typing import Dict, Any
 from apps.api.rag_mapper.schema_types import TagSchema, DataTag
 
 
 def _format_qna_title(values: Dict[str, Any]) -> str:
-    """
-    QNA title 포맷팅
-    
-    Args:
-        values: title 생성에 필요한 필드값 딕셔너리
-                - question: QNA명
-    
-    Returns:
-        question
-    """
+    """QnA payload에서 title로 쓸 문자열을 조합한다."""
     name = values.get("question", "QNA 제목 미상")
     
     return name
 
 
 def get_qna_schema() -> TagSchema:
-    """
-    QNA 스키마 생성
-    
-    Returns:
-        QNA용 TagSchema 인스턴스
+    """QnA tag에 대한 TagSchema를 반환한다.
+
+    label_map, reference_map, title 규칙을 한곳에 묶어 mapper registry가 이 domain을 같은 방식으로 읽게 한다.
     """
     return TagSchema(
         tag=DataTag.QNA,
