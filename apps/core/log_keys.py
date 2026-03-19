@@ -1,0 +1,16 @@
+"""Shared log key constants used across runtime seams."""
+
+LOG_KEY_POLICY_MODE = "policy_mode"
+LOG_KEY_EXECUTION_MODE = "execution_mode"
+LOG_KEY_PLANNER_INVALID_FALLBACK = "planner_invalid_fallback"
+LOG_KEY_STRICT_STRATEGY_CONSISTENCY = "strict_strategy_consistency"
+LOG_KEY_PROMOTION_MODE = "promotion_mode"
+LOG_KEY_FORCE_FALLBACK_CHAT = "force_fallback_chat"
+LOG_KEY_STRATEGY_MUTATION_STAGE = "strategy_mutation_stage"
+LOG_KEY_CHANGED_BY = "changed_by"
+
+CHANGED_BY_PARSER = "parser"
+CHANGED_BY_VALIDATOR = "validator"
+CHANGED_BY_NORMALIZER = "normalizer"
+CHANGED_BY_PLANNER_MERGE = "planner_merge"
+CHANGED_BY_EXECUTOR = "executor"

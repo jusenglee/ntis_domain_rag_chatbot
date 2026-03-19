@@ -1,0 +1,358 @@
+"""Planner merge helpers shared by runtime code and tests.\n\nKeeping planner merge behavior here prevents the app entry module from becoming the source of truth\nfor strategy mutation rules.\n"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any, Optional
+
+
+def normalize_hint_terms(values: Any) -> list[str]:
+    """Planner가 준 hint 값을 문자열 목록으로 정규화한다.
+
+    None과 placeholder 계열 값은 버리고, 순서를 보존한 채 중복만 제거해
+    이후 merge 단계가 안정적으로 동일한 비교 기준을 쓰게 만든다.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if not normalized or normalized.lower() in ("none", "null") or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def collect_researcher_name_terms(filters: dict[str, Any]) -> list[str]:
+    """Planner filter에서 연구자 이름 후보만 모아 people_terms seed로 쓴다.
+
+    과거 alias 키가 섞여 들어오는 경우도 같이 흡수해, 후속 intent merge가
+    연구자명 신호를 한 경로로만 다루도록 정리한다.
+    """
+    if not isinstance(filters, dict):
+        return []
+
+    researcher_keys = (
+        "participant_researcher_name",
+        "participant_researcher_names",
+        "participant_researcher",
+        "participant_researchers",
+        "researcher_name",
+        "researcher_names",
+        "researcher",
+        "people_name",
+    )
+
+    terms: list[str] = []
+    for key in researcher_keys:
+        terms.extend(normalize_hint_terms(filters.get(key)))
+    return normalize_hint_terms(terms)
+
+
+def merge_planner_hints(
+    intent: Any,
+    qa: Any,
+    *,
+    normalize_org_terms: Any,
+    normalize_hint_terms: Any,
+    collect_researcher_name_terms: Any,
+) -> Any:
+    """Planner QA 결과에서 보조 hint만 골라 기존 intent에 덧입힌다.
+
+    여기서는 org, people, year, title, perf type처럼 retrieval 보조 신호만 합치고,
+    confidence가 너무 낮으면 explicit hint를 오염시키지 않도록 merge를 건너뛴다.
+    """
+    if qa is None:
+        return intent
+
+    confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
+    if confidence < 0.2:
+        return intent
+
+    filters = dict(getattr(qa, "filters", {}) or {})
+    lead_org_terms = normalize_org_terms(filters.get("lead_org_name") or filters.get("performing_org_name"))
+    participant_org_terms = normalize_org_terms(filters.get("participant_org_name"))
+    people_affiliation_org_terms = normalize_org_terms(filters.get("people_affiliation_org_name"))
+    org_terms = normalize_org_terms([
+        *lead_org_terms,
+        *participant_org_terms,
+        *people_affiliation_org_terms,
+        *(filters.get("org_name") or [] if isinstance(filters.get("org_name"), list) else [filters.get("org_name")] if filters.get("org_name") else []),
+    ])
+
+    planner_year_from = str(filters.get("year_from") or "").strip() or None
+    planner_year_to = str(filters.get("year_to") or "").strip() or None
+    planner_years = normalize_hint_terms(filters.get("years"))
+    if not planner_year_from and planner_years:
+        planner_year_from = planner_years[0]
+    if not planner_year_to and planner_years:
+        planner_year_to = planner_years[-1]
+
+    planner_perf_types = normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
+    planner_title_terms = normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
+    planner_keywords = normalize_hint_terms(filters.get("keywords"))
+    planner_people_terms = collect_researcher_name_terms(filters)
+    planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
+
+    if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
+        planner_people_terms = []
+
+    return replace(
+        intent,
+        planner_limit=int(getattr(qa, "limit", 20) or 20),
+        retrieval_query=getattr(qa, "retrieval_query", None),
+        planner_confidence=confidence,
+        org_role=planner_org_role,
+        org_terms=org_terms or list(getattr(intent, "org_terms", []) or []),
+        people_terms=planner_people_terms if planner_people_terms else list(getattr(intent, "people_terms", []) or []),
+        lead_org_terms=lead_org_terms or list(getattr(intent, "lead_org_terms", []) or []),
+        participant_org_terms=participant_org_terms or list(getattr(intent, "participant_org_terms", []) or []),
+        people_affiliation_org_terms=people_affiliation_org_terms or list(getattr(intent, "people_affiliation_org_terms", []) or []),
+        year_from=planner_year_from or getattr(intent, "year_from", None),
+        year_to=planner_year_to or getattr(intent, "year_to", None),
+        years=planner_years or list(getattr(intent, "years", []) or []),
+        perf_types=planner_perf_types or list(getattr(intent, "perf_types", []) or []),
+        keywords=planner_keywords or list(getattr(intent, "keywords", []) or []),
+        title=planner_title_terms or list(getattr(intent, "title", []) or []),
+    )
+
+
+def apply_planner_strategy(
+    intent: Any,
+    qa: Any,
+    *,
+    request_id: Optional[str],
+    conversation_id: Optional[str],
+    normalize_hint_terms: Any,
+    log_event: Any,
+    build_changed_fields: Any,
+    changed_by_planner_merge: str,
+    strategy_violation_cls: type[Exception],
+) -> tuple[Any, bool]:
+    """Planner가 확정한 strategy 필드를 intent에 반영한다.
+
+    mode, relation, join_key_mode, target_cols, ids_map 같은 실행 계약은 이 단계에서만
+    갱신하고, planner가 명시하지 않은 값은 유지해 runtime truth를 한곳에 고정한다.
+    """
+    if qa is None:
+        return intent, False
+
+    action_mode_map = {
+        "topic": "search",
+        "list": "lookup",
+        "detail": "lookup",
+        "stats": "lookup",
+        "download": "lookup",
+        "id_exact": "lookup",
+        "id_fuzzy": "lookup",
+        "join": "join",
+    }
+    tracked_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "ids_map")
+    strategy_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols")
+    filter_fields = ("ids_map",)
+    before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
+
+    confidence = float(getattr(qa, "confidence", 0.0) or 0.0)
+    if confidence < 0.2:
+        return intent, False
+
+    planner_source = str(getattr(qa, "planner_source", "") or "").strip().lower() or None
+    planner_action = str(getattr(qa, "action", "") or "").strip().lower()
+    planner_mode = str(getattr(qa, "mode", getattr(intent, "mode", "")) or getattr(intent, "mode", "")).strip().lower() or None
+    expected_mode = action_mode_map.get(planner_action)
+    relation_raw = getattr(qa, "relation", None)
+    if isinstance(relation_raw, (tuple, list)):
+        has_join_relation = len(relation_raw) >= 2 and bool(str(relation_raw[0]).strip()) and bool(str(relation_raw[1]).strip())
+    else:
+        has_join_relation = bool(str(relation_raw or "").strip())
+
+    if expected_mode and planner_mode and planner_mode != expected_mode:
+        if not (planner_mode == "join" and has_join_relation):
+            mismatch_reason = f"planner action/mode mismatch(action={planner_action}, mode={planner_mode}, expected_mode={expected_mode})"
+            log_event(
+                "RAG.STRATEGY.ACTION_MODE_MISMATCH",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                planner_source=planner_source,
+                planner_action=planner_action,
+                original_mode=planner_mode,
+                expected_mode=expected_mode,
+                error_code="PLANNER_ACTION_MODE_MISMATCH",
+                reason=mismatch_reason,
+            )
+            raise strategy_violation_cls(error_code="PLANNER_ACTION_MODE_MISMATCH", reason=mismatch_reason)
+
+    relation_map = {
+        "project_perf": ("project", "perf"),
+        "perf_project": ("perf", "project"),
+    }
+    relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
+
+    def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
+        """기존 ids_map과 planner ids_map을 합쳐 최종 seed 사전을 만든다.
+
+        Planner가 같은 key를 다시 제시하면 그 값을 우선하고, 새 key는 그대로 추가해
+        join/followup 단계가 최신 planner seed를 기준으로 움직이게 한다.
+        """
+        merged: dict[str, list[str]] = {}
+
+        def _ingest(source: Any, *, overwrite: bool = False) -> None:
+            """source 사전을 병합용 중간 맵에 적재한다.
+
+            overwrite=True이면 같은 key가 이미 있어도 planner 값으로 덮어써
+            planner 우선 merge 규칙을 구현한다.
+            """
+            if not isinstance(source, dict):
+                return
+            for key, raw_values in source.items():
+                values = normalize_hint_terms(raw_values)
+                if not values:
+                    continue
+                if overwrite or key not in merged:
+                    merged[key] = list(values)
+                else:
+                    merged[key] = normalize_hint_terms([*merged[key], *values])
+
+        _ingest(base_ids)
+        _ingest(planner_ids, overwrite=True)
+        return merged
+
+    planner_target_cols = normalize_hint_terms(getattr(qa, "target_cols", None))
+    planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
+    if planner_mode == "join" and relation:
+        planner_head = str(relation[1]).strip().lower()
+    planner_output_type = str(getattr(qa, "output_type", "") or "").strip().lower() or None
+    if planner_output_type not in {"summary", "list", "detail", "stats", "relation"}:
+        qa_action = str(getattr(qa, "action", "") or "").strip().lower()
+        if qa_action == "detail":
+            planner_output_type = "detail"
+        elif qa_action == "stats":
+            planner_output_type = "stats"
+        elif qa_action == "list":
+            planner_output_type = "list"
+        elif relation:
+            planner_output_type = "relation"
+        else:
+            planner_output_type = getattr(intent, "output_type", None)
+
+    merged_ids_map = _merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {})
+    planner_join_key_mode = str(getattr(qa, "join_key_mode", "") or "").strip().lower() or None
+
+    if planner_mode == "join":
+        join_relation = relation if isinstance(relation, (list, tuple)) else None
+        has_relation = bool(join_relation and len(join_relation) >= 2 and all(str(v or "").strip() for v in join_relation[:2]))
+        if not has_relation or not planner_join_key_mode:
+            reason = (
+                "planner join strategy requires non-empty relation and join_key_mode"
+                f"(mode={planner_mode}, relation={relation}, join_key_mode={planner_join_key_mode or None})"
+            )
+            log_event(
+                "RAG.STRATEGY.JOIN_FIELDS_MISSING",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                planner_source=planner_source,
+                error_code="PLANNER_JOIN_FIELDS_MISSING",
+                reason=reason,
+                policy_mode="strict",
+            )
+            raise strategy_violation_cls(error_code="PLANNER_JOIN_FIELDS_MISSING", reason=reason)
+
+        has_instance_seed = bool(normalize_hint_terms(merged_ids_map.get("pjt_id")))
+        qa_filters = dict(getattr(qa, "filters", {}) or {})
+        people_gate_terms = normalize_hint_terms(getattr(intent, "people_terms", None))
+        if not people_gate_terms:
+            people_gate_terms = collect_researcher_name_terms(qa_filters)
+        org_gate_terms = normalize_hint_terms(getattr(intent, "org_terms", None))
+        if not org_gate_terms:
+            org_gate_terms = normalize_hint_terms([
+                qa_filters.get("lead_org_name"),
+                qa_filters.get("performing_org_name"),
+                qa_filters.get("participant_org_name"),
+                qa_filters.get("people_affiliation_org_name"),
+                qa_filters.get("org_name"),
+            ])
+        has_people_org_gate = bool(people_gate_terms or org_gate_terms)
+
+        if planner_join_key_mode == "instance" and not has_instance_seed and not has_people_org_gate:
+            downgraded_mode = str(getattr(intent, "mode", "") or "").strip().lower() or "lookup"
+            if downgraded_mode == "join":
+                downgraded_mode = "lookup"
+            log_event(
+                "RAG.STRATEGY.JOIN_DOWNGRADED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                planner_source=planner_source,
+                original_mode=planner_mode,
+                downgraded_mode=downgraded_mode,
+                relation=relation,
+                original_join_key_mode=planner_join_key_mode,
+                reason="seedless_instance_join_without_gate",
+                has_instance_seed=0,
+                has_people_org_gate=int(has_people_org_gate),
+            )
+            planner_mode = downgraded_mode
+            planner_join_key_mode = None
+
+    patched = replace(
+        intent,
+        base_route=planner_head,
+        action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
+        mode=planner_mode,
+        relation=relation,
+        join_key_mode=planner_join_key_mode,
+        target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
+        ids_map=merged_ids_map,
+        output_type=planner_output_type,
+    )
+
+    after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
+    changed_strategy_fields = build_changed_fields(before_snapshot, after_snapshot, strategy_fields, changed_by=changed_by_planner_merge)
+    changed_filter_fields = build_changed_fields(before_snapshot, after_snapshot, filter_fields, changed_by=changed_by_planner_merge)
+    log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="intent_merge",
+        status="success",
+        applied=int(bool({**changed_strategy_fields, **changed_filter_fields})),
+        confidence=round(confidence, 3),
+        strategy_mutation_stage="planner_merge",
+        changed_by=changed_by_planner_merge,
+        changed_strategy_fields=changed_strategy_fields,
+        changed_filter_fields=changed_filter_fields,
+    )
+    return patched, True
+
+
+def apply_planner_v2(
+    intent: Any,
+    qa: Any,
+    *,
+    request_id: Optional[str],
+    conversation_id: Optional[str],
+    merge_planner_hints: Any,
+    normalize_hint_terms: Any,
+    apply_planner_strategy_fn: Any,
+) -> tuple[Any, bool]:
+    """Stagewise planner 결과를 intent에 반영하는 v2 진입점이다.
+
+    먼저 hint merge로 retrieval 보조 신호를 정리한 뒤, strategy merge에서
+    mode/relation/ids_map 같은 실행 계약을 확정한다.
+    """
+    hinted_intent = merge_planner_hints(intent, qa)
+
+    return apply_planner_strategy_fn(
+        hinted_intent,
+        qa,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+
