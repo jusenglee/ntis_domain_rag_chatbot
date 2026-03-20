@@ -41,7 +41,7 @@ from apps.api.services.conversation_store import (
     save_conversation_memory,
 )
 from apps.api.services.llm_json import sanitize_llm_json
-from apps.api.services.llm_runtime import build_llm, get_llm_cache, load_system_prompt
+from apps.api.services.llm_runtime import build_llm, get_llm_cache, load_system_prompt, resolve_system_prompt_path
 from apps.api.services.planner_runtime import run_stagewise_question_analysis
 from apps.api.services.planner_service import (
     apply_planner_strategy,
@@ -144,6 +144,11 @@ PRIORITY_CONTEXT_FIELDS = tuple(
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
 PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v1").strip()
 PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v1").strip()
+DEFAULT_SYSTEM_PROMPT_PATH = Path(os.getenv("DEFAULT_SYSTEM_PROMPT_PATH", "prompts/ntis_chatbot.md").strip() or "prompts/ntis_chatbot.md")
+_GEMMA_SYSTEM_PROMPT_PATH_RAW = os.getenv("GEMMA_SYSTEM_PROMPT_PATH", "").strip()
+GEMMA_SYSTEM_PROMPT_PATH = Path(_GEMMA_SYSTEM_PROMPT_PATH_RAW) if _GEMMA_SYSTEM_PROMPT_PATH_RAW else None
+_SOLAR_SYSTEM_PROMPT_PATH_RAW = os.getenv("SOLAR_SYSTEM_PROMPT_PATH", "").strip()
+SOLAR_SYSTEM_PROMPT_PATH = Path(_SOLAR_SYSTEM_PROMPT_PATH_RAW) if _SOLAR_SYSTEM_PROMPT_PATH_RAW else None
 PLANNER_TEMPERATURE = float(os.getenv("PLANNER_TEMPERATURE", "0.0"))
 PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS = {
     "pjt_id",
@@ -200,6 +205,7 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
     intent_payload = getattr(state, "intent_payload", None)
+    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {}) if intent_payload is not None else {}
     context = getattr(state, "context", None) or []
     merge_debug = getattr(state, "merge_debug", None) or {}
     timings = getattr(state, "timings", None) or {}
@@ -263,8 +269,13 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "join_resolution_policy": timings.get("info.join_resolution_policy") or getattr(strategy, "join_resolution_policy", None),
         "resolved_runtime_join_mode": timings.get("info.resolved_runtime_join_mode") or None,
         "dual_branch_used": timings.get("info.dual_branch_used"),
-        "candidate_project_key_count": timings.get("info.candidate_project_key_count") or ((getattr(intent_payload, "strategy_meta", None) or {}).get("candidate_project_key_count") if intent_payload is not None else None),
-        "candidate_perf_key_count": timings.get("info.candidate_perf_key_count") or ((getattr(intent_payload, "strategy_meta", None) or {}).get("candidate_perf_key_count") if intent_payload is not None else None),
+        "candidate_project_key_count": timings.get("info.candidate_project_key_count") or strategy_meta.get("candidate_project_key_count"),
+        "candidate_perf_key_count": timings.get("info.candidate_perf_key_count") or strategy_meta.get("candidate_perf_key_count"),
+        "followup_resolution_status": strategy_meta.get("followup_resolution_status"),
+        "followup_reference_kind": strategy_meta.get("followup_reference_kind"),
+        "selected_prev_index": strategy_meta.get("selected_prev_index"),
+        "selected_prev_context_kind": strategy_meta.get("selected_prev_context_kind"),
+        "seed_source": strategy_meta.get("seed_source"),
         "docs_found": len(context),
         "selected_model": merge_debug.get("selected_model"),
         "rendered_context_used": int(bool(getattr(state, "rendered_context_used", False))),
@@ -377,7 +388,12 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
             logger=logger,
         ),
         load_system_prompt_fn=load_system_prompt,
-        system_prompt_path=Path("prompts/ntis_chatbot.md"),
+        system_prompt_path=resolve_system_prompt_path(
+            model_name=model_name,
+            default_path=DEFAULT_SYSTEM_PROMPT_PATH,
+            gemma_path=GEMMA_SYSTEM_PROMPT_PATH,
+            solar_path=SOLAR_SYSTEM_PROMPT_PATH,
+        ),
         log_section_fn=log_section,
         select_max_tokens_hint_fn=lambda qa: select_max_tokens_hint(
             qa,

@@ -96,10 +96,12 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "selected_prev_pjt_id": selected_prev_item.get("pjt_id") if selected_prev_item else None,
         "selected_prev_pjt_no": selected_prev_item.get("pjt_no") if selected_prev_item else None,
         "followup_resolution_status": followup_resolution.get("followup_resolution_status") or "none",
+        "followup_reference_kind": followup_resolution.get("followup_reference_kind"),
+        "explicit_followup": bool(followup_resolution.get("explicit_followup")),
         "requested_token": followup_resolution.get("requested_token"),
         "requested_index": followup_resolution.get("requested_index"),
         "available_count": followup_resolution.get("available_count"),
-        "seed_source": "reference_context_ordinal" if followup_resolution.get("followup_resolution_status") == "resolved" else None,
+        "seed_source": followup_resolution.get("seed_source"),
     }
 def _build_intent_payload_object(intent_payload_cls: Any, normalized_intent: Any, question_analysis: Any, *, followup_resolution: Optional[Dict[str, Any]] = None) -> Any:
     """Instantiate the configured transport payload, keeping test doubles working."""
@@ -174,7 +176,7 @@ class RequestUnderstandingFacade:
         )
         question_analysis = None
         planner_failed = 0
-        followup_resolution = {"followup_resolution_status": "none", "selected_prev_item": None, "seed_map": {}}
+        followup_resolution = {"followup_resolution_status": "none", "selected_prev_item": None, "seed_map": {}, "seed_source": None, "explicit_followup": False, "followup_reference_kind": None}
         base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
         base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
         if not has_explicit_precheck_signals(precheck) and not _has_ids_map_values(base_ids_map):
@@ -196,7 +198,8 @@ class RequestUnderstandingFacade:
                     selected_prev_pjt_no=(followup_resolution.get("selected_prev_item") or {}).get("pjt_no"),
                     available_count=followup_resolution.get("available_count"),
                     requested_token=followup_resolution.get("requested_token"),
-                    seed_source="reference_context_ordinal",
+                    seed_source=followup_resolution.get("seed_source"),
+                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
                 )
             elif status == "out_of_range":
                 self.log_event(
@@ -206,6 +209,7 @@ class RequestUnderstandingFacade:
                     available_count=followup_resolution.get("available_count"),
                     requested_index=followup_resolution.get("requested_index"),
                     requested_token=followup_resolution.get("requested_token"),
+                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
                 )
             elif status in {"missing_context", "unresolved"}:
                 self.log_event(
@@ -215,6 +219,7 @@ class RequestUnderstandingFacade:
                     followup_resolution_status=status,
                     requested_token=followup_resolution.get("requested_token"),
                     available_count=followup_resolution.get("available_count"),
+                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
                 )
         if not has_explicit_precheck_signals(precheck):
             question_analysis = await self.run_question_analysis(

@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, Dict
 
 from apps.api.services.canonical_context import build_prev_context_canonical_text
+from apps.core.followup_resolution import build_followup_clarification_message, should_short_circuit_followup_clarification
 
 
 def _get_normalized_intent(state: Any) -> Any:
@@ -58,6 +59,28 @@ async def node_knowledge_sufficiency(
     qa = state.question_analysis
     query_intent = _get_normalized_intent(state)
     strategy = _get_strategy(state)
+    intent_payload = getattr(state, "intent_payload", None)
+    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
+    if should_short_circuit_followup_clarification(strategy_meta):
+        no_result_message = build_followup_clarification_message(strategy_meta)
+        result = knowledge_sufficiency_cls(
+            requires_new_knowledge="low",
+            search_intent="followup clarification short-circuit",
+            retrieval_query=state.messages[-1].content,
+            confidence=1.0,
+        )
+        log_event(
+            "KS.RESULT",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            stage="knowledge_sufficiency",
+            requires_new_knowledge=result.requires_new_knowledge,
+            retrieval_query=result.retrieval_query,
+            confidence=round(float(result.confidence), 2),
+            followup_resolution_status=strategy_meta.get("followup_resolution_status"),
+            early_exit_reason="followup_clarification",
+        )
+        return {"knowledge_sufficiency": result, "no_result_message": no_result_message}
     retrieval_query = _pick_attr(query_intent, qa, key="retrieval_query", default=state.messages[-1].content)
     action = _pick_attr(query_intent, strategy, qa, key="action")
 

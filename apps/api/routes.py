@@ -298,9 +298,13 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     elif kind == "on_chain_start" and node == "rag_search":
                         yield _stream_data("status", status="retrieve")
 
-                    elif kind == "on_chain_end" and node == "merge_answers":
-                        docs = data.get("output", {}).get("context", [])
-                        documents_used.extend(docs)
+                    elif kind == "on_chain_end" and node in {"rag_search", "merge_answers"}:
+                        output = data.get("output", {})
+                        docs = []
+                        if isinstance(output, dict):
+                            docs = output.get("context") or output.get("documents") or []
+                        if isinstance(docs, list):
+                            documents_used.extend(docs)
 
                 ref_docs = []
                 seen_reference_keys = set()

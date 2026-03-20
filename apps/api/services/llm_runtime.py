@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import aiofiles
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from apps.core.openai_compat_llm import OpenAICompatChatModel
 from apps.core.triton_llm import TritonChatModel
@@ -47,6 +47,21 @@ async def load_prompt_file(path: Path) -> str:
     _PROMPT_CACHE.clear()
     _PROMPT_CACHE[cache_key] = content
     return content
+
+
+def resolve_system_prompt_path(
+    *,
+    model_name: str,
+    default_path: Path,
+    gemma_path: Optional[Path] = None,
+    solar_path: Optional[Path] = None,
+) -> Path:
+    """Return the configured final-answer prompt path for the target model."""
+    if model_name == "gemma_triton_0" and gemma_path is not None:
+        return gemma_path
+    if model_name == "solar_vllm_0" and solar_path is not None:
+        return solar_path
+    return default_path
 
 
 async def load_system_prompt(path: Path) -> str:

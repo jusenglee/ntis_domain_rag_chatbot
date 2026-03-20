@@ -252,6 +252,7 @@ def test_query_intent_does_not_confuse_issn_with_project_candidate():
 
 
 
+
 def _project_canonical_item(*, pjt_id: str, pjt_no: str, title: str) -> dict:
     return {
         "ids": {"pjt_id": pjt_id, "pjt_no": pjt_no},
@@ -262,7 +263,7 @@ def _project_canonical_item(*, pjt_id: str, pjt_no: str, title: str) -> dict:
 
 def test_resolve_reference_context_followup_uses_reference_context_order():
     resolution = resolve_reference_context_followup(
-        question='1번 과제의 연구자를 알려줘',
+        question="1\ubc88 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918",
         canonical_evidence=[
             _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
             _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
@@ -282,7 +283,7 @@ def test_build_intent_payload_injects_reference_context_seed_before_planner():
 
     payload, _ = asyncio.run(
         build_intent_payload(
-            question='1번 과제의 연구자를 알려줘',
+            question="1\ubc88 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918",
             conversation_id='cid',
             chat_history=[],
             prev_context=[],
@@ -323,7 +324,7 @@ def test_build_intent_payload_injects_reference_context_seed_before_planner():
 
 
 def test_collect_researcher_name_terms_strips_ordinal_tokens():
-    assert collect_researcher_name_terms({'participant_researcher_name': ['1번', 'Kim']}) == ['Kim']
+    assert collect_researcher_name_terms({'participant_researcher_name': ['1\ubc88\uc9f8', 'Kim']}) == ['Kim']
 
 
 def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
@@ -331,9 +332,9 @@ def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
     intent = NormalizedIntent(action='detail', base_route='project', relation=None, is_id_query=False)
     qa = SimpleNamespace(
         confidence=0.9,
-        filters={'participant_researcher_name': ['1번', 'Kim']},
+        filters={'participant_researcher_name': ['1\ubc88\uc9f8', 'Kim']},
         limit=5,
-        retrieval_query='1번 과제의 연구자를 알려줘',
+        retrieval_query='1\ubc88 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918',
         action='detail',
         mode='lookup',
         relation=None,
@@ -379,14 +380,113 @@ def test_custom_rag_retriever_short_circuits_followup_clarification():
             normalized_intent=NormalizedIntent(action='detail', base_route='project', relation=None, is_id_query=False),
             strategy_meta={
                 'followup_resolution_status': 'out_of_range',
+                'explicit_followup': True,
                 'selected_prev_context_kind': 'project',
                 'available_count': 3,
             },
         )
         retriever = rag_retriever_module.CustomRAGRetriever(intent_payload=payload)
-        result = retriever.retrieve('10번 과제의 연구자를 알려줘')
+        result = retriever.retrieve('10\ubc88 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918')
     finally:
         rag_retriever_module.run_rag_ab_compare = original
 
     assert result['documents'] == []
-    assert '이전 목록에는 3개만 있습니다.' in result['no_result_message']
+    assert '\uc774\uc804 \ubaa9\ub85d\uc5d0\ub294 3\uac1c\ub9cc \uc788\uc2b5\ub2c8\ub2e4.' in result['no_result_message']
+
+
+def test_resolve_reference_context_followup_resolves_deictic_with_single_previous_item():
+    resolution = resolve_reference_context_followup(
+        question='\uadf8 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918',
+        canonical_evidence=[_project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project')],
+        prev_context=[],
+        default_context_kind='project',
+    )
+
+    assert resolution['followup_resolution_status'] == 'resolved'
+    assert resolution['seed_map'] == {'pjt_id': ['PJT-1']}
+    assert resolution['seed_source'] == 'reference_context_deictic'
+
+
+def test_resolve_reference_context_followup_clarifies_deictic_with_multiple_previous_items():
+    resolution = resolve_reference_context_followup(
+        question='\uadf8 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918',
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+        ],
+        prev_context=[],
+        default_context_kind='project',
+    )
+
+    assert resolution['followup_resolution_status'] == 'unresolved'
+    assert resolution['explicit_followup'] is True
+    assert resolution['followup_reference_kind'] == 'deictic'
+
+
+def test_build_intent_payload_keeps_deictic_seed_source_metadata():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(confidence=0.8)
+
+    payload, _ = asyncio.run(
+        build_intent_payload(
+            question='\uadf8 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            canonical_evidence=[_project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project')],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: SimpleNamespace(
+                action='detail',
+                base_route='project',
+                ids_map={},
+                candidate_keys={},
+                project_key_policy=None,
+                join_resolution_policy=None,
+                join_key_mode=None,
+                is_exact_key_query=False,
+            ),
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, False),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert payload.normalized_intent.ids_map == {'pjt_id': ['PJT-1']}
+    assert payload.strategy_meta['seed_source'] == 'reference_context_deictic'
+    assert payload.strategy_meta['followup_reference_kind'] == 'deictic'
+
+
+def test_custom_rag_retriever_short_circuits_deictic_followup_clarification():
+    from apps.core.schemas import IntentPayloadV3
+
+    original = rag_retriever_module.run_rag_ab_compare
+    rag_retriever_module.run_rag_ab_compare = lambda **kwargs: (_ for _ in ()).throw(AssertionError('retrieval should be skipped'))
+    try:
+        payload = IntentPayloadV3(
+            normalized_intent=NormalizedIntent(action='detail', base_route='project', relation=None, is_id_query=False),
+            strategy_meta={
+                'followup_resolution_status': 'unresolved',
+                'followup_reference_kind': 'deictic',
+                'explicit_followup': True,
+                'selected_prev_context_kind': 'project',
+                'available_count': 2,
+                'requested_token': '\uadf8 \uacfc\uc81c',
+            },
+        )
+        retriever = rag_retriever_module.CustomRAGRetriever(intent_payload=payload)
+        result = retriever.retrieve('\uadf8 \uacfc\uc81c\uc758 \uc5f0\uad6c\uc790\ub97c \uc54c\ub824\uc918')
+    finally:
+        rag_retriever_module.run_rag_ab_compare = original
+
+    assert result['documents'] == []
+    assert '\uc774\uc804 \ubaa9\ub85d\uc5d0\uc11c \uc5b4\ub290 \uacfc\uc81c\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ud655\uc778\ud574 \uc8fc\uc138\uc694.' in result['no_result_message']

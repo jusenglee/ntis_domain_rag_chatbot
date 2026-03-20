@@ -78,3 +78,8 @@
 - raw payload, canonical evidence, prompt view를 같은 artifact처럼 설명하지 않습니다.
 - `pjt_id`와 `pjt_no`를 절대 같은 의미로 섞지 않습니다.
 - 레거시 문서는 참고 자료일 뿐, 현행 계약 문서가 아닙니다.
+
+
+## Final-answer prompt note
+- ?? ??? system prompt? ?? `prompts/ntis_chatbot.md`? ????? ????.
+- ?? ? `GEMMA_SYSTEM_PROMPT_PATH`, `SOLAR_SYSTEM_PROMPT_PATH`? ??? prompt ??? ??? ? ??.
