@@ -1,4 +1,4 @@
-# PLANNER_PARAMETER_REFERENCE
+﻿# PLANNER_PARAMETER_REFERENCE
 
 이 문서는 planner artifact, normalized intent, runtime prelude, execution layer에서 사용하는 핵심 파라미터를 정리한다.
 
@@ -7,9 +7,9 @@
 - planner merge/runtime prelude: `apps/api/services/planner_service.py`, `apps/core/rag_runtime_prelude.py`
 - 계약 문서: `docs/CONTRACT.md`
 
-## 핵심 원칙
+## 기본 원칙
 
-- planner artifact는 execution truth를 바로 대체하지 않는다.
+- planner artifact가 execution truth를 직접 대체하지 않는다.
 - `ids_map`에는 resolved identifier만 들어간다.
 - unresolved exact key는 `candidate_keys`에 들어간다.
 - `IntentPayloadV3`는 transport contract이다.
@@ -19,16 +19,17 @@
 
 | artifact | 역할 | source of truth |
 |---|---|---|
-| `question_analysis` | planner와 deterministic gate가 조립한 질의 계약 | planner/runtime assemble |
-| `intent_payload.normalized_intent` | retrieval이 소비하는 canonical intent | request facade |
-| `strategy` | executor가 실제로 실행할 전략 | runtime prelude |
-| `QueryPlan` | planner/runtime가 공유하는 plan metadata | pipeline steps |
-| `canonical_evidence` | raw retrieval을 renderer가 쓸 수 있는 형태로 정리한 결과 | result assembly |
+| `question_analysis` | planner와 deterministic gate가 조립한 질의 해석 | planner/runtime assemble |
+| `intent_payload.normalized_intent` | retrieval가 소비하는 canonical intent | request facade |
+| `strategy` | executor가 실제로 실행하는 전략 | runtime prelude |
+| `QueryPlan` | planner/runtime이 공유하는 plan metadata | pipeline steps |
+| `canonical_evidence` | raw retrieval를 renderer 친화 형태로 정규화한 결과 | result assembly |
 | `render_profile` | `output_type`별 evidence rendering shape | context builder |
 
 ## planner stage 1
 
-stage 1은 초기 해석을 수행한다.
+stage 1은 초기 구조 해석만 수행한다.
+
 - `action`
 - `head`
 - `relation_candidate`
@@ -36,6 +37,7 @@ stage 1은 초기 해석을 수행한다.
 - `confidence`
 
 stage 1은 다음 값을 확정하지 않는다.
+
 - `mode`
 - `join_key_mode`
 - `target_cols`
@@ -46,6 +48,7 @@ stage 1은 다음 값을 확정하지 않는다.
 ## deterministic gate
 
 deterministic gate는 다음 값을 고정한다.
+
 - `mode`
 - `action`
 - `relation`
@@ -53,11 +56,12 @@ deterministic gate는 다음 값을 고정한다.
 - `target_cols`
 - `output_type`
 
-planner stage 2와 lower layer은 이 값들을 바꾸지 않는다.
+planner stage 2와 lower layer는 이 값을 바꾸지 않는다.
 
 ## planner stage 2
 
-stage 2는 실행에 필요한 세부 슬롯을 채운다.
+stage 2는 실행에 필요한 가변 슬롯만 채운다.
+
 - `ids_map`
 - `candidate_keys`
 - `project_key_policy`
@@ -76,7 +80,7 @@ stage 2는 실행에 필요한 세부 슬롯을 채운다.
   - `rst_id`
   - `doi`
   - `issn`
-- `pjt_id`와 `pjt_no`는 동시 resolved seed로 올라가면 안 된다.
+- `pjt_id`와 `pjt_no`를 동시에 resolved seed로 올리면 안 된다.
 
 ### `candidate_keys`
 
@@ -100,7 +104,7 @@ stage 2는 실행에 필요한 세부 슬롯을 채운다.
 - `group`
 - `deferred`
 
-`deferred`는 runtime이 hop1 discovery 후 key kind를 결정한다.
+`deferred`는 runtime이 hop1 discovery 뒤 key kind를 결정한다.
 
 ### `join_resolution_policy`
 
@@ -112,8 +116,9 @@ stage 2는 실행에 필요한 세부 슬롯을 채운다.
 
 ## normalized intent
 
-normalized intent는 retrieval이 소비하는 canonical 질의 객체다.
+normalized intent는 retrieval가 소비하는 canonical 질의 객체다.
 주요 필드:
+
 - `base_route`
 - `action`
 - `relation`
@@ -140,19 +145,19 @@ normalized intent는 retrieval이 소비하는 canonical 질의 객체다.
 
 ## transport contract
 
-- `IntentPayloadV3`는 transport version과 semantic version을 함께 실어 내린다.
+- `IntentPayloadV3`는 transport version과 semantic version을 함께 실어 나른다.
 - `question_analysis`와 `strategy_meta`는 transport에서 유지된다.
 - payload가 존재하면 `intent_payload_version="v3"`가 필수다.
 
 ## runtime contracts
 
-- `StrategySpec`는 runtime prelude가 조립하는 실행 계약이다.
-- `QueryPlan`은 planner/runtime가 공유하는 계획 메타데이터다.
+- `StrategySpec`은 runtime prelude가 조립하는 실행 계약이다.
+- `QueryPlan`은 planner/runtime이 공유하는 계획 메타데이터다.
 - `mode`, `action`, `relation`, `join_key_mode`, `ids_map`, `target_cols`, `retrieval_query`, `planner_limit`, `output_type`는 transport와 runtime에서 함께 유지한다.
 
 ## 점검 체크
 
 - planner artifact가 execution truth를 덮어쓰지 않는가
 - resolved key와 candidate key가 섞이지 않는가
-- planner-first 원칙을 어기고 raw text를 다시 해석하지 않는가
+- planner-first 원칙을 지키고 raw text를 다시 해석하지 않는가
 - observability 필드가 summary/debug에 그대로 노출되는가
