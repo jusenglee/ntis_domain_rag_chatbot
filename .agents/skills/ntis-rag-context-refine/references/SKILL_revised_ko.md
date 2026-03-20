@@ -42,17 +42,14 @@ description: NTIS RAG에서 raw source data를 canonical schema로 정리하고,
 - `apps/api/services/rag_result_assembly.py`
 
 ### 문서 기준선
-- `docs_ko_reorganized/README.md`
-- `docs_ko_reorganized/01_아키텍처와_흐름.md`
-- `docs_ko_reorganized/02_실행계약과_전략규칙.md`
-- `docs_ko_reorganized/03_운영과_환경.md`
-- `docs_ko_reorganized/04_회귀기준과_점검.md`
-- `docs_ko_reorganized/05_유지보수와_확장.md`
+- `README.md`
+- `CONTRACT.md`
+- `RUNBOOK.md`
+- `GOLDEN_TESTS.md`
+- `PLANNER_PARAMETER_REFERENCE.md`
 
 ### 참고 전용 문서
-- `docs_ko_reorganized/문서_재편성_매핑표.md`
-  - 구문서와 신문서의 대응 관계를 볼 때만 참고한다.
-- `NTIS_RAG_Search_Strategy_v1_2.md` (레거시 참고용)
+- `NTIS_RAG_Search_Strategy_v1_2.md`
   - 역사/배경 참고용이다.
   - 현행 runtime invariant의 정본으로 사용하지 않는다.
 
@@ -245,21 +242,20 @@ retrieval view를 prompt에 그대로 넣지 않는다.
 ## 문서를 같이 갱신해야 하는 경우
 
 - contract / strategy 변경
-  - `docs_ko_reorganized/02_실행계약과_전략규칙.md`
-  - `docs_ko_reorganized/04_회귀기준과_점검.md`
-  - `docs_ko_reorganized/README.md`
+  - `CONTRACT.md`
+  - `GOLDEN_TESTS.md`
+  - `README.md`
 - triage / 운영 변경
-  - `docs_ko_reorganized/03_운영과_환경.md`
+  - `RUNBOOK.md`
 - validation / env 변경
-  - `docs_ko_reorganized/03_운영과_환경.md`
-  - `docs_ko_reorganized/04_회귀기준과_점검.md`
+  - `ENVIRONMENT.md`
+  - `RUNBOOK.md`
 - canonical evidence / renderer / output_type 변경
-  - `docs_ko_reorganized/README.md`
-  - `docs_ko_reorganized/01_아키텍처와_흐름.md`
-  - `docs_ko_reorganized/04_회귀기준과_점검.md`
+  - `README.md`
+  - `GOLDEN_TESTS.md`
+  - 관련 설계 문서
 - 큰 설계 결정 변경
-  - `docs_ko_reorganized/05_유지보수와_확장.md`
-  - 필요 시 ADR 추가 또는 갱신
+  - ADR 추가 또는 갱신
 
 ## 한 줄 기준
 

@@ -1,2 +1,0 @@
-﻿env:
-  RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT: "true"
