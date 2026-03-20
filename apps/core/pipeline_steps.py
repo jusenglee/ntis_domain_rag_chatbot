@@ -216,7 +216,6 @@ def normalize_intent(
         *,
         query: str,
         keywords: List[str],
-        allow_strategy_fallback: bool = False,
         hint_people_terms: Optional[List[str]] = None,
         hint_org_terms: Optional[List[str]] = None,
         hint_org_role: Optional[str] = None,
@@ -227,7 +226,6 @@ def normalize_intent(
         hint_perf_types: Optional[List[str]] = None,
         hint_title_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
-    # allow_strategy_fallback는 현재 strict baseline에서 의미상 비활성이다.
     # If the planner already fixed mode, action, and relation, lower layers must not silently reclassify it.
     # Contract violations should fail closed and only allow explicit manual override when the runtime says so.
     # This keeps planner intent and executor behavior aligned for observability and debugging.

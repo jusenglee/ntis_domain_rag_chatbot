@@ -30,8 +30,6 @@ class IntentPayloadV3:
     strategy_meta: Dict[str, Any] = field(default_factory=dict)
 
 
-IntentPayloadV2 = IntentPayloadV3  # Legacy compatibility alias for older imports. New code should use IntentPayloadV3.
-
 Stage1Relation = Literal["project_perf", "perf_project"]
 
 
@@ -232,7 +230,9 @@ class QueryPlan:
 
 @dataclass
 class ExecutionContext:
-    """한 요청이 runtime을 통과하는 동안 동행하는 가변 컨텍스트다.
+    """Mutable runtime context derived from normalized intent.
+
+    한 요청이 runtime을 통과하는 동안 동행하는 가변 컨텍스트다.
     normalized intent에서 받은 기본 의미를 보존하면서 plan·strategy·target collections같은 runtime 산출물을 차례로 채운다.
     """
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Stagewise planner and deterministic gate helpers."""
 
@@ -11,7 +11,7 @@ Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
 Action = Literal["topic", "list", "detail", "stats", "download"]
 Relation = Literal["project_perf", "perf_project"]
-JoinKeyMode = Literal["instance", "group", "deferred"]
+GateJoinKeyMode = Literal["instance", "group"]
 
 PROJECT_TO_PERF = "project_perf"
 PERF_TO_PROJECT = "perf_project"
@@ -29,23 +29,23 @@ _PERF_SEED_KEYS = (
 
 
 @dataclass(frozen=True)
-class LockedStrategy:
-    """Container for stage-1 locked planner strategy fields.
+class DeterministicGateStrategy:
+    """Deterministic gate artifact for mode, relation, join key mode, and target collections.
     Stage 2 may fill ids, candidate_keys, filters, retrieval_query, and limit only.
-    Deferred join is not emitted here by default; it becomes legal only after stage-2 sanitize and re-gate.
+    Deferred join is legalized later during assembled question analysis, not in the gate artifact.
     """
     mode: Mode
     head: Head
     action: Action
     relation: Optional[Relation] = None
-    join_key_mode: Optional[JoinKeyMode] = None
+    join_key_mode: Optional[GateJoinKeyMode] = None
     target_cols: List[str] = field(default_factory=list)
     output_type: str = "summary"
     prev_context_seed: Dict[str, List[str]] = field(default_factory=dict)
     gate_seed_map: Dict[str, List[str]] = field(default_factory=dict)
 
     def to_prompt_payload(self) -> Dict[str, Any]:
-        """LockedStrategy를 planner prompt에 다시 넣을 수 있는 dict로 펼어준다.
+        """DeterministicGateStrategy를 planner prompt에 다시 넣을 수 있는 dict로 펼어준다.
         stage 2가 보는 locked truth를 dataclass 형태 그대로 직렬화하는 엔트리 포인트다.
         """
         return asdict(self)
@@ -139,10 +139,10 @@ def regate_locked_strategy(
     conversation_id: str,
     stage1: Any,
     stage2: Any,
-    locked_strategy: LockedStrategy | Dict[str, Any],
+    locked_strategy: DeterministicGateStrategy | Dict[str, Any],
     allowed_keys: set[str],
     log_event: Any,
-) -> LockedStrategy | Dict[str, Any]:
+) -> DeterministicGateStrategy | Dict[str, Any]:
     """stage 2 seed가 추가되었을 때 locked strategy를 한 번 더 재계산할지 판정한다.
     SEARCH/LOOKUP에서만 regate를 허용하고, 변경 여부를 로그로 남기어 planner가 언제 JOIN으로 상향되었는지 추적할 수 있게 한다.
     """
@@ -160,7 +160,7 @@ def regate_locked_strategy(
         stage2_seed_map=stage2_seed_map,
     )
 
-    updated: LockedStrategy | Dict[str, Any] = locked_strategy
+    updated: DeterministicGateStrategy | Dict[str, Any] = locked_strategy
     if can_regate:
         merged_seed_map = {**base_seed_map}
         for key, values in stage2_seed_map.items():
@@ -184,8 +184,8 @@ def regate_locked_strategy(
         if isinstance(locked_strategy, dict):
             updated = updated.to_prompt_payload()
 
-    def _locked_field(value: LockedStrategy | Dict[str, Any], field: str) -> Any:
-        """dict 또는 LockedStrategy에서 같은 필드를 읽어 비교에 쓰는 내부 헬퍼다.
+    def _locked_field(value: DeterministicGateStrategy | Dict[str, Any], field: str) -> Any:
+        """dict 또는 DeterministicGateStrategy에서 같은 필드를 읽어 비교에 쓰는 내부 헬퍼다.
         regate 전후 로그를 남길 때 구조체 형식 차이를 신경 쓰지 않기 위해 두었다.
         """
         return value.get(field) if isinstance(value, dict) else getattr(value, field)
@@ -219,11 +219,11 @@ def compose_locked_strategy(
     has_prev_anchor: bool,
     prev_context_seed: Optional[Dict[str, List[str]]] = None,
     gate_seed_map: Optional[Dict[str, List[str]]] = None,
-) -> LockedStrategy:
+) -> DeterministicGateStrategy:
 
-    """Build the locked stage-1 strategy from resolved seeds and prior context.
+    """Build the deterministic gate artifact from resolved seeds and prior context.
     This step fixes SEARCH, LOOKUP, or JOIN only from resolved seeds.
-    Deferred join for ambiguous exact project keys is introduced later by stage-2 sanitize and re-gate.
+    Deferred join for ambiguous exact project keys is introduced later during assembly.
     """
     action = str(stage1.get("action") or "topic").strip().lower() or "topic"
     head = str(stage1.get("head") or "project").strip().lower() or "project"
@@ -234,7 +234,7 @@ def compose_locked_strategy(
     has_perf_seed = any(ids_map.get(k) for k in _PERF_SEED_KEYS)
     explicit_join_seed = has_project_seed or has_perf_seed
 
-    join_key_mode: Optional[JoinKeyMode] = None
+    join_key_mode: Optional[GateJoinKeyMode] = None
     if ids_map.get("pjt_no"):
         join_key_mode = "group"
     elif ids_map.get("pjt_id") or has_perf_seed:
@@ -253,7 +253,7 @@ def compose_locked_strategy(
 
     locked_head = relation.split("_", 1)[1] if mode == "JOIN" and relation else head
 
-    return LockedStrategy(
+    return DeterministicGateStrategy(
         mode=mode,
         head=locked_head,  # type: ignore[arg-type]
         action=action,  # type: ignore[arg-type]
@@ -266,11 +266,11 @@ def compose_locked_strategy(
     )
 
 
-def merge_locked_strategy_slots(*, schema_version: str, locked: LockedStrategy, slots: Dict[str, Any], default_query: Optional[str] = None) -> Dict[str, Any]:
+def merge_locked_strategy_slots(*, schema_version: str, locked: DeterministicGateStrategy, slots: Dict[str, Any], default_query: Optional[str] = None) -> Dict[str, Any]:
 
-    """Merge locked strategy fields with stage-2 slots into the final planner payload.
-    Locked fields stay fixed, while v3 slot fields such as candidate_keys, project_key_policy, and join_resolution_policy are appended.
-    Deferred join remains a downstream runtime strategy, not a stage-1 lock.
+    """Merge deterministic gate fields with stage-2 slots into the assembled question analysis payload.
+    Gate fields stay fixed, while v3 slot fields such as candidate_keys, project_key_policy, and join_resolution_policy are appended.
+    Deferred join remains an assembled/runtime strategy, not a gate-mode output.
     """
     return {
         "strategy_version": schema_version,
@@ -290,3 +290,10 @@ def merge_locked_strategy_slots(*, schema_version: str, locked: LockedStrategy, 
         "retrieval_query": slots.get("retrieval_query") or default_query,
         "confidence": float(slots.get("confidence") or 0.0),
     }
+
+
+
+
+
+
+

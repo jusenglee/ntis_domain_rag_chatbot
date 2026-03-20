@@ -65,7 +65,7 @@ def test_build_intent_payload_runs_planner_when_precheck_has_no_signal():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -83,7 +83,7 @@ def test_build_intent_payload_runs_planner_when_precheck_has_no_signal():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,
@@ -104,7 +104,7 @@ def test_build_intent_payload_skips_planner_for_explicit_id_signal():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -122,7 +122,7 @@ def test_build_intent_payload_skips_planner_for_explicit_id_signal():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,
@@ -143,7 +143,7 @@ def test_build_intent_payload_keeps_planner_for_non_id_precheck_signals():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -161,7 +161,7 @@ def test_build_intent_payload_keeps_planner_for_non_id_precheck_signals():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,

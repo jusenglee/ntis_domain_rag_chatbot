@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from apps.core.query_intent import QueryIntent
-
-logger = logging.getLogger(__name__)
 
 SEARCH_POLICY_VERSION = "v1.2"
 
@@ -20,8 +17,6 @@ PEOPLE_ORG_FIELDS = [
     "prtcp_org[].org_nm",
     "prtcp_org.org_nm",
 ]
-
-_PROJECT_KEY_POLICY_LOGGED = False
 
 
 @dataclass
@@ -320,125 +315,3 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     return _prioritize_people_org_fields(SearchPreset(top_k_dense=_i("RAG_TOPK_DENSE", 25), top_k_lex_cand=_i("RAG_TOPK_LEX_CAND", 250), top_k_lex=_i("RAG_TOPK_LEX", 50), w_lex=_f("RAG_W_LEX", 0.25), lexical_fields=base_fields, lexical_field_weights=weights, sparse_vector_name=default_sparse_vector, sparse_topk=_i("RAG_TOPK_LEX", 50), sparse_weight=_f("RAG_W_LEX", 0.25), use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD", "1") == "1"), min_dense_score=_f("RAG_MIN_DENSE_SCORE_DEFAULT", _f("RAG_MIN_DENSE_SCORE", 0.52)), min_reranked=_i("RAG_MIN_RERANKED", 4), max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS", 30), tag_boost=_f("RAG_TAG_BOOST", 0.6), tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.1)), intent=intent, default_weights=weights)
 
 
-def _log_project_key_policy_once() -> None:
-    """project key 정책을 한 번만 로그에 남긴다."""
-    global _PROJECT_KEY_POLICY_LOGGED
-    if _PROJECT_KEY_POLICY_LOGGED:
-        return
-    _PROJECT_KEY_POLICY_LOGGED = True
-    logger.info("project key policy mode=top-level-only")
-
-
-def _as_list(value: Any) -> List[str]:
-    """scalar/list/set 값을 빈 값·none·중복을 제거한 문자열 리스트로 통일한다."""
-    if value is None:
-        return []
-    seq = list(value) if isinstance(value, (list, tuple, set)) else [value]
-    out: List[str] = []
-    seen: set[str] = set()
-    for v in seq:
-        text = str(v).strip()
-        if not text or text.lower() in ("none", "null") or text in seen:
-            continue
-        seen.add(text)
-        out.append(text)
-    return out
-
-
-def _payload_get(payload: Dict[str, Any], *keys: str) -> List[str]:
-    """payload에서 여러 dotted key 후보를 순차적으로 꼭 집어 리스트로 모은다."""
-    values: List[str] = []
-    for key in keys:
-        if "." not in key:
-            values.extend(_as_list(payload.get(key)))
-            continue
-        cur: Any = payload
-        ok = True
-        for part in key.split("."):
-            if not isinstance(cur, dict) or part not in cur:
-                ok = False
-                break
-            cur = cur.get(part)
-        if ok:
-            values.extend(_as_list(cur))
-    return values
-
-
-def _extract_ids_from_hits(search_hits: List[Any], *, limit: int = 20) -> Dict[str, List[str]]:
-    """검색 hit payload에서 pjt_id, pjt_no, rst_id, doi, issn 등 후속 모드 승격에 쓸 id를 추출한다."""
-    out: Dict[str, List[str]] = {"pjt_id": [], "pjt_no": [], "rst_id": [], "doi": [], "issn": [], "patent_reg_no": []}
-
-    def _add(key: str, values: List[str]) -> None:
-        """id 목록에 중복 없이 값을 추가한다."""
-        for value in values:
-            if value not in out[key]:
-                out[key].append(value)
-
-    for hit in (search_hits or [])[: max(1, int(limit))]:
-        payload = getattr(hit, "payload", None) or {}
-        if not isinstance(payload, dict):
-            continue
-        _log_project_key_policy_once()
-        _add("pjt_id", _payload_get(payload, "pjt_id"))
-        _add("pjt_no", _payload_get(payload, "pjt_no"))
-        _add("rst_id", _payload_get(payload, "rst_id", "meta_basic.rst_id", "id"))
-        _add("doi", _payload_get(payload, "doi", "meta_basic.doi"))
-        _add("issn", _payload_get(payload, "issn", "eissn", "pissn", "meta_basic.issn"))
-        _add("patent_reg_no", _payload_get(payload, "patent_reg_no", "meta_basic.patent_reg_no"))
-    return out
-
-
-def _merge_ids_map(base: Dict[str, List[str]], extra: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """기존 ids_map과 search hit에서 추출한 ids_map를 합친다."""
-    merged: Dict[str, List[str]] = {}
-    for key in set((base or {}).keys()) | set((extra or {}).keys()):
-        merged[key] = _as_list((base or {}).get(key))
-        for value in _as_list((extra or {}).get(key)):
-            if value not in merged[key]:
-                merged[key].append(value)
-    return merged
-
-
-def _infer_join_relation(planner_relation: Any, planner_action: Optional[str]) -> Optional[str]:
-    """planner relation/action에서 project_perf 또는 perf_project JOIN 의도를 정규화한다."""
-    if isinstance(planner_relation, tuple) and len(planner_relation) == 2:
-        return f"{planner_relation[0]}_{planner_relation[1]}"
-    rel = str(planner_relation or "").strip().lower()
-    if rel in ("project_perf", "perf_project"):
-        return rel
-    if str(planner_action or "").strip().lower() == "relation":
-        return "project_perf"
-    return None
-
-
-def promote_mode_from_search_hits(*, current_mode: str, search_hits: List[Any], ids_map: Dict[str, List[str]], planner_strategy: Any) -> Dict[str, Any]:
-    """search 결과에서 뽑은 id를 보고 mode를 lookup 또는 join으로 승격할지 판단한다.
-    
-    이 단계는 planner가 정한 action/relation을 존중하되, hit에서 실제 id가 나왔을 때만 승격을 허용한다."""
-    mode_now = str(current_mode or "").strip().lower() or "search"
-    merged_ids_map: Dict[str, List[str]] = dict(ids_map or {}) if isinstance(ids_map, dict) else {}
-    planner_mode = str(getattr(planner_strategy, "mode", "") or "").strip().lower() or None
-    planner_action = str(getattr(planner_strategy, "action", "") or "").strip().lower() or None
-    planner_relation = getattr(planner_strategy, "relation", None)
-    if mode_now != "search":
-        return {"mode": mode_now, "kind": None, "reason": "non_search_mode_passthrough", "ids_map": merged_ids_map, "planner_mode": planner_mode, "planner_action": planner_action, "planner_relation": planner_relation, "query_text": None, "strategy_key": build_strategy_key(planner_action, mode_now), "allowed": {"policy": "search_only", "lookup": False, "join": False}, "signals": {"has_pjt_id": int(bool((merged_ids_map.get("pjt_id") or []))), "has_pjt_no": int(bool((merged_ids_map.get("pjt_no") or []))), "has_history_nuance": 0, "has_detail_nuance": 0, "wants_project_perf_relation": 0}}
-    extracted = _extract_ids_from_hits(search_hits)
-    merged_ids_map = _merge_ids_map(merged_ids_map, extracted)
-    has_pjt_id = bool(merged_ids_map.get("pjt_id"))
-    has_pjt_no = bool(merged_ids_map.get("pjt_no"))
-    has_perf_id = bool(merged_ids_map.get("rst_id") or merged_ids_map.get("doi") or merged_ids_map.get("issn") or merged_ids_map.get("patent_reg_no"))
-    action_like_lookup = planner_action in ("list", "detail", "stats", "download", "id_exact", "id_fuzzy", "relation")
-    wants_join = bool(_infer_join_relation(planner_relation, planner_action) in ("project_perf", "perf_project") or planner_action == "relation")
-    promote_mode = mode_now
-    kind = None
-    reason = "promotion_conditions_not_met"
-    if action_like_lookup and (has_pjt_id or has_pjt_no or has_perf_id):
-        if wants_join:
-            promote_mode = "join"
-            kind = "search_to_join"
-            reason = "search_hit_ids_and_relation_action"
-        else:
-            promote_mode = "lookup"
-            kind = "search_to_lookup"
-            reason = "search_hit_ids_and_lookup_like_action"
-    return {"mode": promote_mode, "kind": kind, "reason": reason, "ids_map": merged_ids_map, "planner_mode": planner_mode, "planner_action": planner_action, "planner_relation": planner_relation, "query_text": None, "strategy_key": build_strategy_key(planner_action, promote_mode), "allowed": {"policy": "search_hit_promotion", "lookup": bool(action_like_lookup and (has_pjt_id or has_pjt_no or has_perf_id)), "join": bool(wants_join and (has_pjt_id or has_pjt_no or has_perf_id))}, "signals": {"has_pjt_id": int(has_pjt_id), "has_pjt_no": int(has_pjt_no), "has_perf_id": int(has_perf_id), "has_history_nuance": 0, "has_detail_nuance": int(planner_action in ("detail", "stats", "list")), "wants_project_perf_relation": int(wants_join)}}

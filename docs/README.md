@@ -1,124 +1,80 @@
-﻿# Docs Guide
+# NTIS RAG 문서 안내
 
-This directory contains the authoritative documentation set for the NTIS Domain RAG repository.
+이 문서 묶음은 NTIS Domain RAG 저장소의 **현행 기준 문서**를 한국어 중심으로 다시 정리한 버전입니다.
 
-The system follows a retrieval-first architecture with chat UX layered on top. Retrieval planning,
-contract enforcement, canonical evidence handling, and renderer-specific prompt views remain the
-source of truth for application behavior.
+목표는 세 가지입니다.
 
-## Quick Start
+1. 문서 수를 줄여 처음 읽는 사람이 길을 잃지 않게 한다.
+2. 현재 기준선(v3, retrieval-first, strict contract)을 한글로 일관되게 설명한다.
+3. 레거시 설명, 중복 문장, 영어 위주 표현을 걷어내고 운영·개발에 바로 쓰기 쉽게 만든다.
 
-Read these four documents first:
+## 먼저 읽을 문서
 
-- `ARCHITECTURE_RETRIEVAL_FIRST.md`
-- `SYSTEM_FLOW_RETRIEVAL_FIRST.md`
-- `CONTRACT.md`
-- `RUNBOOK.md`
+아래 네 문서를 우선 읽으면 현재 시스템의 큰 틀을 파악할 수 있습니다.
 
-Then use `MODE_DECISION_GUIDE.md`, `PLANNER_PARAMETER_REFERENCE.md`, and `GOLDEN_TESTS.md`
-as the working references for mode selection, planner/runtime vocabulary, and regression baselines.
+1. `01_아키텍처와_흐름.md`
+2. `02_실행계약과_전략규칙.md`
+3. `03_운영과_환경.md`
+4. `04_회귀기준과_점검.md`
 
-## Read First
+그다음 유지보수와 확장 계획이 필요할 때 `05_유지보수와_확장.md`를 봅니다.
 
-Recommended reading order:
+## 현재 기준선
 
-1. `ARCHITECTURE_RETRIEVAL_FIRST.md`
-2. `SYSTEM_FLOW_RETRIEVAL_FIRST.md`
-3. `CONTRACT.md`
-4. `RUNBOOK.md`
-5. `MODE_DECISION_GUIDE.md`
-6. `PLANNER_PARAMETER_REFERENCE.md`
-7. `GOLDEN_TESTS.md`
-8. `ENVIRONMENT.md`
-9. `RETRIEVAL_ROBUSTNESS_PLAN.md`
+현재 문서 묶음이 전제로 두는 기준은 다음과 같습니다.
 
-## Source Of Truth
+- 시스템은 **retrieval-first** 구조이며, 채팅 UX는 그 위에 올라가는 표현 계층입니다.
+- `IntentPayloadV3`가 활성 transport 계약이고, `strategy_version="v3"`가 활성 의미 계약입니다.
+- `ids_map`에는 **resolved identifier**만 들어갑니다.
+- `candidate_keys.project_key`는 **미해결 exact project key**를 담습니다.
+- `project_key_policy=ambiguous_or`는 **exact OR exact discovery**를 뜻하며 자유 텍스트 fallback을 뜻하지 않습니다.
+- `join_key_mode=deferred`는 합법적인 runtime 전략입니다.
+- `lookup` / `join`에서 `reason=no_reranked`는 `normal_no_result`이고, `search`의 `reason=no_reranked`는 `strict_search`입니다.
+- 사람/기관/관계/역추적/패턴 의미는 planner-first 원칙을 유지합니다.
 
-### Retrieval-first baseline
+## 문서 구성
 
-- Retrieval intent assembly: `apps/api/services/request_facade.py`
-- Planner merge / final strategy application: `apps/api/services/planner_service.py`
-- Planner contract validation: `apps/core/planner_contract.py`
-- Runtime prelude / contract gate: `apps/core/rag_runtime_prelude.py`
-- Runtime dispatcher: `apps/core/rag_pipeline.py`
-- SEARCH / LOOKUP orchestration: `apps/core/rag_base_orchestration.py`
-- JOIN orchestration: `apps/core/rag_join_orchestration.py`
-- Canonical evidence normalization: `apps/core/canonical_evidence.py`
-- Result assembly / render bridge: `apps/api/services/rag_result_assembly.py`
-- Chat UX entrypoints: `apps/api/routes.py`, `apps/api/services/answer_generation.py`, `apps/api/services/answer_merge.py`
+### 1. 구조와 흐름
+- `01_아키텍처와_흐름.md`
+- 시스템 계층, artifact 경계, 요청 1건의 처리 흐름을 설명합니다.
 
-### Runtime entrypoints
+### 2. 계약과 전략
+- `02_실행계약과_전략규칙.md`
+- SEARCH / LOOKUP / JOIN, planner stage, join 규칙, project key 규칙, no-result 정책을 설명합니다.
 
-- Runtime entry point: `apps/api/main.py`
-- App assembly / workflow DI: `apps/api/app_factory.py`
-- Workflow graph definition: `apps/api/services/workflow_builder.py`
-- Runtime bootstrap / shutdown: `apps/api/runtime.py`
+### 3. 운영과 환경
+- `03_운영과_환경.md`
+- 운영 로그, triage 순서, 필수 환경 변수, 검증 명령을 설명합니다.
 
-## Document Roles
+### 4. 회귀와 점검
+- `04_회귀기준과_점검.md`
+- 골든 질의, 핵심 불변식, 파일별 점검 포인트를 설명합니다.
 
-- `ARCHITECTURE_RETRIEVAL_FIRST.md`: repository structure, layer boundaries, and retrieval-first architecture
-- `SYSTEM_FLOW_RETRIEVAL_FIRST.md`: artifact handoff and end-to-end execution flow
-- `CONTRACT.md`: retrieval/runtime contracts, fail-close rules, and v3 transport semantics
-- `RUNBOOK.md`: triage steps, observability fields, and operational debugging rules
-- `MODE_DECISION_GUIDE.md`: SEARCH / LOOKUP / JOIN decision guide
-- `PLANNER_PARAMETER_REFERENCE.md`: planner/runtime parameter vocabulary
-- `GOLDEN_TESTS.md`: regression baselines and invariants
-- `ENVIRONMENT.md`: runtime defaults, validation entrypoints, and deployment-facing configuration
-- `MAINTENANCE_TASK_MASTER.md`: maintenance backlog and structural debt tracking
-- `RETRIEVAL_ROBUSTNESS_PLAN.md`: future retrieval robustness roadmap
-- `NTIS_RAG_Search_Strategy_v1_2.md`: legacy strategy reference
+### 5. 유지보수와 확장
+- `05_유지보수와_확장.md`
+- 현재 구조 debt, 우선순위, retrieval robustness 확장 방향을 설명합니다.
 
-## Current Baseline
+### 6. 재편성 매핑
+- `문서_재편성_매핑표.md`
+- 기존 문서가 새 문서 어디로 흡수되었는지 정리합니다.
 
-The current repository baseline includes the following behavior.
+## 코드 기준 Source of Truth
 
-- `ids_map` contains resolved identifiers only.
-- `candidate_keys.project_key` stores unresolved exact project keys.
-- `project_key_policy=ambiguous_or` means exact OR exact project discovery, not free-text fallback.
-- `join_key_mode=deferred` is a valid runtime strategy.
-- `lookup` and `join` with `reason=no_reranked` are `normal_no_result` outcomes.
-- `search` with `reason=no_reranked` remains `strict_search`.
-- `IntentPayloadV3` is the active transport contract and `strategy_version="v3"` is the active semantic contract.
-- Planner-first remains the default rule for people, organization, relation, reverse-trace, and pattern meaning.
+- 요청 조립: `apps/api/services/request_facade.py`
+- planner 조립: `apps/api/services/planner_service.py`, `apps/api/services/planner_runtime.py`
+- 계약 검증: `apps/core/planner_contract.py`
+- runtime prelude: `apps/core/rag_runtime_prelude.py`
+- runtime dispatcher: `apps/core/rag_pipeline.py`
+- SEARCH/LOOKUP 실행: `apps/core/rag_base_orchestration.py`
+- JOIN 실행: `apps/core/rag_join_orchestration.py`, `apps/core/rag_join_runtime.py`
+- canonical evidence: `apps/core/canonical_evidence.py`
+- 결과 조립: `apps/api/services/rag_result_assembly.py`
+- 응답 생성: `apps/api/services/answer_generation.py`, `apps/api/services/answer_merge.py`
 
-## Prompt Views
+## 문서 사용 원칙
 
-Supported prompt views are:
-
-- `summary`
-- `detail`
-- `list`
-- `stats`
-- `relation`
-- `comparison`
-- `series`
-
-`output_type` controls evidence presentation shape. It is not answer wording policy.
-
-## Extended Runtime Capabilities
-
-The runtime now includes the following retrieval-first extensions.
-
-- `comparison`: precomputed aggregation payloads for project/performance comparisons
-- `series`: project-group and year-window series payloads
-- `perf_to_project_to_perf`: reverse trace from performance to origin project to follow-up performance
-- `anchor_resolution`: planner-first researcher/org anchor normalization before filter compilation
-- `pattern_analysis`: runtime-computed pattern payloads for supported pattern kinds
-- `multi_hop_bundle`: researcher/org -> project -> multiple downstream targets in one payload
-
-## Update Rules
-
-Update the smallest authoritative document set that matches the behavior change.
-
-- Contract, planner, filter, query intent, or `rag_pipeline` changes: update `CONTRACT.md`, `GOLDEN_TESTS.md`, and `README.md`
-- Runtime, route, metrics, or streaming changes: update `RUNBOOK.md`, `ENVIRONMENT.md`, and `README.md`
-- Large policy or design changes: add or update an ADR
-
-## Writing Rules
-
-- Keep documents in UTF-8.
-- Do not leave broken Korean or mojibake in repository docs.
-- Do not treat `pjt_id` and `pjt_no` as interchangeable.
-- Do not mix lead / participant / affiliation organization semantics.
-- Do not describe raw payload, canonical schema, and prompt view as the same artifact.
-- Do not dump raw retrieval payload into prompt-facing documentation.
+- 원문 표현보다 **현재 동작과 운영 판단**을 우선합니다.
+- 같은 개념을 여러 문서에서 반복하지 않습니다.
+- raw payload, canonical evidence, prompt view를 같은 artifact처럼 설명하지 않습니다.
+- `pjt_id`와 `pjt_no`를 절대 같은 의미로 섞지 않습니다.
+- 레거시 문서는 참고 자료일 뿐, 현행 계약 문서가 아닙니다.

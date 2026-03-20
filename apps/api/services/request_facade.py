@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -87,7 +87,7 @@ class RequestUnderstandingFacade:
     classify_query_intent: Any
     normalize_intent: Any
     run_question_analysis: Any
-    apply_planner_v2: Any
+    apply_question_analysis_v3: Any
     log_event: Any
     intent_payload_cls: Any
     planner_stagewise_enabled: bool
@@ -118,7 +118,7 @@ class RequestUnderstandingFacade:
     ) -> tuple[Any, Any]:
         """질문을 normalized_intent와 question_analysis로 분해하는 주 진입점이다.
 
-        명시적 ID 신호가 없을 때만 planner를 호출하고, 최종 intent는 apply_planner_v2를 거쳐 planner truth와 base intent를 함께 반영한다.
+        명시적 ID 신호가 없을 때만 planner를 호출하고, 최종 intent는 apply_question_analysis_v3를 거쳐 planner truth와 base intent를 함께 반영한다.
         """
         precheck = self.cheap_precheck(question)
         explicit_only_hint = self._build_explicit_only_hint(question)
@@ -129,7 +129,6 @@ class RequestUnderstandingFacade:
             raw_intent,
             query=question,
             keywords=kws,
-            allow_strategy_fallback=False,
             hint_years=list(explicit_only_hint.get("years", [])),
             hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
             hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
@@ -149,7 +148,7 @@ class RequestUnderstandingFacade:
             )
             planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
 
-        normalized_intent, planner_applied = self.apply_planner_v2(
+        normalized_intent, planner_applied = self.apply_question_analysis_v3(
             normalized_intent_base,
             question_analysis,
             request_id=request_id,
@@ -187,7 +186,7 @@ async def build_intent_payload(
     classify_query_intent: Any,
     normalize_intent: Any,
     run_question_analysis: Any,
-    apply_planner_v2: Any,
+    apply_question_analysis_v3: Any,
     log_event: Any,
     intent_payload_cls: Any,
     planner_stagewise_enabled: bool,
@@ -204,7 +203,7 @@ async def build_intent_payload(
         classify_query_intent=classify_query_intent,
         normalize_intent=normalize_intent,
         run_question_analysis=run_question_analysis,
-        apply_planner_v2=apply_planner_v2,
+        apply_question_analysis_v3=apply_question_analysis_v3,
         log_event=log_event,
         intent_payload_cls=intent_payload_cls,
         planner_stagewise_enabled=planner_stagewise_enabled,
@@ -219,3 +218,4 @@ async def build_intent_payload(
         canonical_evidence=canonical_evidence,
         request_id=request_id,
     )
+

@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-"""Planner와 executor 사이의 계약을 검증하는 모듈.\n\n문서 계약을 코드에서 마지막으로 강제하는 계층이며,\n규칙 변경 시 `docs/CONTRACT.md`와 함께 갱신해야 한다.\n"""
+"""Planner and executor contract validation helpers.\n\nPlanner와 executor 사이의 계약을 검증하는 모듈.\n문서 계약을 코드에서 마지막으로 강제하는 계층이며,\n규칙 변경 시 `docs/02_실행계약과_전략규칙.md`와 함께 갱신해야 한다.\n"""
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
@@ -34,14 +34,14 @@ def planner_contract_mode(
         strategy_mode: Optional[str],
         strategy_action: Optional[str],
         strategy_relation: Optional[Tuple[str, str]],
-        fallback_mode: Optional[str],
+        default_mode: Optional[str],
 ) -> tuple[str, list[str]]:
     """planner가 낸 mode가 action·relation과 맞는지 검사하고 정규 mode를 돌려준다.
     action-mode mismatch와 join_without_relation 같은 기본 계약 이탈을 초기에 걸러 낼 때 쓴다.
     """
     errors: list[str] = []
 
-    mode = str(strategy_mode or fallback_mode or "").strip().lower()
+    mode = str(strategy_mode or default_mode or "").strip().lower()
     action_value = str(strategy_action or "").strip().lower()
 
     action_mode_map = {
@@ -334,7 +334,7 @@ class StrategyCompiler:
             mode: str,
             relation: Optional[Tuple[str, str]],
             target_cols: list[str],
-            fallback_target_cols: list[str],
+            default_target_cols: list[str],
             planner_filter_spec: Optional[dict[str, Any]],
             topk_spec: Optional[dict[str, Any]],
             rerank_spec: Optional[dict[str, Any]],
@@ -355,7 +355,7 @@ class StrategyCompiler:
         mode_norm = str(mode or "").strip().lower()
         target_cols_norm = [str(c).strip() for c in (target_cols or []) if str(c).strip()]
         if not target_cols_norm:
-            target_cols_norm = [str(c).strip() for c in (fallback_target_cols or []) if str(c).strip()]
+            target_cols_norm = [str(c).strip() for c in (default_target_cols or []) if str(c).strip()]
 
         lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_hint) or "hard"
         lookup_title_filter_policy = normalize_lookup_title_filter_policy(lookup_title_filter_policy_hint) or "soft"
@@ -417,3 +417,6 @@ class StrategyCompiler:
             title_match_mode=title_match_mode,
             relation_lookup_enforce=relation_lookup_enforce,
         )
+
+
+

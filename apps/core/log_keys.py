@@ -1,8 +1,9 @@
-"""Shared log key constants used across runtime seams."""
+﻿"""Shared log key constants used across runtime seams."""
 
 LOG_KEY_POLICY_MODE = "policy_mode"
 LOG_KEY_EXECUTION_MODE = "execution_mode"
-LOG_KEY_PLANNER_INVALID_FALLBACK = "planner_invalid_fallback"
+LOG_KEY_ASSEMBLY_ADJUSTMENT_KIND = "assembly_adjustment_kind"
+LOG_KEY_ASSEMBLY_ADJUSTMENT_REASON = "assembly_adjustment_reason"
 LOG_KEY_STRICT_STRATEGY_CONSISTENCY = "strict_strategy_consistency"
 LOG_KEY_PROMOTION_MODE = "promotion_mode"
 LOG_KEY_FORCE_FALLBACK_CHAT = "force_fallback_chat"

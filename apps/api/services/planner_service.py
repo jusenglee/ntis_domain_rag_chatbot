@@ -299,14 +299,16 @@ def apply_planner_strategy(
             if downgraded_mode == "join":
                 downgraded_mode = "lookup"
             log_event(
-                "RAG.STRATEGY.JOIN_DOWNGRADED",
+                "PLANNER.ASSEMBLE.JOIN_RESHAPED",
                 request_id=request_id,
                 conversation_id=conversation_id,
                 planner_source=planner_source,
                 original_mode=planner_mode,
-                downgraded_mode=downgraded_mode,
+                final_mode=downgraded_mode,
                 relation=relation,
                 original_join_key_mode=planner_join_key_mode,
+                final_join_key_mode=None,
+                adjustment_source="planner_merge",
                 reason=("seedless_instance_join_with_unresolved_anchor_pair" if unresolved_anchor_pair else "seedless_instance_join_without_gate"),
                 has_instance_seed=0,
                 has_people_org_gate=int(has_people_org_gate),
@@ -345,11 +347,16 @@ def apply_planner_strategy(
         changed_by=changed_by_planner_merge,
         changed_strategy_fields=changed_strategy_fields,
         changed_filter_fields=changed_filter_fields,
+        original_mode=before_snapshot.get("mode"),
+        final_mode=after_snapshot.get("mode"),
+        original_join_key_mode=before_snapshot.get("join_key_mode"),
+        final_join_key_mode=after_snapshot.get("join_key_mode"),
+        adjustment_source="planner_merge",
     )
     return patched, True
 
 
-def apply_planner_v2(
+def apply_question_analysis_v3(
     intent: Any,
     qa: Any,
     *,
@@ -368,3 +375,4 @@ def apply_planner_v2(
         request_id=request_id,
         conversation_id=conversation_id,
     )
+
