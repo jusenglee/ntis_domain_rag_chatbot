@@ -30,8 +30,6 @@ class IntentPayloadV3:
     strategy_meta: Dict[str, Any] = field(default_factory=dict)
 
 
-IntentPayloadV2 = IntentPayloadV3  # Legacy compatibility alias for older imports. New code should use IntentPayloadV3.
-
 Stage1Relation = Literal["project_perf", "perf_project"]
 
 

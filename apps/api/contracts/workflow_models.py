@@ -40,8 +40,11 @@ Action = Literal["topic", "list", "detail", "stats", "download"]
 
 
 class QuestionAnalysisV3(BaseModel):
-    """planner가 내놓은 question analysis payload를 엄격한 타입과 validator로 고정한다.
-    모드·head·relation·ids_map·filters가 source of truth인 구조체로 정리되어 runtime으로 넘어가게 하는 계약 계층이다.
+    """Assembled question-analysis contract.
+
+    This is the validated planner payload between the deterministic gate artifact
+    and the final execution strategy. Runtime consumes this contract as the
+    assembled source of truth before execution-time compilation resolves keys.
     """
     strategy_version: str = Field(default=PLANNER_SCHEMA_VERSION, validate_default=True)
     mode: Mode
@@ -78,9 +81,7 @@ class QuestionAnalysisV3(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_planner_payload(cls, data: Any) -> Any:
-        """planner가 내린 반정형 payload를 `QuestionAnalysisV3`가 받을 정규형으로 정리한다.
-        alias head/action, relation tuple, ids_map 키, filter alias를 이 단계에서 수렴해 후속 validator가 의미만 검사하게 만든다.
-        """
+        """Normalize planner payload aliases into the v3 assembled contract shape."""
         if not isinstance(data, dict):
             return data
 
@@ -149,9 +150,7 @@ class QuestionAnalysisV3(BaseModel):
             d["join_key_mode"] = jkm.strip().lower() or None
 
         def _coerce_str_list(value: Any) -> list[str]:
-            """입력값을 planner contract에서 쓸 문자열 리스트로 정규화한다.
-            `None`, 빈 문자열, 하나의 scalar 값을 다 흡수해 filters와 ids_map 정리가 같은 방식으로 흘러가게 한다.
-            """
+            """Coerce planner inputs into a normalized list of non-empty strings."""
             if value is None:
                 return []
             if isinstance(value, (list, tuple, set)):
@@ -208,9 +207,7 @@ class QuestionAnalysisV3(BaseModel):
         }
 
         def _append_unique(dst: list[str], values: list[str]) -> list[str]:
-            """기존 리스트에 중복 없이 새 값을 병합한다.
-            filter alias가 여러 개 들어와도 결국 canonical filter에는 중복 없이 남게 하는 보조 헬퍼다.
-            """
+            """Append normalized values without duplicates."""
             seen = {str(v).strip() for v in dst if str(v).strip()}
             for item in values:
                 norm_item = str(item).strip()
@@ -258,18 +255,14 @@ class QuestionAnalysisV3(BaseModel):
     @field_validator("strategy_version")
     @classmethod
     def validate_strategy_version(cls, value: str) -> str:
-        """question analysis가 현재 planner schema version과 맞는지 검사한다.
-        구버전 payload가 섞여 들어오면 runtime이 구현하지 않는 필드 의미를 가정할 수 있으므로 여기서 fail-close한다.
-        """
+        """Require the current planner schema version exactly."""
         if value != PLANNER_SCHEMA_VERSION:
             raise ValueError(f"strategy_version must be {PLANNER_SCHEMA_VERSION!r}")
         return value
 
     @model_validator(mode="after")
     def validate_join_contract(self) -> "QuestionAnalysisV3":
-        """JOIN 모드에서 relation, join_key_mode, ids_map의 정합성을 검사한다.
-        `pjt_id`와 `pjt_no`를 섞거나 non-join에 join key를 심는 코드 경로를 이 validator가 초기에 차단한다.
-        """
+        """Validate JOIN relation and join-key semantics after normalization."""
         relation_norm = str(self.relation or "").strip().lower()
         if relation_norm:
             if relation_norm in self._FORBIDDEN_PEOPLE_ORG_RELATIONS:
@@ -285,40 +278,29 @@ class QuestionAnalysisV3(BaseModel):
 
 
 QuestionAnalysis = QuestionAnalysisV3
-QuestionAnalysisV2 = QuestionAnalysisV3
 
 
-class PlannerV3ParseError(ValueError):
+class PlannerParseError(ValueError):
     """Strict parse error for missing planner schema fields."""
     pass
 
 
-PlannerV2ParseError = PlannerV3ParseError
-
 def validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
-    """planner raw payload에 필수 키가 전부 들어 있는지 점검한다.
-    스테이지워이즈 planner가 누락한 사항을 runtime이 보정하려 들기 전에 계약 위반으로 잡아낸다.
-    """
+    """Fail closed when the planner payload misses required assembled keys."""
     missing_keys = sorted(QUESTION_ANALYSIS_REQUIRED_KEYS - set(payload.keys()))
     if missing_keys:
-        raise PlannerV3ParseError(f"missing required keys: {missing_keys}")
+        raise PlannerParseError(f"missing required keys: {missing_keys}")
 
 
 def planner_backoff_seconds(*, attempt_no: int, retry_backoff_sec: float, backoff_cap_sec: float) -> float:
-    """planner 재시도 사이의 exponential backoff 대기 시간을 계산한다.
-    연속 실패 시 planner provider를 과도하게 두드리지 않으면서도 초기 재시도는 빠르게 시도하도록 한다.
-    """
+    """Compute exponential backoff for planner retries."""
     backoff = retry_backoff_sec * (2 ** max(0, attempt_no - 1))
     return min(backoff, backoff_cap_sec)
 
 
-planner_v2_backoff_seconds = planner_backoff_seconds
-
 
 def merge_bool_flag(existing: bool, new: bool) -> bool:
-    """streaming 누적 메타에서 boolean flag를 OR semantics으로 병합한다.
-    한 번이라도 참이 된 상태를 놓치면 안 되는 deadline 부류 meta를 합치는 데 쓴다.
-    """
+    """Merge boolean stream flags with OR semantics."""
     return bool(existing) or bool(new)
 
 
@@ -369,9 +351,7 @@ class AgentState(BaseModel):
     intent_payload: Optional[IntentPayloadV3] = None
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
-        """여러 latency field를 누적 meta에 병합하되 가장 의미 있는 값을 남긴다.
-        최대치가 맞는 항목과 마지막 값이 맞는 항목을 구분해 stream summary가 실제 체감 latency를 가까운 값으로 보존하게 한다.
-        """
+        """Merge latency fields into the aggregated execution metadata."""
         result = existing.copy()
         result.update(new)
         return result
@@ -379,9 +359,7 @@ class AgentState(BaseModel):
     latencies: Annotated[Dict[str, float], merge_latencies] = Field(default_factory=dict)
 
     def merge_stream_meta(existing: Dict[str, Dict[str, Any]], new: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """청크별 stream meta를 하나의 누적 구조로 합친다.
-        error/deadline/latency/usage 같은 후속 로그 항목이 이 함수를 통해 일관된 shape를 유지한다.
-        """
+        """Merge per-stream metadata into the accumulated execution state."""
         result = existing.copy()
         result.update(new)
         return result
@@ -390,17 +368,11 @@ class AgentState(BaseModel):
 
 
 def measure_latency(node_name: str, *, logger_obj: Any):
-    """비동기 함수의 실행 시간을 재고 로그를 남기는 decorator를 만든다.
-    워크플로우 node나 planner call의 목병을 찾을 때 별도 계측 코드를 안 심고도 시간 로그를 붙일 수 있게 한다.
-    """
+    """Create a decorator that records node latency and logs it."""
     def decorator(func):
-        """실제 비동기 wrapper를 생성하는 데코레이터 팩토리다.
-        로거와 메시지 템플릿을 바깥 스코프에서 고정한 뒤 wrapper에 전달한다.
-        """
+        """Wrap an async node with latency measurement."""
         async def wrapper(state: AgentState, *args, **kwargs):
-            """대상 coroutine를 실행하고 경과 시간을 로그로 남긴다.
-            정상 종료와 예외 종료 모두에서 시간을 계측해, 실패한 경로도 눈에 들어오게 한다.
-            """
+            """Execute the coroutine, attach latency metadata, and return the result."""
             start = time.perf_counter()
             result = await func(state, *args, **kwargs)
             elapsed = time.perf_counter() - start

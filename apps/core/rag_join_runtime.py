@@ -505,7 +505,7 @@ class Hop1JoinResolution:
 @dataclass(frozen=True)
 class DeferredJoinResolution:
     """ambiguous project key discovery 이후 resolved 또는 dual-branch 결정을 담는다."""
-    resolved_join_key_mode: str
+    resolved_runtime_join_mode: str
     join_pjt_ids: List[str]
     join_pjt_nos: List[str]
     join_key_source: Optional[str]
@@ -690,7 +690,7 @@ def resolve_deferred_join_from_hop1(
 
     log_kv(
         "RAG.JOIN.DEFERRED.RESOLVE",
-        resolved_join_key_mode=resolved_mode,
+        resolved_runtime_join_mode=resolved_mode,
         dual_branch_used=int(dual_branch_used),
         resolution_reason=resolution_reason,
         join_pjt_ids_count=len(join_pjt_ids),
@@ -698,7 +698,7 @@ def resolve_deferred_join_from_hop1(
         tier="debug",
     )
     return DeferredJoinResolution(
-        resolved_join_key_mode=resolved_mode,
+        resolved_runtime_join_mode=resolved_mode,
         join_pjt_ids=join_pjt_ids,
         join_pjt_nos=join_pjt_nos,
         join_key_source=("hop1" if hop1_top else None),

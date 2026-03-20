@@ -1,8 +1,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import apps.api.services.rag_retriever as rag_retriever_module
+from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.request_facade import build_intent_payload
-from apps.core.pipeline_steps import normalize_intent
+from apps.core.followup_resolution import resolve_reference_context_followup
+from apps.core.pipeline_steps import NormalizedIntent, normalize_intent
 from apps.core.planner_staged import compose_locked_strategy
 from apps.core.query_intent import QueryIntent, classify_query
 from apps.core.rag_pipeline import _validate_intent_payload_version
@@ -65,7 +68,7 @@ def test_build_intent_payload_runs_planner_when_precheck_has_no_signal():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -83,7 +86,7 @@ def test_build_intent_payload_runs_planner_when_precheck_has_no_signal():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,
@@ -104,7 +107,7 @@ def test_build_intent_payload_skips_planner_for_explicit_id_signal():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -122,7 +125,7 @@ def test_build_intent_payload_skips_planner_for_explicit_id_signal():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,
@@ -143,7 +146,7 @@ def test_build_intent_payload_keeps_planner_for_non_id_precheck_signals():
         run_calls.append(kwargs['question'])
         return SimpleNamespace(confidence=0.8)
 
-    def fake_apply_planner_v2(intent, qa, **kwargs):
+    def fake_apply_question_analysis_v3(intent, qa, **kwargs):
         return ({'intent': intent, 'planner_used': qa is not None}, qa is not None)
 
     payload, question_analysis = asyncio.run(
@@ -161,7 +164,7 @@ def test_build_intent_payload_keeps_planner_for_non_id_precheck_signals():
             classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
             normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
             run_question_analysis=fake_run_question_analysis,
-            apply_planner_v2=fake_apply_planner_v2,
+            apply_question_analysis_v3=fake_apply_question_analysis_v3,
             log_event=lambda *args, **kwargs: None,
             intent_payload_cls=Payload,
             planner_stagewise_enabled=True,
@@ -244,3 +247,146 @@ def test_query_intent_does_not_confuse_issn_with_project_candidate():
 
     assert intent.candidate_keys == {}
     assert intent.project_key_policy is None
+
+
+
+
+
+def _project_canonical_item(*, pjt_id: str, pjt_no: str, title: str) -> dict:
+    return {
+        "ids": {"pjt_id": pjt_id, "pjt_no": pjt_no},
+        "facts": {"title": title, "year": "2024"},
+        "roles": {"participant_researcher_name": ["Kim"]},
+    }
+
+
+def test_resolve_reference_context_followup_uses_reference_context_order():
+    resolution = resolve_reference_context_followup(
+        question='1번 과제의 연구자를 알려줘',
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+        ],
+        prev_context=[],
+        default_context_kind='project',
+    )
+
+    assert resolution['followup_resolution_status'] == 'resolved'
+    assert resolution['seed_map'] == {'pjt_id': ['PJT-1']}
+    assert resolution['selected_prev_item']['index'] == 1
+
+
+def test_build_intent_payload_injects_reference_context_seed_before_planner():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(confidence=0.8)
+
+    payload, _ = asyncio.run(
+        build_intent_payload(
+            question='1번 과제의 연구자를 알려줘',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            canonical_evidence=[
+                _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+                _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+            ],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: SimpleNamespace(
+                action='list',
+                base_route='project',
+                ids_map={},
+                candidate_keys={},
+                project_key_policy=None,
+                join_resolution_policy=None,
+                join_key_mode=None,
+                is_exact_key_query=False,
+            ),
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, False),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert payload.normalized_intent.ids_map == {'pjt_id': ['PJT-1']}
+    assert payload.strategy_meta['seed_source'] == 'reference_context_ordinal'
+    assert payload.strategy_meta['selected_prev_item']['pjt_id'] == 'PJT-1'
+
+
+def test_collect_researcher_name_terms_strips_ordinal_tokens():
+    assert collect_researcher_name_terms({'participant_researcher_name': ['1번', 'Kim']}) == ['Kim']
+
+
+def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
+    log_calls = []
+    intent = NormalizedIntent(action='detail', base_route='project', relation=None, is_id_query=False)
+    qa = SimpleNamespace(
+        confidence=0.9,
+        filters={'participant_researcher_name': ['1번', 'Kim']},
+        limit=5,
+        retrieval_query='1번 과제의 연구자를 알려줘',
+        action='detail',
+        mode='lookup',
+        relation=None,
+        join_key_mode=None,
+        target_cols=['ntis_project_v1'],
+        ids_map={},
+        candidate_keys={},
+        project_key_policy=None,
+        join_resolution_policy=None,
+        output_type='detail',
+        planner_source='stagewise',
+    )
+
+    hinted_intent, applied = apply_question_analysis_v3(
+        intent,
+        qa,
+        request_id='rid',
+        conversation_id='cid',
+        merge_planner_hints=lambda intent, qa: merge_planner_hints(
+            intent,
+            qa,
+            normalize_org_terms=lambda values: values or [],
+            normalize_hint_terms=normalize_hint_terms,
+            collect_researcher_name_terms=collect_researcher_name_terms,
+        ),
+        normalize_hint_terms=normalize_hint_terms,
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        apply_planner_strategy_fn=lambda intent, qa, **kwargs: (intent, True),
+    )
+
+    assert applied is True
+    assert hinted_intent.people_terms == ['Kim']
+    assert any(event == 'PLANNER.FILTER.ORDINAL_STRIPPED' for event, _ in log_calls)
+
+
+def test_custom_rag_retriever_short_circuits_followup_clarification():
+    from apps.core.schemas import IntentPayloadV3
+
+    original = rag_retriever_module.run_rag_ab_compare
+    rag_retriever_module.run_rag_ab_compare = lambda **kwargs: (_ for _ in ()).throw(AssertionError('retrieval should be skipped'))
+    try:
+        payload = IntentPayloadV3(
+            normalized_intent=NormalizedIntent(action='detail', base_route='project', relation=None, is_id_query=False),
+            strategy_meta={
+                'followup_resolution_status': 'out_of_range',
+                'selected_prev_context_kind': 'project',
+                'available_count': 3,
+            },
+        )
+        retriever = rag_retriever_module.CustomRAGRetriever(intent_payload=payload)
+        result = retriever.retrieve('10번 과제의 연구자를 알려줘')
+    finally:
+        rag_retriever_module.run_rag_ab_compare = original
+
+    assert result['documents'] == []
+    assert '이전 목록에는 3개만 있습니다.' in result['no_result_message']

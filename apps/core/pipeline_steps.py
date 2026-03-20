@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
-
 from apps.core.rag_constants import (
     COL_PROJECT,
     COL_PERF,
@@ -19,8 +17,6 @@ from apps.core.query_intent import (
     normalize_join_key_mode,
     normalize_org_terms,
 )
-
-
 def build_changed_fields(
         before: Dict[str, Any],
         after: Dict[str, Any],
@@ -43,8 +39,6 @@ def build_changed_fields(
             "changed_by": changed_by,
         }
     return changed
-
-
 def classify_query_compat(
         q: str,
         kws: List[str],
@@ -59,8 +53,6 @@ def classify_query_compat(
     if hint is not None and "hint" in sig.parameters:
         return _classify_query(q, kws, domain_hint=domain_hint, hint=hint)
     return _classify_query(q, kws, domain_hint=domain_hint)
-
-
 def _normalize_terms(values: Any) -> List[str]:
     """scalar/list/set으로 들어온 후보를 중복 없는 문자열 리스트로 정리한다.
     intent normalization 전처리에서 필드별 shape를 일치시키기 위한 중앙 헬퍼다.
@@ -73,7 +65,6 @@ def _normalize_terms(values: Any) -> List[str]:
         iterable = list(values)
     else:
         iterable = [values]
-
     out: List[str] = []
     seen: set[str] = set()
     for v in iterable:
@@ -83,8 +74,6 @@ def _normalize_terms(values: Any) -> List[str]:
         seen.add(s)
         out.append(s)
     return out
-
-
 def _normalize_ids_map(raw: Any) -> Dict[str, List[str]]:
     """ids_map 입력을 키별 문자열 리스트 형태로 정리한다.
     lookup/join 시드를 어떤 레이어에서 주드더라도 동일한 contract로 부호화하기 위한 보조 정규화다.
@@ -101,8 +90,6 @@ def _normalize_ids_map(raw: Any) -> Dict[str, List[str]]:
         if norm:
             out[str(key)] = norm
     return out
-
-
 def _flatten_ids(ids_map: Dict[str, List[str]]) -> List[str]:
     """ids_map의 값들을 중복 제거한 평탄 id 목록으로 만든다.
     id query 판단이나 단순 prompt summary에서 키 구분 없이 전체 id를 보고 싶을 때 쓴다.
@@ -116,8 +103,6 @@ def _flatten_ids(ids_map: Dict[str, List[str]]) -> List[str]:
             seen.add(v)
             out.append(v)
     return out
-
-
 @dataclass(frozen=True)
 class NormalizedIntent:
     """query_intent 결과를 planner/runtime 공용 형식으로 정규화한 중간 구조체다.
@@ -179,7 +164,6 @@ class NormalizedIntent:
     candidate_n: int = 50
     top_k: int = 1
     tie_break: str = "performance_count_desc_name_asc"
-
 @dataclass(frozen=True)
 class FilterBundle:
     """runtime이 조립한 people/org/tag filter 묶음을 담는 구조체다.
@@ -195,8 +179,6 @@ class FilterBundle:
     participant_org_filter: Any
     people_filter: Any
     perf_tag_filter: Any
-
-
 @dataclass(frozen=True)
 class JoinHopPlan:
     """JOIN 질의에서 hop1/hop2 컬렉션과 tag filter 분담을 설명하는 계획이다.
@@ -209,14 +191,11 @@ class JoinHopPlan:
     hop1_tag_filters: Optional[List[str]]
     hop2_tag_filters: Optional[List[str]]
     hop2_label: str
-
-
 def normalize_intent(
         intent: QueryIntent,
         *,
         query: str,
         keywords: List[str],
-        allow_strategy_fallback: bool = False,
         hint_people_terms: Optional[List[str]] = None,
         hint_org_terms: Optional[List[str]] = None,
         hint_org_role: Optional[str] = None,
@@ -227,10 +206,6 @@ def normalize_intent(
         hint_perf_types: Optional[List[str]] = None,
         hint_title_terms: Optional[List[str]] = None,
 ) -> NormalizedIntent:
-    # allow_strategy_fallback는 현재 strict baseline에서 의미상 비활성이다.
-    # If the planner already fixed mode, action, and relation, lower layers must not silently reclassify it.
-    # Contract violations should fail closed and only allow explicit manual override when the runtime says so.
-    # This keeps planner intent and executor behavior aligned for observability and debugging.
     """query classifier 결과와 explicit hint를 합쳐 NormalizedIntent로 정규화한다.
     action/base_route/relation, people/org/year/title/tag/id signal, stats policy를 함께 정리해 planner와 runtime이 공유할 진입 truth를 만든다.
     """
@@ -238,21 +213,15 @@ def normalize_intent(
     ids_flat = _normalize_terms(getattr(intent, "ids_flat", None) or [])
     if not ids_flat:
         ids_flat = _flatten_ids(ids_map)
-
     org_terms = normalize_org_terms(_normalize_terms(getattr(intent, "org_terms", None) or []))
     if hint_org_terms:
         org_terms = normalize_org_terms(list(hint_org_terms))
-
     people_terms = _normalize_terms(getattr(intent, "people_terms", None) or [])
-
     if hint_people_terms:
         # Use explicit hints as an override only when a hint is actually present.
         people_terms = _normalize_terms(list(hint_people_terms))
-
     gender_terms = _normalize_terms(getattr(intent, "gender_terms", None) or [])
-
     org_role = (hint_org_role or getattr(intent, "org_role", None) or "").strip().lower() or None
-
     lead_org_terms = normalize_org_terms(_normalize_terms(hint_lead_org_terms or getattr(intent, "lead_org_terms", None) or []))
     participant_org_terms = normalize_org_terms(_normalize_terms(
         hint_participant_org_terms or getattr(intent, "participant_org_terms", None) or []
@@ -260,7 +229,6 @@ def normalize_intent(
     people_affiliation_org_terms = normalize_org_terms(_normalize_terms(
         hint_people_affiliation_org_terms or getattr(intent, "people_affiliation_org_terms", None) or []
     ))
-
     if not org_terms and (lead_org_terms or participant_org_terms or people_affiliation_org_terms):
         org_terms = normalize_org_terms([*lead_org_terms, *participant_org_terms, *people_affiliation_org_terms])
     if org_role in ("lead", "performer", "performing") and not lead_org_terms and org_terms:
@@ -269,7 +237,6 @@ def normalize_intent(
         participant_org_terms = list(org_terms)
     if org_role == "affiliation" and not people_affiliation_org_terms and org_terms:
         people_affiliation_org_terms = list(org_terms)
-
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower()
     action = str(getattr(intent, "action", "") or "").strip().lower()
     if action == "rank":
@@ -306,28 +273,22 @@ def normalize_intent(
         "detail",
         "content",
     }
-    # Fallback is allowed only when the input is outside the supported route/action contract.
-    # Normal runtime policy remains contract-first and fail-closed.
     normalization_warnings: List[str] = []
     if base_route not in valid_routes:
         normalization_warnings.append(f"invalid_base_route:{base_route or 'empty'}")
     if action not in valid_actions:
         normalization_warnings.append(f"invalid_action:{action or 'empty'}")
-
     perf_types_raw = _normalize_terms(hint_perf_types or getattr(intent, "perf_types", None) or [])
     perf_type_norm = normalize_perf_types(perf_types_raw)
     perf_types = perf_type_norm["tags"] or perf_type_norm["unknown"]
-
     years = _normalize_terms(hint_years or getattr(intent, "years", None) or [])
     title_terms = _normalize_terms(hint_title_terms or getattr(intent, "title", None) or [])
-
     normalized_join_key_mode = normalize_join_key_mode(getattr(intent, "join_key_mode", None))
     candidate_keys = getattr(intent, "candidate_keys", None) or {}
     join_parsing_warnings = _normalize_terms(
         list(getattr(intent, "parsing_warnings", None) or []) + normalization_warnings
     )
     join_contract_violations = _normalize_terms(list(getattr(intent, "contract_violations", None) or []))
-
     stats_policy = normalize_stats_policy_value(
         stats_metric=getattr(intent, "stats_metric", None),
         window_years=getattr(intent, "window_years", None),
@@ -335,7 +296,6 @@ def normalize_intent(
         top_k=getattr(intent, "top_k", None),
         tie_break=getattr(intent, "tie_break", None),
     )
-
     return NormalizedIntent(
         mode=str(getattr(intent, "mode", "") or "").strip().lower() or None,
         action=action,
@@ -394,14 +354,12 @@ def normalize_intent(
         top_k=stats_policy["top_k"],
         tie_break=stats_policy["tie_break"],
     )
-
 def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPlan]:
     """relation 방향과 태그 필터 상태를 바탕으로 JOIN hop 계획을 계산한다.
     project->perf와 perf->project가 다른 태그 장착 전략을 가지므로, hop별 collection·kind·label을 중앙화한다.
     """
     if not relation:
         return None
-
     if relation == ("project", "perf"):
         return JoinHopPlan(
             hop1_col=COL_PROJECT,
@@ -443,5 +401,3 @@ def resolve_join_hops(relation: Optional[Tuple[str, str]]) -> Optional[JoinHopPl
             hop2_label="연관 과제",
         )
     return None
-
-

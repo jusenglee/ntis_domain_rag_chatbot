@@ -63,7 +63,7 @@
 - 요청 조립: `apps/api/services/request_facade.py`
 - planner 조립: `apps/api/services/planner_service.py`, `apps/api/services/planner_runtime.py`
 - 계약 검증: `apps/core/planner_contract.py`
-- runtime prelude: `apps/core/rag_runtime_prelude.py`
+- execution strategy compile: `apps/core/rag_runtime_prelude.py`
 - runtime dispatcher: `apps/core/rag_pipeline.py`
 - SEARCH/LOOKUP 실행: `apps/core/rag_base_orchestration.py`
 - JOIN 실행: `apps/core/rag_join_orchestration.py`, `apps/core/rag_join_runtime.py`

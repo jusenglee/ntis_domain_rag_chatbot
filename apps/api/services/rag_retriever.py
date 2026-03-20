@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from apps.core.rag_pipeline import run_rag_ab_compare
 from apps.core.pipeline_steps import NormalizedIntent
 from apps.core.schemas import IntentPayloadV3
+from apps.core.followup_resolution import build_followup_clarification_message
 
 from apps.api.services.context_helpers import resolve_title_from_payload
 from apps.api.contracts.runtime_contracts import friendly_strategy_violation_message
@@ -103,7 +104,7 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
-        """`IntentPayloadV2`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
+        """`IntentPayloadV3`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
         normalized intent가 올바른 타입일 때만 넘기며, 아니면 retriever가 planner/runtime contract 바깥 shape를 집어넣지 않게 한다.
         """
         if intent_payload is None:
@@ -137,6 +138,16 @@ class CustomRAGRetriever(BaseModel):
         """AB 비교 RAG 실행 결과에서 사용자가 보기 쉬운 documents/canonical_evidence/render_profile 구조를 만든다.
         aggregation rank_items와 일반 hit 경로를 구분해 서비스 뷰에 맞는 열린 dict 형태로 재포장한다.
         """
+        strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
+        followup_message = build_followup_clarification_message(dict(strategy_meta))
+        if followup_message:
+            return {
+                "documents": [],
+                "canonical_evidence": [],
+                "render_profile": {},
+                "no_result_message": followup_message,
+            }
+
         res_map = run_rag_ab_compare(
             query=query,
             model_name=self.model_name,

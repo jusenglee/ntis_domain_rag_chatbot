@@ -160,7 +160,6 @@ from apps.core.result_contract import enforce_reranked_contract as _enforce_rera
 from apps.core.log_keys import (
     LOG_KEY_CHANGED_BY,
     LOG_KEY_FORCE_FALLBACK_CHAT,
-    LOG_KEY_PLANNER_INVALID_FALLBACK,
     LOG_KEY_POLICY_MODE,
     LOG_KEY_EXECUTION_MODE,
     LOG_KEY_STRATEGY_MUTATION_STAGE,
@@ -529,8 +528,8 @@ def _run_rag_with_vectors(
     hinted_limit = int(prelude.hinted_limit or 0)
     compiled_strategy = prelude.compiled_strategy
     planner_filter_spec = dict(prelude.planner_filter_spec or {})
-    resolved_join_key_mode = prelude.resolved_join_key_mode
-    planner_raw_join_key_mode = prelude.planner_raw_join_key_mode
+    resolved_runtime_join_mode = prelude.resolved_runtime_join_mode
+    assembled_question_analysis_join_mode = prelude.assembled_question_analysis_join_mode
     preset = prelude.preset
     lex_w_eff = dict(prelude.lex_w_eff or {})
     sparse_vector_name_eff = prelude.sparse_vector_name_eff
@@ -717,13 +716,13 @@ def _run_rag_with_vectors(
                 keywords=kws,
                 output_type=plan.output_type,
                 planner_limit=int(planner_limit or 0),
-                resolved_join_key_mode=resolved_join_key_mode,
-                planner_raw_join_key_mode=planner_raw_join_key_mode,
+                resolved_runtime_join_mode=resolved_runtime_join_mode,
+                planner_raw_join_key_mode=assembled_question_analysis_join_mode,
                 join_execution_policy=resolve_join_execution_policy(
                     relation=relation,
                     mode=plan.mode,
                     action=action,
-                    join_key_mode=resolved_join_key_mode,
+                    join_key_mode=resolved_runtime_join_mode,
                     seed_join_pjt_ids=list(normalized_pjt_ids),
                     seed_join_pjt_nos=list(normalized_pjt_nos),
                     has_people_org_gate=bool(people_terms or people_ids or org_terms),

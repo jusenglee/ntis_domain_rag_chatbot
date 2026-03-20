@@ -1,4 +1,8 @@
-"""Stagewise planner orchestration helpers.\n\nThis module owns the LLM-driven stage1/stage2 planner flow so the app entry module\ncan stay focused on composition-root concerns.\n"""
+"""Stagewise planner orchestration helpers.
+
+This module owns the LLM-driven stage-1/stage-2 planner flow so the app entry
+module can stay focused on composition-root concerns.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +15,9 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
+from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.planner_staged import (
-    LockedStrategy,
+    DeterministicGateStrategy,
     collect_regate_seed_map,
     compose_locked_strategy,
     extract_single_project_seed,
@@ -27,9 +32,7 @@ from apps.core.query_intent import (
 
 
 def intent_snapshot(normalized_intent: Any) -> dict[str, Any]:
-    """stage 1 planner에 넘길 정규화 intent 요약본을 만든다.
-    LLM이 보아야 할 필드만 간추려 프롬프트 노이즈를 줄이고, stage 1이 슬롯 세부 사항까지 선행 결정하지 않게 한다.
-    """
+    """Build the compact intent snapshot that stage 1 is allowed to inspect."""
     return {
         "action": getattr(normalized_intent, "action", None),
         "base_route": getattr(normalized_intent, "base_route", None),
@@ -47,9 +50,7 @@ def _planner_prev_context_text(
     canonical_evidence: list[dict[str, Any]],
     normalized_intent: Any,
 ) -> str:
-    """이전 대화 컨텍스트를 stage 1 planner prompt에 넣을 텍스트로 만든다.
-    canonical evidence가 있으면 그것을 우선하고, 없으면 prev_context snapshot을 짤라 넣어 stage 1이 참조형 질의를 해석할 수 있게 한다.
-    """
+    """Render prior context for the stage-1 planner prompt."""
     if canonical_evidence:
         return render_canonical_evidence_text(
             canonical_evidence,
@@ -65,12 +66,13 @@ def _planner_prev_context_text(
 
 def _extract_prev_context_seed(
     *,
+    question: str,
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
+    allow_ordinal_resolution: bool = False,
+    default_context_kind: str = "project",
 ) -> dict[str, list[str]]:
-    """이전 context 또는 canonical evidence에서 유효한 project seed를 추출한다.
-    referential follow-up에서 새 id가 없어도 JOIN/LOOKUP gate가 참조 seed를 쓸 수 있게 하는 입구다.
-    """
+    """Extract reusable project seeds from prior context or canonical evidence."""
     if canonical_evidence:
         pjt_ids, pjt_nos = set(), set()
         for item in canonical_evidence:
@@ -87,7 +89,19 @@ def _extract_prev_context_seed(
             return {"pjt_id": [next(iter(pjt_ids))]}
         if len(pjt_nos) == 1:
             return {"pjt_no": [next(iter(pjt_nos))]}
-    return extract_single_project_seed(prev_context)
+    seed = extract_single_project_seed(prev_context)
+    if seed:
+        return seed
+    if allow_ordinal_resolution:
+        resolution = resolve_reference_context_followup(
+            question=question,
+            canonical_evidence=canonical_evidence,
+            prev_context=prev_context,
+            default_context_kind=default_context_kind,
+        )
+        if str(resolution.get("followup_resolution_status") or "") == "resolved":
+            return dict(resolution.get("seed_map") or {})
+    return {}
 
 
 async def run_planner_stage1(
@@ -108,9 +122,7 @@ async def run_planner_stage1(
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
-    """stage 1 planner prompt를 구성하고 LLM을 호출해 action·head·relation_candidate를 얻는다.
-    history, prev context, intent snapshot을 함께 넘기되 stage 1이 mode·ids·filters를 직접 확정하지 않는 계약 내에서만 출력하게 한다.
-    """
+    """Run the stage-1 planner and return action, head, and relation hints only."""
     llm = build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=planner_stage1_decision_cls)
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in chat_history[-4:]])
@@ -129,7 +141,7 @@ async def run_planner_stage1(
             ),
         ]
     )
-    #Solar 의 경우 해당 부분에서 '깊은 생각' 모드를 조절.
+    # Keep planner reasoning shallow and deterministic for the stage prompt.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -165,20 +177,22 @@ async def run_planner_stage1(
 
 def determine_locked_strategy(
     *,
+    question: str,
     stage1: Any,
     normalized_intent: Any,
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
     planner_stage2_regate_seed_allowed_keys: set[str],
     log_event: Any,
-) -> LockedStrategy:
-    """stage 1 결과와 기존 id/context seed로 locked strategy를 고정한다.
-    prev context seed가 JOIN으로 상향시키는지까지 포함해, stage 2가 손대면 안 되는 진입 전략을 먼저 닫는 단계다.
-    """
+) -> DeterministicGateStrategy:
+    """Resolve the deterministic gate artifact from stage 1, ids, and prior anchors."""
     base_ids_map = dict(getattr(normalized_intent, "ids_map", {}) or {})
     prev_context_seed = _extract_prev_context_seed(
+        question=question,
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
+        allow_ordinal_resolution=bool(getattr(stage1, "referential_followup", False)),
+        default_context_kind=str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
     )
     gate_seed_map = collect_regate_seed_map(
         {**base_ids_map, **prev_context_seed},
@@ -207,7 +221,7 @@ def determine_locked_strategy(
         gate_relation=locked.relation,
         gate_join_key_mode=locked.join_key_mode,
         gate_target_cols=locked.target_cols,
-        used_prev_context_seed=int(bool(prev_context_seed)),
+        used_prev_context_seed=int(bool(prev_context_seed) or (bool(getattr(stage1, "referential_followup", False)) and bool(base_ids_map.get("pjt_id") or base_ids_map.get("pjt_no")))),
         prev_context_seed_source="canonical_evidence" if canonical_evidence else "prev_context_snapshot",
     )
     return locked
@@ -218,7 +232,7 @@ async def run_planner_stage2(
     question: str,
     conversation_id: str,
     request_id: Optional[str],
-    locked_strategy: LockedStrategy,
+    locked_strategy: DeterministicGateStrategy,
     build_llm: Any,
     planner_stage2_slots_cls: Any,
     load_prompt_file: Any,
@@ -228,9 +242,7 @@ async def run_planner_stage2(
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
-    """locked strategy를 prompt에 주입한 stage 2 planner를 실행해 ids/filter/retrieval_query와 한도를 채운다.
-    stage 2는 가변 슬롯만 내리게 되며, locked strategy는 JSON 형태로 그대로 넘겨 모드 변조를 막는다.
-    """
+    """Run the stage-2 planner against the deterministic gate artifact and fill slots."""
     llm = build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=planner_stage2_slots_cls)
     system_prompt = await load_prompt_file(Path(f"prompts/planner_stage2_{planner_stage2_prompt_version}.md"))
@@ -240,7 +252,7 @@ async def run_planner_stage2(
             ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>"),
         ]
     )
-    #Solar 의 경우 해당 부분에서 '깊은 생각' 모드를 조절.
+    # Keep planner reasoning shallow and deterministic for the stage prompt.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -274,7 +286,7 @@ def assemble_question_analysis(
     request_id: Optional[str],
     stage1: Any,
     stage2: Any,
-    locked_strategy: LockedStrategy,
+    locked_strategy: DeterministicGateStrategy,
     sanitize_ids_map_semantics: Any,
     question_analysis_cls: Any,
     log_event: Any,
@@ -286,9 +298,7 @@ def assemble_question_analysis(
 ) -> Any:
     # `question_analysis` is a planner artifact. Retrieval/runtime stages must use
     # the final assembled execution strategy and normalized intent as source of truth.
-    """stage 1, locked strategy, stage 2 slots를 합쳐 최종 question analysis payload를 만든다.
-    ids_map semantic sanitize, regate, top-k clamp, schema version 주입까지 포함한 planner orchestration의 최종 합성 단계다.
-    """
+    """Assemble the validated question-analysis artifact from gate and stage-2 slots."""
     ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
     for item in invalids:
         log_event(
@@ -326,37 +336,46 @@ def assemble_question_analysis(
     generic_org_gate = bool(stage2_filters.get("org_name"))
     role_scoped_org_gate = bool(stage2_filters.get("org_role") or stage2_filters.get("lead_org_name") or stage2_filters.get("performing_org_name") or stage2_filters.get("participant_org_name") or stage2_filters.get("people_affiliation_org_name"))
     unresolved_anchor_pair = bool(researcher_gate_terms and generic_org_gate and not role_scoped_org_gate)
-    regate_reason = None
-    payload_mode = str(payload.get("mode") or "").strip().lower()
-    payload_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
+    assembly_adjustment_kind = None
+    assembly_adjustment_reason = None
+    assembled_mode = str(payload.get("mode") or "").strip().lower()
+    assembled_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
     payload_project_key_policy = str(payload.get("project_key_policy") or "").strip().lower() or None
     payload_join_resolution_policy = str(payload.get("join_resolution_policy") or "").strip().lower() or None
     candidate_project_keys = list((candidate_keys or {}).get("project_key") or [])
     has_pjt_id_seed = bool(ids_map.get("pjt_id"))
     has_pjt_no_seed = bool(ids_map.get("pjt_no"))
-    if payload_mode == "join":
-        if payload_join_key_mode == "instance" and not has_pjt_id_seed:
+    gate_join_key_mode = locked_strategy.join_key_mode
+    if assembled_mode == "join":
+        if assembled_join_key_mode == "instance" and not has_pjt_id_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
-            regate_reason = "sanitized_instance_seed_unresolved_anchor_pair" if unresolved_anchor_pair else "sanitized_instance_seed_missing"
-        elif payload_join_key_mode == "group" and not has_pjt_no_seed:
+            assembly_adjustment_kind = "seed_loss_downgrade"
+            assembly_adjustment_reason = "sanitized_instance_seed_unresolved_anchor_pair" if unresolved_anchor_pair else "sanitized_instance_seed_missing"
+        elif assembled_join_key_mode == "group" and not has_pjt_no_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
-            regate_reason = "sanitized_group_seed_missing"
+            assembly_adjustment_kind = "seed_loss_downgrade"
+            assembly_adjustment_reason = "sanitized_group_seed_missing"
         elif payload_project_key_policy == "ambiguous_or" and candidate_project_keys:
             payload["join_key_mode"] = "deferred"
             payload.setdefault("join_resolution_policy", payload_join_resolution_policy or "auto_resolve")
-            regate_reason = "ambiguous_project_key_deferred_join"
-    if regate_reason:
+            assembly_adjustment_kind = "assembly_legalize"
+            assembly_adjustment_reason = "ambiguous_project_key_deferred_join"
+    if assembly_adjustment_reason:
         log_event(
-            "PLANNER.REGATE",
+            "PLANNER.ASSEMBLE.JOIN_RESHAPED",
             request_id=request_id,
             conversation_id=conversation_id,
-            reason=regate_reason,
-            original_mode=payload_mode,
-            downgraded_mode=payload.get("mode"),
+            assembly_adjustment_kind=assembly_adjustment_kind,
+            assembly_adjustment_reason=assembly_adjustment_reason,
+            gate_join_key_mode=gate_join_key_mode,
+            assembled_join_key_mode=payload.get("join_key_mode"),
+            original_mode=assembled_mode,
+            final_mode=payload.get("mode"),
             relation=payload.get("relation"),
-            original_join_key_mode=payload_join_key_mode,
+            original_join_key_mode=assembled_join_key_mode,
+            final_join_key_mode=payload.get("join_key_mode"),
             has_pjt_id_seed=int(has_pjt_id_seed),
             has_pjt_no_seed=int(has_pjt_no_seed),
             candidate_project_key_count=len(candidate_project_keys),
@@ -380,6 +399,10 @@ def assemble_question_analysis(
         planner_output_mode=qa.mode,
         planner_output_relation=qa.relation,
         planner_output_target_cols=qa.target_cols,
+        gate_join_key_mode=gate_join_key_mode,
+        assembled_join_key_mode=qa.join_key_mode,
+        assembly_adjustment_kind=assembly_adjustment_kind,
+        assembly_adjustment_reason=assembly_adjustment_reason,
         project_key_ambiguity=int(project_key_ambiguity),
         planner_stagewise_enabled=int(planner_stagewise_enabled),
         planner_stage1_prompt_version=planner_stage1_prompt_version,
@@ -414,9 +437,7 @@ async def run_stagewise_question_analysis(
     planner_stage2_regate_seed_allowed_keys: set[str],
     max_top_k_size: int,
 ) -> Any:
-    """stage 1 -> gate -> stage 2 -> assemble 순서로 stagewise planner 전체 흐름을 실행한다.
-    app entry는 이 파사드만 호출하면 stagewise planner 전체 절차와 로그가 한 곳에서 완결된다.
-    """
+    """Execute the full stagewise planner flow: stage 1, gate, stage 2, and assemble."""
     stage1 = await run_planner_stage1(
         question=question,
         conversation_id=conversation_id,
@@ -435,6 +456,7 @@ async def run_stagewise_question_analysis(
         planner_temperature=planner_temperature,
     )
     locked_strategy = determine_locked_strategy(
+        question=question,
         stage1=stage1,
         normalized_intent=normalized_intent,
         prev_context=prev_context,

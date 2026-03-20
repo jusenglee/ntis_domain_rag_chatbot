@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from apps.core.query_intent import normalize_org_terms
+from apps.core.followup_resolution import strip_ordinal_reference_terms
 
 from apps.core.rag_constants import (
     COL_PERF,
@@ -684,6 +685,7 @@ def _build_prtcp_mp_people_nested_filter(
         return None
 
     people_terms = [str(x).strip() for x in (people_terms or []) if str(x).strip()]
+    people_terms, _ = strip_ordinal_reference_terms(people_terms)
     person_ids = [str(x).strip() for x in (person_ids or []) if str(x).strip()]
     gender_terms = [str(x).strip() for x in (gender_terms or []) if str(x).strip()]
     org_terms = normalize_org_terms([str(x).strip() for x in (org_terms or []) if str(x).strip()])

@@ -9,7 +9,6 @@ class RuntimeStrategyPolicy:
     """런타임이 planner 전략 불일치를 어떻게 다룰지 정리한 정책 객체다."""
     strict_strategy_consistency: bool
     runtime_env: str
-    planner_invalid_fallback: bool
     force_fallback_chat: bool
 
 
@@ -32,7 +31,7 @@ def build_runtime_strategy_policy() -> RuntimeStrategyPolicy:
     return RuntimeStrategyPolicy(
         strict_strategy_consistency=env_flag("RAG_STRICT_STRATEGY_CONSISTENCY", "1"),
         runtime_env=str(os.getenv("APP_ENV", os.getenv("ENV", "")) or "").strip().lower(),
-        planner_invalid_fallback=False,
+        # RAG_FORCE_FALLBACK_CHAT is a response fallback, not a strategy fallback.
         force_fallback_chat=env_flag("RAG_FORCE_FALLBACK_CHAT", "0"),
     )
 

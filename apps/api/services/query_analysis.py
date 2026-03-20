@@ -39,7 +39,6 @@ async def run_question_analysis(
         classify_query_intent(question, [], hint={}),
         query=question,
         keywords=[],
-        allow_strategy_fallback=False,
     )
     return await run_stagewise_question_analysis(
         question=question,

@@ -7,7 +7,10 @@ for strategy mutation rules.
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, Optional
+
+from apps.core.followup_resolution import strip_ordinal_reference_terms
 
 
 def _planner_truthy_flag(value: Any) -> bool:
@@ -57,8 +60,60 @@ def collect_researcher_name_terms(filters: dict[str, Any]) -> list[str]:
 
     terms: list[str] = []
     for key in researcher_keys:
-        terms.extend(normalize_hint_terms(filters.get(key)))
+        values, _ = strip_ordinal_reference_terms(normalize_hint_terms(filters.get(key)))
+        terms.extend(values)
     return normalize_hint_terms(terms)
+
+
+def _sanitize_planner_filters(filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    if not isinstance(filters, dict):
+        return {}, {}
+
+    sensitive_keys = {
+        "participant_researcher_name",
+        "participant_researcher_names",
+        "participant_researcher",
+        "participant_researchers",
+        "researcher_name",
+        "researcher_names",
+        "researcher",
+        "people_name",
+        "org_name",
+        "lead_org_name",
+        "performing_org_name",
+        "participant_org_name",
+        "people_affiliation_org_name",
+        "title_terms",
+        "title",
+        "name",
+    }
+    sanitized = dict(filters)
+    stripped: dict[str, list[str]] = {}
+    for key in sensitive_keys:
+        if key not in sanitized:
+            continue
+        kept, removed = strip_ordinal_reference_terms(sanitized.get(key))
+        if not removed:
+            continue
+        stripped[key] = removed
+        current = sanitized.get(key)
+        if isinstance(current, list):
+            sanitized[key] = kept
+        elif isinstance(current, tuple):
+            sanitized[key] = tuple(kept)
+        elif isinstance(current, set):
+            sanitized[key] = set(kept)
+        else:
+            sanitized[key] = kept[0] if kept else None
+    return sanitized, stripped
+
+
+def _clone_question_analysis_with_filters(qa: Any, filters: dict[str, Any]) -> Any:
+    if hasattr(qa, "model_copy"):
+        return qa.model_copy(update={"filters": filters})
+    data = dict(getattr(qa, "__dict__", {}) or {})
+    data["filters"] = filters
+    return SimpleNamespace(**data)
 
 
 def merge_planner_hints(
@@ -299,14 +354,19 @@ def apply_planner_strategy(
             if downgraded_mode == "join":
                 downgraded_mode = "lookup"
             log_event(
-                "RAG.STRATEGY.JOIN_DOWNGRADED",
+                "PLANNER.ASSEMBLE.JOIN_RESHAPED",
                 request_id=request_id,
                 conversation_id=conversation_id,
                 planner_source=planner_source,
                 original_mode=planner_mode,
-                downgraded_mode=downgraded_mode,
+                final_mode=downgraded_mode,
                 relation=relation,
                 original_join_key_mode=planner_join_key_mode,
+                final_join_key_mode=None,
+                adjustment_source="planner_merge",
+                assembled_join_key_mode=None,
+                assembly_adjustment_kind="seed_loss_downgrade",
+                assembly_adjustment_reason=("seedless_instance_join_with_unresolved_anchor_pair" if unresolved_anchor_pair else "seedless_instance_join_without_gate"),
                 reason=("seedless_instance_join_with_unresolved_anchor_pair" if unresolved_anchor_pair else "seedless_instance_join_without_gate"),
                 has_instance_seed=0,
                 has_people_org_gate=int(has_people_org_gate),
@@ -343,13 +403,18 @@ def apply_planner_strategy(
         confidence=round(confidence, 3),
         strategy_mutation_stage="planner_merge",
         changed_by=changed_by_planner_merge,
+        original_mode=before_snapshot.get("mode"),
+        final_mode=after_snapshot.get("mode"),
+        original_join_key_mode=before_snapshot.get("join_key_mode"),
+        final_join_key_mode=after_snapshot.get("join_key_mode"),
+        adjustment_source="planner_merge",
         changed_strategy_fields=changed_strategy_fields,
         changed_filter_fields=changed_filter_fields,
     )
     return patched, True
 
 
-def apply_planner_v2(
+def apply_question_analysis_v3(
     intent: Any,
     qa: Any,
     *,
@@ -358,13 +423,29 @@ def apply_planner_v2(
     merge_planner_hints: Any,
     normalize_hint_terms: Any,
     apply_planner_strategy_fn: Any,
+    log_event: Any = None,
 ) -> tuple[Any, bool]:
     """Stagewise planner entry point used by runtime code."""
-    hinted_intent = merge_planner_hints(intent, qa)
+    sanitized_qa = qa
+    stripped_fields = {}
+    if qa is not None:
+        sanitized_filters, stripped_fields = _sanitize_planner_filters(dict(getattr(qa, "filters", {}) or {}))
+        sanitized_qa = _clone_question_analysis_with_filters(qa, sanitized_filters)
+        if stripped_fields and log_event is not None:
+            for field_name, stripped_values in stripped_fields.items():
+                log_event(
+                    "PLANNER.FILTER.ORDINAL_STRIPPED",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    field_name=field_name,
+                    stripped_values=list(stripped_values),
+                )
+
+    hinted_intent = merge_planner_hints(intent, sanitized_qa)
 
     return apply_planner_strategy_fn(
         hinted_intent,
-        qa,
+        sanitized_qa,
         request_id=request_id,
         conversation_id=conversation_id,
     )
