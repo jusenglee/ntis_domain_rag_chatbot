@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from apps.api.rag_mapper.schema_types import DataTag
 from apps.core.metrics import MetricSnapshot
 from apps.core.schemas import strategy_spec_to_response
 
@@ -99,26 +100,38 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         body = {"tag": tag, **payload}
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
-    def _resolve_reference_id(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
-        """reference/doc payload에서 출처 식별자를 우선순위대로 고른다."""
-        for key in (
-            "id",
-            "pjt_id",
-            "pjt_no",
-            "rst_id",
-            "doi",
-            "patent_reg_no",
-            "paper_regist_no",
-            "issn",
-            "doc_id",
-        ):
+    def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
+        """reference/doc payload?? ??? ?? ?? ?? ???? ???."""
+        for key in keys:
             value = reference.get(key)
             if value is None and isinstance(doc, dict):
                 value = doc.get(key)
+            if value is None and isinstance(doc, dict):
+                for meta_key in ("meta_basic", "meta_detail"):
+                    meta = doc.get(meta_key)
+                    if isinstance(meta, dict):
+                        value = meta.get(key)
+                        if value is not None:
+                            break
             text = str(value or "").strip()
             if text:
                 return text
         return None
+
+    def _is_project_reference_source(reference: Dict[str, Any], doc: Dict[str, Any]) -> bool:
+        """project source? pjt_id? reference.id? ????."""
+        tag = str(reference.get("tag") or doc.get("tag") or "").strip()
+        if tag == DataTag.PROJECT.value:
+            return True
+        return bool(_pick_reference_value(reference, doc, "pjt_id")) and not bool(
+            _pick_reference_value(reference, doc, "rst_id")
+        )
+
+    def _resolve_reference_id(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
+        """reference id? source semantics? ?? canonical id? ????."""
+        if _is_project_reference_source(reference, doc):
+            return _pick_reference_value(reference, doc, "pjt_id")
+        return _pick_reference_value(reference, doc, "rst_id")
 
     def _resolve_reference_title(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
         """reference/doc payload에서 사용자에게 보여줄 제목을 고른다."""
@@ -290,10 +303,20 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         documents_used.extend(docs)
 
                 ref_docs = []
+                seen_reference_keys = set()
                 for doc in documents_used:
                     if not is_hit_source(doc):
                         continue
-                    ref_docs.append(_normalize_reference_payload(doc))
+                    normalized = _normalize_reference_payload(doc)
+                    dedupe_key = (
+                        normalized.get("tag"),
+                        normalized.get("id"),
+                        normalized.get("title"),
+                    )
+                    if dedupe_key in seen_reference_keys:
+                        continue
+                    seen_reference_keys.add(dedupe_key)
+                    ref_docs.append(normalized)
 
                 yield _stream_data("reference", reference=ref_docs)
 
