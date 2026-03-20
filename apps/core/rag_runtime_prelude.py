@@ -1,6 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""Execution truth assembled by runtime prelude for downstream retrieval."""
 import os
 from dataclasses import dataclass, fields, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -389,7 +388,7 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
         planner_mode=planner_mode,
         planner_filter_spec=planner_filter_spec,
         target_cols=list(ctx.target_collections or []),
-        default_target_cols=list(plan.target_collections or []),
+        fallback_target_cols=list(plan.target_collections or []),
         topk_spec=topk_spec,
         rerank_spec=rerank_spec,
         search_filter_signal=search_filter_signal,
@@ -456,4 +455,3 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     min_dense_score_policy = float(policy_topk.get("min_dense_score", preset.min_dense_score))
 
     return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_join_key_mode=resolved_join_key_mode, planner_raw_join_key_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter, resolved_anchors=resolved_anchors, reverse_trace_followup=bool(reverse_trace_followup), followup_relation_hint=followup_relation_hint, pattern_kind=(getattr(getattr(plan, "pattern_analysis_plan", None), "kind", None) if getattr(plan, "pattern_analysis_plan", None) is not None else None), bundle_kind=(getattr(getattr(plan, "multi_hop_bundle_plan", None), "kind", None) if getattr(plan, "multi_hop_bundle_plan", None) is not None else None), bundle_targets=list(getattr(getattr(plan, "multi_hop_bundle_plan", None), "targets", tuple()) or tuple()), guidance_required=bool(getattr(getattr(plan, "multi_hop_bundle_plan", None), "guidance_required", False)) if getattr(plan, "multi_hop_bundle_plan", None) is not None else bool(getattr(plan, "guidance_required", False)))
-

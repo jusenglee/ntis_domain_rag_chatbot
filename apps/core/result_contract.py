@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from typing import Any, Callable, Optional
@@ -15,8 +15,10 @@ def evaluate_reranked_contract(
         score_topn: int,
         timing_put: Callable[[str, Any], None],
 ) -> Optional[str]:
-    """Evaluate whether reranked hits satisfy the result contract."""
+    """rerank 결과가 최소 hit 수와 score 기준을 만족하는지 평가한다.
 
+    실패하면 이유 코드만 돌려주고, 예외를 던질지 fallback으로 넘길지는 호출자가 결정하게 둔다.
+    """
     if not reranked:
         return "no_reranked"
     if min_reranked and len(reranked) < min_reranked:
@@ -55,15 +57,11 @@ def enforce_reranked_contract(
         timing_put: Callable[[str, Any], None],
         mode: str | None = None,
 ) -> Optional[str]:
-    """Enforce reranked-result contract and classify empty-result outcomes.
+    """rerank 결과 계약을 강제한다.
 
-    `search` zero-hit remains a strict contract path. `lookup`/`join` with
-    `reason=no_reranked` remains a normal no-result path.
-
-    `RAG_FORCE_FALLBACK_CHAT` is a response fallback control only. It must not be
-    read as strategy fallback permission.
+    `search`는 0건을 strict 예외로 유지하고, `lookup`/`join`의 `no_reranked`는
+    deterministic no-result outcome으로 내려 observability 필드만 남긴다.
     """
-
     normalized_mode = str(mode or "").strip().lower() or None
     empty_result_policy = "strict_search"
     timing_put("info.reranked_count", int(len(reranked or [])))

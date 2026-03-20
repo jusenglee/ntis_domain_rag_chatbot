@@ -1,4 +1,4 @@
-﻿"""Stagewise planner orchestration helpers.\n\nThis module owns the LLM-driven stage1/stage2 planner flow so the app entry module\ncan stay focused on composition-root concerns.\n"""
+"""Stagewise planner orchestration helpers.\n\nThis module owns the LLM-driven stage1/stage2 planner flow so the app entry module\ncan stay focused on composition-root concerns.\n"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
 from apps.core.planner_staged import (
-    DeterministicGateStrategy,
+    LockedStrategy,
     collect_regate_seed_map,
     compose_locked_strategy,
     extract_single_project_seed,
@@ -171,7 +171,7 @@ def determine_locked_strategy(
     canonical_evidence: list[dict[str, Any]],
     planner_stage2_regate_seed_allowed_keys: set[str],
     log_event: Any,
-) -> DeterministicGateStrategy:
+) -> LockedStrategy:
     """stage 1 결과와 기존 id/context seed로 locked strategy를 고정한다.
     prev context seed가 JOIN으로 상향시키는지까지 포함해, stage 2가 손대면 안 되는 진입 전략을 먼저 닫는 단계다.
     """
@@ -218,7 +218,7 @@ async def run_planner_stage2(
     question: str,
     conversation_id: str,
     request_id: Optional[str],
-    locked_strategy: DeterministicGateStrategy,
+    locked_strategy: LockedStrategy,
     build_llm: Any,
     planner_stage2_slots_cls: Any,
     load_prompt_file: Any,
@@ -274,7 +274,7 @@ def assemble_question_analysis(
     request_id: Optional[str],
     stage1: Any,
     stage2: Any,
-    locked_strategy: DeterministicGateStrategy,
+    locked_strategy: LockedStrategy,
     sanitize_ids_map_semantics: Any,
     question_analysis_cls: Any,
     log_event: Any,
@@ -326,44 +326,37 @@ def assemble_question_analysis(
     generic_org_gate = bool(stage2_filters.get("org_name"))
     role_scoped_org_gate = bool(stage2_filters.get("org_role") or stage2_filters.get("lead_org_name") or stage2_filters.get("performing_org_name") or stage2_filters.get("participant_org_name") or stage2_filters.get("people_affiliation_org_name"))
     unresolved_anchor_pair = bool(researcher_gate_terms and generic_org_gate and not role_scoped_org_gate)
-    assembly_adjustment_kind = None
-    assembly_adjustment_reason = None
-    assembled_mode = str(payload.get("mode") or "").strip().lower()
-    assembled_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
+    regate_reason = None
+    payload_mode = str(payload.get("mode") or "").strip().lower()
+    payload_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
     payload_project_key_policy = str(payload.get("project_key_policy") or "").strip().lower() or None
     payload_join_resolution_policy = str(payload.get("join_resolution_policy") or "").strip().lower() or None
     candidate_project_keys = list((candidate_keys or {}).get("project_key") or [])
     has_pjt_id_seed = bool(ids_map.get("pjt_id"))
     has_pjt_no_seed = bool(ids_map.get("pjt_no"))
-    if assembled_mode == "join":
-        if assembled_join_key_mode == "instance" and not has_pjt_id_seed:
+    if payload_mode == "join":
+        if payload_join_key_mode == "instance" and not has_pjt_id_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
-            assembly_adjustment_kind = "join_reshaped"
-            assembly_adjustment_reason = "sanitized_instance_seed_unresolved_anchor_pair" if unresolved_anchor_pair else "sanitized_instance_seed_missing"
-        elif assembled_join_key_mode == "group" and not has_pjt_no_seed:
+            regate_reason = "sanitized_instance_seed_unresolved_anchor_pair" if unresolved_anchor_pair else "sanitized_instance_seed_missing"
+        elif payload_join_key_mode == "group" and not has_pjt_no_seed:
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
-            assembly_adjustment_kind = "join_reshaped"
-            assembly_adjustment_reason = "sanitized_group_seed_missing"
+            regate_reason = "sanitized_group_seed_missing"
         elif payload_project_key_policy == "ambiguous_or" and candidate_project_keys:
             payload["join_key_mode"] = "deferred"
             payload.setdefault("join_resolution_policy", payload_join_resolution_policy or "auto_resolve")
-            assembly_adjustment_kind = "assembly_legalize"
-            assembly_adjustment_reason = "ambiguous_project_key_deferred_join"
-    if assembly_adjustment_reason:
+            regate_reason = "ambiguous_project_key_deferred_join"
+    if regate_reason:
         log_event(
-            "PLANNER.ASSEMBLE.ADJUSTED",
+            "PLANNER.REGATE",
             request_id=request_id,
             conversation_id=conversation_id,
-            assembly_adjustment_kind=assembly_adjustment_kind,
-            assembly_adjustment_reason=assembly_adjustment_reason,
-            original_mode=assembled_mode,
-            final_mode=payload.get("mode"),
+            reason=regate_reason,
+            original_mode=payload_mode,
+            downgraded_mode=payload.get("mode"),
             relation=payload.get("relation"),
-            gate_join_key_mode=locked_strategy.join_key_mode,
-            original_join_key_mode=assembled_join_key_mode,
-            assembled_join_key_mode=payload.get("join_key_mode"),
+            original_join_key_mode=payload_join_key_mode,
             has_pjt_id_seed=int(has_pjt_id_seed),
             has_pjt_no_seed=int(has_pjt_no_seed),
             candidate_project_key_count=len(candidate_project_keys),
@@ -383,8 +376,6 @@ def assemble_question_analysis(
         action=qa.action,
         relation=qa.relation,
         join_key_mode=qa.join_key_mode,
-        gate_join_key_mode=locked_strategy.join_key_mode,
-        assembled_join_key_mode=qa.join_key_mode,
         target_cols=qa.target_cols,
         planner_output_mode=qa.mode,
         planner_output_relation=qa.relation,
@@ -490,4 +481,3 @@ async def run_stagewise_question_analysis(
         planner_stage1_prompt_version=planner_stage1_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
     )
-

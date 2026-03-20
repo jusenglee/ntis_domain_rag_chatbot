@@ -1,4 +1,4 @@
-﻿"""FastAPI app factory and workflow assembly for the NTIS RAG application."""
+"""FastAPI app factory and workflow assembly for the NTIS RAG application."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from apps.api.services.llm_runtime import build_llm, get_llm_cache, load_system_
 from apps.api.services.planner_runtime import run_stagewise_question_analysis
 from apps.api.services.planner_service import (
     apply_planner_strategy,
-    apply_question_analysis_v3,
+    apply_planner_v2,
     collect_researcher_name_terms,
     merge_planner_hints,
     normalize_hint_terms,
@@ -210,17 +210,11 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "request_id": getattr(state, "request_id", None),
         "conversation_id": getattr(state, "conversation_id", None),
         "stage": "summary",
-        "strategy_source": "execution_strategy" if strategy is not None else "assembled_question_analysis_only",
+        "strategy_source": "execution_strategy" if strategy is not None else "planner_fallback",
         "mode": getattr(strategy, "mode", None) or getattr(question_analysis, "mode", None),
         "relation": getattr(strategy, "relation", None) or getattr(question_analysis, "relation", None),
         "target_cols": list(target_cols) if isinstance(target_cols, (list, tuple)) else target_cols,
         "join_key_mode": getattr(strategy, "join_key_mode", None),
-        "question_analysis_mode": getattr(question_analysis, "mode", None),
-        "question_analysis_relation": getattr(question_analysis, "relation", None),
-        "question_analysis_join_key_mode": getattr(question_analysis, "join_key_mode", None),
-        "execution_mode": getattr(strategy, "mode", None),
-        "execution_relation": getattr(strategy, "relation", None),
-        "execution_join_key_mode": getattr(strategy, "join_key_mode", None),
         "join_key_source": getattr(strategy, "join_key_source", None),
         "join_compile_selection": getattr(strategy, "join_compile_selection", None),
         "hop2_key_strategy": getattr(strategy, "hop2_key_strategy", None),
@@ -434,8 +428,8 @@ def build_advanced_workflow() -> Any:
             classify_query_intent=classify_query_intent,
             normalize_intent=normalize_intent,
             run_question_analysis=_run_question_analysis,
-            apply_question_analysis_v3=partial(
-                apply_question_analysis_v3,
+            apply_planner_v2=partial(
+                apply_planner_v2,
                 merge_planner_hints=partial(
                     merge_planner_hints,
                     normalize_org_terms=normalize_org_terms,
@@ -570,5 +564,4 @@ def create_app() -> FastAPI:
         ),
     )
     return app
-
 

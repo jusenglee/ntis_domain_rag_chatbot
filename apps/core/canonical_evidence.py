@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-"""Collect canonical ids while keeping `pjt_id`, `pjt_no`, and `rst_id` separate."""
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 

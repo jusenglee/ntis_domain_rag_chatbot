@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -37,7 +37,7 @@ def assemble_runtime_compile_policy(
     planner_mode: Optional[str],
     planner_filter_spec: Optional[dict[str, Any]],
     target_cols: list[str],
-    default_target_cols: list[str],
+    fallback_target_cols: list[str],
     topk_spec: Optional[dict[str, Any]],
     rerank_spec: Optional[dict[str, Any]],
     search_filter_signal: bool,
@@ -171,7 +171,7 @@ def assemble_runtime_compile_policy(
         mode=plan_mode,
         relation=relation,
         target_cols=target_cols,
-        default_target_cols=default_target_cols,
+        fallback_target_cols=fallback_target_cols,
         planner_filter_spec=planner_filter_spec,
         topk_spec=topk_spec,
         rerank_spec=rerank_spec,
@@ -235,4 +235,3 @@ def assemble_runtime_compile_policy(
         people_promote_one_must=people_promote_one_must,
         search_filter_server_policy=search_filter_server_policy,
     )
-

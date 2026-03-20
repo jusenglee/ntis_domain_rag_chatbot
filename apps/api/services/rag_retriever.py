@@ -1,4 +1,4 @@
-﻿"""RAG retrieval helpers for execution-layer query dispatch and shaping."""
+"""RAG retrieval helpers for execution-layer query dispatch and shaping."""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
-        """`IntentPayloadV3`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
+        """`IntentPayloadV2`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
         normalized intent가 올바른 타입일 때만 넘기며, 아니면 retriever가 planner/runtime contract 바깥 shape를 집어넣지 않게 한다.
         """
         if intent_payload is None:
@@ -367,4 +367,3 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     confidence = ks_confidence if ks_confidence is not None else (qa_confidence if qa_confidence is not None else 0.0)
     search_query = hint_query if confidence >= min_confidence else raw_query
     return raw_query, hint_query, search_query, confidence
-

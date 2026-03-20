@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import time
@@ -285,6 +285,7 @@ class QuestionAnalysisV3(BaseModel):
 
 
 QuestionAnalysis = QuestionAnalysisV3
+QuestionAnalysisV2 = QuestionAnalysisV3
 
 
 class PlannerV3ParseError(ValueError):
@@ -292,7 +293,7 @@ class PlannerV3ParseError(ValueError):
     pass
 
 
-PlannerParseError = PlannerV3ParseError
+PlannerV2ParseError = PlannerV3ParseError
 
 def validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
     """planner raw payload에 필수 키가 전부 들어 있는지 점검한다.
@@ -311,6 +312,7 @@ def planner_backoff_seconds(*, attempt_no: int, retry_backoff_sec: float, backof
     return min(backoff, backoff_cap_sec)
 
 
+planner_v2_backoff_seconds = planner_backoff_seconds
 
 
 def merge_bool_flag(existing: bool, new: bool) -> bool:
@@ -410,6 +412,5 @@ def measure_latency(node_name: str, *, logger_obj: Any):
             return result
         return wrapper
     return decorator
-
 
 

@@ -424,20 +424,6 @@ def refine_documents_rule_based(
                 + ("" if not followup_perf else "- followup_perf: " + ", ".join(str(item.get('perf_title') or item.get('doc_id') or 'perf').strip() for item in followup_perf[:6]) + "\n")
             )
             continue
-
-        if str(doc.get("source_type", "")).strip().lower() == "pattern_analysis":
-            pattern_item = doc.get("pattern_item") or {}
-            author_names = ", ".join(str(name).strip() for name in list(pattern_item.get("author_names") or []) if str(name).strip())
-            supporting_titles = ", ".join(str(title).strip() for title in list(pattern_item.get("supporting_perf_titles") or []) if str(title).strip())
-            context_chunks.append(
-                f"## Source {doc.get('source_index')}. {pattern_item.get('org_name') or doc.get('pattern_kind') or 'pattern'}\n"
-                + (f"- pattern_kind: {doc.get('pattern_kind')}\n" if doc.get("pattern_kind") else "")
-                + (f"- repeated_author_count: {pattern_item.get('repeated_author_count')}\n" if pattern_item.get("repeated_author_count") is not None else "")
-                + (f"- author_names: {author_names}\n" if author_names else "")
-                + (f"- supporting_perf_titles: {supporting_titles}\n" if supporting_titles else "")
-            )
-            continue
-
         if str(doc.get("source_type", "")).strip().lower() == "aggregation":
             rank_item = doc.get("rank_item") or {}
             metric = str(doc.get("metric") or "project_participation_count")
@@ -521,6 +507,4 @@ def refine_documents_rule_based(
         context_chunks.append(f"## Source {source_idx}. {title}\n{limited_text}\n")
 
     return "\n\n".join(context_chunks)
-
-
 

@@ -160,6 +160,7 @@ from apps.core.result_contract import enforce_reranked_contract as _enforce_rera
 from apps.core.log_keys import (
     LOG_KEY_CHANGED_BY,
     LOG_KEY_FORCE_FALLBACK_CHAT,
+    LOG_KEY_PLANNER_INVALID_FALLBACK,
     LOG_KEY_POLICY_MODE,
     LOG_KEY_EXECUTION_MODE,
     LOG_KEY_STRATEGY_MUTATION_STAGE,
