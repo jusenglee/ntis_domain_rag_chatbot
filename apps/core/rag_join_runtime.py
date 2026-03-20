@@ -251,8 +251,9 @@ def ensure_join_mode_has_keys(
             join_key_mode=join_key_mode,
         )
 
-    join_key_label = "PJT_NO" if join_key_mode == "group" else "PJT_ID"
-    error_code = "JOIN_GROUP_KEYS_UNRESOLVED" if str(join_key_mode or "").strip().lower() == "group" else "JOIN_KEYS_MISSING"
+    join_mode_norm = str(join_key_mode or "").strip().lower()
+    join_key_label = "PROJECT_KEY" if join_mode_norm == "deferred" else ("PJT_NO" if join_mode_norm == "group" else "PJT_ID")
+    error_code = "JOIN_GROUP_KEYS_UNRESOLVED" if join_mode_norm == "group" else ("JOIN_KEYS_MISSING" if join_mode_norm == "instance" else "JOIN_DEFERRED_UNRESOLVED")
     raise StrategyViolation(
         error_code=error_code,
         reason=(
@@ -285,8 +286,16 @@ def resolve_join_compile_selection(
     join_pjt_ids: List[str],
     join_pjt_nos: List[str],
 ) -> str:
-    """hop2에서 어떤 join key 선택 전략이 실제로 적용될지 이름으로 고정한다."""
+    """hop2에서 어떤 join key 전략을 쓸지 런타임 선택값으로 정리한다."""
     join_mode_norm = str(join_key_mode or "instance").strip().lower()
+    if join_mode_norm == "deferred":
+        if join_pjt_ids and join_pjt_nos:
+            return "deferred_dual_branch"
+        if join_pjt_nos:
+            return "deferred_group"
+        if join_pjt_ids:
+            return "deferred_instance"
+        return "deferred_unresolved"
     if hop2_col == COL_PERF and join_mode_norm == "group":
         if join_pjt_nos:
             return "group_pjt_no_only"
@@ -297,11 +306,19 @@ def resolve_join_compile_selection(
 
 
 def resolve_hop2_key_strategy(*, join_key_mode: str, join_compile_selection: str) -> str:
-    """join compile selection을 hop2 runtime key 전략 이름으로 바꾸다."""
+    """join compile selection을 hop2 runtime key 전략으로 변환한다."""
     selection_norm = str(join_compile_selection or "").strip().lower()
     join_mode_norm = str(join_key_mode or "instance").strip().lower()
     if selection_norm == "group_perf_pjt_id_fallback":
         return "pjt_id_in"
+    if selection_norm == "deferred_dual_branch":
+        return "dual_branch"
+    if selection_norm == "deferred_group":
+        return "pjt_no"
+    if selection_norm == "deferred_instance":
+        return "pjt_id_in"
+    if join_mode_norm == "deferred":
+        return "project_key_exact_or"
     return "pjt_no" if join_mode_norm == "group" else "pjt_id_in"
 
 
@@ -325,8 +342,15 @@ def _build_join_hop2_meta(
         join_key_mode=join_key_mode,
         join_compile_selection=join_compile_selection,
     )
-    resolved_runtime_key_kind = "pjt_id" if hop2_key_strategy == "pjt_id_in" else "pjt_no"
-    join_keys_used_count = len(join_pjt_ids) if hop2_key_strategy == "pjt_id_in" else len(join_pjt_nos)
+    if hop2_key_strategy == "dual_branch":
+        resolved_runtime_key_kind = "mixed"
+        join_keys_used_count = len(join_pjt_ids) + len(join_pjt_nos)
+    elif hop2_key_strategy == "pjt_id_in":
+        resolved_runtime_key_kind = "pjt_id"
+        join_keys_used_count = len(join_pjt_ids)
+    else:
+        resolved_runtime_key_kind = "pjt_no"
+        join_keys_used_count = len(join_pjt_nos)
     return {
         "hop2_col": hop2_col,
         "join_key_mode": join_key_mode,
@@ -477,6 +501,16 @@ class Hop1JoinResolution:
     join_key_source: Optional[str]
 
 
+
+@dataclass(frozen=True)
+class DeferredJoinResolution:
+    """ambiguous project key discovery 이후 resolved 또는 dual-branch 결정을 담는다."""
+    resolved_join_key_mode: str
+    join_pjt_ids: List[str]
+    join_pjt_nos: List[str]
+    join_key_source: Optional[str]
+    dual_branch_used: bool
+    resolution_reason: str
 @dataclass(frozen=True)
 class JoinHop2Preparation:
     """hop2 진입 전 준비된 join mode와 filter 결과를 묶는다."""
@@ -605,6 +639,72 @@ def normalize_relation_hint(value: Any) -> Optional[Tuple[str, str]]:
         if len(parts) == 2:
             return parts[0], parts[1]
     return None
+
+
+def resolve_deferred_join_from_hop1(
+    *,
+    hop1_top: List[Any],
+    hop1_keep: int,
+    seed_join_pjt_ids: List[str],
+    seed_join_pjt_nos: List[str],
+    extract_join_keys: Callable[..., Any],
+    log_kv: Callable[..., None],
+    join_resolution_policy: Optional[str] = None,
+) -> DeferredJoinResolution:
+    """hop1 discovery 결과로 deferred join의 instance, group, dual-branch를 결정한다."""
+    instance_result = extract_join_keys(hop1_top[:hop1_keep], mode="instance", max_ids=max(1, hop1_keep))
+    group_result = extract_join_keys(hop1_top[:hop1_keep], mode="group", max_ids=max(1, hop1_keep))
+    join_pjt_ids = list(dict.fromkeys([*(str(x).strip() for x in (seed_join_pjt_ids or []) if str(x).strip()), *(str(x).strip() for x in (instance_result.keys or []) if str(x).strip())]))
+    join_pjt_nos = list(dict.fromkeys([*(str(x).strip() for x in (seed_join_pjt_nos or []) if str(x).strip()), *(str(x).strip() for x in (group_result.keys or []) if str(x).strip())]))
+
+    resolution_policy = str(join_resolution_policy or "").strip().lower()
+    if join_pjt_ids and join_pjt_nos:
+        if resolution_policy == "dual_branch":
+            resolved_mode = "deferred"
+            dual_branch_used = True
+            resolution_reason = "planner_requested_dual_branch"
+        elif len(join_pjt_ids) == 1 and len(hop1_top or []) <= 1:
+            resolved_mode = "instance"
+            dual_branch_used = False
+            resolution_reason = "single_project_exact_match"
+        elif len(join_pjt_nos) == 1 and len(join_pjt_ids) > 1:
+            resolved_mode = "group"
+            dual_branch_used = False
+            resolution_reason = "shared_group_across_instances"
+        else:
+            resolved_mode = "deferred"
+            dual_branch_used = True
+            resolution_reason = "ambiguous_dual_branch"
+    elif join_pjt_ids:
+        resolved_mode = "instance"
+        dual_branch_used = False
+        resolution_reason = "instance_keys_only"
+    elif join_pjt_nos:
+        resolved_mode = "group"
+        dual_branch_used = False
+        resolution_reason = "group_keys_only"
+    else:
+        resolved_mode = "deferred"
+        dual_branch_used = False
+        resolution_reason = "no_join_keys_from_discovery"
+
+    log_kv(
+        "RAG.JOIN.DEFERRED.RESOLVE",
+        resolved_join_key_mode=resolved_mode,
+        dual_branch_used=int(dual_branch_used),
+        resolution_reason=resolution_reason,
+        join_pjt_ids_count=len(join_pjt_ids),
+        join_pjt_nos_count=len(join_pjt_nos),
+        tier="debug",
+    )
+    return DeferredJoinResolution(
+        resolved_join_key_mode=resolved_mode,
+        join_pjt_ids=join_pjt_ids,
+        join_pjt_nos=join_pjt_nos,
+        join_key_source=("hop1" if hop1_top else None),
+        dual_branch_used=dual_branch_used,
+        resolution_reason=resolution_reason,
+    )
 
 
 def resolve_join_keys_from_hop1(

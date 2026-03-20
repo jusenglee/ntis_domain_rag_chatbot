@@ -70,7 +70,9 @@ class JoinFilterInput:
     join_key_mode가 `instance`면 pjt_id, `group`이면 pjt_no 계약을 강제한다."""
     join_ids: List[str] = field(default_factory=list)
     pjt_nos: List[str] = field(default_factory=list)
-    join_key_mode: str = "instance"  # instance|group
+    join_key_mode: str = "instance"  # instance|group|deferred
+    candidate_project_keys: List[str] = field(default_factory=list)
+    project_key_policy: Optional[str] = None
     tag_filters: Optional[List[str]] = None
     people_terms: List[str] = field(default_factory=list)
     org_terms: List[str] = field(default_factory=list)
@@ -799,7 +801,7 @@ def build_perf_type_filter(perf_types: List[str]) -> Optional[Any]:
 # -----------------------------
 # Project id filters
 # -----------------------------
-def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[Any]:
+def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str], *, candidate_project_keys: Optional[List[str]] = None, project_key_policy: Optional[str] = None) -> Optional[Any]:
     """project 컬렉션에서 pjt_id 또는 pjt_no 하나만 쓰는 식별자 필터다.
     
     두 키를 함께 받으면 의미 혼합으로 간주하고 예외를 올린다."""
@@ -818,11 +820,20 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
         if sval and sval not in pjt_no_values:
             pjt_no_values.append(sval)
 
-    if not pjt_id_values and not pjt_no_values:
+    candidate_values = []
+    for val in (candidate_project_keys or []):
+        sval = str(val).strip()
+        if sval and sval not in candidate_values:
+            candidate_values.append(sval)
+
+    if not pjt_id_values and not pjt_no_values and not candidate_values:
         return None
 
+    policy = str(project_key_policy or "").strip().lower()
     if pjt_id_values and pjt_no_values:
         raise ValueError("build_project_id_filter requires either pjt_id or pjt_no, but not both")
+    if candidate_values and policy not in {"", "ambiguous_or"}:
+        raise ValueError(f"build_project_id_filter candidate_project_keys requires ambiguous_or policy, got {project_key_policy}")
 
     _log_project_key_policy_once()
     id_key_cands = _project_key_candidates("pjt_id")
@@ -833,6 +844,9 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str]) -> Optional[
         should.extend(qmodels.FieldCondition(key=k, match=make_match_any(pjt_id_values)) for k in id_key_cands)
     if pjt_no_values:
         should.extend(qmodels.FieldCondition(key=k, match=make_match_any(pjt_no_values)) for k in no_key_cands)
+    if candidate_values:
+        should.extend(qmodels.FieldCondition(key=k, match=make_match_any(candidate_values)) for k in id_key_cands)
+        should.extend(qmodels.FieldCondition(key=k, match=make_match_any(candidate_values)) for k in no_key_cands)
 
     return _build_filter(must=None, should=should, must_not=None, min_should=1)
 
@@ -855,10 +869,10 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     pjt_nos = list(dict.fromkeys(str(x).strip() for x in (spec.pjt_nos or []) if str(x).strip()))
 
     mode = str(spec.join_key_mode or "").strip().lower()
-    if mode not in ("instance", "group"):
+    if mode not in ("instance", "group", "deferred"):
         raise ValueError(f"JOIN_KEY_MODE_INVALID: unsupported join_key_mode={spec.join_key_mode}")
 
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos)
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos, candidate_project_keys=spec.candidate_project_keys)
 
     _log_project_key_policy_once()
     primary_id = _project_key_candidates("pjt_id")[0]
@@ -867,8 +881,12 @@ def build_join_filter(spec: JoinFilterInput) -> "qmodels.Filter":
     must: List[Any] = []
     if mode == "group":
         must.append(qmodels.FieldCondition(key=primary_no, match=make_match_any(pjt_nos)))
-    else:
+    elif mode == "instance":
         must.append(qmodels.FieldCondition(key=primary_id, match=make_match_any(join_ids)))
+    else:
+        ambiguous = build_project_id_filter([], [], candidate_project_keys=spec.candidate_project_keys, project_key_policy=spec.project_key_policy or "ambiguous_or")
+        if ambiguous is not None:
+            return ambiguous
 
     validate_join_filter_must_keys(mode=mode, must_conditions=must)
 
@@ -881,6 +899,8 @@ def build_collection_join_filter(
         join_key_mode: str,
         join_ids: List[str],
         pjt_nos: List[str],
+        candidate_project_keys: Optional[List[str]] = None,
+        project_key_policy: Optional[str] = None,
         resolved_pjt_ids: Optional[List[str]] = None,
         perf_group_strategy: str = "prefer_pjt_no",
         query: str = "",
@@ -892,7 +912,7 @@ def build_collection_join_filter(
     group JOIN의 perf hop2는 pjt_no를 우선하고, 허용된 경우에만 resolved pjt_id fallback을 쓴다."""
     _ = apply_query_tag_inference
     mode = str(join_key_mode or "").strip().lower()
-    if mode not in ("instance", "group"):
+    if mode not in ("instance", "group", "deferred"):
         raise ValueError(f"JOIN_KEY_MODE_INVALID: unsupported join_key_mode={join_key_mode}")
 
     resolved_pjt_ids = _dedupe_non_empty(resolved_pjt_ids or [])
@@ -936,10 +956,10 @@ def build_collection_join_filter(
         return build_perf_filter_by_pjt_id(join_ids, query, apply_query_tag_inference=False)
 
     # For non-perf hop2 paths, planner join_key_mode still defines the runtime key contract.
-    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm)
+    validate_join_mode_key_inputs(mode=mode, join_ids=join_ids, pjt_nos=pjt_nos_norm, candidate_project_keys=candidate_project_keys or [])
 
     if col_canonical == "ntis_project":
-        pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [])
+        pjt_filter = build_project_id_filter(join_ids if mode == "instance" else [], pjt_nos if mode == "group" else [], candidate_project_keys=(candidate_project_keys or []) if mode == "deferred" else [], project_key_policy=project_key_policy)
         return pjt_filter or qmodels.Filter(must=[])
 
     if fallback_spec is None:
@@ -947,6 +967,8 @@ def build_collection_join_filter(
             join_ids=join_ids,
             pjt_nos=pjt_nos,
             join_key_mode=mode,
+            candidate_project_keys=list(candidate_project_keys or []),
+            project_key_policy=project_key_policy,
         )
     return build_join_filter(fallback_spec)
 
@@ -999,11 +1021,20 @@ def validate_planner_join_keys(mode: str, ids_map: Any) -> Dict[str, List[str]]:
     return normalized_ids_map
 
 
-def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str]) -> None:
-    """executor 런타임에서 join_key_mode별 실제 키가 맞는지 검증한다."""
+def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str], candidate_project_keys: Optional[List[str]] = None) -> None:
+    """executor가 join_key_mode별 runtime key 입력을 검증한다."""
     mode_norm = str(mode or "").strip().lower()
     pjt_ids_norm = _dedupe_non_empty(pjt_ids)
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+    candidate_norm = _dedupe_non_empty(candidate_project_keys or [])
+
+    if mode_norm == "deferred":
+        if candidate_norm and not pjt_ids_norm and not pjt_nos_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="deferred requires candidate project keys and forbids resolved instance/group keys",
+        )
 
     if mode_norm == "group":
         if not (pjt_nos_norm or pjt_ids_norm):
@@ -1021,7 +1052,6 @@ def validate_resolved_join_keys(mode: str, pjt_nos: List[str], pjt_ids: List[str
 
     raise ValueError(f"EXECUTOR_JOIN_KEY_MODE_INVALID: unsupported join_key_mode={mode}")
 
-
 def validate_group_join_runtime_keys(*, pjt_nos: List[str], pjt_ids: List[str]) -> None:
     """group JOIN hop2는 pjt_no 또는 동치인 resolved pjt_id가 반드시 있어야 한다."""
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
@@ -1033,26 +1063,35 @@ def validate_group_join_runtime_keys(*, pjt_nos: List[str], pjt_ids: List[str]) 
     )
 
 
-def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str]) -> None:
-    """join_key_mode와 join_ids/pjt_nos 조합이 strict 계약에 맞는지 검증한다."""
+def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: List[str], candidate_project_keys: Optional[List[str]] = None) -> None:
+    """join_key_mode별로 join_ids, pjt_nos, candidate_project_keys 입력 조합을 검증한다."""
     mode_norm = str(mode or "").strip().lower()
     join_ids_norm = _dedupe_non_empty(join_ids)
     pjt_nos_norm = _dedupe_non_empty(pjt_nos)
+    candidate_norm = _dedupe_non_empty(candidate_project_keys or [])
 
     if mode_norm == "instance":
-        if join_ids_norm and not pjt_nos_norm:
+        if join_ids_norm and not pjt_nos_norm and not candidate_norm:
             return
         raise StrategyViolation(
             error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
-            reason="instance requires pjt_id and forbids pjt_no",
+            reason="instance requires pjt_id and forbids pjt_no/candidate project keys",
         )
 
     if mode_norm == "group":
-        if pjt_nos_norm and not join_ids_norm:
+        if pjt_nos_norm and not join_ids_norm and not candidate_norm:
             return
         raise StrategyViolation(
             error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
-            reason="group requires pjt_no and forbids pjt_id",
+            reason="group requires pjt_no and forbids pjt_id/candidate project keys",
+        )
+
+    if mode_norm == "deferred":
+        if candidate_norm and not join_ids_norm and not pjt_nos_norm:
+            return
+        raise StrategyViolation(
+            error_code="EXECUTOR_JOIN_KEY_INPUT_INVALID",
+            reason="deferred requires candidate project keys and forbids resolved pjt_id/pjt_no",
         )
 
     raise StrategyViolation(
@@ -1062,8 +1101,10 @@ def validate_join_mode_key_inputs(*, mode: str, join_ids: List[str], pjt_nos: Li
 
 
 def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> None:
-    """실제로 조립된 JOIN must 조건이 mode에 맞는 키를 쓰는지 확인한다."""
+    """실행된 JOIN must 조건이 mode별 runtime key 규칙과 맞는지 검증한다."""
     mode_norm = str(mode or "").strip().lower()
+    if mode_norm == "deferred":
+        return
     for cond in (must_conditions or []):
         key = getattr(cond, "key", None)
         if not key:
@@ -1072,7 +1113,7 @@ def validate_join_filter_must_keys(*, mode: str, must_conditions: List[Any]) -> 
             raise ValueError(f"group join mode requires a pjt_no runtime key, got {key}")
         if mode_norm == "instance" and not _is_pjt_id_key(key):
             raise ValueError(f"instance join mode requires a pjt_id runtime key, got {key}")
-
+            raise ValueError(f"instance join mode requires a pjt_id runtime key, got {key}")
 
 def _dedupe_non_empty(values: List[str]) -> List[str]:
     """비어 있지 않은 문자열만 중복 없이 유지한다."""

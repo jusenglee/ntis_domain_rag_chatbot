@@ -76,6 +76,8 @@ def build_dispatch_runtime_support(
     hydrate_reranked_payloads_fn: Callable[..., None],
     soft_title_contains_fn: Callable[..., bool],
     aggregation_builder_fn: Callable[..., Optional[Dict[str, Any]]],
+    pattern_analysis_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    multi_hop_bundle_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     payload_get_fn: Callable[..., Any],
     hit_key_fn: Callable[..., Any],
     title_match_mode_contains: str,
@@ -314,6 +316,7 @@ def build_dispatch_runtime_support(
             get_relation_route_fn=get_relation_route_fn,
             context_builder=context_builder_fn,
             series_builder_fn=series_builder_fn,
+            multi_hop_bundle_builder_fn=multi_hop_bundle_builder_fn,
             payload_get_fn=payload_get_fn,
         )
 
@@ -361,6 +364,8 @@ def build_dispatch_runtime_support(
             soft_title_contains_fn=soft_title_contains_fn,
             aggregation_builder_fn=aggregation_builder_fn,
             series_builder_fn=series_builder_fn,
+            pattern_analysis_builder_fn=pattern_analysis_builder_fn,
+            multi_hop_bundle_builder_fn=multi_hop_bundle_builder_fn,
             payload_get_fn=payload_get_fn,
             hit_key_fn=hit_key_fn,
             title_match_mode_contains=title_match_mode_contains,

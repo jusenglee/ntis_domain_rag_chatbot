@@ -129,6 +129,7 @@ async def run_planner_stage1(
             ),
         ]
     )
+    #Solar 의 경우 해당 부분에서 '깊은 생각' 모드를 조절.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -239,6 +240,7 @@ async def run_planner_stage2(
             ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>"),
         ]
     )
+    #Solar 의 경우 해당 부분에서 '깊은 생각' 모드를 조절.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -287,7 +289,7 @@ def assemble_question_analysis(
     """stage 1, locked strategy, stage 2 slots를 합쳐 최종 question analysis payload를 만든다.
     ids_map semantic sanitize, regate, top-k clamp, schema version 주입까지 포함한 planner orchestration의 최종 합성 단계다.
     """
-    ids_map, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question)
+    ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
     for item in invalids:
         log_event(
             "PLANNER.IDS_MAP.INVALID_VALUE",
@@ -301,6 +303,9 @@ def assemble_question_analysis(
         locked=locked_strategy,
         slots={
             "ids_map": ids_map,
+            "candidate_keys": candidate_keys,
+            "project_key_policy": getattr(stage2, "project_key_policy", None),
+            "join_resolution_policy": getattr(stage2, "join_resolution_policy", None),
             "filters": stage2.filters,
             "limit": min(stage2.limit, max_top_k_size),
             "retrieval_query": stage2.retrieval_query or question,
@@ -324,6 +329,9 @@ def assemble_question_analysis(
     regate_reason = None
     payload_mode = str(payload.get("mode") or "").strip().lower()
     payload_join_key_mode = str(payload.get("join_key_mode") or "").strip().lower() or None
+    payload_project_key_policy = str(payload.get("project_key_policy") or "").strip().lower() or None
+    payload_join_resolution_policy = str(payload.get("join_resolution_policy") or "").strip().lower() or None
+    candidate_project_keys = list((candidate_keys or {}).get("project_key") or [])
     has_pjt_id_seed = bool(ids_map.get("pjt_id"))
     has_pjt_no_seed = bool(ids_map.get("pjt_no"))
     if payload_mode == "join":
@@ -335,6 +343,10 @@ def assemble_question_analysis(
             payload["mode"] = "lookup"
             payload["join_key_mode"] = None
             regate_reason = "sanitized_group_seed_missing"
+        elif payload_project_key_policy == "ambiguous_or" and candidate_project_keys:
+            payload["join_key_mode"] = "deferred"
+            payload.setdefault("join_resolution_policy", payload_join_resolution_policy or "auto_resolve")
+            regate_reason = "ambiguous_project_key_deferred_join"
     if regate_reason:
         log_event(
             "PLANNER.REGATE",
@@ -347,6 +359,7 @@ def assemble_question_analysis(
             original_join_key_mode=payload_join_key_mode,
             has_pjt_id_seed=int(has_pjt_id_seed),
             has_pjt_no_seed=int(has_pjt_no_seed),
+            candidate_project_key_count=len(candidate_project_keys),
             project_key_ambiguity=int(project_key_ambiguity),
             has_explicit_pjt_id_label=int(has_explicit_pjt_id_label),
             has_explicit_pjt_no_label=int(has_explicit_pjt_no_label),

@@ -1,15 +1,15 @@
-# 골든 테스트 (GOLDEN TESTS)
+﻿# GOLDEN TESTS
 
-이 문서는 현재 runtime의 최소 golden-query invariant를 retrieval-first 기준으로 기록합니다.
-입문 문서가 아니라 regression / invariant 기준 문서로 사용합니다.
+This document records the active golden-query invariants for the NTIS Domain RAG repository.
 
-## 현재 기준선
+It is not a tutorial. It is the regression and invariant baseline for retrieval-first behavior.
 
-현재 baseline은 다음을 전제로 합니다.
-- retrieval correctness가 answer wording보다 우선합니다.
-- `apps/core/query_intent.py`의 explicit precheck는 구조적 신호만 제공합니다.
-- planner contract enforcement는 `apps/core/planner_contract.py`에 유지됩니다.
-- execution mode selection과 runtime enforcement는 final assembled strategy 기준으로 검증됩니다.
+## Current Baseline
+
+- retrieval correctness comes before answer wording
+- `apps/core/query_intent.py` only contributes cheap precheck signals
+- planner contract enforcement is owned by `apps/core/planner_contract.py`
+- execution mode selection and runtime enforcement are validated against the final assembled strategy
 
 ## Golden Queries
 
@@ -17,117 +17,94 @@
 |---|---|---|---|
 | G001 | `AI related projects` | `search` | broad topic query |
 | G002 | `1711015550 project detail` | `lookup` | exact project id lookup |
-| G003 | `PJT-2020-1234-5678 related outputs` | `join` | group project seed plus perf/output cue should stay join-classified |
-| G004 | `Kim researcher projects` | `lookup` | English researcher cue should still become person-constrained lookup/list behavior |
+| G003 | `PJT-2020-1234-5678 related outputs` | `join` | unresolved exact project key plus perf/output cue should stay join-classified |
+| G004 | `Kim researcher projects` | `lookup` | researcher cue should remain person-constrained lookup/list behavior |
 | G005 | `ETRI papers stats 2021 2023` | `lookup` | stats-style perf lookup |
 
-## Invariants
+## 1. Strategy Invariants
 
-### 1. Strategy Invariants
+- planner fixes one strategy per request
+- executor validates and executes that strategy; it does not invent another one
+- `SEARCH`, `LOOKUP`, and `JOIN` remain separate contracts
+- cheap precheck must not override planner truth for people, organizations, or roles
+- explicit identifier precheck may skip planner only for strong resolved-id paths
+- ambiguous project-key mentions such as `과제번호` must not be promoted to resolved `pjt_id` or `pjt_no`
 
-- planner는 질의마다 하나의 strategy를 확정합니다.
-- executor는 확정된 strategy를 재해석하거나 재결정하지 않습니다.
-- `SEARCH`, `LOOKUP`, `JOIN`의 계약 경계는 실행 레이어에서 바뀌지 않습니다.
-- 사용자 질의 이후 단계별 흐름은 `docs/SYSTEM_FLOW_RETRIEVAL_FIRST.md`의 artifact handoff와 모순되면 안 됩니다.
-- 비어 있는 heuristic precheck payload가 planner 실행을 막으면 안 됩니다.
-- org term, year, perf type, title term 같은 non-id heuristic hint도 planner를 거쳐야 합니다.
-- explicit identifier precheck는 불필요한 planner round-trip을 건너뛸 수 있습니다.
-- `과제고유번호`/`PJT_ID` 라벨이 붙은 영문+숫자 project key는 explicit identifier precheck로 승격될 수 있습니다.
-- `과제번호` 단독 표현은 `pjt_id`/`pjt_no`로 고정하지 않고 planner로 넘겨야 합니다.
-- 사람 이름, 기관명, 기관 역할 의미를 regex로 전단 복원하지 않아야 합니다.
-- planner normalize/merge가 질의 문구만 보고 `participant_org_name` 같은 역할 필드를 자동 승격하면 안 됩니다.
+## 2. Join / Filter Invariants
 
-### 2. Join / Filter Invariants
+- JOIN requires a valid relation intent and a legal join strategy
+- invalid stage2 seeds removed by sanitize must not leave a strict JOIN behind
+- `lookup` / `join` with `no_reranked` are normal no-result outcomes
+- relation queries use `output_type=relation`; they do not introduce a separate `action=relation` dialect
+- `join_key_mode=instance` and `join_key_mode=group` remain strict resolved-key modes
+- `join_key_mode=deferred` is a legal runtime strategy for ambiguous exact project keys
+- group fallback must be explicit in runtime metadata rather than silently changing key semantics
 
-- JOIN은 relation intent와 유효한 join seed를 모두 요구합니다.
-- stage2가 잘못 넣은 project key seed가 sanitize에서 제거되면, assemble 단계는 strict JOIN을 유지하지 않고 `lookup`으로 다시 낮춰야 합니다.
-- `lookup`/`join`의 `no_reranked`는 exception이 아니라 정상 no-result outcome이어야 합니다.
-- relation query는 별도 `action=relation` dialect가 아니라 `action=list` + `output_type=relation`으로 정규화되어야 합니다.
-- JOIN에서 `head`는 relation target과 같아야 합니다.
-- `join_key_mode=instance`와 `join_key_mode=group`은 상호 배타적이어야 합니다.
-- `group + pjt_no 없음`은 자동 보정 없이 계약 위반으로 처리되어야 합니다.
-- planner contract 통과 뒤 group JOIN hop2는 `pjt_no` 또는 group expansion으로 얻은 resolved `pjt_id`가 있으면 실행 가능해야 합니다.
-- `hop2_key_strategy`는 실제 Hop2 filter key 사용을 반영해야 하며, group fallback 실행 시 `pjt_id_in`으로 기록되어야 합니다.
-- group fallback 실행 시 `resolved_runtime_key_kind`는 `pjt_id`로 기록되어야 합니다.
-- group fallback 실행 시 strategy / response에도 `join_compile_selection=group_perf_pjt_id_fallback`가 반영되어야 합니다.
-- `/query/debug`의 `strategy_summary`는 같은 JOIN 실행 메타를 그대로 보여줘야 하며, `question_analysis`와 혼동되면 안 됩니다.
-- 문서의 다이어그램 vocabulary는 `question_analysis`, `normalized_intent`, `strategy`, `canonical_evidence`, `render_profile`를 서로 다른 artifact로 유지해야 합니다.
-- SEARCH는 org/person filter를 server-side hard requirement로 두면 안 됩니다.
-- LOOKUP의 명시적 identifier는 server-side lookup filter로 전환되어야 합니다.
-- JOIN hop2는 무관한 org/title hard gate를 추가하면 안 됩니다.
+## 3. Canonical Evidence Invariants
 
-### 3. Canonical Evidence Invariants
+- canonical evidence preserves `pjt_id`, `pjt_no`, and `rst_id` semantics independently
+- lead / participant / affiliation organization semantics remain separate
+- retrieval view and prompt view remain distinct artifacts
+- answer context is built from canonical evidence, not from raw retrieval payload
 
-- source payload에 둘 다 있으면 `pjt_id`와 `pjt_no`를 각각 독립적으로 보존해야 합니다.
-- lead/participant/affiliation organization semantics를 분리해서 유지해야 합니다.
-- retrieval view와 prompt view는 같지 않아야 합니다.
-- answer context building은 canonical evidence만 사용해야 하며, 필요 시 raw retrieved document를 요청 시점에 canonicalize 해야 합니다.
-- knowledge sufficiency의 previous-context reasoning은 canonicalized context text만 사용해야 합니다.
-- planner previous-context prompting과 previous-anchor seed extraction은 canonical evidence snapshot만 사용해야 합니다.
+## 4. Render / Output Invariants
 
-### 4. Render / Output Invariants
+- `summary`, `detail`, `list`, `stats`, `relation`, `comparison`, and `series` must keep distinct context shapes
+- `output_type` controls evidence presentation shape, not answer wording
+- people-oriented project lookups must resolve to people-oriented render profiles when appropriate
 
-- render profile resolution은 people cue가 있는 project lookup을 generic project context가 아닌 people-oriented context로 분류해야 합니다.
-- `summary`, `detail`, `list`, `stats`, `relation`은 같은 context shape를 재사용하면 안 됩니다.
-- `output_type`은 answer wording이 아니라 evidence presentation shape를 결정해야 합니다.
+## 5. Streaming Invariants
 
-### 5. Streaming Invariants
+- reasoning chunks must not leak into final user-visible answer content
+- `ttft_any_ms` and `ttft_content_ms` remain separate metrics
+- direct-answer mode must not duplicate final content streams
 
-- reasoning chunk가 최종 사용자 노출 content에 섞이면 안 됩니다.
-- `ttft_any_ms`와 `ttft_content_ms`는 별도로 추적되어야 합니다.
-- direct-answer mode는 하나의 답변을 여러 model stream으로 중복 송출하면 안 됩니다.
-- 비어 있는 streamed content가 조용히 성공한 답변처럼 처리되면 안 됩니다.
+## 6. Extended Runtime Invariants
 
-## Validation 방향
+### Comparison
 
-권장 테스트:
-- mode, relation, join-key invariant를 검증하는 contract test
-- planner assembly immutability regression check
-- runtime prelude strict contract regression check
-- canonical evidence와 render-profile regression check
-- streaming과 route behavior를 검증하는 runtime test
+- `comparison` must produce aggregation payloads before answer generation
+- aggregation payloads expose `metric`, `group_by`, `threshold`, `sort_order`, and `rank_items`
+- thresholded comparison requests keep the threshold in payload and summary metadata
 
-### Health
+### Series
 
-- `/health`는 compiled graph가 있으면 ready를 반환해야 하며, Redis/KV degradation만으로 실패하면 안 됩니다.
-- `/health/details`는 degraded dependency 상태를 payload에 계속 보여줘야 합니다.
+- `output_type=series` must produce runtime evidence, not metadata only
+- series payloads expose `series_key_kind`, `series_key`, `instance_projects`, `linked_perf`, and `year_buckets`
+- `pjt_no`-based series expansion must not collapse group and instance semantics
 
-### Diagnostic Invariants
+### Reverse trace
 
-- 사람 이름 miss diagnostic은 raw nested `prtcp_mp[]` 기준으로만 판정해야 합니다.
-- `payload_get("a[].b")`의 flatten 결과나 `prtcp_mp_hm_nm` 같은 집계 preview는 diagnostic evidence로 승격하면 안 됩니다.
-- raw nested evidence가 없으면 `FILTER_MISS_SUSPECTED` warning 대신 `unknown` 처리되어야 합니다.
+- `perf -> project -> perf` keeps the relation chain in runtime payloads and logs
+- hop3 follow-up must de-duplicate the origin performance hit from hop1
+- reverse-trace activation is planner-first
 
-### 6. Query Graph / Extended Render Invariants
+### Anchor resolution
 
-- `comparison` and `series` must survive as valid `output_type` values.
-- `project -> perf` relation queries must report `query_graph_kind=project_to_perf`.
-- `perf -> project` relation queries must report `query_graph_kind=perf_to_project`.
-- Stats or comparison requests must not leave `aggregation_kind` empty.
-- Project-series questions must not leave `series_kind` empty.
+- researcher + generic org ambiguity must remain visible in summary/debug metadata
+- resolved role-specific org filters may be compiled only from planner-fixed role truth
+- seedless `JOIN(instance)` with unresolved researcher/org pairing must downgrade to `lookup`
 
-## Comparison Output Invariants
+### Pattern analysis
 
-- Comparison aggregation payloads must expose `metric`, `group_by`, `candidate_docs`, `threshold`, `sort_order`, and `rank_items`.
-- Each comparison `rank_item` must preserve `group_key`, `pjt_id`, `pjt_no`, `project_title`, `metric_value`, and `supporting_perf_count` when available.
-- Comparison rendering must present aggregation payloads without re-counting inside the answer layer.
-- Thresholded comparison queries such as `papers >= 2` must record the threshold in both runtime payload and summary observability.
+- `pattern_analysis` queries must set `query_graph_kind=pattern_analysis`
+- supported pattern kinds are runtime-computed, not answer-layer inferred
 
-## Series Output Invariants
+### Multi-hop bundle
 
-- `output_type=series` must produce runtime evidence, not planner metadata only.
-- Series payloads must preserve `series_key_kind`, `series_key`, `instance_projects`, `linked_perf`, and `year_buckets`.
-- `pjt_no`-based series expansion must keep group-key meaning separate from instance-level `pjt_id` keys.
-- Series rendering must use the precomputed runtime payload and must not rebuild year buckets inside the answer layer.
+- `multi_hop_bundle` is a planner-first query-graph kind for researcher/org -> project -> multiple downstream targets
+- ambiguity must downgrade execution and surface guidance instead of forcing strict JOIN
 
+## 7. QuestionAnalysis v3 Golden Cases
 
-## Reverse Trace Invariants
+- `과제번호 a4412354543 상세` -> `LOOKUP` + `project_key_policy=ambiguous_or` + unresolved `candidate_keys.project_key`
+- `과제번호 a4412354543 성과` -> `JOIN` + `join_key_mode=deferred`
+- `과제고유번호 a4412354543 상세` -> resolved `ids_map.pjt_id`
+- `동일과제번호 a4412354543 전체 이력` -> resolved `ids_map.pjt_no`
+- numeric-only project keys without a strong label must not be auto-promoted to resolved `pjt_id`
+- alphanumeric exact project keys may survive as `candidate_keys.project_key` if hygiene validation passes
 
-- `perf -> project -> perf` questions must keep the relation chain in runtime payloads and logs.
-- Hop3 follow-up performance evidence must de-duplicate the origin performance hit from hop1.
-- Reverse trace meaning must come from planner truth, not regex extraction from the raw user query.
-## Anchor Resolution Golden Cases
-
-- Researcher + generic org + topic queries must preserve the ambiguity in summary/debug metadata instead of silently coercing the org into a lead/participant role.
-- Researcher + org-role queries may compile role-specific filters from resolved anchors without inventing new ids.
-- Seedless `JOIN(instance)` with only an unresolved researcher/org pair must downgrade to `lookup`.
+Transport baseline:
+- `IntentPayloadV3`
+- `intent_payload_version="v3"`
+- `strategy_version="v3"`

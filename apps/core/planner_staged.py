@@ -11,7 +11,7 @@ Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
 Action = Literal["topic", "list", "detail", "stats", "download"]
 Relation = Literal["project_perf", "perf_project"]
-JoinKeyMode = Literal["instance", "group"]
+JoinKeyMode = Literal["instance", "group", "deferred"]
 
 PROJECT_TO_PERF = "project_perf"
 PERF_TO_PROJECT = "perf_project"
@@ -30,10 +30,10 @@ _PERF_SEED_KEYS = (
 
 @dataclass(frozen=True)
 class LockedStrategy:
-    """stage 1에서 고정된 planner 전략 필드를 묶어 두는 구조체다.
-    stage 2는 ids·filters·retrieval_query·limit만 채우고, mode·relation·join_key_mode·target_cols는 이 값을 지켜야 한다.
+    """Container for stage-1 locked planner strategy fields.
+    Stage 2 may fill ids, candidate_keys, filters, retrieval_query, and limit only.
+    Deferred join is not emitted here by default; it becomes legal only after stage-2 sanitize and re-gate.
     """
-
     mode: Mode
     head: Head
     action: Action
@@ -221,8 +221,9 @@ def compose_locked_strategy(
     gate_seed_map: Optional[Dict[str, List[str]]] = None,
 ) -> LockedStrategy:
 
-    """stage 1 결과, 시드, 참조 context 여부로 locked strategy를 조합한다.
-    relation과 explicit join seed, previous anchor를 함께 보고 SEARCH/LOOKUP/JOIN 모드를 고정하며, output_type·target_cols도 같이 결정한다.
+    """Build the locked stage-1 strategy from resolved seeds and prior context.
+    This step fixes SEARCH, LOOKUP, or JOIN only from resolved seeds.
+    Deferred join for ambiguous exact project keys is introduced later by stage-2 sanitize and re-gate.
     """
     action = str(stage1.get("action") or "topic").strip().lower() or "topic"
     head = str(stage1.get("head") or "project").strip().lower() or "project"
@@ -267,8 +268,9 @@ def compose_locked_strategy(
 
 def merge_locked_strategy_slots(*, schema_version: str, locked: LockedStrategy, slots: Dict[str, Any], default_query: Optional[str] = None) -> Dict[str, Any]:
 
-    """locked strategy와 stage 2 slots를 합친 최종 planner payload를 만든다.
-    stage 2가 바꾸면 안 되는 필드는 locked truth에서 가져오고, 가변 슬롯만 붙여 v3-staged schema를 완성한다.
+    """Merge locked strategy fields with stage-2 slots into the final planner payload.
+    Locked fields stay fixed, while v3 slot fields such as candidate_keys, project_key_policy, and join_resolution_policy are appended.
+    Deferred join remains a downstream runtime strategy, not a stage-1 lock.
     """
     return {
         "strategy_version": schema_version,
@@ -280,6 +282,9 @@ def merge_locked_strategy_slots(*, schema_version: str, locked: LockedStrategy, 
         "target_cols": list(locked.target_cols),
         "output_type": locked.output_type,
         "ids_map": dict(slots.get("ids_map") or {}),
+        "candidate_keys": dict(slots.get("candidate_keys") or {}),
+        "project_key_policy": slots.get("project_key_policy"),
+        "join_resolution_policy": slots.get("join_resolution_policy"),
         "filters": dict(slots.get("filters") or {}),
         "limit": int(slots.get("limit") or 20),
         "retrieval_query": slots.get("retrieval_query") or default_query,

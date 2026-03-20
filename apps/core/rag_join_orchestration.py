@@ -16,6 +16,7 @@ from apps.core.rag_join_runtime import (
     ensure_join_keys_in_payload,
     ensure_join_mode_has_keys,
     raise_on_missing_join_keys,
+    resolve_deferred_join_from_hop1,
     resolve_join_compile_selection,
     resolve_join_keys_from_hop1,
 )
@@ -169,6 +170,7 @@ class JoinOrchestrationRuntime:
     context_builder: Callable[..., Any]
     payload_get_fn: Optional[Callable[..., Any]] = None
     series_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
+    multi_hop_bundle_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 @dataclass(frozen=True)
@@ -360,15 +362,27 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
     """
     t_hop0 = time.time()
     ids_map = getattr(request.intent_item, "ids_map", None) or getattr(request.intent_item, "ids", None) or {}
+    candidate_keys = getattr(request.intent_item, "candidate_keys", None) or {}
+    project_key_policy = str(getattr(request.intent_item, "project_key_policy", "") or "").strip().lower() or None
+    join_resolution_policy = str(getattr(request.intent_item, "join_resolution_policy", "") or "").strip().lower() or None
+    candidate_project_key_items = list((candidate_keys or {}).get("project_key") or [])
+    candidate_project_keys: List[str] = []
+    for item in candidate_project_key_items:
+        if isinstance(item, dict):
+            text_value = str(item.get("value") or "").strip()
+        else:
+            text_value = str(item or "").strip()
+        if text_value and text_value not in candidate_project_keys:
+            candidate_project_keys.append(text_value)
     join_key_source = "hop1"
     join_key_mode = request.resolved_join_key_mode
     pjt_ids = [str(x).strip() for x in list(ids_map.get("pjt_id") or []) if str(x).strip()]
     pjt_nos = [str(x).strip() for x in list(ids_map.get("pjt_no") or []) if str(x).strip()]
     seed_join_pjt_ids = list(dict.fromkeys(pjt_ids))
     seed_join_pjt_nos = list(dict.fromkeys(pjt_nos))
-    seed_join_ids = seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos
+    seed_join_ids = candidate_project_keys if join_key_mode == "deferred" else (seed_join_pjt_ids if join_key_mode == "instance" else seed_join_pjt_nos)
     if seed_join_ids:
-        join_key_source = "ids_map"
+        join_key_source = "candidate_keys" if join_key_mode == "deferred" else "ids_map"
 
     hop1_strategy = str(request.join_execution_policy.get("hop1_strategy") or "search")
     runtime.log_kv("RAG.JOIN.POLICY", relation=request.relation, action=request.action, join_key_mode=join_key_mode, policy_source=request.join_execution_policy.get("policy_source") or "execution_policy", hop1_strategy=hop1_strategy, reason=request.join_execution_policy.get("reason"), execution_policy_reason=request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), seed_key_source=request.join_execution_policy.get("seed_key_source"), seed_key_count=int(request.join_execution_policy.get("seed_key_count") or 0), group_resolve_project_ids=int(request.join_execution_policy.get("group_resolve_project_ids") or 0), group_resolve_max_ids=int(request.join_execution_policy.get("group_resolve_max_ids") or 0), group_resolve_topk=int(request.join_execution_policy.get("group_resolve_topk") or 0), tier="debug")
@@ -393,11 +407,13 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
     join_pjt_ids: List[str] = []
     join_pjt_nos: List[str] = []
     hop1_top: List[Any] = []
+    dual_branch_used = False
+    resolved_runtime_join_key_mode = join_key_mode
     if hop1_strategy == "skip" and seed_join_ids:
-        join_key_source = "ids_map"
+        join_key_source = "candidate_keys" if join_key_mode == "deferred" else "ids_map"
 
-    has_seed_join_keys = bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids)
-    runtime.log_kv("RAG.PLAN.JOIN_EXECUTED", relation=request.relation, action=request.action, join_key_mode=join_key_mode, policy_source=request.join_execution_policy.get("policy_source") or "execution_policy", has_seed_join_keys=int(has_seed_join_keys), hop1_strategy=hop1_strategy, execution_policy_reason=request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), seed_key_source=request.join_execution_policy.get("seed_key_source"), seed_key_count=int(request.join_execution_policy.get("seed_key_count") or 0), tier="debug")
+    has_seed_join_keys = bool(candidate_project_keys) if join_key_mode == "deferred" else (bool(seed_join_pjt_nos) if join_key_mode == "group" else bool(seed_join_pjt_ids))
+    runtime.log_kv("RAG.PLAN.JOIN_EXECUTED", relation=request.relation, action=request.action, join_key_mode=join_key_mode, policy_source=request.join_execution_policy.get("policy_source") or "execution_policy", has_seed_join_keys=int(has_seed_join_keys), hop1_strategy=hop1_strategy, execution_policy_reason=request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), seed_key_source=request.join_execution_policy.get("seed_key_source"), seed_key_count=int(request.join_execution_policy.get("seed_key_count") or 0), candidate_project_key_count=len(candidate_project_keys), project_key_policy=project_key_policy, join_resolution_policy=join_resolution_policy, tier="debug")
     if join_key_mode == "group" and seed_join_pjt_nos:
         join_pjt_nos = seed_join_pjt_nos[:]
         join_key_source = "ids_map"
@@ -407,7 +423,7 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
 
     local_timings_h1: Dict[str, float] = {}
     allow_skip_min_lookup = str(os.getenv("RAG_JOIN_HOP1_SKIP_MIN_LOOKUP", "0")).strip().lower() in ("1", "true", "yes", "y")
-    run_hop1 = hop1_strategy in ("lookup", "search") or (hop1_strategy == "skip" and join_key_mode == "instance" and bool(seed_join_pjt_ids) and allow_skip_min_lookup)
+    run_hop1 = join_key_mode == "deferred" or hop1_strategy in ("lookup", "search") or (hop1_strategy == "skip" and join_key_mode == "instance" and bool(seed_join_pjt_ids) and allow_skip_min_lookup)
     hop1_filter = runtime.build_tag_only_filter_fn(hop1_tag_filters) if hop1_tag_filters else None
     if request.people_filter:
         hop1_filter = runtime.and_filter_fn(hop1_filter, request.people_filter)
@@ -445,6 +461,27 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
         hop1_filter = runtime.and_filter_fn(hop1_filter, request.perf_type_filter)
 
     hop1_filter, executed_hop1_filter_spec = build_join_hop1_filter(relation=request.relation, hop1_col=hop1_col, hop1_filter=hop1_filter, compiled_hop1_spec=request.compiled_strategy.hop1_spec, and_filter=runtime.and_filter_fn)
+    if join_key_mode == "deferred" and hop1_col == COL_PROJECT and candidate_project_keys:
+        ambiguous_filter = runtime.build_collection_join_filter_fn(
+            hop2_col=hop1_col,
+            join_key_mode="deferred",
+            join_ids=[],
+            pjt_nos=[],
+            candidate_project_keys=candidate_project_keys,
+            project_key_policy=project_key_policy or "ambiguous_or",
+            resolved_pjt_ids=[],
+            query=request.query_text,
+            apply_query_tag_inference=False,
+        )
+        hop1_filter = runtime.and_filter_fn(hop1_filter, ambiguous_filter)
+        executed_hop1_filter_spec = dict(executed_hop1_filter_spec or {})
+        executed_hop1_filter_spec.setdefault("_meta", {})
+        if isinstance(executed_hop1_filter_spec.get("_meta"), dict):
+            executed_hop1_filter_spec["_meta"] = {
+                **dict(executed_hop1_filter_spec.get("_meta") or {}),
+                "project_key_policy": project_key_policy or "ambiguous_or",
+                "candidate_project_key_count": len(candidate_project_keys),
+            }
     planner_join_hop1_filter_spec = dict((request.planner_filter_spec or {}).get("join_hop1_filter") or {})
     join_hop1_filter_diff = runtime.diff_filter_spec_fn(planner_filter_spec=planner_join_hop1_filter_spec, executed_filter_spec=executed_hop1_filter_spec)
     join_hop1_filter_diff_changed = join_hop1_filter_diff.get("changed", {})
@@ -469,17 +506,28 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
         else:
             hydrate_keep = min(max(hop1_keep, int(os.getenv("RAG_HOP1_FINAL_KEEP", "40")), 20), request.ctx_hard_limit)
             runtime.hydrate_points_fn(hop1_reranked[:hydrate_keep])
-            missing = runtime.count_missing_join_keys_fn(hop1_top, join_key_mode=join_key_mode)
-            if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
-                if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
-                    runtime.hydrate_points_fn(hop1_top)
-                raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode, count_missing_join_keys=runtime.count_missing_join_keys_fn, log_kv=runtime.log_kv, debug_force_join_keys_enabled=runtime.debug_force_join_keys_enabled_fn, ensure_join_keys_in_payload_fn=lambda pts: ensure_join_keys_in_payload(pts, get_meta=runtime.get_meta_fn, pick_first=runtime.pick_first_fn))
-        join_resolution = resolve_join_keys_from_hop1(hop1_top=hop1_top, hop1_reranked=hop1_reranked, hop1_keep=hop1_keep, join_key_mode=join_key_mode, seed_join_pjt_nos=seed_join_pjt_nos, join_execution_policy=request.join_execution_policy, relation=request.relation, hop1_col=hop1_col, hop1_k_base=hop1_k_base, log_kv=runtime.log_kv, extract_join_keys=runtime.extract_join_keys_fn, resolve_group_pjt_ids=runtime.resolve_group_pjt_ids_fn)
-        join_key_result = join_resolution.join_key_result
-        join_pjt_ids = list(join_resolution.join_pjt_ids)
-        join_pjt_nos = list(join_resolution.join_pjt_nos)
-        if hop1_top:
-            join_key_source = join_resolution.join_key_source or "hop1"
+            if join_key_mode != "deferred":
+                missing = runtime.count_missing_join_keys_fn(hop1_top, join_key_mode=join_key_mode)
+                if (missing.get("missing_pjt_any") or missing.get("missing_tag") or missing.get("invalid_pjt_id") or missing.get("invalid_pjt_no") or missing.get("suspected_swap") or missing.get("same_id_no")):
+                    if str(os.getenv("RAG_HOP1_REHYDRATE_ON_MISSING_KEYS", "1")).strip().lower() in ("1", "true", "yes", "y"):
+                        runtime.hydrate_points_fn(hop1_top)
+                    raise_on_missing_join_keys(hop1_top, scope=f"join_hop1:{hop1_col}", join_key_mode=join_key_mode, count_missing_join_keys=runtime.count_missing_join_keys_fn, log_kv=runtime.log_kv, debug_force_join_keys_enabled=runtime.debug_force_join_keys_enabled_fn, ensure_join_keys_in_payload_fn=lambda pts: ensure_join_keys_in_payload(pts, get_meta=runtime.get_meta_fn, pick_first=runtime.pick_first_fn))
+        if join_key_mode == "deferred":
+            deferred_resolution = resolve_deferred_join_from_hop1(hop1_top=hop1_top, hop1_keep=hop1_keep, seed_join_pjt_ids=seed_join_pjt_ids, seed_join_pjt_nos=seed_join_pjt_nos, extract_join_keys=runtime.extract_join_keys_fn, log_kv=runtime.log_kv, join_resolution_policy=join_resolution_policy)
+            join_pjt_ids = list(deferred_resolution.join_pjt_ids)
+            join_pjt_nos = list(deferred_resolution.join_pjt_nos)
+            resolved_runtime_join_key_mode = deferred_resolution.resolved_join_key_mode
+            dual_branch_used = bool(deferred_resolution.dual_branch_used)
+            join_key_result = JoinKeyExtractionResult(keys=list(join_pjt_ids or join_pjt_nos), invalid_values=[], suspected_swaps=[])
+            if hop1_top:
+                join_key_source = deferred_resolution.join_key_source or "hop1"
+        else:
+            join_resolution = resolve_join_keys_from_hop1(hop1_top=hop1_top, hop1_reranked=hop1_reranked, hop1_keep=hop1_keep, join_key_mode=join_key_mode, seed_join_pjt_nos=seed_join_pjt_nos, join_execution_policy=request.join_execution_policy, relation=request.relation, hop1_col=hop1_col, hop1_k_base=hop1_k_base, log_kv=runtime.log_kv, extract_join_keys=runtime.extract_join_keys_fn, resolve_group_pjt_ids=runtime.resolve_group_pjt_ids_fn)
+            join_key_result = join_resolution.join_key_result
+            join_pjt_ids = list(join_resolution.join_pjt_ids)
+            join_pjt_nos = list(join_resolution.join_pjt_nos)
+            if hop1_top:
+                join_key_source = join_resolution.join_key_source or "hop1"
     else:
         join_key_result = JoinKeyExtractionResult(keys=[], invalid_values=[], suspected_swaps=[])
         runtime.log_kv("RAG.JOIN.HOP1.SKIPPED", relation=request.relation, hop1_col=hop1_col, hop1_strategy=hop1_strategy, policy_source=request.join_execution_policy.get("policy_source") or "execution_policy", reason=request.join_execution_policy.get("reason"), execution_policy_reason=request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), seed_key_source=request.join_execution_policy.get("seed_key_source"), seed_key_count=int(request.join_execution_policy.get("seed_key_count") or 0), allow_skip_min_lookup=int(allow_skip_min_lookup), tier="debug")
@@ -493,7 +541,7 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
         raise StrategyViolation(error_code="JOIN_KEYS_INVALID", reason=f"[join_hop1:{hop1_col}:extract] invalid join keys detected (join_key_mode={join_key_mode}, invalid_count={len(invalid_values)}, suspected_swap_count={suspected_swap_count})")
 
     runtime.log_top_points("RAG.JOIN.HOP1.TOP", hop1_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP1", "6")), tier="debug")
-    if join_key_mode == "group":
+    if resolved_runtime_join_key_mode == "group":
         runtime.log_section("RAG.JOIN.JOIN_PJT_NOS", join_pjt_nos[: min(len(join_pjt_nos), 30)], tier="debug")
     else:
         runtime.log_section("RAG.JOIN.JOIN_PJT_IDS", join_pjt_ids[: min(len(join_pjt_ids), 30)], tier="debug")
@@ -501,64 +549,122 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
     runtime.log_kv("RAG.JOIN.HOP1.TIMINGS", tier="debug", **hop1_payload)
 
     has_join_keys = len(join_pjt_ids) > 0 or len(join_pjt_nos) > 0
-    ensure_join_mode_has_keys(has_join_keys=has_join_keys, join_key_mode=join_key_mode, hop1_top=hop1_top, hop1_col=hop1_col, join_pjt_ids_count=len(join_pjt_ids), join_pjt_nos_count=len(join_pjt_nos), log_kv=runtime.log_kv, raise_on_missing_join_keys_fn=lambda points, **kwargs: raise_on_missing_join_keys(points, count_missing_join_keys=runtime.count_missing_join_keys_fn, log_kv=runtime.log_kv, debug_force_join_keys_enabled=runtime.debug_force_join_keys_enabled_fn, ensure_join_keys_in_payload_fn=lambda pts: ensure_join_keys_in_payload(pts, get_meta=runtime.get_meta_fn, pick_first=runtime.pick_first_fn), **kwargs))
-    if join_key_mode == "group" and int(request.join_execution_policy.get("group_resolve_project_ids") or 0) and len(join_pjt_ids) == 0:
-        raise StrategyViolation(error_code="JOIN_GROUP_KEYS_UNRESOLVED", reason=f"group JOIN Hop1 resolve failed: resolved_pjt_ids is empty (relation={request.relation}, hop1_col={hop1_col}, seed_pjt_nos={len(seed_join_pjt_nos)})")
+    if join_key_mode == "deferred":
+        runtime.timing_put_fn(request.timings, "info.project_key_policy", project_key_policy or "ambiguous_or")
+        runtime.timing_put_fn(request.timings, "info.join_resolution_policy", join_resolution_policy or "auto_resolve")
+        runtime.timing_put_fn(request.timings, "info.resolved_join_key_mode", resolved_runtime_join_key_mode)
+        runtime.timing_put_fn(request.timings, "info.dual_branch_used", int(dual_branch_used))
+        runtime.timing_put_fn(request.timings, "info.candidate_project_key_count", len(candidate_project_keys))
+        if not hop1_top:
+            runtime.timing_put_fn(request.timings, "info.failed_step", "join_deferred_empty_result")
+            result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=[], hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=[], hop2_label=hop2_label, effective_join_mode="deferred", join_pjt_ids=[], join_pjt_nos=[], preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=[], debug_meta={"join": {"join_key_mode": "deferred", "resolved_join_key_mode": "deferred", "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "project_key_policy": project_key_policy or "ambiguous_or", "join_resolution_policy": join_resolution_policy or "auto_resolve", "dual_branch_used": 0, "candidate_project_key_count": len(candidate_project_keys), "join_compile_selection": "deferred_empty_result", "hop2_key_strategy": "project_key_exact_or", "resolved_runtime_key_kind": "project_key", "join_keys_used_count": 0, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}}, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
+            return JoinOrchestrationOutcome(result=result, join_key_source=join_key_source, hop1_mode=hop1_strategy, join_compile_selection="deferred_empty_result", hop2_key_strategy="project_key_exact_or", resolved_runtime_key_kind="project_key", join_keys_used_count=0)
+        if not has_join_keys:
+            runtime.timing_put_fn(request.timings, "info.failed_step", "join_deferred_unresolved")
+            result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=hop1_top, hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=[], hop2_label=hop2_label, effective_join_mode="deferred", join_pjt_ids=[], join_pjt_nos=[], preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=list(hop1_top or []), debug_meta={"join": {"join_key_mode": "deferred", "resolved_join_key_mode": "deferred", "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "project_key_policy": project_key_policy or "ambiguous_or", "join_resolution_policy": join_resolution_policy or "auto_resolve", "dual_branch_used": int(dual_branch_used), "candidate_project_key_count": len(candidate_project_keys), "join_compile_selection": "deferred_unresolved", "hop2_key_strategy": "project_key_exact_or", "resolved_runtime_key_kind": "project_key", "join_keys_used_count": 0, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}}, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
+            return JoinOrchestrationOutcome(result=result, join_key_source=join_key_source, hop1_mode=hop1_strategy, join_compile_selection="deferred_unresolved", hop2_key_strategy="project_key_exact_or", resolved_runtime_key_kind="project_key", join_keys_used_count=0)
+    else:
+        ensure_join_mode_has_keys(has_join_keys=has_join_keys, join_key_mode=join_key_mode, hop1_top=hop1_top, hop1_col=hop1_col, join_pjt_ids_count=len(join_pjt_ids), join_pjt_nos_count=len(join_pjt_nos), log_kv=runtime.log_kv, raise_on_missing_join_keys_fn=lambda points, **kwargs: raise_on_missing_join_keys(points, count_missing_join_keys=runtime.count_missing_join_keys_fn, log_kv=runtime.log_kv, debug_force_join_keys_enabled=runtime.debug_force_join_keys_enabled_fn, ensure_join_keys_in_payload_fn=lambda pts: ensure_join_keys_in_payload(pts, get_meta=runtime.get_meta_fn, pick_first=runtime.pick_first_fn), **kwargs))
+        if join_key_mode == "group" and int(request.join_execution_policy.get("group_resolve_project_ids") or 0) and len(join_pjt_ids) == 0:
+            raise StrategyViolation(error_code="JOIN_GROUP_KEYS_UNRESOLVED", reason=f"group JOIN Hop1 resolve failed: resolved_pjt_ids is empty (relation={request.relation}, hop1_col={hop1_col}, seed_pjt_nos={len(seed_join_pjt_nos)})")
 
-    planner_join_key_mode = request.resolved_join_key_mode
+    planner_join_key_mode = resolved_runtime_join_key_mode if join_key_mode == "deferred" and resolved_runtime_join_key_mode in {"instance", "group"} else request.resolved_join_key_mode
     join_compile_selection = resolve_join_compile_selection(
         hop2_col=hop2_col,
-        join_key_mode=planner_join_key_mode,
+        join_key_mode=(planner_join_key_mode if not dual_branch_used else "deferred"),
         join_pjt_ids=join_pjt_ids,
         join_pjt_nos=join_pjt_nos,
     )
     if join_compile_selection == "group_join_keys_missing":
         raise StrategyViolation(error_code="JOIN_GROUP_KEYS_UNRESOLVED", reason=f"group JOIN Hop2(perf) compile failed: neither pjt_no nor fallback pjt_id is available (relation={request.relation}, hop2_col={hop2_col}, join_key_mode={planner_join_key_mode})")
-    runtime.log_kv("RAG.JOIN.KEY_MODE.CHECK", resolved_join_key_mode=request.resolved_join_key_mode, planner_raw_join_key_mode=request.planner_raw_join_key_mode, planner_join_key_mode=planner_join_key_mode, join_compile_selection=join_compile_selection, join_pjt_ids_count=len(join_pjt_ids), resolved_pjt_ids_count=len(join_pjt_ids), join_pjt_nos_count=len(join_pjt_nos), opposite_key_count=(len(join_pjt_ids) if join_key_mode == "group" else len(join_pjt_nos)), relation=request.relation, hop2_col=hop2_col, tier="debug")
-    try:
-        runtime.validate_resolved_join_keys_fn(mode=planner_join_key_mode, pjt_ids=join_pjt_ids, pjt_nos=join_pjt_nos)
-    except ValueError as exc:
-        msg = str(exc)
-        error_code, _, reason = msg.partition(": ")
-        raise StrategyViolation(error_code=error_code if error_code.startswith("EXECUTOR_") else "EXECUTOR_JOIN_KEYS_INVALID", reason=reason or msg) from exc
+    runtime.log_kv("RAG.JOIN.KEY_MODE.CHECK", resolved_join_key_mode=request.resolved_join_key_mode, planner_raw_join_key_mode=request.planner_raw_join_key_mode, planner_join_key_mode=planner_join_key_mode, resolved_runtime_join_key_mode=resolved_runtime_join_key_mode, project_key_policy=project_key_policy, join_resolution_policy=join_resolution_policy, dual_branch_used=int(dual_branch_used), join_compile_selection=join_compile_selection, join_pjt_ids_count=len(join_pjt_ids), resolved_pjt_ids_count=len(join_pjt_ids), join_pjt_nos_count=len(join_pjt_nos), opposite_key_count=(len(join_pjt_ids) if resolved_runtime_join_key_mode == "group" else len(join_pjt_nos)), relation=request.relation, hop2_col=hop2_col, tier="debug")
+    if planner_join_key_mode in {"instance", "group"}:
+        try:
+            runtime.validate_resolved_join_keys_fn(mode=planner_join_key_mode, pjt_ids=join_pjt_ids, pjt_nos=join_pjt_nos)
+        except ValueError as exc:
+            msg = str(exc)
+            error_code, _, reason = msg.partition(": ")
+            raise StrategyViolation(error_code=error_code if error_code.startswith("EXECUTOR_") else "EXECUTOR_JOIN_KEYS_INVALID", reason=reason or msg) from exc
 
     hop2_join_key_mode = planner_join_key_mode
-    hop2_filter, executed_join_filter_spec = build_join_hop2_filter(relation=request.relation, hop2_col=hop2_col, join_key_mode=hop2_join_key_mode, join_pjt_ids=join_pjt_ids, join_pjt_nos=join_pjt_nos, join_ids=(join_pjt_ids if hop2_join_key_mode == "instance" else []), q=request.query_text, hop2_tag_filters=hop2_tag_filters, people_terms=request.people_terms, org_terms=request.org_terms, planner_filter_spec=request.planner_filter_spec, compiled_hop2_spec=request.compiled_strategy.hop2_spec, build_collection_join_filter=runtime.build_collection_join_filter_fn, join_filter_input_factory=runtime.join_filter_input_factory, and_filter=runtime.and_filter_fn, serialize_filter_for_log=runtime.serialize_filter_for_log_fn, log_kv=runtime.log_kv)
-    if request.relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and request.org_filter:
-        hop2_filter = runtime.and_filter_fn(hop2_filter, request.org_filter)
-    planner_join_filter_spec = dict((request.planner_filter_spec or {}).get("join_filter") or {})
-    join_filter_diff = runtime.diff_filter_spec_fn(planner_filter_spec=planner_join_filter_spec, executed_filter_spec=executed_join_filter_spec, list_match_mode="subset")
-    join_filter_diff_changed = join_filter_diff.get("changed", {})
-    runtime.log_kv("RAG.JOIN.HOP2.FILTER_SPEC.DIFF", level="error" if join_filter_diff_changed else "info", planner_filter_keys=join_filter_diff.get("planner_keys", []), changed=join_filter_diff_changed, changed_count=len(join_filter_diff_changed), planner_join_filter_spec=planner_join_filter_spec, executed_join_filter_spec=executed_join_filter_spec, tier="debug")
-    if join_filter_diff_changed:
-        raise StrategyViolation(error_code="STRATEGY_MISMATCH", reason=f"join Hop2 filter_spec mismatch between planner and executed (changed_keys={list(join_filter_diff_changed.keys())})")
-
-    if hop2_col == COL_PERF:
-        runtime.log_kv("RAG.JOIN.HOP2.ORG_GATE.SKIP", hop2_col=hop2_col, relation=request.relation, join_key_mode=hop2_join_key_mode, reason="hop2_perf_join_key_only", tier="debug")
-    else:
-        hop2_filter = runtime.with_org_must_gate_fn(hop2_filter, col=hop2_col, mode_override="join_hop2")
-    if hop2_col in (COL_PROJECT, COL_PERF) and request.year_range_filter:
-        hop2_filter = runtime.and_filter_fn(hop2_filter, request.year_range_filter)
-    if hop2_col == COL_PERF and request.perf_type_filter:
-        hop2_filter = runtime.and_filter_fn(hop2_filter, request.perf_type_filter)
-
-    executed_join_meta = dict((executed_join_filter_spec or {}).get("_meta") or {})
+    hop2_top: List[Any] = []
+    hop2_reranked: List[Any] = []
+    local_timings_h2: Dict[str, float] = {}
+    executed_join_meta: Dict[str, Any] = {}
     effective_join_mode = str(hop2_join_key_mode or "")
-    join_compile_selection = str(executed_join_meta.get("join_compile_selection") or join_compile_selection)
-    hop2_key_strategy = str(executed_join_meta.get("hop2_key_strategy") or ("pjt_no" if effective_join_mode == "group" else "pjt_id_in"))
-    resolved_runtime_key_kind = str(executed_join_meta.get("resolved_runtime_key_kind") or ("pjt_no" if hop2_key_strategy == "pjt_no" else "pjt_id"))
-    join_keys_used_count = int(
-        executed_join_meta.get("join_keys_used_count")
-        if executed_join_meta.get("join_keys_used_count") is not None
-        else (len(join_pjt_nos) if hop2_key_strategy == "pjt_no" else len(join_pjt_ids))
-    )
-    runtime.log_kv("RAG.JOIN.HOP2", hop2_col=hop2_col, hop2_kind=hop2_kind, hop2_q=request.query_text, hop2_tag_filters=hop2_tag_filters, hop2_filter=str(hop2_filter) if hop2_filter is not None else None, hop2_k_base=hop2_k_base, hop2_keep=hop2_keep, join_pjt_ids_preview=join_pjt_ids[:10], join_pjt_nos_preview=join_pjt_nos[:10], tier="debug")
+    hop2_key_strategy = "pjt_no" if effective_join_mode == "group" else "pjt_id_in"
+    resolved_runtime_key_kind = "pjt_no" if effective_join_mode == "group" else "pjt_id"
+    join_keys_used_count = len(join_pjt_nos) if effective_join_mode == "group" else len(join_pjt_ids)
 
-    hop2_reranked, local_timings_h2 = _run_ranked_hop(collection=hop2_col, query_text=request.query_text, keywords=request.keywords, query_filter=hop2_filter, k_base=hop2_k_base, dense_topk=request.topk_dense, sparse_vector_name_eff=request.sparse_vector_name_eff, sparse_weight_eff=request.sparse_weight_eff, vector_names=request.vector_names, w_dense_map=request.w_dense_map, fallback_emb=request.fallback_emb, qdr=runtime.qdr, preset=runtime.preset, contract_scope="join_hop2", rerank_mode="join", rerank_base_route=("perf" if hop2_kind == "perf" else request.base_route), rerank_keep=int(os.getenv("RAG_HOP2_FINAL_KEEP", "80")), intent_item=request.intent_item, lex_w_eff=request.lex_w_eff, ctx_hard_limit=request.ctx_hard_limit, log_prefix="RAG.DENSE.THRESHOLD.HOP2", action=request.action, base_route=request.base_route, relation=request.relation, runtime=runtime)
+    branch_specs: List[Tuple[str, List[str], List[str]]] = []
+    if dual_branch_used:
+        if join_pjt_ids:
+            branch_specs.append(("instance", list(join_pjt_ids), []))
+        if join_pjt_nos or join_pjt_ids:
+            branch_specs.append(("group", list(join_pjt_ids), list(join_pjt_nos)))
+        effective_join_mode = "deferred"
+        hop2_key_strategy = "dual_branch"
+        resolved_runtime_key_kind = "mixed"
+        join_keys_used_count = len(join_pjt_ids) + len(join_pjt_nos)
+    else:
+        branch_specs.append((hop2_join_key_mode, list(join_pjt_ids), list(join_pjt_nos)))
+
+    branch_results: List[Any] = []
+    branch_timings: List[Dict[str, float]] = []
+    primary_executed_join_filter_spec: Dict[str, Any] = {}
+
+    for branch_index, (branch_mode, branch_pjt_ids, branch_pjt_nos) in enumerate(branch_specs):
+        branch_filter, branch_filter_spec = build_join_hop2_filter(relation=request.relation, hop2_col=hop2_col, join_key_mode=branch_mode, join_pjt_ids=branch_pjt_ids, join_pjt_nos=branch_pjt_nos, join_ids=(branch_pjt_ids if branch_mode == "instance" else []), q=request.query_text, hop2_tag_filters=hop2_tag_filters, people_terms=request.people_terms, org_terms=request.org_terms, planner_filter_spec=request.planner_filter_spec, compiled_hop2_spec=request.compiled_strategy.hop2_spec, build_collection_join_filter=runtime.build_collection_join_filter_fn, join_filter_input_factory=runtime.join_filter_input_factory, and_filter=runtime.and_filter_fn, serialize_filter_for_log=runtime.serialize_filter_for_log_fn, log_kv=runtime.log_kv)
+        if request.relation not in (("project", "perf"), ("people", "perf"), ("org", "perf")) and hop2_kind in ("project", "org") and request.org_filter:
+            branch_filter = runtime.and_filter_fn(branch_filter, request.org_filter)
+        planner_join_filter_spec = dict((request.planner_filter_spec or {}).get("join_filter") or {})
+        branch_filter_diff = runtime.diff_filter_spec_fn(planner_filter_spec=planner_join_filter_spec, executed_filter_spec=branch_filter_spec, list_match_mode="subset")
+        branch_filter_diff_changed = branch_filter_diff.get("changed", {})
+        runtime.log_kv("RAG.JOIN.HOP2.FILTER_SPEC.DIFF", level="error" if branch_filter_diff_changed else "info", branch_mode=branch_mode, branch_index=branch_index, planner_filter_keys=branch_filter_diff.get("planner_keys", []), changed=branch_filter_diff_changed, changed_count=len(branch_filter_diff_changed), planner_join_filter_spec=planner_join_filter_spec, executed_join_filter_spec=branch_filter_spec, tier="debug")
+        if branch_filter_diff_changed and not dual_branch_used:
+            raise StrategyViolation(error_code="STRATEGY_MISMATCH", reason=f"join Hop2 filter_spec mismatch between planner and executed (changed_keys={list(branch_filter_diff_changed.keys())})")
+
+        if hop2_col == COL_PERF:
+            runtime.log_kv("RAG.JOIN.HOP2.ORG_GATE.SKIP", hop2_col=hop2_col, relation=request.relation, join_key_mode=branch_mode, reason="hop2_perf_join_key_only", tier="debug")
+        else:
+            branch_filter = runtime.with_org_must_gate_fn(branch_filter, col=hop2_col, mode_override="join_hop2")
+        if hop2_col in (COL_PROJECT, COL_PERF) and request.year_range_filter:
+            branch_filter = runtime.and_filter_fn(branch_filter, request.year_range_filter)
+        if hop2_col == COL_PERF and request.perf_type_filter:
+            branch_filter = runtime.and_filter_fn(branch_filter, request.perf_type_filter)
+
+        runtime.log_kv("RAG.JOIN.HOP2", hop2_col=hop2_col, hop2_kind=hop2_kind, hop2_q=request.query_text, hop2_tag_filters=hop2_tag_filters, hop2_filter=str(branch_filter) if branch_filter is not None else None, hop2_k_base=hop2_k_base, hop2_keep=hop2_keep, branch_mode=branch_mode, branch_index=branch_index, join_pjt_ids_preview=branch_pjt_ids[:10], join_pjt_nos_preview=branch_pjt_nos[:10], tier="debug")
+        branch_reranked, branch_timings_local = _run_ranked_hop(collection=hop2_col, query_text=request.query_text, keywords=request.keywords, query_filter=branch_filter, k_base=hop2_k_base, dense_topk=request.topk_dense, sparse_vector_name_eff=request.sparse_vector_name_eff, sparse_weight_eff=request.sparse_weight_eff, vector_names=request.vector_names, w_dense_map=request.w_dense_map, fallback_emb=request.fallback_emb, qdr=runtime.qdr, preset=runtime.preset, contract_scope="join_hop2", rerank_mode="join", rerank_base_route=("perf" if hop2_kind == "perf" else request.base_route), rerank_keep=int(os.getenv("RAG_HOP2_FINAL_KEEP", "80")), intent_item=request.intent_item, lex_w_eff=request.lex_w_eff, ctx_hard_limit=request.ctx_hard_limit, log_prefix="RAG.DENSE.THRESHOLD.HOP2", action=request.action, base_route=request.base_route, relation=request.relation, runtime=runtime)
+        branch_top = branch_reranked[: max(1, hop2_keep)]
+        runtime.log_top_points("RAG.JOIN.HOP2.TOP", branch_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")), tier="debug")
+        runtime.log_kv("RAG.JOIN.HOP2.TIMINGS", branch_mode=branch_mode, branch_index=branch_index, tier="debug", **build_join_hop_timing_payload(merge_log_fields=runtime.merge_log_fields_fn, local_timings=branch_timings_local))
+        if branch_index == 0:
+            primary_executed_join_filter_spec = branch_filter_spec
+            executed_join_meta = dict((branch_filter_spec or {}).get("_meta") or {})
+        branch_results.extend(branch_reranked)
+        branch_timings.append(branch_timings_local)
+
+    hop2_reranked = runtime.dedup_by_doc_id_fn(branch_results)
+    if len(hop2_reranked) > request.ctx_hard_limit:
+        hop2_reranked = hop2_reranked[: request.ctx_hard_limit]
     hop2_top = hop2_reranked[: max(1, hop2_keep)]
-    runtime.log_top_points("RAG.JOIN.HOP2.TOP", hop2_top, topn=int(os.getenv("RAG_LOG_TOPN_HOP2", "8")), tier="debug")
-    hop2_payload = build_join_hop_timing_payload(merge_log_fields=runtime.merge_log_fields_fn, local_timings=local_timings_h2)
-    runtime.log_kv("RAG.JOIN.HOP2.TIMINGS", tier="debug", **hop2_payload)
+    if dual_branch_used:
+        join_compile_selection = "deferred_dual_branch"
+        hop2_key_strategy = "dual_branch"
+        resolved_runtime_key_kind = "mixed"
+        executed_join_meta = {
+            **dict(executed_join_meta or {}),
+            "join_compile_selection": join_compile_selection,
+            "hop2_key_strategy": hop2_key_strategy,
+            "resolved_runtime_key_kind": resolved_runtime_key_kind,
+            "join_keys_used_count": join_keys_used_count,
+        }
+    else:
+        join_compile_selection = str(executed_join_meta.get("join_compile_selection") or join_compile_selection)
+        hop2_key_strategy = str(executed_join_meta.get("hop2_key_strategy") or ("pjt_no" if effective_join_mode == "group" else "pjt_id_in"))
+        resolved_runtime_key_kind = str(executed_join_meta.get("resolved_runtime_key_kind") or ("pjt_no" if hop2_key_strategy == "pjt_no" else "pjt_id"))
+        join_keys_used_count = int(executed_join_meta.get("join_keys_used_count") if executed_join_meta.get("join_keys_used_count") is not None else (len(join_pjt_nos) if hop2_key_strategy == "pjt_no" else len(join_pjt_ids)))
+    local_timings_h2 = branch_timings[0] if branch_timings else {}
 
     t0 = time.time()
     hydrate_limit = min(max(1, hop2_keep), request.ctx_hard_limit)
@@ -632,7 +738,7 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
     runtime.timing_put_fn(request.timings, "phase.hydrate_full_payload", time.time() - t0)
     runtime.timing_put_fn(request.timings, "phase.hop_total", time.time() - t_hop0)
     hits = (hop1_top or []) + (hop2_top or []) + (followup_perf_top or [])
-    debug_meta = {"join": {"join_key_mode": join_key_mode, "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "hop2_key_strategy": hop2_key_strategy, "resolved_runtime_key_kind": resolved_runtime_key_kind, "join_compile_selection": join_compile_selection, "join_keys_used_count": join_keys_used_count, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}, "reverse_trace": {"enabled": bool(request.reverse_trace_followup and request.relation == ("perf", "project")), "hop_count": (3 if request.reverse_trace_followup and request.relation == ("perf", "project") else 2), "origin_project_count": len(hop2_top or []), "followup_perf_count": len(followup_perf_top or []), "followup_relation_hint": request.followup_relation_hint}}
+    debug_meta = {"join": {"join_key_mode": join_key_mode, "resolved_join_key_mode": resolved_runtime_join_key_mode, "join_key_source": join_key_source, "hop1_mode": hop1_strategy, "policy_source": request.join_execution_policy.get("policy_source") or "execution_policy", "execution_policy_reason": request.join_execution_policy.get("execution_policy_reason") or request.join_execution_policy.get("reason"), "project_key_policy": project_key_policy, "join_resolution_policy": join_resolution_policy, "dual_branch_used": int(dual_branch_used), "candidate_project_key_count": len(candidate_project_keys), "hop2_key_strategy": hop2_key_strategy, "resolved_runtime_key_kind": resolved_runtime_key_kind, "join_compile_selection": join_compile_selection, "join_keys_used_count": join_keys_used_count, "seed_key_source": request.join_execution_policy.get("seed_key_source"), "seed_key_count": int(request.join_execution_policy.get("seed_key_count") or 0)}, "reverse_trace": {"enabled": bool(request.reverse_trace_followup and request.relation == ("perf", "project")), "hop_count": (3 if request.reverse_trace_followup and request.relation == ("perf", "project") else 2), "origin_project_count": len(hop2_top or []), "followup_perf_count": len(followup_perf_top or []), "followup_relation_hint": request.followup_relation_hint}}
     series = None
     if callable(runtime.series_builder_fn):
         series = runtime.series_builder_fn(
@@ -642,7 +748,33 @@ def execute_join_orchestration(*, request: JoinOrchestrationRequest, runtime: Jo
             policy_limit=request.ctx_hard_limit,
             payload_get_fn=runtime.payload_get_fn,
         )
-    result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=hop1_top, hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=hop2_top, hop2_label=hop2_label, effective_join_mode=effective_join_mode, join_pjt_ids=join_pjt_ids, join_pjt_nos=join_pjt_nos, preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=hits, series=series, reverse_trace=reverse_trace, debug_meta=debug_meta, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
+    runtime.timing_put_fn(request.timings, "info.project_key_policy", project_key_policy)
+    runtime.timing_put_fn(request.timings, "info.join_resolution_policy", join_resolution_policy)
+    runtime.timing_put_fn(request.timings, "info.resolved_join_key_mode", resolved_runtime_join_key_mode)
+    runtime.timing_put_fn(request.timings, "info.dual_branch_used", int(dual_branch_used))
+    runtime.timing_put_fn(request.timings, "info.candidate_project_key_count", len(candidate_project_keys))
+
+    multi_hop_bundle = None
+    if callable(runtime.multi_hop_bundle_builder_fn):
+        project_points = list(hop1_top if hop1_kind == "project" else hop2_top if hop2_kind == "project" else [])
+        perf_points = list(hop2_top if hop2_kind == "perf" else followup_perf_top if followup_perf_top else [])
+        multi_hop_bundle = runtime.multi_hop_bundle_builder_fn(
+            reranked=hits,
+            intent=request.intent_item,
+            hinted_limit=hop2_keep,
+            policy_limit=request.ctx_hard_limit,
+            payload_get_fn=runtime.payload_get_fn,
+            project_points=project_points,
+            perf_points=perf_points,
+        )
+        if multi_hop_bundle:
+            bundles = list(multi_hop_bundle.get("bundles") or [])
+            runtime.timing_put_fn(request.timings, "info.bundle_kind", str(multi_hop_bundle.get("bundle_kind") or ""))
+            runtime.timing_put_fn(request.timings, "info.bundle_target_count", len(bundles))
+            runtime.timing_put_fn(request.timings, "info.bundle_project_count", len(multi_hop_bundle.get("projects", []) or []))
+            runtime.timing_put_fn(request.timings, "info.bundle_item_count", sum(int(entry.get("item_count") or 0) for entry in bundles))
+            runtime.timing_put_fn(request.timings, "info.guidance_required", int(bool(multi_hop_bundle.get("guidance_message") or multi_hop_bundle.get("ambiguities"))))
+    result = assemble_join_rag_result(context_builder=runtime.context_builder, hop1_points=hop1_top, hop1_kind=hop1_kind, hop1_query_text=request.query_text, hop1_max_items=hop1_keep, hop2_reranked=hop2_top, hop2_label=hop2_label, effective_join_mode=effective_join_mode, join_pjt_ids=join_pjt_ids, join_pjt_nos=join_pjt_nos, preset_max_ctx_items=hop2_keep, ctx_hard_limit=request.ctx_hard_limit, action=request.action, hop2_kind=hop2_kind, output_type=request.output_type, mode=request.mode, query_text=request.query_text, people_terms=request.people_terms, person_ids=request.people_ids, org_terms=request.org_terms, org_role=request.org_role, timings=request.timings, t_all0=request.t_all0, stack=request.stack, keywords=request.keywords, hits=hits, series=series, reverse_trace=reverse_trace, multi_hop_bundle=multi_hop_bundle, debug_meta=debug_meta, timing_put=lambda key, value: runtime.timing_put_fn(request.timings, key, value), log_kv=runtime.log_kv)
     return JoinOrchestrationOutcome(
         result=result,
         join_key_source=join_key_source,

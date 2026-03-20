@@ -64,6 +64,13 @@ def resolve_join_execution_policy(
         seed_key_source = "ids_map.pjt_no"
         seed_key_count = len(seed_join_pjt_nos)
         join_seed_presence = "pjt_no"
+    elif join_key_mode == "deferred":
+        hop1_strategy = "lookup"
+        reason = "ambiguous_project_key_discovery"
+        seed_key_source = "candidate_keys.project_key"
+        seed_key_count = 0
+        join_seed_presence = "candidate_project_key"
+        hop1_key_extraction_status = "lookup_required"
     elif has_people_org_gate:
         hop1_strategy = "lookup"
         reason = "people_org_gate_lookup"

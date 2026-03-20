@@ -61,6 +61,8 @@ from apps.core.rag_rerank_support import RerankSupportRuntime, build_final_reran
 from apps.core.rag_runtime_observability import build_runtime_observability
 from apps.core.rag_dispatch_runtime import build_dispatch_runtime_support
 from apps.core.rag_runtime_safety import (
+    build_multi_hop_bundle_payload as _build_multi_hop_bundle_payload,
+    build_pattern_analysis_payload as _build_pattern_analysis_payload,
     build_people_superlative_aggregation as _build_people_superlative_aggregation,
     build_project_series_payload as _build_project_series_payload,
     debug_force_join_keys_enabled as _debug_force_join_keys_enabled,
@@ -122,6 +124,28 @@ from apps.core.planner_contract import (
     normalize_stats_policy_value,
     StrategyViolation,
 )
+
+
+def _extract_intent_payload_version(intent_payload: Any) -> Optional[str]:
+    """Return the declared transport payload version, if present."""
+    if intent_payload is None:
+        return None
+    if isinstance(intent_payload, Mapping):
+        value = intent_payload.get("intent_payload_version")
+    else:
+        value = getattr(intent_payload, "intent_payload_version", None)
+    return str(value or "").strip().lower() or None
+
+
+def _validate_intent_payload_version(intent_payload: Any) -> None:
+    """Accept only the v3 transport wrapper when an intent payload is supplied."""
+    if intent_payload is None:
+        return
+    version = _extract_intent_payload_version(intent_payload)
+    if version != "v3":
+        raise ValueError(f"intent_payload_version must be 'v3', got {version!r}")
+
+
 from apps.core.rag_rank_runtime import (
     dedup_by_doc_id as _dedup_by_doc_id,
     RankSource as _RankSource,
@@ -227,6 +251,8 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
     ids_flat = getattr(it, "ids_flat", None)
     if isinstance(ids_flat, list) and len(ids_flat) > 0:
         return True
+    if bool(getattr(it, "is_exact_key_query", False)):
+        return True
     # backward compat
     legacy = getattr(it, "ids", None)
     if isinstance(legacy, dict) and any(v for v in legacy.values() if v):
@@ -246,6 +272,10 @@ def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
                 return True
     ids_flat = getattr(it, "ids_flat", None) or []
     if isinstance(ids_flat, list) and ids_flat:
+        return True
+    if bool(getattr(it, "is_exact_key_query", False)):
+        return True
+    if bool(getattr(it, "has_project_candidate_key", False) or getattr(it, "has_perf_candidate_key", False)):
         return True
     return False
 
@@ -611,6 +641,8 @@ def _run_rag_with_vectors(
         soft_title_contains_fn=soft_title_contains,
         aggregation_builder_fn=_build_people_superlative_aggregation,
         series_builder_fn=_build_project_series_payload,
+        pattern_analysis_builder_fn=_build_pattern_analysis_payload,
+        multi_hop_bundle_builder_fn=_build_multi_hop_bundle_payload,
         payload_get_fn=_payload_get,
         hit_key_fn=_hit_key,
         title_match_mode_contains=TITLE_MATCH_MODE_CONTAINS,
@@ -857,6 +889,7 @@ def run_rag_once(
         intent_payload: Any = None,
 ) -> RagResult:
     """기본 vector 설정으로 단일 RAG 실행을 수행하는 공개 엔트리포인트다."""
+    _validate_intent_payload_version(intent_payload)
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
     vector_names = [v.strip() for v in vector_names_env.split(",") if v.strip()]

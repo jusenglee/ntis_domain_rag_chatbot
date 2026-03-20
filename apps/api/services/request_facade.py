@@ -24,6 +24,58 @@ def has_explicit_precheck_signals(precheck: dict[str, Any]) -> bool:
     return False
 
 
+def _build_strategy_meta(normalized_intent: Any, question_analysis: Any) -> Dict[str, Any]:
+    """Build the transport-visible v3 strategy metadata bundle."""
+    if isinstance(normalized_intent, dict):
+        ids_map = normalized_intent.get("ids_map") or {}
+        candidate_keys = normalized_intent.get("candidate_keys") or {}
+        project_key_policy = normalized_intent.get("project_key_policy")
+        join_resolution_policy = normalized_intent.get("join_resolution_policy")
+        join_key_mode = normalized_intent.get("join_key_mode")
+        is_exact_key_query = bool(normalized_intent.get("is_exact_key_query", False))
+    else:
+        ids_map = getattr(normalized_intent, "ids_map", None) or {}
+        candidate_keys = getattr(normalized_intent, "candidate_keys", None) or {}
+        project_key_policy = getattr(normalized_intent, "project_key_policy", None)
+        join_resolution_policy = getattr(normalized_intent, "join_resolution_policy", None)
+        join_key_mode = getattr(normalized_intent, "join_key_mode", None)
+        is_exact_key_query = bool(getattr(normalized_intent, "is_exact_key_query", False))
+    return {
+        "strategy_version": str(getattr(question_analysis, "strategy_version", "v3") or "v3"),
+        "candidate_keys": dict(candidate_keys),
+        "project_key_policy": project_key_policy,
+        "join_resolution_policy": join_resolution_policy,
+        "join_key_mode": join_key_mode,
+        "ids_map": dict(ids_map),
+        "has_project_candidate_key": bool((candidate_keys.get("project_key") or [])),
+        "has_perf_candidate_key": bool((candidate_keys.get("perf_key") or [])),
+        "is_exact_key_query": is_exact_key_query,
+        "candidate_project_key_count": len(candidate_keys.get("project_key") or []),
+        "candidate_perf_key_count": len(candidate_keys.get("perf_key") or []),
+    }
+
+
+def _build_intent_payload_object(intent_payload_cls: Any, normalized_intent: Any, question_analysis: Any) -> Any:
+    """Instantiate the configured transport payload, keeping test doubles working."""
+    strategy_meta = _build_strategy_meta(normalized_intent, question_analysis)
+    try:
+        return intent_payload_cls(
+            intent_payload_version="v3",
+            normalized_intent=normalized_intent,
+            question_analysis=question_analysis,
+            strategy_meta=strategy_meta,
+        )
+    except TypeError:
+        payload = intent_payload_cls(normalized_intent=normalized_intent)
+        if hasattr(payload, "intent_payload_version"):
+            setattr(payload, "intent_payload_version", "v3")
+        if hasattr(payload, "question_analysis"):
+            setattr(payload, "question_analysis", question_analysis)
+        if hasattr(payload, "strategy_meta"):
+            setattr(payload, "strategy_meta", strategy_meta)
+        return payload
+
+
 @dataclass(frozen=True)
 class RequestUnderstandingFacade:
     """질문 이해 단계에서 precheck, intent 정규화, planner 적용을 묶는 얇은 facade다."""
@@ -114,9 +166,9 @@ class RequestUnderstandingFacade:
             planner_stagewise_enabled=int(self.planner_stagewise_enabled),
             planner_stage1_prompt_version=self.planner_stage1_prompt_version,
             planner_stage2_prompt_version=self.planner_stage2_prompt_version,
-            schema_fields=["normalized_intent"],
+            schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
         )
-        return self.intent_payload_cls(normalized_intent=normalized_intent), question_analysis
+        return _build_intent_payload_object(self.intent_payload_cls, normalized_intent, question_analysis), question_analysis
 
 
 async def build_intent_payload(

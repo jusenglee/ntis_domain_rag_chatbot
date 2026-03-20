@@ -52,6 +52,8 @@
 - list
 - stats
 - relation
+- comparison
+- series
 
 ## 5. 주로 확인할 코드 위치
 

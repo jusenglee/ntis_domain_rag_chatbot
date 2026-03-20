@@ -19,6 +19,7 @@ class RagResult:
     series: Optional[Dict[str, Any]] = None
     reverse_trace: Optional[Dict[str, Any]] = None
     pattern_analysis: Optional[Dict[str, Any]] = None
+    multi_hop_bundle: Optional[Dict[str, Any]] = None
     llm_answer: Optional[str] = None
     debug_meta: Optional[Dict[str, Any]] = None
     canonical_evidence: Optional[List[Dict[str, Any]]] = None

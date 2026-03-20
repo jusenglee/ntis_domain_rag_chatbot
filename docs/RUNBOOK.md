@@ -1,163 +1,173 @@
-# RUNBOOK — NTIS Domain RAG 운영 / 트리아지 가이드
+﻿# RUNBOOK
 
-> 목적: 장애나 품질 저하를 retrieval-first 계약 기준으로 진단하기 위함입니다.
->
-> 범위: 이 문서는 운영 대응과 triage를 다룹니다. 계약 자체는 `docs/CONTRACT.md`, 테스트 기준은 `docs/GOLDEN_TESTS.md`를 함께 봅니다.
+This runbook is the operational triage guide for the NTIS Domain RAG repository.
 
----
-
-## 0) 운영 기준선
-
-- 시스템 정체성: `retrieval-first search system with chat UX`
-- triage 우선순위는 answer wording보다 retrieval correctness입니다.
-- planner invalid / contract violation은 strict fail-close로 다룹니다.
-- retrieval failure를 empty-success로 숨기지 않습니다.
-- chat UX 문제는 retrieval correctness 점검 이후에 봅니다.
+Use this document to diagnose retrieval-first behavior. For the execution contract itself, see `docs/CONTRACT.md`. For regression baselines, see `docs/GOLDEN_TESTS.md`.
 
 ---
 
-## 1) 빠른 트리아지(3분 코스)
+## 0. Operational baseline
 
-단계별 시스템 흐름 자체는 `docs/SYSTEM_FLOW_RETRIEVAL_FIRST.md`를 기준으로 보고,
-이 문서는 각 단계에서 무엇을 확인해야 하는지에 집중합니다.
+- System shape: retrieval-first search system with chat UX layered on top
+- Triage priority: retrieval correctness before answer wording
+- Planner invalid / contract violation: strict fail-close
+- Retrieval failure must not be disguised as empty success
+- Chat UX issues are triaged after retrieval correctness
 
-### Step 1. Query / Intent 확인
+---
 
-확인 로그:
+## 1. Fast triage flow
+
+### Step 1. Query / intent
+
+Check logs:
 - `REQ.START`
 - `PLANNER.PIPELINE`
 
-확인 필드:
-- 원문 질의
+Check fields:
+- raw user query
 - `NormalizedIntent`
-- explicit identifier seed 유무
+- explicit identifier seed presence
+- candidate exact-key presence
 
-정상 / 이상 판정:
-- 정상: broad topic / exact lookup / relation query 의도가 retrieval 의미로 남아 있음
-- 이상: non-id hint 때문에 planner가 불필요하게 skip되거나 retrieval 의미가 유실됨
+Healthy signs:
+- broad topic, exact lookup, and relation intent map to the expected retrieval family
+- cheap precheck only contributes safe hints
 
-다음 액션:
+Suspicious signs:
+- non-id hint bypasses planner unexpectedly
+- exact-key candidate falls through to topic-like routing
+
+Primary files:
 - `apps/api/services/request_facade.py`
 - `apps/core/query_intent.py`
 - `apps/core/pipeline_steps.py`
 
-운영 메모:
-- cheap precheck와 explicit hint는 identifier, year, perf type, title 같은 구조 신호만 전달해야 합니다.
-- 사람 이름, 기관명, 기관 역할은 precheck에서 복원하지 말고 planner가 해석해야 합니다.
+### Step 2. Strategy
 
-### Step 2. Strategy 확인
-
-확인 로그:
+Check logs:
 - `PLANNER.ASSEMBLE`
 - `RAG.PLAN`
 
-확인 필드:
+Check fields:
 - `mode`
 - `relation`
 - `join_key_mode`
 - `target_cols`
 - `strategy_summary`
 
-정상 / 이상 판정:
-- 정상: `SEARCH / LOOKUP / JOIN` 중 하나로 일관되게 확정됨
-- 이상: planner layer와 execution layer가 다른 전략을 가리킴
+Healthy signs:
+- `SEARCH / LOOKUP / JOIN` are fixed deterministically
+- execution uses `strategy_summary` as the runtime truth
 
-다음 액션:
-- `/query/debug`에서는 `question_analysis`보다 `strategy_summary`를 우선 확인합니다.
+Suspicious signs:
+- planner layer and execution layer disagree
+- runtime appears to rebuild strategy from raw text
+
+Primary files:
 - `apps/core/planner_contract.py`
 - `apps/core/rag_runtime_prelude.py`
 
-### Step 3. Filter compile 확인
+### Step 3. Filter compile
 
-확인 로그:
+Check logs:
 - `RAG.FILTER.COMPILED.QDRANT`
 - `RAG.COL.RETRIEVE`
 
-확인 필드:
-- must / should 구조
-- identifier / role filter 반영 여부
-- JOIN hop filter의 join key contract 일치 여부
+Check fields:
+- compiled must / should structure
+- identifier or role filters
+- join-key contract preservation
 
-정상 / 이상 판정:
-- 정상: retrieval intent와 compiled filter 의미가 일치함
-- 이상: SEARCH에 hard must가 생기거나 LOOKUP/JOIN 제약이 누락됨
+Healthy signs:
+- compiled filter matches retrieval intent
 
-다음 액션:
+Suspicious signs:
+- SEARCH gets hard must constraints
+- LOOKUP or JOIN loses exact-key constraints
+
+Primary files:
 - `apps/core/planner_contract.py::StrategyCompiler.compile()`
 - `apps/core/filters.py::compile_filter()`
 - `apps/core/rag_compile_runtime.py`
 
-### Step 4. Retrieval hit 분포 확인
+### Step 4. Retrieval distribution
 
-확인 로그:
+Check logs:
 - `RAG.RETRIEVE`
 - `RAG.COL.STATS`
 
-확인 필드:
+Check fields:
 - dense hit / lexical hit
-- collection 단위 hit
-- hybrid retrieval 사용 여부
+- collection hit distribution
+- hybrid retrieval behavior
 
-정상 / 이상 판정:
-- 정상: 질의 유형에 맞는 hit 분포가 나옴
-- 이상: dense/lexical이 모두 0이거나 BM25-only 우회 상태가 지속됨
+Healthy signs:
+- hit distribution matches query class
 
-다음 액션:
+Suspicious signs:
+- dense and lexical both zero unexpectedly
+- retrieval is stuck in one weak path
+
+Primary files:
 - `apps/core/retrieval.py::dense_retrieve_hybrid_multi()`
 - `apps/core/rag_collection_retrieval.py`
 
-### Step 5. Evidence 확인
+### Step 5. Evidence
 
-확인 로그:
+Check logs:
 - `RAG.RESULT.TOP`
 - `RAG.CONTEXT`
 - `RAG.CTX`
 
-확인 필드:
+Check fields:
 - `canonical_evidence`
 - `render_profile`
 - `output_type`
 
-정상 / 이상 판정:
-- 정상: `pjt_id`/`pjt_no`, 기관 역할 의미, context shape가 유지됨
-- 이상: canonicalization 또는 render profile이 retrieval semantics를 깨뜨림
+Healthy signs:
+- `pjt_id`, `pjt_no`, and organization roles survive
+- context shape matches `output_type`
 
-다음 액션:
+Suspicious signs:
+- canonicalization blurs retrieval semantics
+- render profile collapses distinct output shapes
+
+Primary files:
 - `apps/core/canonical_evidence.py`
 - `apps/api/services/rag_result_assembly.py`
 - `apps/api/services/context_build_policy.py`
 
-### Step 6. Answer / Streaming 확인
+### Step 6. Answer / streaming
 
-확인 로그:
+Check logs:
 - `LLM.RESULT`
 - `STREAM.DONE`
 
-확인 필드:
+Check fields:
 - `ttft_any_ms`
 - `ttft_content_ms`
-- direct-answer mode의 단일 stream 여부
+- direct-answer mode stream behavior
 
-정상 / 이상 판정:
-- 정상: retrieval correctness를 유지한 채 answer/stream이 이어짐
-- 이상: reasoning chunk 누출, 중복 stream, 늦은 relay가 발생함
+Healthy signs:
+- answer generation follows canonical evidence and render profile
 
-다음 액션:
+Suspicious signs:
+- duplicated stream output
+- reasoning leakage or incorrect direct-answer routing
+
+Primary files:
 - `apps/api/routes.py`
 - `apps/api/services/answer_generation.py`
 - `apps/api/services/answer_merge.py`
 
 ---
 
-## 2) Observability 최소 스키마
+## 2. Minimum observability
 
-요청 단위에서는 `trace_id` 또는 `request_id` 기준으로 아래 이벤트를 따라갑니다.
-
-### 운영 기본(`RAG_LOG_LEVEL=normal`)
-
+Default operational logs:
 - `REQ.START`
 - `PLANNER.PIPELINE`
-- `KS.RESULT`
 - `RAG.PLAN`
 - `RAG.RETRIEVE`
 - `RAG.RESULT.TOP`
@@ -168,58 +178,39 @@
 - `REQ.ERROR`
 - `REQ.END`
 
-`REQ.SUMMARY` 해석 원칙:
-- `mode`, `relation`, `target_cols`는 execution strategy 기준으로 봅니다.
-- `strategy_source=execution_strategy`가 정상 기본 경로이고, `planner_fallback`은 strategy 부재 시에만 허용되는 보조 경로입니다.
-- `planner_mode`, `planner_relation`, `planner_target_cols`는 planner/question layer drift 진단용 보조 필드입니다.
+`REQ.SUMMARY` interpretation:
+- `mode`, `relation`, `target_cols` come from execution strategy
+- `intent_payload_version` and `strategy_version` must both be visible on v3 paths
+- `planner_*` fields are diagnostic only and must not replace execution truth
 
-`RAG.CONTEXT` / `RAG.CTX` 해석 원칙:
-- `execution_mode`, `execution_base_route`, `execution_output_type`는 execution-layer context assembly 기준입니다.
-- `strategy_source=execution_request`는 planner artifact가 아니라 execution request 기준으로 context가 조립됐다는 뜻입니다.
-
-### 디버그(`RAG_LOG_LEVEL=debug`)
-
-- `RAG.STRATEGY.DIFF.*`
-- `RAG.PLAN.MODE_CONFLICT`
-- `RAG.PLAN.JOIN_EXECUTED`
-- `RAG.FILTER.COMPILED.QDRANT`
-- `RAG.JOIN.HOP1.TOP`
-- `RAG.JOIN.HOP2.TOP`
-- `RAG.MERGED_RRF.TOP`
-- `STREAM.DONE`
-
-### trace(`RAG_LOG_LEVEL=trace`)
-
-- 점수 분포
-- 세부 payload 직렬화
-- 계약 위반 / filter miss / 이상치 추적용 샘플 로그
+`RAG.CONTEXT` / `RAG.CTX` interpretation:
+- `execution_mode`, `execution_base_route`, and `execution_output_type` describe execution-layer context assembly
+- context assembly must be driven by execution request artifacts, not ad-hoc planner reconstruction
 
 ---
 
-## 3) 코드 버전 불일치 점검
+## 3. Empty-result baseline
 
-확인 로그:
-- `CODE.FINGERPRINT`
-- `REQ.START`
-- `REQ.END`
-- `REQ.ERROR`
+Inspect these fields together:
+- `contract_fail_reason`
+- `empty_result_policy`
+- `reranked_count`
 
-확인 필드:
-- `app_main_sha256`
-- `rag_pipeline_sha256`
+Current baseline:
+- `lookup` and `join` with `reason=no_reranked` are ordinary `normal_no_result` outcomes
+- `search` with `reason=no_reranked` remains `strict_search`
+- deferred hop1 0-hit and dual-branch 0-hit are normal no-result outcomes
 
-정상 / 이상 판정:
-- 정상: 요청 단위 이벤트와 startup fingerprint가 일치함
-- 이상: 같은 시각 인스턴스 간 fingerprint가 다름
-
-다음 액션:
-- 롤링 배포 불일치 또는 핫패치 흔적을 의심합니다.
+Strict contract failures include:
+- resolved `instance/group` strategy missing the required runtime seed
+- invalid enum or unsupported relation
+- malformed payload that violates the v3 contract
 
 ---
 
-## 4) Stagewise Planner 점검
+## 4. Stagewise planner triage
 
-### 필수 환경 변수
+Recommended environment:
 
 ```bash
 PLANNER_STAGE1_PROMPT_VERSION=v1
@@ -227,211 +218,188 @@ PLANNER_STAGE2_PROMPT_VERSION=v1
 PLANNER_TEMPERATURE=0.0
 ```
 
-### 정상 시 관측해야 할 로그
-
+Key logs:
 - `PLANNER.STAGE1`
 - `PLANNER.GATE`
 - `PLANNER.STAGE2`
 - `PLANNER.ASSEMBLE`
-- 필요 시 `PLANNER.REGATE`
+- `PLANNER.REGATE`
 - `PLANNER.IDS_MAP.INVALID_VALUE`
 
-### 중단 / 롤백 신호
-
-- `PLANNER_ACTION_MODE_MISMATCH`
-- `PLANNER_PARSE_FINAL_FAILED`
-- `PLANNER_JOIN_FIELDS_MISSING`
-- `RAG_EMPTY_RESULT_CONTRACT` (`search` 또는 진짜 contract failure일 때만)
-- `mode=JOIN`인데 `docs_found=0`이고 `PLANNER.REGATE`도 없으며 no-result 정책과 맞지 않음
-
-### triage 절차
-
+Review order:
 - Stage 1: `action`, `head`, `relation_candidate`, `referential_followup`, `confidence`
 - Deterministic gate: `mode`, `relation`, `join_key_mode`, `target_cols`, `output_type`
-- Stage 2: `ids_map`, `filters`, `retrieval_query`, `limit`
-- Assemble 이후: planner merge가 전략 의미를 바꾸지 않았는지 확인
-- Runtime prelude: strict contract gate에서 fail-close가 나는지 확인
+- Stage 2: `ids_map`, `candidate_keys`, `project_key_policy`, `join_resolution_policy`, `filters`, `retrieval_query`, `limit`
+- Assemble: verify that execution strategy fields were not mutated downstream
+- Prelude: verify strict contract gate and any downgrade
 
 ---
 
-## 5) 자주 보는 장애 패턴
+## 5. Common failure patterns
 
-### (A) JOIN인데 결과가 0
+### A. JOIN but zero results
 
-증상:
-- `JOIN_KEYS_MISSING` 또는 `mode=join`인데 `docs_found=0`
+Symptoms:
+- `JOIN_KEYS_MISSING`
+- `mode=join` with `docs_found=0`
 
-우선 확인:
-- `PLANNER.IDS_MAP.INVALID_VALUE`에 사람 이름이나 주제 토큰이 `pjt_id`/`person_no`로 들어갔는지
-- `PLANNER.REGATE`가 `sanitized_instance_seed_missing` 또는 `sanitized_group_seed_missing`를 남겼는지
-- 질의가 `과제번호`처럼 모호한 project key 표현만 포함하는지
+Check first:
+- `PLANNER.IDS_MAP.INVALID_VALUE`
+- `PLANNER.REGATE`
+- `candidate_keys.project_key`
+- `project_key_policy`
+- `join_key_mode`
+- `resolved_join_key_mode`
+- `dual_branch_used`
 
-판정:
-- `과제번호`만 있고 `pjt_id`/`pjt_no` 라벨이 없으면 seed를 확정하지 않는 것이 정상입니다. 이 경우 strict JOIN을 강행하지 않고 `lookup` + followup 경로로 남겨야 합니다.
-- stage2가 `AI_SEMICONDUCTOR_2023` 같은 토큰을 `pjt_id`로 넣더라도 sanitize 뒤 제거되면, assemble 단계에서 `lookup`으로 다시 낮아져야 합니다.
+Interpretation:
+- `과제번호`-style ambiguous project keys should not be force-resolved early
+- if sanitize removes a resolved seed, runtime should downgrade or keep deferred discovery
+- `JOIN_KEYS_MISSING` is only valid for resolved `instance/group`
 
-다음 액션:
-- `apps/core/query_intent.py`에서 라벨 기반 추출 규칙 확인
-- `apps/api/contracts/runtime_contracts.py::sanitize_ids_map_semantics()` 확인
-- `apps/api/services/planner_runtime.py::assemble_question_analysis()`의 post-sanitize re-gate 확인
+### B. LOOKUP/JOIN no-result vs route error
 
-### (B) LOOKUP/JOIN 0건인데 에러인지 정상 no-result인지 헷갈림
+Symptoms:
+- `docs_found=0`
+- no reranked items
 
-증상:
-- `docs_found=0`, `canonical_evidence_found=0`
-- summary에는 `contract_fail_reason=no_reranked`가 있는데 route 오류는 없거나, 반대로 route 오류로만 보임
-
-우선 확인:
+Check:
 - `REQ.SUMMARY.contract_fail_reason`
 - `REQ.SUMMARY.empty_result_policy`
 - `REQ.ERROR.contract_fail_reason`
 - `REQ.ERROR.empty_result_policy`
-- `REQ.ERROR.reranked_count`
 
-판정:
-- `lookup`/`join`에서 `reason=no_reranked`이면 현재 baseline은 `empty_result_policy=normal_no_result`가 정상입니다. 이 경우 route exception이 아니라 deterministic no-result 답변으로 내려와야 합니다.
-- `search`에서 0건은 여전히 `strict_search` 예외 경로가 정상입니다.
+Interpretation:
+- `lookup/join + no_reranked` should remain `normal_no_result`
+- `search + no_reranked` remains `strict_search`
 
-다음 액션:
-- `apps/core/result_contract.py`에서 mode별 empty-result 정책 확인
-- `apps/api/services/rag_retriever.py`의 no-result 메시지 short-circuit 확인
-- `apps/api/services/answer_generation.py`의 no-result short-circuit 확인
+### C. SEARCH over-constrained
 
-### (C) SEARCH인데 결과가 지나치게 좁아짐
-
-증상:
-- broad query인데 결과가 지나치게 적음
-
-확인 로그:
-- `RAG.FILTER.COMPILED.QDRANT`
-- `RAG.COL.RETRIEVE`
-
-확인 필드:
-- compile 결과의 must / should 구조
+Check:
+- compiled must / should structure
 - `search_filter_enabled`
 
-정상 / 이상 판정:
-- 정상: SEARCH는 recall 우선이며 과도한 must gate가 없음
-- 이상: SEARCH인데 lookup성 hard must가 들어감
+Interpretation:
+- SEARCH should remain recall-oriented and avoid lookup-style hard filters
 
-다음 액션:
-- SEARCH hard filter 금지 규칙이 validator에서 유지되는지 확인합니다.
+### D. Evidence shape mismatch
 
-### (D) LOOKUP인데 결과가 너무 넓거나 엉뚱함
-
-증상:
-- LOOKUP인데 결과가 넓거나 엉뚱함
-
-확인 로그:
-- `RAG.FILTER.COMPILED.QDRANT`
-- `RAG.RESULT.TOP`
-
-확인 필드:
-- `ids_map`
-- compile된 filter
-- `lookup_filter_policy`
-- `lookup_filter_min_should`
-
-정상 / 이상 판정:
-- 정상: identifier 또는 제약 필드가 filter에 정확히 반영됨
-- 이상: lookup 제약이 누락되거나 search처럼 동작함
-
-다음 액션:
-- planner payload와 compiled filter 사이에서 누락된 constraint를 추적합니다.
-
-### (D) Evidence는 맞는데 답변이 이상함
-
-증상:
-- retrieval 결과는 맞는데 답변 문장이나 follow-up이 이상함
-
-확인 로그:
+Check:
 - `RAG.CONTEXT`
 - `RAG.CTX`
-- `LLM.RESULT`
+- `canonical_evidence`
+- `render_profile`
 
-확인 필드:
-- canonical evidence 내용
-- render profile
-- answer generation이 `question_analysis`보다 canonical evidence / render profile / strategy를 우선하는지
-- retrieval query가 이상하면 `knowledge_sufficiency.retrieval_query -> normalized_intent.retrieval_query -> question_analysis.retrieval_query` 우선순위가 지켜지는지
-
-정상 / 이상 판정:
-- 정상: answer는 canonical evidence / render profile 기준으로 생성됨
-- 이상: planner artifact나 history만 보고 답변 방향이 바뀜
-
-다음 액션:
-- history는 UX 맥락으로만 보고, retrieval anchor 판단은 canonical evidence / render profile 기준으로 다시 확인합니다.
+Interpretation:
+- answer generation must follow canonical evidence, render profile, and execution strategy
+- `question_analysis` is not the final execution truth
 
 ---
 
-## 6) 장애 대응 체크리스트
+## 6. Query graph observability
+
+Inspect these fields in `REQ.SUMMARY` and `/query/debug`:
+
+- `query_graph_kind`: `project_to_perf`, `perf_to_project`, `perf_to_project_to_perf`, `aggregate_comparison`, `project_series`, `pattern_analysis`, `multi_hop_bundle`, or single-route
+- `anchor_summary`
+- `aggregation_kind`
+- `series_kind`
+- `bundle_kind`
+- `bundle_target_count`
+- `bundle_project_count`
+- `bundle_item_count`
+- `guidance_required`
+
+These fields do not replace planner truth. They explain how runtime executed the plan.
+
+---
+
+## 7. Extended runtime triage
+
+### Aggregation runtime
+
+Inspect:
+- `aggregation_metric`
+- `aggregation_group_by`
+- `aggregation_threshold`
+- `aggregation_result_count`
+- `failed_step`
+
+### Series runtime
+
+Inspect:
+- `series_kind`
+- `series_result_count`
+- `series_bucket_count`
+- `failed_step`
+
+### Reverse trace
+
+Inspect:
+- `reverse_trace_enabled`
+- `reverse_trace_hop_count`
+- `origin_project_count`
+- `followup_perf_count`
+- `failed_step`
+
+### Anchor resolution
+
+Inspect:
+- `anchor_resolution_status`
+- `ambiguity_codes`
+- `resolved_researcher_count`
+- `resolved_org_count`
+
+### Pattern analysis
+
+Inspect:
+- `pattern_kind`
+- `pattern_result_count`
+- `pattern_subject_count`
+- `pattern_support_doc_count`
+
+### Multi-hop bundle
+
+Inspect:
+- `bundle_kind`
+- `bundle_target_count`
+- `bundle_project_count`
+- `bundle_item_count`
+- `guidance_required`
+
+---
+
+## 8. QuestionAnalysis v3 triage
+
+Check fields:
+- `candidate_keys.project_key`
+- `project_key_policy`
+- `join_resolution_policy`
+- `resolved_join_key_mode`
+- `dual_branch_used`
+- `candidate_project_key_count`
+- `candidate_perf_key_count`
+
+Interpretation:
+- `candidate_keys.project_key` means unresolved exact project key
+- `project_key_policy=ambiguous_or` means exact OR exact discovery
+- `join_key_mode=deferred` means discovery is part of the legal strategy
+- `IntentPayloadV3` and `strategy_version="v3"` must travel together on v3 paths
+- `intent_payload_version="v3"` must be visible on v3 transport paths
+
+---
+
+## 9. Minimal reproduction checklist
 
 ```txt
-[ ] query / request_id 확보
-[ ] normalized_intent 확인
-[ ] strategy(mode/action/relation/join_key_mode) 확인
-[ ] ids_map(pjt_id vs pjt_no XOR) 확인
-[ ] compile 결과(qdrant_filter must/should/min_should) 확인
-[ ] retrieval hit 분포(dense/lexical/collection) 확인
-[ ] canonical evidence 확인
-[ ] render profile / output_type 확인
-[ ] contract_fail_reason / error_code 기록
-[ ] 재현용 최소 입력(query + env) 정리
+[ ] raw query
+[ ] normalized_intent
+[ ] strategy summary
+[ ] ids_map / candidate_keys
+[ ] compiled qdrant filter
+[ ] retrieval hit distribution
+[ ] canonical evidence
+[ ] render profile / output_type
+[ ] contract_fail_reason / error_code
+[ ] environment and request identifiers
 ```
-
----
-
-## 7) 추가 메모
-
-- `RAG.ORG.MATCH.POLICY`, `RAG.SERVER_FILTER.ORG_GATE`, `RAG.JOIN.HOP2.ORG_GATE.SKIP` 로그로 기관 필터 정책을 추적합니다.
-- title 필터는 hard gate가 아니라 soft rerank로만 동작해야 합니다.
-- conversation cache는 `history`, `last_canonical_evidence`, `last_render_profile`을 저장할 수 있습니다.
-- retrieval anchor 판단은 history가 아니라 canonical evidence / render profile를 우선 기준으로 봅니다.
-- `FILTER_MISS_SUSPECTED`는 raw payload의 `prtcp_mp[]`를 직접 읽어 확인 가능한 경우에만 신뢰합니다.
-- `prtcp_mp_hm_nm` 같은 집계/flatten preview 필드는 운영 관측용일 뿐, 사람 이름 filter miss 판정 근거로 쓰면 안 됩니다.
-
-## Empty Result / JOIN Triage
-- `RAG_EMPTY_RESULT_CONTRACT`가 발생하면 `info.contract_fail_reason`, `info.empty_result_policy`, `info.reranked_count`를 먼저 확인한다. 현재 정책은 `lookup/join`은 `fail_close`, `search`는 `strict_search`로 기록된다.
-- `JOIN_KEYS_MISSING`는 planner가 관계형 질의로 해석했지만 Hop1에서 `pjt_id`/`pjt_no`를 만들지 못한 경우다. seed 없는 `JOIN(instance)`는 merge 단계에서 `lookup`으로 downgrade되므로, 여전히 이 오류가 나면 Hop1 filter 또는 key extraction 경로를 우선 본다.
-
-## Query Graph Observability
-
-Inspect these fields in `REQ.SUMMARY` and `/query/debug` when triaging complex traversal questions.
-
-- `query_graph_kind`: `project_to_perf`, `perf_to_project`, `aggregate_comparison`, `project_series`, or a single-route plan
-- `anchor_summary`: how many researcher, org, project, and perf anchors survived into execution
-- `aggregation_kind`: whether runtime treated the request as plain stats or comparison
-- `series_kind`: whether the series axis is `pjt_no` or a time window
-- `anchor_summary.generic_org_count`: number of generic org anchors that were not resolved into a specific role
-- `anchor_summary.ambiguities`: ambiguity labels such as `org_role_unspecified` or `researcher_org_pair_unresolved`
-
-These fields do not replace planner truth. They help distinguish unsupported traversal shapes from ordinary no-result outcomes.
-
-## Aggregation Runtime Triage
-
-- `aggregation_kind=comparison` means the retrieval runtime produced project/perf aggregation payloads.
-- Summary/debug fields to inspect are `aggregation_metric`, `aggregation_group_by`, `aggregation_threshold`, `aggregation_result_count`, and `failed_step`.
-- `failed_step=aggregation_empty_result` means comparison planning was accepted but no grouped items survived filtering or thresholding.
-- `failed_step=aggregation_unsupported` means the request fell back to ordinary relation/list rendering instead of hard-failing.
-- Aggregation failures must be distinguished from `no_reranked` and other retrieval contract failures.
-
-## Series Runtime Triage
-
-- `output_type=series` means retrieval/runtime already built project-series evidence before answer generation.
-- Summary/debug fields to inspect are `series_kind`, `series_result_count`, `series_bucket_count`, and `failed_step`.
-- `failed_step=series_empty_result` means the series plan was accepted but no instance projects or buckets survived.
-- `failed_step=series_unsupported` means runtime degraded to ordinary relation/list rendering instead of hard-failing.
-- Series triage still respects `pjt_id` versus `pjt_no`; a series payload must not silently reinterpret one key kind as the other.
-
-
-## Reverse Trace Triage
-
-- Check `reverse_trace_enabled`, `reverse_trace_hop_count`, `origin_project_count`, and `followup_perf_count` in `REQ.SUMMARY`.
-- `failed_step=reverse_trace_partial` means the origin project was resolved but no additional follow-up performance evidence survived hop3.
-- Reverse trace is planner-first. If the traversal did not activate, inspect planner stage2 `filters.reverse_trace_followup` before looking at runtime retrieval.
-## Anchor Resolution Triage
-
-- Inspect `anchor_resolution_status`, `ambiguity_codes`, `resolved_researcher_count`, and `resolved_org_count` in `REQ.SUMMARY` and `/query/debug`.
-- `anchor_resolution_status=ambiguous` means execution kept name-level anchors without enough role or id information to promote a stricter traversal.
-- `researcher_org_pair_unresolved` means a researcher name and a generic org term survived together, but planner truth did not fix the organization role pairing.
-- Seedless `JOIN(instance)` with that ambiguity now downgrades before execution and logs `RAG.STRATEGY.JOIN_DOWNGRADED` with `reason=seedless_instance_join_with_unresolved_anchor_pair`.

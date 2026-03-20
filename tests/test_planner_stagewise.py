@@ -5,18 +5,24 @@ from apps.api.services.request_facade import build_intent_payload
 from apps.core.pipeline_steps import normalize_intent
 from apps.core.planner_staged import compose_locked_strategy
 from apps.core.query_intent import QueryIntent, classify_query
+from apps.core.rag_pipeline import _validate_intent_payload_version
 
 
 class Payload:
-    def __init__(self, normalized_intent):
+    def __init__(self, normalized_intent, intent_payload_version=None, question_analysis=None, strategy_meta=None):
         self.normalized_intent = normalized_intent
+        self.intent_payload_version = intent_payload_version
+        self.question_analysis = question_analysis
+        self.strategy_meta = strategy_meta or {}
 
 
 def test_query_intent_marks_project_output_relation():
     intent = classify_query('PJT-2020-1234-5678 related outputs', [])
 
     assert intent.relation == ('project', 'perf')
-    assert intent.join_key_mode == 'group'
+    assert intent.join_key_mode == 'deferred'
+    assert intent.project_key_policy == 'ambiguous_or'
+    assert intent.candidate_keys['project_key'][0]['value'] == 'PJT-2020-1234-5678'
     assert intent.action == 'list'
     assert intent.output_type == 'relation'
 
@@ -179,7 +185,9 @@ def test_normalize_intent_keeps_group_join_mode_for_relation_query():
     )
 
     assert normalized.relation == ('project', 'perf')
-    assert normalized.join_key_mode == 'group'
+    assert normalized.join_key_mode == 'deferred'
+    assert normalized.project_key_policy == 'ambiguous_or'
+    assert normalized.candidate_keys['project_key'][0]['value'] == 'PJT-2020-1234-5678'
     assert normalized.contract_violations == []
 
 
@@ -213,3 +221,26 @@ def test_query_intent_extracts_labeled_alphanumeric_project_id_only_with_explici
 
     assert labeled.ids_map["pjt_id"] == ["AI2024X001"]
     assert ambiguous.ids_map == {}
+
+
+def test_query_intent_does_not_promote_year_only_token_as_project_key():
+    intent = classify_query('과제번호 2024 detail', [])
+
+    assert intent.candidate_keys == {}
+    assert intent.project_key_policy is None
+
+
+def test_intent_payload_version_requires_v3_when_payload_is_present():
+    try:
+        _validate_intent_payload_version(SimpleNamespace(normalized_intent=SimpleNamespace()))
+    except ValueError as exc:
+        assert "intent_payload_version must be 'v3'" in str(exc)
+    else:
+        raise AssertionError('missing intent_payload_version must fail when payload is supplied')
+
+
+def test_query_intent_does_not_confuse_issn_with_project_candidate():
+    intent = classify_query('과제번호 ISSN 2020-1234 detail', [])
+
+    assert intent.candidate_keys == {}
+    assert intent.project_key_policy is None

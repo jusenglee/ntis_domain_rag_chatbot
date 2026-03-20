@@ -8,12 +8,12 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from apps.core.schemas import IntentPayloadV2
+from apps.core.schemas import IntentPayloadV3
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.storage import KVStore
 
 
-PLANNER_SCHEMA_VERSION = "v3-staged"
+PLANNER_SCHEMA_VERSION = "v3"
 QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "strategy_version",
     "mode",
@@ -23,6 +23,9 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "join_key_mode",
     "target_cols",
     "ids_map",
+    "candidate_keys",
+    "project_key_policy",
+    "join_resolution_policy",
     "filters",
     "limit",
     "retrieval_query",
@@ -36,7 +39,7 @@ Head = Literal["project", "perf", "people", "org", "support"]
 Action = Literal["topic", "list", "detail", "stats", "download"]
 
 
-class QuestionAnalysisV2(BaseModel):
+class QuestionAnalysisV3(BaseModel):
     """planner가 내놓은 question analysis payload를 엄격한 타입과 validator로 고정한다.
     모드·head·relation·ids_map·filters가 source of truth인 구조체로 정리되어 runtime으로 넘어가게 하는 계약 계층이다.
     """
@@ -45,9 +48,12 @@ class QuestionAnalysisV2(BaseModel):
     head: Head
     action: Action
     relation: Optional[str] = None
-    join_key_mode: Literal["instance", "group"] | None = None
+    join_key_mode: Literal["instance", "group", "deferred"] | None = None
     output_type: Optional[str] = Field(default=None, description="summary|list|detail|stats|relation|comparison|series")
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
+    candidate_keys: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     filters: dict[str, Any] = Field(default_factory=dict)
     target_cols: list[str] = Field(default_factory=list)
     limit: int = Field(MAX_TOP_K_SIZE, le=MAX_TOP_K_SIZE)
@@ -72,7 +78,7 @@ class QuestionAnalysisV2(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_planner_payload(cls, data: Any) -> Any:
-        """planner가 내린 반정형 payload를 `QuestionAnalysisV2`가 받을 정규형으로 정리한다.
+        """planner가 내린 반정형 payload를 `QuestionAnalysisV3`가 받을 정규형으로 정리한다.
         alias head/action, relation tuple, ids_map 키, filter alias를 이 단계에서 수렴해 후속 validator가 의미만 검사하게 만든다.
         """
         if not isinstance(data, dict):
@@ -161,6 +167,7 @@ class QuestionAnalysisV2(BaseModel):
             return out
 
         raw_ids_map = d.get("ids_map") if isinstance(d.get("ids_map"), dict) else {}
+        d["candidate_keys"] = dict(d.get("candidate_keys") or {}) if isinstance(d.get("candidate_keys"), dict) else {}
         normalized_ids_map: dict[str, list[str]] = {}
         for raw_key, raw_value in raw_ids_map.items():
             if raw_key is None:
@@ -259,7 +266,7 @@ class QuestionAnalysisV2(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_join_contract(self) -> "QuestionAnalysisV2":
+    def validate_join_contract(self) -> "QuestionAnalysisV3":
         """JOIN 모드에서 relation, join_key_mode, ids_map의 정합성을 검사한다.
         `pjt_id`와 `pjt_no`를 섞거나 non-join에 join key를 심는 코드 경로를 이 validator가 초기에 차단한다.
         """
@@ -277,16 +284,16 @@ class QuestionAnalysisV2(BaseModel):
         return self
 
 
-QuestionAnalysis = QuestionAnalysisV2
+QuestionAnalysis = QuestionAnalysisV3
+QuestionAnalysisV2 = QuestionAnalysisV3
 
 
-class PlannerV2ParseError(ValueError):
-    """`PlannerV2ParseError`는 현재 모듈의 책임을 표현하는 타입 또는 헬퍼 클래스입니다.
-
-책임:
-- 현재 레이어는 planner/contract/runtime 경계를 넘어 의미를 임의 보정하지 않고, 필요한 검증과 조립만 수행해야 합니다.\n    """
+class PlannerV3ParseError(ValueError):
+    """Strict parse error for missing planner schema fields."""
     pass
 
+
+PlannerV2ParseError = PlannerV3ParseError
 
 def validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
     """planner raw payload에 필수 키가 전부 들어 있는지 점검한다.
@@ -294,15 +301,18 @@ def validate_question_analysis_required_keys(payload: Dict[str, Any]) -> None:
     """
     missing_keys = sorted(QUESTION_ANALYSIS_REQUIRED_KEYS - set(payload.keys()))
     if missing_keys:
-        raise PlannerV2ParseError(f"missing required keys: {missing_keys}")
+        raise PlannerV3ParseError(f"missing required keys: {missing_keys}")
 
 
-def planner_v2_backoff_seconds(*, attempt_no: int, retry_backoff_sec: float, backoff_cap_sec: float) -> float:
+def planner_backoff_seconds(*, attempt_no: int, retry_backoff_sec: float, backoff_cap_sec: float) -> float:
     """planner 재시도 사이의 exponential backoff 대기 시간을 계산한다.
     연속 실패 시 planner provider를 과도하게 두드리지 않으면서도 초기 재시도는 빠르게 시도하도록 한다.
     """
     backoff = retry_backoff_sec * (2 ** max(0, attempt_no - 1))
     return min(backoff, backoff_cap_sec)
+
+
+planner_v2_backoff_seconds = planner_backoff_seconds
 
 
 def merge_bool_flag(existing: bool, new: bool) -> bool:
@@ -313,10 +323,7 @@ def merge_bool_flag(existing: bool, new: bool) -> bool:
 
 
 class KnowledgeSufficiency(BaseModel):
-    """`KnowledgeSufficiency`는 현재 모듈의 책임을 표현하는 타입 또는 헬퍼 클래스입니다.
-
-책임:
-- 현재 레이어는 planner/contract/runtime 경계를 넘어 의미를 임의 보정하지 않고, 필요한 검증과 조립만 수행해야 합니다.\n    """
+    """Shared planner/runtime model for pre-retrieval knowledge sufficiency."""
     requires_new_knowledge: Literal["low", "medium", "high"]
     search_intent: str
     retrieval_query: str
@@ -324,20 +331,14 @@ class KnowledgeSufficiency(BaseModel):
 
 
 class RuleDecision(BaseModel):
-    """`RuleDecision`는 현재 모듈의 책임을 표현하는 타입 또는 헬퍼 클래스입니다.
-
-책임:
-- 현재 레이어는 planner/contract/runtime 경계를 넘어 의미를 임의 보정하지 않고, 필요한 검증과 조립만 수행해야 합니다.\n    """
+    """Model for direct answer, skip, or proceed decisions."""
     action: Literal["direct_answer", "skip", "proceed"]
     direct_response: Optional[str] = None
     reason: str
 
 
 class AgentState(BaseModel):
-    """`AgentState`는 현재 모듈의 책임을 표현하는 타입 또는 헬퍼 클래스입니다.
-
-책임:
-- 현재 레이어는 planner/contract/runtime 경계를 넘어 의미를 임의 보정하지 않고, 필요한 검증과 조립만 수행해야 합니다.\n    """
+    """Shared execution state container for the LangGraph workflow."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     messages: Annotated[List[BaseMessage], add_messages]
@@ -365,7 +366,7 @@ class AgentState(BaseModel):
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
     knowledge_sufficiency: Optional[KnowledgeSufficiency] = None
-    intent_payload: Optional[IntentPayloadV2] = None
+    intent_payload: Optional[IntentPayloadV3] = None
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
         """여러 latency field를 누적 meta에 병합하되 가장 의미 있는 값을 남긴다.

@@ -432,3 +432,327 @@ def build_project_series_payload(
         "year_buckets": buckets,
         "candidate_docs": candidate_docs,
     }
+
+
+def _normalize_member_name(value: Any) -> str:
+    """Return a trimmed member name for pattern calculations."""
+    return str(value or "").strip()
+
+
+def build_pattern_analysis_payload(
+    *,
+    reranked: List[Any],
+    intent: Any,
+    hinted_limit: int,
+    policy_limit: int,
+    payload_get_fn: Callable[[Dict[str, Any], str], Any],
+    aggregation: Optional[Dict[str, Any]] = None,
+    series: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Compute planner-selected pattern analysis from retrieval/runtime evidence only."""
+    pattern_kind = str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None
+    if not pattern_kind:
+        return None
+
+    docs = list(reranked or [])
+    candidate_docs = min(len(docs), max(1, int(hinted_limit or 0), int(policy_limit or 0), 20)) if docs else 0
+
+    if pattern_kind == "coauthor_org_repeat":
+        org_authors: Dict[str, set[str]] = {}
+        org_titles: Dict[str, List[str]] = {}
+        support_docs = 0
+        for point in docs[:candidate_docs]:
+            payload = getattr(point, "payload", None) or {}
+            members = payload.get("prtcp_mp") if isinstance(payload, dict) else None
+            if not isinstance(members, list) or not members:
+                continue
+            support_docs += 1
+            perf_title = _pick_payload_value(payload_get_fn, payload, "title_text", "title", "meta_basic.title", "meta_detail.title") or "perf"
+            local_orgs: Dict[str, set[str]] = {}
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                org_name = str(member.get("blng_org_nm") or "").strip()
+                author_name = _normalize_member_name(member.get("hm_nm"))
+                if not org_name or not author_name:
+                    continue
+                local_orgs.setdefault(org_name, set()).add(author_name)
+            for org_name, author_names in local_orgs.items():
+                org_authors.setdefault(org_name, set()).update(author_names)
+                org_titles.setdefault(org_name, []).append(str(perf_title).strip())
+        items = []
+        for org_name, author_names in sorted(org_authors.items(), key=lambda item: (-len(item[1]), item[0])):
+            if len(author_names) < 2:
+                continue
+            titles = []
+            seen_titles = set()
+            for title in org_titles.get(org_name, []):
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                titles.append(title)
+            items.append({
+                "org_name": org_name,
+                "repeated_author_count": len(author_names),
+                "author_names": sorted(author_names),
+                "supporting_perf_titles": titles[:6],
+            })
+        status = "ok" if items else ("insufficient_evidence" if support_docs else "empty_result")
+        return {
+            "status": status,
+            "pattern_kind": pattern_kind,
+            "candidate_docs": candidate_docs,
+            "subject_count": len(items),
+            "support_doc_count": support_docs,
+            "items": items,
+        }
+
+    if pattern_kind == "perf_mix_gap":
+        groups: Dict[str, Dict[str, Any]] = {}
+        for point in docs[:candidate_docs]:
+            payload = getattr(point, "payload", None) or {}
+            if not isinstance(payload, dict):
+                continue
+            pjt_id = _pick_payload_value(payload_get_fn, payload, "pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id")
+            pjt_no = _pick_payload_value(payload_get_fn, payload, "pjt_no", "meta_basic.pjt_no", "meta_detail.pjt_no")
+            group_key = pjt_id or pjt_no
+            if not group_key:
+                continue
+            item = groups.setdefault(
+                group_key,
+                {
+                    "group_key": group_key,
+                    "pjt_id": pjt_id or None,
+                    "pjt_no": pjt_no or None,
+                    "project_title": _pick_payload_value(payload_get_fn, payload, "kor_pjt_nm", "meta_basic.kor_pjt_nm", "meta_detail.kor_pjt_nm", "title_text") or group_key,
+                    "paper_count": 0,
+                    "patent_count": 0,
+                    "report_count": 0,
+                },
+            )
+            tag = _pick_payload_value(payload_get_fn, payload, "tag", "meta_basic.tag", "meta_detail.tag")
+            if _is_metric_tag_match("paper_count", tag):
+                item["paper_count"] += 1
+            if _is_metric_tag_match("patent_count", tag):
+                item["patent_count"] += 1
+            if _is_metric_tag_match("report_count", tag):
+                item["report_count"] += 1
+        items = []
+        for item in sorted(groups.values(), key=lambda row: (-int(row.get("paper_count") or 0), str(row.get("project_title") or row.get("group_key") or ""))):
+            if int(item.get("paper_count") or 0) <= 0 or int(item.get("patent_count") or 0) != 0:
+                continue
+            items.append({**item, "gap_kind": "paper_without_patent"})
+        support_doc_count = sum(int(row.get("paper_count") or 0) + int(row.get("patent_count") or 0) + int(row.get("report_count") or 0) for row in groups.values())
+        return {
+            "status": "ok" if items else ("empty_result" if groups else "insufficient_evidence"),
+            "pattern_kind": pattern_kind,
+            "candidate_docs": candidate_docs,
+            "subject_count": len(items),
+            "support_doc_count": support_doc_count,
+            "items": items,
+        }
+
+    if pattern_kind == "series_member_change":
+        if not isinstance(series, dict) or not list(series.get("instance_projects") or []):
+            return {
+                "status": "unsupported",
+                "pattern_kind": pattern_kind,
+                "candidate_docs": candidate_docs,
+                "subject_count": 0,
+                "support_doc_count": 0,
+                "items": [],
+            }
+        members_by_project: Dict[str, set[str]] = {}
+        for point in docs[:candidate_docs]:
+            payload = getattr(point, "payload", None) or {}
+            pjt_id = _pick_payload_value(payload_get_fn, payload, "pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id")
+            if not pjt_id:
+                continue
+            members = payload.get("prtcp_mp") if isinstance(payload, dict) else None
+            if not isinstance(members, list):
+                continue
+            bucket = members_by_project.setdefault(pjt_id, set())
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                name = _normalize_member_name(member.get("hm_nm"))
+                if name:
+                    bucket.add(name)
+        items = []
+        previous_members: set[str] = set()
+        support_docs = 0
+        for project in list(series.get("instance_projects") or []):
+            pjt_id = str(project.get("pjt_id") or "").strip()
+            current_members = set(members_by_project.get(pjt_id, set()))
+            if current_members:
+                support_docs += 1
+            if not current_members and not previous_members:
+                continue
+            items.append({
+                "year": project.get("year"),
+                "project_title": project.get("project_title"),
+                "added_members": sorted(current_members - previous_members),
+                "removed_members": sorted(previous_members - current_members),
+                "member_count": len(current_members),
+            })
+            previous_members = current_members
+        status = "ok" if items else ("insufficient_evidence" if support_docs == 0 else "empty_result")
+        return {
+            "status": status,
+            "pattern_kind": pattern_kind,
+            "candidate_docs": candidate_docs,
+            "subject_count": len(items),
+            "support_doc_count": support_docs,
+            "items": items,
+        }
+
+    return {
+        "status": "unsupported",
+        "pattern_kind": pattern_kind,
+        "candidate_docs": candidate_docs,
+        "subject_count": 0,
+        "support_doc_count": 0,
+        "items": [],
+    }
+
+
+
+def build_multi_hop_bundle_payload(
+    *,
+    reranked: List[Any],
+    intent: Any,
+    hinted_limit: int,
+    policy_limit: int,
+    payload_get_fn: Callable[[Dict[str, Any], str], Any],
+    project_points: Optional[List[Any]] = None,
+    perf_points: Optional[List[Any]] = None,
+    resolved_anchors: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Build a planner-first multi-hop bundle payload from project/perf evidence only."""
+    bundle_targets = [str(value).strip().lower() for value in (getattr(intent, "bundle_targets", None) or []) if str(value).strip()]
+    if not bundle_targets:
+        return None
+
+    docs = list(reranked or [])
+    project_docs = list(project_points or [])
+    perf_docs = list(perf_points or [])
+    if not project_docs or not perf_docs:
+        for point in docs:
+            payload = getattr(point, "payload", None) or {}
+            if not isinstance(payload, dict):
+                continue
+            kind = _infer_series_doc_kind(payload, payload_get_fn)
+            if kind == "project":
+                project_docs.append(point)
+            elif kind == "perf":
+                perf_docs.append(point)
+
+    candidate_docs = max(len(project_docs), len(perf_docs), min(len(docs), max(1, int(hinted_limit or 0), int(policy_limit or 0), 20)) if docs else 0)
+    project_items: List[Dict[str, Any]] = []
+    seen_projects: set[str] = set()
+    for point in project_docs[:candidate_docs]:
+        payload = getattr(point, "payload", None) or {}
+        if not isinstance(payload, dict):
+            continue
+        pjt_id = _pick_payload_value(payload_get_fn, payload, "pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id")
+        pjt_no = _pick_payload_value(payload_get_fn, payload, "pjt_no", "meta_basic.pjt_no", "meta_detail.pjt_no")
+        project_key = pjt_id or pjt_no
+        if not project_key or project_key in seen_projects:
+            continue
+        seen_projects.add(project_key)
+        project_items.append({
+            "pjt_id": pjt_id or None,
+            "pjt_no": pjt_no or None,
+            "project_title": _pick_payload_value(payload_get_fn, payload, "meta_basic.kor_pjt_nm", "meta_detail.kor_pjt_nm", "kor_pjt_nm", "title_text") or project_key,
+            "lead_org_name": _pick_payload_value(payload_get_fn, payload, "org_nm", "meta_basic.org_nm", "meta_detail.org_nm") or None,
+            "year": (_pick_payload_value(payload_get_fn, payload, "stan_yr", "meta_basic.stan_yr", "meta_detail.stan_yr", "dt1")[:4] or None),
+        })
+
+    bundle_entries: List[Dict[str, Any]] = []
+    representative_only = bool(getattr(intent, "representative_only", False))
+    for target in bundle_targets:
+        items: List[Dict[str, Any]] = []
+        selection_policy = "top_reranked"
+        if target in {"paper", "patent", "report", "representative_perf"}:
+            desired_type = None if target == "representative_perf" else target
+            for point in perf_docs[:candidate_docs]:
+                payload = getattr(point, "payload", None) or {}
+                if not isinstance(payload, dict):
+                    continue
+                tag = _pick_payload_value(payload_get_fn, payload, "tag", "meta_basic.tag", "meta_detail.tag")
+                perf_type = _perf_type_from_tag(tag)
+                if desired_type and perf_type != desired_type:
+                    continue
+                items.append({
+                    "perf_type": perf_type,
+                    "perf_title": _pick_payload_value(payload_get_fn, payload, "title_text", "title", "meta_basic.title", "meta_detail.title") or "perf",
+                    "published_year": (_pick_payload_value(payload_get_fn, payload, "pub_year", "year", "meta_basic.year", "meta_detail.year")[:4] or None),
+                    "pjt_id": _pick_payload_value(payload_get_fn, payload, "pjt_id", "meta_basic.pjt_id", "meta_detail.pjt_id") or None,
+                    "pjt_no": _pick_payload_value(payload_get_fn, payload, "pjt_no", "meta_basic.pjt_no", "meta_detail.pjt_no") or None,
+                })
+            if target == "representative_perf" or representative_only:
+                items = items[:1]
+                selection_policy = "reranked_top1"
+        elif target == "participant_org":
+            selection_policy = "project_payload_unique"
+            seen = set()
+            for point in project_docs[:candidate_docs]:
+                payload = getattr(point, "payload", None) or {}
+                orgs = payload.get("prtcp_org") if isinstance(payload, dict) else None
+                if not isinstance(orgs, list):
+                    continue
+                for org in orgs:
+                    if not isinstance(org, dict):
+                        continue
+                    org_nm = str(org.get("org_nm") or org.get("org_name") or org.get("name") or "").strip()
+                    role = str(org.get("org_slct_nm") or org.get("role") or "").strip() or None
+                    key = (org_nm, role)
+                    if not org_nm or key in seen:
+                        continue
+                    seen.add(key)
+                    items.append({"org_name": org_nm, "role": role})
+        elif target == "researcher":
+            selection_policy = "project_payload_unique"
+            seen = set()
+            for point in project_docs[:candidate_docs]:
+                payload = getattr(point, "payload", None) or {}
+                members = payload.get("prtcp_mp") if isinstance(payload, dict) else None
+                if not isinstance(members, list):
+                    continue
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    name = str(member.get("hm_nm") or member.get("name") or "").strip()
+                    affiliation = str(member.get("blng_org_nm") or member.get("affiliation") or "").strip() or None
+                    key = (name, affiliation)
+                    if not name or key in seen:
+                        continue
+                    seen.add(key)
+                    items.append({"researcher_name": name, "affiliation_org_name": affiliation})
+        bundle_entries.append({
+            "target_kind": target,
+            "items": items[:6],
+            "item_count": len(items),
+            "selection_policy": selection_policy,
+        })
+
+    ambiguities = list(getattr(resolved_anchors, "ambiguities", tuple()) or tuple()) if resolved_anchors is not None else []
+    guidance_required = bool(getattr(intent, "guidance_required", False)) or bool(ambiguities)
+    guidance_message = None
+    if guidance_required:
+        guidance_message = "모호한 조건이 있어 일부 JOIN 결과만 보여줍니다. 필요하면 과제번호나 기관 역할을 더 구체적으로 지정해 주세요."
+
+    bundle_item_count = sum(int(entry.get("item_count") or 0) for entry in bundle_entries)
+    status = "ok" if project_items or bundle_item_count else "empty_result"
+    if guidance_required and status == "ok":
+        status = "partial"
+    return {
+        "status": status,
+        "anchor_kind": str(getattr(intent, "base_route", "project") or "project"),
+        "bundle_kind": str(getattr(intent, "bundle_kind", "") or "project_outputs"),
+        "projects": project_items[:8],
+        "bundles": bundle_entries,
+        "ambiguities": ambiguities,
+        "guidance_message": guidance_message,
+        "candidate_docs": candidate_docs,
+    }

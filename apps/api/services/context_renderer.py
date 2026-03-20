@@ -1,4 +1,4 @@
-"""Context rendering helpers extracted from the legacy app entry module."""
+﻿"""Context rendering helpers extracted from the legacy app entry module."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def normalize_researcher_token(value: Optional[str]) -> str:
     """연구자/기관 비교용 토큰을 알파넘릭 중심으로 정규화한다."""
     if not value:
         return ""
-    return re.sub(r"[^0-9a-zA-Z?-?]", "", str(value)).lower()
+    return re.sub(r"[^0-9a-zA-Z가-힣]", "", str(value)).lower()
 
 
 def normalize_hint_terms(values: Any) -> list[str]:

@@ -1,4 +1,8 @@
-"""Planner merge helpers shared by runtime code and tests.\n\nKeeping planner merge behavior here prevents the app entry module from becoming the source of truth\nfor strategy mutation rules.\n"""
+﻿"""Planner merge helpers shared by runtime code and tests.
+
+Keeping planner merge behavior here prevents the app entry module from becoming the source of truth
+for strategy mutation rules.
+"""
 
 from __future__ import annotations
 
@@ -15,11 +19,7 @@ def _planner_truthy_flag(value: Any) -> bool:
 
 
 def normalize_hint_terms(values: Any) -> list[str]:
-    """Planner가 준 hint 값을 문자열 목록으로 정규화한다.
-
-    None과 placeholder 계열 값은 버리고, 순서를 보존한 채 중복만 제거해
-    이후 merge 단계가 안정적으로 동일한 비교 기준을 쓰게 만든다.
-    """
+    """Normalize planner hint values into a stable string list."""
     if values is None:
         return []
     if isinstance(values, str):
@@ -40,11 +40,7 @@ def normalize_hint_terms(values: Any) -> list[str]:
 
 
 def collect_researcher_name_terms(filters: dict[str, Any]) -> list[str]:
-    """Planner filter에서 연구자 이름 후보만 모아 people_terms seed로 쓴다.
-
-    과거 alias 키가 섞여 들어오는 경우도 같이 흡수해, 후속 intent merge가
-    연구자명 신호를 한 경로로만 다루도록 정리한다.
-    """
+    """Collect only researcher-name-like filter values as `people_terms` seeds."""
     if not isinstance(filters, dict):
         return []
 
@@ -73,11 +69,7 @@ def merge_planner_hints(
     normalize_hint_terms: Any,
     collect_researcher_name_terms: Any,
 ) -> Any:
-    """Planner QA 결과에서 보조 hint만 골라 기존 intent에 덧입힌다.
-
-    여기서는 org, people, year, title, perf type처럼 retrieval 보조 신호만 합치고,
-    confidence가 너무 낮으면 explicit hint를 오염시키지 않도록 merge를 건너뛴다.
-    """
+    """Merge non-strategy planner hints into the existing intent."""
     if qa is None:
         return intent
 
@@ -111,6 +103,10 @@ def merge_planner_hints(
     planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
     planner_reverse_trace_followup = _planner_truthy_flag(filters.get("reverse_trace_followup")) or bool(getattr(intent, "reverse_trace_followup", False))
     planner_followup_relation_hint = str(filters.get("followup_relation_hint") or getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None
+    planner_pattern_kind = str(filters.get("pattern_kind") or getattr(intent, "pattern_kind", "") or "").strip().lower() or None
+    planner_bundle_kind = str(filters.get("bundle_mode") or filters.get("bundle_kind") or getattr(intent, "bundle_kind", "") or "").strip().lower() or None
+    planner_bundle_targets = normalize_hint_terms(filters.get("bundle_targets") or getattr(intent, "bundle_targets", []) or [])
+    planner_guidance_required = _planner_truthy_flag(filters.get("guidance_required")) or bool(getattr(intent, "guidance_required", False))
 
     if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
         planner_people_terms = []
@@ -134,6 +130,10 @@ def merge_planner_hints(
         title=planner_title_terms or list(getattr(intent, "title", []) or []),
         reverse_trace_followup=bool(planner_reverse_trace_followup),
         followup_relation_hint=planner_followup_relation_hint or getattr(intent, "followup_relation_hint", None),
+        pattern_kind=planner_pattern_kind or getattr(intent, "pattern_kind", None),
+        bundle_kind=planner_bundle_kind or getattr(intent, "bundle_kind", None),
+        bundle_targets=planner_bundle_targets or list(getattr(intent, "bundle_targets", []) or []),
+        guidance_required=bool(planner_guidance_required),
     )
 
 
@@ -149,11 +149,7 @@ def apply_planner_strategy(
     changed_by_planner_merge: str,
     strategy_violation_cls: type[Exception],
 ) -> tuple[Any, bool]:
-    """Planner가 확정한 strategy 필드를 intent에 반영한다.
-
-    mode, relation, join_key_mode, target_cols, ids_map 같은 실행 계약은 이 단계에서만
-    갱신하고, planner가 명시하지 않은 값은 유지해 runtime truth를 한곳에 고정한다.
-    """
+    """Apply planner-fixed strategy fields to the intent."""
     if qa is None:
         return intent, False
 
@@ -167,8 +163,8 @@ def apply_planner_strategy(
         "id_fuzzy": "lookup",
         "join": "join",
     }
-    tracked_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "ids_map")
-    strategy_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols")
+    tracked_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "ids_map", "candidate_keys", "project_key_policy", "join_resolution_policy")
+    strategy_fields = ("mode", "base_route", "action", "relation", "join_key_mode", "target_cols", "project_key_policy", "join_resolution_policy")
     filter_fields = ("ids_map",)
     before_snapshot = {k: getattr(intent, k, None) for k in tracked_fields}
 
@@ -209,19 +205,10 @@ def apply_planner_strategy(
     relation = relation_map.get(getattr(qa, "relation", None), getattr(intent, "relation", None))
 
     def _merge_ids_map(base_ids: Any, planner_ids: Any) -> dict[str, list[str]]:
-        """기존 ids_map과 planner ids_map을 합쳐 최종 seed 사전을 만든다.
-
-        Planner가 같은 key를 다시 제시하면 그 값을 우선하고, 새 key는 그대로 추가해
-        join/followup 단계가 최신 planner seed를 기준으로 움직이게 한다.
-        """
+        """Merge the existing ids_map with planner-emitted ids_map values."""
         merged: dict[str, list[str]] = {}
 
         def _ingest(source: Any, *, overwrite: bool = False) -> None:
-            """source 사전을 병합용 중간 맵에 적재한다.
-
-            overwrite=True이면 같은 key가 이미 있어도 planner 값으로 덮어써
-            planner 우선 merge 규칙을 구현한다.
-            """
             if not isinstance(source, dict):
                 return
             for key, raw_values in source.items():
@@ -242,7 +229,7 @@ def apply_planner_strategy(
     if planner_mode == "join" and relation:
         planner_head = str(relation[1]).strip().lower()
     planner_output_type = str(getattr(qa, "output_type", "") or "").strip().lower() or None
-    if planner_output_type not in {"summary", "list", "detail", "stats", "relation"}:
+    if planner_output_type not in {"summary", "list", "detail", "stats", "relation", "comparison", "series"}:
         qa_action = str(getattr(qa, "action", "") or "").strip().lower()
         if qa_action == "detail":
             planner_output_type = "detail"
@@ -256,12 +243,16 @@ def apply_planner_strategy(
             planner_output_type = getattr(intent, "output_type", None)
 
     merged_ids_map = _merge_ids_map(getattr(intent, "ids_map", {}) or {}, getattr(qa, "ids_map", {}) or {})
+    merged_candidate_keys = dict(getattr(intent, "candidate_keys", {}) or {})
+    merged_candidate_keys.update(dict(getattr(qa, "candidate_keys", {}) or {}))
     planner_join_key_mode = str(getattr(qa, "join_key_mode", "") or "").strip().lower() or None
+    planner_project_key_policy = str(getattr(qa, "project_key_policy", "") or "").strip().lower() or None
+    planner_join_resolution_policy = str(getattr(qa, "join_resolution_policy", "") or "").strip().lower() or None
 
     if planner_mode == "join":
         join_relation = relation if isinstance(relation, (list, tuple)) else None
         has_relation = bool(join_relation and len(join_relation) >= 2 and all(str(v or "").strip() for v in join_relation[:2]))
-        if not has_relation or not planner_join_key_mode:
+        if not has_relation or not (planner_join_key_mode or planner_project_key_policy == "ambiguous_or"):
             reason = (
                 "planner join strategy requires non-empty relation and join_key_mode"
                 f"(mode={planner_mode}, relation={relation}, join_key_mode={planner_join_key_mode or None})"
@@ -278,6 +269,7 @@ def apply_planner_strategy(
             raise strategy_violation_cls(error_code="PLANNER_JOIN_FIELDS_MISSING", reason=reason)
 
         has_instance_seed = bool(normalize_hint_terms(merged_ids_map.get("pjt_id")))
+        has_candidate_project_key = bool((merged_candidate_keys.get("project_key") or []))
         qa_filters = dict(getattr(qa, "filters", {}) or {})
         people_gate_terms = normalize_hint_terms(getattr(intent, "people_terms", None))
         if not people_gate_terms:
@@ -297,6 +289,10 @@ def apply_planner_strategy(
         affiliation_org_gate_terms = normalize_hint_terms(getattr(intent, "people_affiliation_org_terms", None) or qa_filters.get("people_affiliation_org_name"))
         has_people_org_gate = bool(people_gate_terms or org_gate_terms)
         unresolved_anchor_pair = bool(people_gate_terms and org_gate_terms and not (planner_org_role or lead_org_gate_terms or participant_org_gate_terms or affiliation_org_gate_terms))
+
+        if planner_project_key_policy == "ambiguous_or" and has_candidate_project_key and not planner_join_key_mode:
+            planner_join_key_mode = "deferred"
+            planner_join_resolution_policy = planner_join_resolution_policy or "auto_resolve"
 
         if planner_join_key_mode == "instance" and not has_instance_seed and (not has_people_org_gate or unresolved_anchor_pair):
             downgraded_mode = str(getattr(intent, "mode", "") or "").strip().lower() or "lookup"
@@ -326,6 +322,9 @@ def apply_planner_strategy(
         mode=planner_mode,
         relation=relation,
         join_key_mode=planner_join_key_mode,
+        candidate_keys=merged_candidate_keys,
+        project_key_policy=planner_project_key_policy,
+        join_resolution_policy=planner_join_resolution_policy,
         target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
         ids_map=merged_ids_map,
         output_type=planner_output_type,
@@ -360,11 +359,7 @@ def apply_planner_v2(
     normalize_hint_terms: Any,
     apply_planner_strategy_fn: Any,
 ) -> tuple[Any, bool]:
-    """Stagewise planner 결과를 intent에 반영하는 v2 진입점이다.
-
-    먼저 hint merge로 retrieval 보조 신호를 정리한 뒤, strategy merge에서
-    mode/relation/ids_map 같은 실행 계약을 확정한다.
-    """
+    """Stagewise planner entry point used by runtime code."""
     hinted_intent = merge_planner_hints(intent, qa)
 
     return apply_planner_strategy_fn(
@@ -373,4 +368,3 @@ def apply_planner_v2(
         request_id=request_id,
         conversation_id=conversation_id,
     )
-

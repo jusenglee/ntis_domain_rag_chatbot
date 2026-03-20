@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from apps.core.rag_pipeline import run_rag_ab_compare
 from apps.core.pipeline_steps import NormalizedIntent
-from apps.core.schemas import IntentPayloadV2
+from apps.core.schemas import IntentPayloadV3
 
 from apps.api.services.context_helpers import resolve_title_from_payload
 from apps.api.contracts.runtime_contracts import friendly_strategy_violation_message
@@ -49,10 +49,10 @@ class CustomRAGRetriever(BaseModel):
 
     model_name: str = "gemma_triton_0"
     top_k: int = 5
-    intent_payload: Optional[IntentPayloadV2] = None
+    intent_payload: Optional[IntentPayloadV3] = None
 
     @staticmethod
-    def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV2] = None) -> Optional[str]:
+    def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV3] = None) -> Optional[str]:
         """히트 payload와 intent target collection을 바탕으로 문서 태그를 추정한다.
         payload에 태그가 없어도 project/perf 계열 템플릿을 맞게 렌더할 수 있도록 보조 태그를 만든다.
         """
@@ -102,16 +102,19 @@ class CustomRAGRetriever(BaseModel):
         return False
 
     @staticmethod
-    def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV2]) -> Optional[Dict[str, Any]]:
+    def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
         """`IntentPayloadV2`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
         normalized intent가 올바른 타입일 때만 넘기며, 아니면 retriever가 planner/runtime contract 바깥 shape를 집어넣지 않게 한다.
         """
         if intent_payload is None:
             return None
         normalized_intent = getattr(intent_payload, "normalized_intent", None)
-        if not isinstance(normalized_intent, NormalizedIntent):
+        if normalized_intent is None:
             return None
-        return {"normalized_intent": normalized_intent}
+        payload_version = getattr(intent_payload, "intent_payload_version", None)
+        question_analysis = getattr(intent_payload, "question_analysis", None)
+        strategy_meta = getattr(intent_payload, "strategy_meta", None) or {}
+        return {"intent_payload_version": payload_version or "v3", "normalized_intent": normalized_intent, "question_analysis": question_analysis, "strategy_meta": dict(strategy_meta)}
 
     @staticmethod
     def _format_aggregation_title(item: Dict[str, Any], metric: str, index: int) -> str:
@@ -163,6 +166,8 @@ class CustomRAGRetriever(BaseModel):
                     ),
                 )
 
+        pattern_analysis = getattr(res_m, "pattern_analysis", None) or {}
+        multi_hop_bundle = getattr(res_m, "multi_hop_bundle", None) or {}
         series_items = series.get("instance_projects") if isinstance(series, dict) else None
         if isinstance(series_items, list) and series_items:
             documents = []
@@ -178,6 +183,61 @@ class CustomRAGRetriever(BaseModel):
                     "candidate_docs": int(series.get("candidate_docs") or 0),
                 })
             return {"documents": documents, "canonical_evidence": canonical_evidence, "render_profile": render_profile, "no_result_message": no_result_message}
+        if isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"} and (list(multi_hop_bundle.get("projects") or []) or list(multi_hop_bundle.get("bundles") or [])):
+            documents = []
+            for idx, project in enumerate(list(multi_hop_bundle.get("projects") or [])[: self.top_k] or [None], start=1):
+                title = "multi-hop bundle"
+                if isinstance(project, dict):
+                    title = str(project.get("project_title") or project.get("pjt_id") or project.get("pjt_no") or title).strip()
+                documents.append(
+                    {
+                        "title": title,
+                        "source_index": idx,
+                        "source_type": "multi_hop_bundle",
+                        "bundle_kind": str(multi_hop_bundle.get("bundle_kind") or "project_outputs"),
+                        "projects": list(multi_hop_bundle.get("projects") or []),
+                        "bundles": list(multi_hop_bundle.get("bundles") or []),
+                        "ambiguities": list(multi_hop_bundle.get("ambiguities") or []),
+                        "guidance_message": multi_hop_bundle.get("guidance_message"),
+                    }
+                )
+            return {
+                "documents": documents,
+                "canonical_evidence": canonical_evidence,
+                "render_profile": render_profile,
+                "no_result_message": no_result_message,
+            }
+
+        if isinstance(pattern_analysis, dict) and str(pattern_analysis.get("status") or "").strip().lower() in {"ok", "partial"} and list(pattern_analysis.get("items") or []):
+            documents = []
+            pattern_kind = str(pattern_analysis.get("pattern_kind") or "pattern_analysis")
+            for idx, item in enumerate(list(pattern_analysis.get("items") or [])[: self.top_k], start=1):
+                title = pattern_kind
+                if pattern_kind == "coauthor_org_repeat":
+                    title = f"{idx}. {item.get('org_name')} ({item.get('repeated_author_count', 0)})"
+                elif pattern_kind == "perf_mix_gap":
+                    title = f"{idx}. {item.get('project_title') or item.get('group_key')}"
+                elif pattern_kind == "series_member_change":
+                    title = f"{idx}. {item.get('project_title') or item.get('year') or 'series_change'}"
+                documents.append(
+                    {
+                        "title": title,
+                        "source_index": idx,
+                        "source_type": "pattern_analysis",
+                        "pattern_kind": pattern_kind,
+                        "pattern_item": dict(item),
+                        "candidate_docs": int(pattern_analysis.get("candidate_docs") or 0),
+                        "subject_count": int(pattern_analysis.get("subject_count") or 0),
+                        "support_doc_count": int(pattern_analysis.get("support_doc_count") or 0),
+                    }
+                )
+            return {
+                "documents": documents,
+                "canonical_evidence": canonical_evidence,
+                "render_profile": render_profile,
+                "no_result_message": no_result_message,
+            }
+
         reverse_trace = getattr(res_m, "reverse_trace", None) or {}
         if isinstance(reverse_trace, dict) and (reverse_trace.get("origin_projects") or reverse_trace.get("followup_perf") or reverse_trace.get("origin_perf")):
             documents = []

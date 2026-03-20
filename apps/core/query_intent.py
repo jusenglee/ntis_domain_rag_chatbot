@@ -27,13 +27,11 @@ from apps.core.rag_constants import (
 _YEAR_RE = re.compile(r"(19\d{2}|20\d{2})")
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 _ISSN_RE = re.compile(r"\b\d{4}-\d{3}[\dXx]\b")
-_RST_ID_RE = re.compile(r"\b[A-Z]{2,6}-\d{4}-\d{6,}\b")
-_PJT_ID_RE = re.compile(r"\b\d{8,12}\b")
-_PJT_NO_RE = re.compile(r"\bPJT[-_/]?[A-Za-z0-9]+(?:[-/][A-Za-z0-9]+){1,}\b", re.IGNORECASE)
-_PJT_ID_LABEL_RE = re.compile(r"(?:과제고유번호|과제\s*고유\s*번호|pjt[_\s-]*id|project\s*id)", re.IGNORECASE)
-_PJT_NO_LABEL_RE = re.compile(r"(?:과제\s*그룹\s*번호|pjt[_\s-]*no|project\s*group\s*number|group\s*number)", re.IGNORECASE)
-_AMBIGUOUS_PROJECT_KEY_RE = re.compile(r"(?:과제번호|과제\s*번호|project\s*number)", re.IGNORECASE)
-_LABELED_ALNUM_VALUE_RE = re.compile(r"[=:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{3,63})|\s+([A-Za-z0-9][A-Za-z0-9_-]{3,63})")
+_PJT_ID_LABEL_RE = re.compile(r"(?:\uacfc\uc81c\uace0\uc720\ubc88\ud638|\uacfc\uc81c\s*\uace0\uc720\s*\ubc88\ud638|pjt[_\s-]*id|project\s*id)", re.IGNORECASE)
+_PJT_NO_LABEL_RE = re.compile(r"(?:\uacfc\uc81c\uadf8\ub8f9\ubc88\ud638|\ub3d9\uc77c\uacfc\uc81c\ubc88\ud638|\uacfc\uc81c\s*\uadf8\ub8f9\s*\ubc88\ud638|pjt[_\s-]*no|project\s*group\s*number|group\s*number)", re.IGNORECASE)
+_AMBIGUOUS_PROJECT_KEY_RE = re.compile(r"(?:\uacfc\uc81c\ubc88\ud638|\uacfc\uc81c\s*\ubc88\ud638|project\s*number|project\s*id|pjt)", re.IGNORECASE)
+_LABELED_ALNUM_VALUE_RE = re.compile(r"[=:]\s*([A-Za-z0-9][A-Za-z0-9_-]{3,63})|\s+([A-Za-z0-9][A-Za-z0-9_-]{3,63})")
+_AMBIGUOUS_PROJECT_KEY_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9_-]{3,63}\b")
 _TITLE_QUOTE_RE = re.compile(r'"([^"\n]{2,80})"|\'([^\'\n]{2,80})\'')
 _MIN_COUNT_RE = re.compile("(\\d+)\\s*(?:\\uac74|\\uac1c)?\\s*(?:\\uc774\\uc0c1|\\uc774\\uc0c1\\uc778|\\uc774\\uc0c1\\ub9cc|\\uc774\\uc0c1\\s+\\ub098\\uc628)", re.IGNORECASE)
 
@@ -133,8 +131,15 @@ class QueryIntent:
     retrieval_query: Optional[str] = None
     confidence: float = 0.0
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
+    candidate_keys: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     ids_flat: List[str] = field(default_factory=list)
-    join_key_mode: Optional[Literal["instance", "group"]] = None
+    is_id_query: bool = False
+    has_project_candidate_key: bool = False
+    has_perf_candidate_key: bool = False
+    is_exact_key_query: bool = False
+    join_key_mode: Optional[Literal["instance", "group", "deferred"]] = None
 
 
 @dataclass(frozen=True)
@@ -170,7 +175,7 @@ def normalize_categories(values: Any) -> List[str]:
 def normalize_join_key_mode(value: Any) -> Optional[str]:
     """JOIN 키 모드를 `instance` 또는 `group`으로만 제한한다."""
     text = str(value or "").strip().lower()
-    if text in {"instance", "group"}:
+    if text in {"instance", "group", "deferred"}:
         return text
     return None
 
@@ -258,7 +263,7 @@ def extract_perf_types(q: str, kws: Optional[List[str]] = None) -> List[str]:
 
 
 def extract_min_metric_count(q: str) -> Optional[int]:
-    """Extract simple numeric thresholds such as `2? ??` for aggregation queries."""
+    """Extract simple numeric thresholds such as `2건 이상` for aggregation queries."""
     match = _MIN_COUNT_RE.search(q or "")
     if not match:
         return None
@@ -348,37 +353,76 @@ def get_relation_route(relation: Optional[Tuple[str, str]]) -> Optional[Relation
     return None
 
 
-def _extract_ids_map(text: str) -> Dict[str, List[str]]:
-    """정규식으로 안전한 식별자 seed만 추출한다.
+def _is_project_key_candidate_token(token: str) -> bool:
+    """Return whether a token is safe to keep as an unresolved exact project key."""
+    text = str(token or "").strip()
+    if not text or not any(ch.isdigit() for ch in text):
+        return False
+    if _YEAR_RE.fullmatch(text):
+        return False
+    if _DOI_RE.fullmatch(text) or _ISSN_RE.fullmatch(text):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{3,63}", text):
+        return False
+    return True
 
-    숫자형 `pjt_id`와 canonical `pjt_no`는 강한 패턴으로 바로 추출한다.
-    영문+숫자 project key는 `과제고유번호`나 `PJT_ID`처럼 slot 라벨이 있을 때만
-    `ids_map`에 넣고, `과제번호` 같은 모호 표현만 있는 경우에는 seed로 승격하지 않는다.
-    """
+
+def _extract_candidate_project_keys(text: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Extract unresolved exact project-key candidates without forcing pjt_id/pjt_no semantics."""
+    raw = text or ""
+    if not has_ambiguous_project_key_label(raw):
+        return {}
+
+    values = _extract_labeled_values(raw, _AMBIGUOUS_PROJECT_KEY_RE)
+    if not values:
+        for match in _AMBIGUOUS_PROJECT_KEY_RE.finditer(raw):
+            window = raw[max(0, match.start() - 2): match.end() + 48]
+            for token_match in _AMBIGUOUS_PROJECT_KEY_TOKEN_RE.finditer(window):
+                token = token_match.group(0)
+                if not _is_project_key_candidate_token(token):
+                    continue
+                values.append(token)
+                break
+    if not values:
+        return {}
+
+    seen: set[str] = set()
+    candidates: List[Dict[str, Any]] = []
+    for value in values:
+        token = str(value).strip()
+        if not _is_project_key_candidate_token(token) or token in seen:
+            continue
+        seen.add(token)
+        candidates.append({
+            "value": token,
+            "candidate_types": ["pjt_id", "pjt_no"],
+            "source": "label:과제번호",
+            "confidence": 0.35,
+        })
+    return {"project_key": candidates} if candidates else {}
+
+
+def _extract_ids_map(text: str) -> Dict[str, List[str]]:
+    """Keep only resolved identifiers in ids_map. Ambiguous project keys stay in candidate_keys."""
     text = text or ""
     ids_map: Dict[str, List[str]] = {}
-    pjt_ids = list(dict.fromkeys(match.group(0) for match in _PJT_ID_RE.finditer(text)))
     labeled_pjt_ids = _extract_labeled_values(text, _PJT_ID_LABEL_RE)
-    pjt_nos = list(dict.fromkeys(match.group(0) for match in _PJT_NO_RE.finditer(text)))
     labeled_pjt_nos = _extract_labeled_values(text, _PJT_NO_LABEL_RE)
     dois = list(dict.fromkeys(match.group(0) for match in _DOI_RE.finditer(text)))
     issns = list(dict.fromkeys(match.group(0) for match in _ISSN_RE.finditer(text)))
-    rst_ids = list(dict.fromkeys(match.group(0) for match in _RST_ID_RE.finditer(text)))
+    projectish_tokens = [match.group(0) for match in _AMBIGUOUS_PROJECT_KEY_TOKEN_RE.finditer(text) if _is_project_key_candidate_token(match.group(0))]
+    if projectish_tokens:
+        issns = [value for value in issns if not any(value != token and value in token for token in projectish_tokens)]
 
-    all_pjt_ids = list(dict.fromkeys([*pjt_ids, *labeled_pjt_ids]))
-    all_pjt_nos = list(dict.fromkeys([*pjt_nos, *labeled_pjt_nos]))
-    if all_pjt_ids:
-        ids_map["pjt_id"] = all_pjt_ids
-    if all_pjt_nos:
-        ids_map["pjt_no"] = all_pjt_nos
+    if labeled_pjt_ids:
+        ids_map["pjt_id"] = list(dict.fromkeys(labeled_pjt_ids))
+    if labeled_pjt_nos:
+        ids_map["pjt_no"] = list(dict.fromkeys(labeled_pjt_nos))
     if dois:
         ids_map["doi"] = dois
     if issns:
         ids_map["issn"] = issns
-    if rst_ids:
-        ids_map["rst_id"] = rst_ids
     return ids_map
-
 
 def classify_query(
     q: str,
@@ -395,6 +439,7 @@ def classify_query(
     text = q or ""
     lowered = text.lower()
     ids_map = _extract_ids_map(text)
+    candidate_keys = _extract_candidate_project_keys(text)
     years = extract_years(text)
     people_terms: List[str] = []
     org_terms: List[str] = []
@@ -409,10 +454,11 @@ def classify_query(
         or perf_types
         or ids_map.get("doi")
         or ids_map.get("issn")
-        or ids_map.get("rst_id")
         or any(cue in lowered for cue in PERF_CUES)
     )
-    has_project = bool(ids_map.get("pjt_id") or ids_map.get("pjt_no") or "\uacfc\uc81c" in lowered or "project" in lowered or "pjt" in lowered)
+    has_project_candidate_key = bool(candidate_keys.get("project_key"))
+    has_perf_candidate_key = bool(candidate_keys.get("perf_key"))
+    has_project = bool(ids_map.get("pjt_id") or ids_map.get("pjt_no") or has_project_candidate_key or "\uacfc\uc81c" in lowered or "project" in lowered or "pjt" in lowered)
     has_people_focus = bool(people_terms) or any(cue in lowered for cue in PEOPLE_CUES) or "researcher" in lowered
     has_org_focus = bool(org_terms) or any(cue in lowered for cue in ORG_CUES)
 
@@ -442,7 +488,7 @@ def classify_query(
         action = "stats"
     elif relation:
         action = "list"
-    elif wants_detail or ids_map:
+    elif wants_detail or ids_map or has_project_candidate_key or has_perf_candidate_key:
         action = "detail"
     elif wants_list or ((has_people_focus or has_org_focus) and (has_project or has_perf)):
         action = "list"
@@ -460,15 +506,26 @@ def classify_query(
         output_type = "comparison" if (wants_comparison or wants_rank or min_metric_count is not None or stats_metric is not None) else "stats"
 
     join_key_mode = None
+    project_key_policy = None
+    join_resolution_policy = None
     if relation:
         if ids_map.get("pjt_no"):
             join_key_mode = "group"
-        elif ids_map.get("pjt_id") or ids_map.get("doi") or ids_map.get("issn") or ids_map.get("rst_id"):
+            project_key_policy = "resolved_pjt_no"
+        elif ids_map.get("pjt_id") or ids_map.get("doi") or ids_map.get("issn"):
             join_key_mode = "instance"
+            project_key_policy = "resolved_pjt_id"
+        elif candidate_keys.get("project_key"):
+            join_key_mode = "deferred"
+            project_key_policy = "ambiguous_or"
+            join_resolution_policy = "auto_resolve"
+    elif candidate_keys.get("project_key"):
+        project_key_policy = "ambiguous_or"
 
     categories = normalize_categories([base_route] + (["perf"] if has_perf else []) + (["project"] if has_project else []))
     ids_flat = [value for values in ids_map.values() for value in values]
-    confidence = 0.85 if ids_map else 0.6
+    is_exact_key_query = bool(ids_flat or has_project_candidate_key or has_perf_candidate_key)
+    confidence = 0.85 if is_exact_key_query else 0.6
 
     return QueryIntent(
         base_route=base_route,
@@ -500,6 +557,13 @@ def classify_query(
         retrieval_query=text.strip() or None,
         confidence=confidence,
         ids_map=ids_map,
+        candidate_keys=candidate_keys,
+        project_key_policy=project_key_policy,
+        join_resolution_policy=join_resolution_policy,
         ids_flat=ids_flat,
+        is_id_query=is_exact_key_query,
+        has_project_candidate_key=has_project_candidate_key,
+        has_perf_candidate_key=has_perf_candidate_key,
+        is_exact_key_query=is_exact_key_query,
         join_key_mode=normalize_join_key_mode(join_key_mode),
     )

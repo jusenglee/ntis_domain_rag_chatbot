@@ -97,7 +97,7 @@ from apps.core.query_intent import (
 from apps.core.rag_runtime_observability import get_code_fingerprint_fields, set_log_context
 from apps.core.rag_store import build_rag_objects
 from apps.core.retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
-from apps.core.schemas import IntentPayloadV2, PlannerStage1Decision, PlannerStage2Slots
+from apps.core.schemas import IntentPayloadV3, PlannerStage1Decision, PlannerStage2Slots
 from apps.core.settings import (
     MAX_CONTEXT_CHARS,
     MAX_DOC_SENTENCES,
@@ -199,6 +199,7 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     """
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
+    intent_payload = getattr(state, "intent_payload", None)
     context = getattr(state, "context", None) or []
     merge_debug = getattr(state, "merge_debug", None) or {}
     timings = getattr(state, "timings", None) or {}
@@ -234,6 +235,15 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "series_kind": getattr(strategy, "series_kind", None),
         "series_result_count": timings.get("info.series_result_count"),
         "series_bucket_count": timings.get("info.series_bucket_count"),
+        "pattern_kind": getattr(strategy, "pattern_kind", None) or timings.get("info.pattern_kind") or None,
+        "bundle_kind": getattr(strategy, "bundle_kind", None) or timings.get("info.bundle_kind") or None,
+        "bundle_target_count": timings.get("info.bundle_target_count"),
+        "bundle_project_count": timings.get("info.bundle_project_count"),
+        "bundle_item_count": timings.get("info.bundle_item_count"),
+        "guidance_required": getattr(strategy, "guidance_required", None) if strategy is not None else timings.get("info.guidance_required"),
+        "pattern_result_count": timings.get("info.pattern_result_count"),
+        "pattern_subject_count": timings.get("info.pattern_subject_count"),
+        "pattern_support_doc_count": timings.get("info.pattern_support_doc_count"),
         "reverse_trace_enabled": getattr(strategy, "reverse_trace_enabled", None),
         "reverse_trace_hop_count": timings.get("info.reverse_trace_hop_count") or getattr(strategy, "reverse_trace_hop_count", None),
         "origin_project_count": timings.get("info.origin_project_count"),
@@ -241,6 +251,14 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "planner_mode": getattr(question_analysis, "mode", None),
         "planner_relation": getattr(question_analysis, "relation", None),
         "planner_target_cols": getattr(question_analysis, "target_cols", None),
+        "intent_payload_version": getattr(intent_payload, "intent_payload_version", None),
+        "strategy_version": getattr(question_analysis, "strategy_version", None),
+        "project_key_policy": timings.get("info.project_key_policy") or getattr(strategy, "project_key_policy", None),
+        "join_resolution_policy": timings.get("info.join_resolution_policy") or getattr(strategy, "join_resolution_policy", None),
+        "resolved_join_key_mode": timings.get("info.resolved_join_key_mode") or None,
+        "dual_branch_used": timings.get("info.dual_branch_used"),
+        "candidate_project_key_count": timings.get("info.candidate_project_key_count") or ((getattr(intent_payload, "strategy_meta", None) or {}).get("candidate_project_key_count") if intent_payload is not None else None),
+        "candidate_perf_key_count": timings.get("info.candidate_perf_key_count") or ((getattr(intent_payload, "strategy_meta", None) or {}).get("candidate_perf_key_count") if intent_payload is not None else None),
         "docs_found": len(context),
         "selected_model": merge_debug.get("selected_model"),
         "rendered_context_used": int(bool(getattr(state, "rendered_context_used", False))),
@@ -429,7 +447,7 @@ def build_advanced_workflow() -> Any:
                 ),
             ),
             log_event=_log_event,
-            intent_payload_cls=IntentPayloadV2,
+            intent_payload_cls=IntentPayloadV3,
             planner_stagewise_enabled=True,
             planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
             planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,

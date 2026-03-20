@@ -9,7 +9,6 @@ from copy import deepcopy
 from apps.api.rag_mapper.mapping_config import get_schema_registry
 from apps.api.rag_mapper.schema_types import DataTag, TagSchema
 
-"""원본 NTIS/QnA payload를 RAG 친화적인 평탄 구조로 바꾸는 매퍼.\n\n핵심 규칙:\n- tag별 스키마에 따라 자연어 라벨로 키를 변환한다.\n- title은 가능하면 top-level로 승격해 context builder가 일관되게 사용하게 한다.\n- 원본에 이미 유효한 title이 있으면 보존한다.\n"""
 
 
 class MappingError(Exception):
@@ -22,7 +21,6 @@ class RagMapper:
 
     title을 top-level로 끌어올리고 data field key를 label로 바꾸되, 원천 의미를 임의 보정하지 않고 schema 규칙만 적용한다.
     """
-    """\n    RAG(Retrieval-Augmented Generation) 시스템용 데이터 매퍼\n    기존 중첩 구조를 유지하면서 매칭되는 key만 자연어로 변환\n    """
     # 매칭되지 않는 필드 포함 여부 설정
     # True: 매칭되지 않는 필드도 원본 key 그대로 포함
     # False: 매칭되는 필드만 포함 (매칭되지 않는 필드는 제외)

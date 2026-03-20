@@ -131,7 +131,11 @@ class NormalizedIntent:
     output_type: Optional[str] = None
     reverse_trace_followup: bool = False
     followup_relation_hint: Optional[str] = None
-    join_key_mode: Optional[Literal["instance", "group"]] = None
+    pattern_kind: Optional[str] = None
+    bundle_kind: Optional[str] = None
+    bundle_targets: List[str] = field(default_factory=list)
+    guidance_required: bool = False
+    join_key_mode: Optional[Literal["instance", "group", "deferred"]] = None
     parsing_warnings: List[str] = field(default_factory=list)
     contract_violations: List[str] = field(default_factory=list)
     categories: List[str] = field(default_factory=list)
@@ -155,7 +159,13 @@ class NormalizedIntent:
     project_tag_filters: List[str] = field(default_factory=list)
     tag_filters: List[str] = field(default_factory=list)
     ids_map: Dict[str, List[str]] = field(default_factory=dict)
+    candidate_keys: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     ids_flat: List[str] = field(default_factory=list)
+    has_project_candidate_key: bool = False
+    has_perf_candidate_key: bool = False
+    is_exact_key_query: bool = False
     remove_terms_for_head: List[str] = field(default_factory=list)
     people_terms_match_mode: Optional[str] = None
     people_terms_min_should: Optional[int] = None
@@ -312,6 +322,7 @@ def normalize_intent(
     title_terms = _normalize_terms(hint_title_terms or getattr(intent, "title", None) or [])
 
     normalized_join_key_mode = normalize_join_key_mode(getattr(intent, "join_key_mode", None))
+    candidate_keys = getattr(intent, "candidate_keys", None) or {}
     join_parsing_warnings = _normalize_terms(
         list(getattr(intent, "parsing_warnings", None) or []) + normalization_warnings
     )
@@ -333,7 +344,7 @@ def normalize_intent(
         join_key_mode=normalized_join_key_mode,
         parsing_warnings=join_parsing_warnings,
         contract_violations=join_contract_violations,
-        is_id_query=bool(getattr(intent, "is_id_query", False)),
+        is_id_query=bool(getattr(intent, "is_id_query", False) or getattr(intent, "is_exact_key_query", False)),
         output_type=output_type,
         categories=normalize_categories(getattr(intent, "categories", None)),
         planner_limit=getattr(intent, "planner_limit", None),
@@ -356,7 +367,13 @@ def normalize_intent(
         project_tag_filters=_normalize_terms(getattr(intent, "project_tag_filters", None) or []),
         tag_filters=_normalize_terms(getattr(intent, "tag_filters", None) or []),
         ids_map=ids_map,
+        candidate_keys=dict(candidate_keys),
+        project_key_policy=(str(getattr(intent, "project_key_policy", "") or "").strip().lower() or None),
+        join_resolution_policy=(str(getattr(intent, "join_resolution_policy", "") or "").strip().lower() or None),
         ids_flat=ids_flat,
+        has_project_candidate_key=bool(getattr(intent, "has_project_candidate_key", False)),
+        has_perf_candidate_key=bool(getattr(intent, "has_perf_candidate_key", False)),
+        is_exact_key_query=bool(getattr(intent, "is_exact_key_query", False) or ids_flat or (candidate_keys.get("project_key") or []) or (candidate_keys.get("perf_key") or [])),
         remove_terms_for_head=_normalize_terms(getattr(intent, "remove_terms_for_head", None) or []),
         people_terms_match_mode=str(getattr(intent, "people_terms_match_mode", "") or "").strip().lower() or None,
         people_terms_min_should=getattr(intent, "people_terms_min_should", None),
@@ -366,6 +383,10 @@ def normalize_intent(
         wants_rank=wants_rank,
         reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
         followup_relation_hint=(str(getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None),
+        pattern_kind=(str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None),
+        bundle_kind=(str(getattr(intent, "bundle_kind", "") or "").strip().lower() or None),
+        bundle_targets=_normalize_terms(getattr(intent, "bundle_targets", None) or []),
+        guidance_required=bool(getattr(intent, "guidance_required", False)),
         min_metric_count=getattr(intent, "min_metric_count", None),
         stats_metric=stats_policy["stats_metric"],
         window_years=stats_policy["window_years"],

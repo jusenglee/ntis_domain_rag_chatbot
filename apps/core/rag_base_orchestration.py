@@ -98,6 +98,8 @@ class BaseOrchestrationRuntime:
     hit_key_fn: Callable[..., Any]
     title_match_mode_contains: str
     series_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
+    pattern_analysis_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
+    multi_hop_bundle_builder_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 @dataclass(frozen=True)
@@ -318,5 +320,7 @@ def execute_base_orchestration(*, request: BaseOrchestrationRequest, runtime: Ba
         lookup_title_filter_policy=request.lookup_title_filter_policy,
         aggregation_builder=runtime.aggregation_builder_fn,
         series_builder=runtime.series_builder_fn,
+        pattern_analysis_builder=runtime.pattern_analysis_builder_fn,
+        multi_hop_bundle_builder=runtime.multi_hop_bundle_builder_fn,
     )
     return BaseOrchestrationOutcome(result=result, followup_used=bool(perf_followup_join_ids_count), followup_join_ids_count=perf_followup_join_ids_count)

@@ -40,6 +40,60 @@ def _render_series_context(series: Optional[Dict[str, Any]]) -> str:
             f"- bucket {bucket.get('year')}: projects={bucket.get('project_count', 0)}, papers={bucket.get('paper_count', 0)}, patents={bucket.get('patent_count', 0)}, reports={bucket.get('report_count', 0)}"
         )
     return "\n".join(lines)
+def _render_pattern_analysis_context(pattern_analysis: Optional[Dict[str, Any]]) -> str:
+    """Render a compact text view for pattern-analysis payloads."""
+    if not isinstance(pattern_analysis, dict):
+        return ""
+    items = list(pattern_analysis.get("items") or [])
+    if not items:
+        return ""
+    kind = str(pattern_analysis.get("pattern_kind") or "pattern_analysis")
+    lines = [f"- pattern_kind: {kind}"]
+    for item in items[:8]:
+        if kind == "coauthor_org_repeat":
+            lines.append(f"- org: {item.get('org_name')} | repeated_authors={item.get('repeated_author_count')} | authors={', '.join(item.get('author_names') or [])}")
+            if item.get("supporting_perf_titles"):
+                lines.append(f"- perf_titles: {', '.join(item.get('supporting_perf_titles') or [])}")
+            continue
+        if kind == "perf_mix_gap":
+            lines.append(f"- project: {item.get('project_title') or item.get('group_key')} | paper_count={item.get('paper_count', 0)} | patent_count={item.get('patent_count', 0)} | report_count={item.get('report_count', 0)} | gap={item.get('gap_kind')}")
+            continue
+        if kind == "series_member_change":
+            lines.append(f"- year={item.get('year')} | project={item.get('project_title')} | added={', '.join(item.get('added_members') or []) or '-'} | removed={', '.join(item.get('removed_members') or []) or '-'} | member_count={item.get('member_count', 0)}")
+            continue
+        lines.append(f"- item: {item}")
+    return "\n".join(lines)
+
+
+
+def _render_multi_hop_bundle_context(bundle: Optional[Dict[str, Any]]) -> str:
+    """Render a compact text view for multi-hop bundle payloads."""
+    if not isinstance(bundle, dict):
+        return ""
+    projects = list(bundle.get("projects") or [])
+    bundles = list(bundle.get("bundles") or [])
+    if not projects and not bundles:
+        return ""
+    lines = [f"- bundle_kind: {bundle.get('bundle_kind') or 'project_outputs'}"]
+    if bundle.get("guidance_message"):
+        lines.append(f"- guidance: {bundle.get('guidance_message')}")
+    for project in projects[:6]:
+        title = str(project.get("project_title") or project.get("pjt_id") or project.get("pjt_no") or "project").strip()
+        suffix = ", ".join(part for part in [f"pjt_id={project.get('pjt_id')}" if project.get("pjt_id") else "", f"pjt_no={project.get('pjt_no')}" if project.get("pjt_no") else "", f"year={project.get('year')}" if project.get("year") else ""] if part)
+        lines.append(f"- project: {title}" + (f" ({suffix})" if suffix else ""))
+    for entry in bundles[:6]:
+        lines.append(f"- target: {entry.get('target_kind')} | item_count={entry.get('item_count', 0)} | selection_policy={entry.get('selection_policy')}")
+        for item in list(entry.get("items") or [])[:4]:
+            if entry.get("target_kind") in {"paper", "patent", "report", "representative_perf"}:
+                lines.append(f"- item: {item.get('perf_title')} ({item.get('perf_type')})")
+            elif entry.get("target_kind") == "participant_org":
+                lines.append(f"- item: {item.get('org_name')}" + (f" ({item.get('role')})" if item.get('role') else ""))
+            elif entry.get("target_kind") == "researcher":
+                lines.append(f"- item: {item.get('researcher_name')}" + (f" ({item.get('affiliation_org_name')})" if item.get('affiliation_org_name') else ""))
+            else:
+                lines.append(f"- item: {item}")
+    return "\n".join(lines)
+
 def _render_reverse_trace_context(reverse_trace: Optional[Dict[str, Any]]) -> str:
     """Render a compact text view for perf -> project -> perf reverse traces."""
     if not isinstance(reverse_trace, dict):
@@ -130,6 +184,8 @@ class ResultAssemblyRuntime:
     soft_title_contains: Callable[..., bool]
     aggregation_builder: Callable[..., Optional[Dict[str, Any]]]
     series_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
+    pattern_analysis_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
+    multi_hop_bundle_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
 
 
 def collect_filter_probe_terms(*, people_terms: Optional[List[str]], people_ids: Optional[List[str]], mode: str) -> List[str]:
@@ -298,6 +354,8 @@ def assemble_rag_result(
     keywords: List[str],
     aggregation: Optional[Dict[str, Any]],
     series: Optional[Dict[str, Any]],
+    pattern_analysis: Optional[Dict[str, Any]],
+    multi_hop_bundle: Optional[Dict[str, Any]],
     contract_fail_reason: Any,
     hit_key: HitKey,
     timing_put: TimingPut,
@@ -326,6 +384,10 @@ def assemble_rag_result(
     context = context_bundle["context"]
     if str(output_type or "").strip().lower() == "series" and isinstance(series, dict) and str(series.get("status") or "").strip().lower() == "ok":
         context = _render_series_context(series) or context
+    elif isinstance(pattern_analysis, dict) and str(pattern_analysis.get("status") or "").strip().lower() == "ok":
+        context = _render_pattern_analysis_context(pattern_analysis) or context
+    elif isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"}:
+        context = _render_multi_hop_bundle_context(multi_hop_bundle) or context
     refs = context_bundle["refs"]
     ctx_fieldset = context_bundle["fieldset"]
     render_profile = context_bundle.get("render_profile")
@@ -386,6 +448,7 @@ def assemble_rag_result(
         timings=timings,
         aggregation=aggregation,
         series=series,
+        multi_hop_bundle=multi_hop_bundle,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,
     )
@@ -489,6 +552,27 @@ class SearchLookupResultOrchestrator:
             if status in {"unsupported", "empty_result"}:
                 self.runtime.timing_put("info.failed_step", f"series_{status}")
 
+        pattern_analysis = None
+        if callable(self.runtime.pattern_analysis_builder):
+            pattern_analysis = self.runtime.pattern_analysis_builder(
+                reranked=reranked,
+                intent=self.query_intent,
+                hinted_limit=self.policy.hinted_limit,
+                policy_limit=int(getattr(self.policy.preset, "max_ctx_items", 10) or 10),
+                payload_get_fn=self.runtime.payload_get,
+                aggregation=aggregation,
+                series=series,
+            )
+        if pattern_analysis:
+            items = list(pattern_analysis.get("items") or [])
+            self.runtime.timing_put("info.pattern_kind", str(pattern_analysis.get("pattern_kind") or ""))
+            self.runtime.timing_put("info.pattern_result_count", len(items))
+            self.runtime.timing_put("info.pattern_subject_count", int(pattern_analysis.get("subject_count") or len(items) or 0))
+            self.runtime.timing_put("info.pattern_support_doc_count", int(pattern_analysis.get("support_doc_count") or 0))
+            status = str(pattern_analysis.get("status") or "").strip().lower()
+            if status in {"unsupported", "insufficient_evidence", "empty_result"}:
+                self.runtime.timing_put("info.failed_step", f"pattern_{status}")
+
         result_topn_normal = self.runtime.resolve_env_topn(
             "RAG_LOG_TOPN_NORMAL",
             default=3,
@@ -550,6 +634,26 @@ class SearchLookupResultOrchestrator:
             timing_put=self.runtime.timing_put,
         )
 
+        multi_hop_bundle = None
+        if callable(self.runtime.multi_hop_bundle_builder):
+            multi_hop_bundle = self.runtime.multi_hop_bundle_builder(
+                reranked=reranked,
+                intent=self.query_intent,
+                hinted_limit=self.policy.hinted_limit,
+                policy_limit=int(getattr(self.policy.preset, "max_ctx_items", 10) or 10),
+                payload_get_fn=self.runtime.payload_get,
+            )
+        if multi_hop_bundle:
+            bundles = list(multi_hop_bundle.get("bundles") or [])
+            self.runtime.timing_put("info.bundle_kind", str(multi_hop_bundle.get("bundle_kind") or ""))
+            self.runtime.timing_put("info.bundle_target_count", len(bundles))
+            self.runtime.timing_put("info.bundle_project_count", len(multi_hop_bundle.get("projects", []) or []))
+            self.runtime.timing_put("info.bundle_item_count", sum(int(entry.get("item_count") or 0) for entry in bundles))
+            self.runtime.timing_put("info.guidance_required", int(bool(multi_hop_bundle.get("guidance_message") or multi_hop_bundle.get("ambiguities"))))
+            status = str(multi_hop_bundle.get("status") or "").strip().lower()
+            if status in {"unsupported", "empty_result", "partial"}:
+                self.runtime.timing_put("info.failed_step", f"bundle_{status}")
+
         probe_terms = collect_filter_probe_terms(
             people_terms=self.request.people_terms,
             people_ids=self.request.people_ids,
@@ -598,6 +702,8 @@ class SearchLookupResultOrchestrator:
             keywords=self.request.keywords,
             aggregation=aggregation,
             series=series,
+            pattern_analysis=pattern_analysis,
+            multi_hop_bundle=multi_hop_bundle,
             contract_fail_reason=contract_fail_reason,
             hit_key=self.runtime.hit_key,
             timing_put=self.runtime.timing_put,
@@ -657,6 +763,8 @@ def finalize_rag_result(
     lookup_title_filter_policy: str,
     aggregation_builder: Callable[..., Optional[Dict[str, Any]]],
     series_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    pattern_analysis_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    multi_hop_bundle_builder: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
 ) -> RagResult:
     """request/policy/runtime을 받아 base RAG 결과 조립 전체를 실행한다.
     ResultAssemblyRequest·Policy·Runtime를 입력으로 받는 파사드로, 실제 조립 함수의 긴 인자 목록을 증발시키지 않게 한다.
@@ -712,6 +820,8 @@ def finalize_rag_result(
         soft_title_contains=soft_title_contains,
         aggregation_builder=aggregation_builder,
         series_builder=series_builder,
+        pattern_analysis_builder=pattern_analysis_builder,
+        multi_hop_bundle_builder=multi_hop_bundle_builder,
     )
     return SearchLookupResultOrchestrator(
         merged_rrf=merged_rrf,
@@ -755,6 +865,8 @@ def assemble_join_rag_result(
     aggregation: Optional[Dict[str, Any]] = None,
     series: Optional[Dict[str, Any]] = None,
     reverse_trace: Optional[Dict[str, Any]] = None,
+    pattern_analysis: Optional[Dict[str, Any]] = None,
+    multi_hop_bundle: Optional[Dict[str, Any]] = None,
     debug_meta: Optional[Dict[str, Any]] = None,
     timing_put: TimingPut = lambda key, value: None,
     log_kv: Callable[..., None] = lambda *args, **kwargs: None,
@@ -798,6 +910,8 @@ def assemble_join_rag_result(
         hop2_ctx = _render_series_context(series) or hop2_ctx
     elif isinstance(reverse_trace, dict) and str(reverse_trace.get("status") or "").strip().lower() in {"ok", "partial"}:
         hop2_ctx = _render_reverse_trace_context(reverse_trace) or hop2_ctx
+    elif isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"}:
+        hop2_ctx = _render_multi_hop_bundle_context(multi_hop_bundle) or hop2_ctx
     hop2_refs = context_bundle["refs"]
     render_profile = context_bundle.get("render_profile")
     canonical_evidence = context_bundle.get("canonical_evidence")
@@ -854,6 +968,8 @@ def assemble_join_rag_result(
         aggregation=aggregation,
         series=series,
         reverse_trace=reverse_trace,
+        pattern_analysis=pattern_analysis,
+        multi_hop_bundle=multi_hop_bundle,
         debug_meta=debug_meta,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,

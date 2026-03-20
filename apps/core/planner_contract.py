@@ -87,6 +87,8 @@ def validate_planner_contract(
         ids_map: Optional[dict[str, Any]],
         relation_target_cols: Optional[tuple[str, str]],
         join_key_mode: Optional[str],
+        candidate_keys: Optional[dict[str, Any]] = None,
+        project_key_policy: Optional[str] = None,
 ) -> list[PlannerContractViolation]:
     """mode, relation, ids_map, join_key_mode, target_cols 조합이 planner 계약을 지키는지 검사한다.
     `pjt_id`/`pjt_no` 혼합, non-join의 join_key_mode, group/instance mismatch, relation-target_cols 충돌을 fail-close 대상으로 고정한다.
@@ -121,6 +123,8 @@ def validate_planner_contract(
 
     pjt_ids = _as_str_list(normalized_ids_map.get("pjt_id"))
     pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
+    project_key_candidates = list((candidate_keys or {}).get("project_key") or []) if isinstance(candidate_keys, dict) else []
+    project_key_policy_norm = str(project_key_policy or "").strip().lower()
 
     # 구조적 계약 위반은 상위 레이어에서 StrategyViolation으로 fail-close 한다.
     # 표현상의 경고는 parsing_warnings로 남길 수 있지만, 여기서 다루는 것은 fail-close 대상이다.
@@ -142,7 +146,7 @@ def validate_planner_contract(
             )
         return violations
 
-    if join_key_mode_norm not in ("instance", "group"):
+    if join_key_mode_norm not in ("instance", "group", "deferred"):
         violations.append(
             PlannerContractViolation(
                 error_code="PLANNER_JOIN_KEY_MODE_INVALID",
@@ -202,6 +206,29 @@ def validate_planner_contract(
                 reason="join_key_mode=instance 인데 ids_map에 pjt_id 없이 pjt_no만 존재",
             )
         )
+
+    if join_key_mode_norm == "deferred":
+        if project_key_policy_norm != "ambiguous_or":
+            violations.append(
+                PlannerContractViolation(
+                    error_code="PLANNER_DEFERRED_PROJECT_KEY_POLICY_INVALID",
+                    reason="join_key_mode=deferred requires project_key_policy=ambiguous_or",
+                )
+            )
+        if not project_key_candidates:
+            violations.append(
+                PlannerContractViolation(
+                    error_code="PLANNER_DEFERRED_PROJECT_KEY_MISSING",
+                    reason="join_key_mode=deferred requires candidate_keys.project_key",
+                )
+            )
+        if pjt_ids or pjt_nos:
+            violations.append(
+                PlannerContractViolation(
+                    error_code="PLANNER_DEFERRED_PROJECT_KEY_MIXED",
+                    reason="join_key_mode=deferred forbids resolved pjt_id/pjt_no in ids_map",
+                )
+            )
 
     return violations
 

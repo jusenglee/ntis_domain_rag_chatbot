@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""Core planner and runtime schema definitions.\n\n- `IntentPayloadV2`: app entry payload handed to `rag_pipeline`.\n- `PlannerStage1Decision` / `PlannerStage2Slots`: staged planner outputs.\n- `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor-facing runtime contracts.\n"""
+"""Core planner and runtime schema definitions.
+
+- `IntentPayloadV3`: app entry payload handed to `rag_pipeline`.
+- `PlannerStage1Decision` / `PlannerStage2Slots`: staged planner outputs.
+- `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor-facing runtime contracts.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Optional, Tuple
@@ -16,13 +21,16 @@ from apps.core.settings import RAG_COLLECTION_ALLOWLIST
 
 
 @dataclass(frozen=True)
-class IntentPayloadV2:
-    """앱 진입점에서 정규화된 intent를 하나로 묶어 runtime에 넘기는 최상위 payload다.
-    raw request를 다시 해석하지 않고, 이 구조체를 통해 staged planner와 rag pipeline이 같은 normalized intent를 공유한다.
-    """
+class IntentPayloadV3:
+    """Transport payload shared across planner, retrieval, and runtime."""
 
     normalized_intent: NormalizedIntent
+    intent_payload_version: Literal["v3"] = "v3"
+    question_analysis: Any = None
+    strategy_meta: Dict[str, Any] = field(default_factory=dict)
 
+
+IntentPayloadV2 = IntentPayloadV3  # Legacy compatibility alias for older imports. New code should use IntentPayloadV3.
 
 Stage1Relation = Literal["project_perf", "perf_project"]
 
@@ -49,6 +57,9 @@ class PlannerStage2Slots(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ids_map: Dict[str, list[str]] = Field(default_factory=dict)
+    candidate_keys: Dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     filters: Dict[str, Any] = Field(default_factory=dict)
     retrieval_query: Optional[str] = None
     limit: int = Field(default=20, ge=1)
@@ -67,6 +78,8 @@ class StrategySpec:
     relation: Optional[Tuple[str, str]]
     # Planner output crosses service boundaries, so optional string fields stay normalized.
     join_key_mode: Optional[str] = None
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     join_key_source: Optional[str] = None
     hop1_mode: Optional[str] = None
     join_compile_selection: Optional[str] = None
@@ -93,6 +106,10 @@ class StrategySpec:
     resolved_org_count: Optional[int] = None
     aggregation_kind: Optional[str] = None
     series_kind: Optional[str] = None
+    pattern_kind: Optional[str] = None
+    bundle_kind: Optional[str] = None
+    bundle_targets: Tuple[str, ...] = field(default_factory=tuple)
+    guidance_required: bool = False
     reverse_trace_enabled: bool = False
     reverse_trace_hop_count: Optional[int] = None
     followup_relation_hint: Optional[str] = None
@@ -144,6 +161,23 @@ class ProjectSeriesPlan:
 
 
 @dataclass(frozen=True)
+class PatternAnalysisPlan:
+    """Pattern-analysis metadata that runtime can execute after retrieval."""
+
+    kind: str
+
+
+@dataclass(frozen=True)
+class MultiHopBundlePlan:
+    """Planner-first metadata for bundling multiple downstream targets from a project set."""
+
+    kind: str
+    targets: Tuple[str, ...] = field(default_factory=tuple)
+    representative_only: bool = False
+    guidance_required: bool = False
+
+
+@dataclass(frozen=True)
 class PlanStep:
     """Single step inside a retrieval graph plan."""
 
@@ -180,12 +214,20 @@ class QueryPlan:
     tie_break: str
     target_collections: Tuple[str, ...]
     filters: Dict[str, Any]
+    project_key_policy: Optional[str] = None
+    join_resolution_policy: Optional[str] = None
     query_graph: Optional[QueryGraphPlan] = None
     aggregation_plan: Optional[AggregationPlan] = None
     temporal_constraint: Optional[TemporalConstraint] = None
     project_series_plan: Optional[ProjectSeriesPlan] = None
+    pattern_analysis_plan: Optional[PatternAnalysisPlan] = None
+    multi_hop_bundle_plan: Optional[MultiHopBundlePlan] = None
     reverse_trace_followup: bool = False
     followup_relation_hint: Optional[str] = None
+    pattern_kind: Optional[str] = None
+    bundle_kind: Optional[str] = None
+    bundle_targets: Tuple[str, ...] = field(default_factory=tuple)
+    guidance_required: bool = False
 
 
 @dataclass
@@ -204,6 +246,10 @@ class ExecutionContext:
     output_type: Optional[str]
     reverse_trace_followup: bool
     followup_relation_hint: Optional[str]
+    pattern_kind: Optional[str]
+    bundle_kind: Optional[str]
+    bundle_targets: Tuple[str, ...]
+    guidance_required: bool
     categories: list[str]
     planner_limit: Optional[int]
     retrieval_query: Optional[str]
@@ -225,6 +271,9 @@ class ExecutionContext:
     project_tag_filters: list[str]
     tag_filters: list[str]
     ids_map: Dict[str, list[str]]
+    candidate_keys: Dict[str, list[dict[str, Any]]]
+    project_key_policy: Optional[str]
+    join_resolution_policy: Optional[str]
     ids_flat: list[str]
     remove_terms_for_head: list[str]
     people_terms_match_mode: Optional[str] = None
@@ -274,6 +323,10 @@ class ExecutionContext:
             output_type=intent.output_type,
             reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
             followup_relation_hint=getattr(intent, "followup_relation_hint", None),
+            pattern_kind=getattr(intent, "pattern_kind", None),
+            bundle_kind=getattr(intent, "bundle_kind", None),
+            bundle_targets=tuple(getattr(intent, "bundle_targets", ()) or ()),
+            guidance_required=bool(getattr(intent, "guidance_required", False)),
             categories=list(intent.categories),
             planner_limit=intent.planner_limit,
             retrieval_query=intent.retrieval_query,
@@ -295,6 +348,9 @@ class ExecutionContext:
             project_tag_filters=list(intent.project_tag_filters),
             tag_filters=list(intent.tag_filters),
             ids_map=dict(intent.ids_map),
+            candidate_keys=dict(getattr(intent, "candidate_keys", {}) or {}),
+            project_key_policy=getattr(intent, "project_key_policy", None),
+            join_resolution_policy=getattr(intent, "join_resolution_policy", None),
             ids_flat=list(intent.ids_flat),
             remove_terms_for_head=list(intent.remove_terms_for_head),
             people_terms_match_mode=getattr(intent, "people_terms_match_mode", None),
@@ -324,6 +380,10 @@ class ExecutionContext:
             output_type=self.output_type,
             reverse_trace_followup=bool(self.reverse_trace_followup),
             followup_relation_hint=self.followup_relation_hint,
+            pattern_kind=self.pattern_kind,
+            bundle_kind=self.bundle_kind,
+            bundle_targets=list(self.bundle_targets),
+            guidance_required=bool(self.guidance_required),
             categories=list(self.categories),
             planner_limit=self.planner_limit,
             retrieval_query=self.retrieval_query,
@@ -345,6 +405,9 @@ class ExecutionContext:
             project_tag_filters=list(self.project_tag_filters),
             tag_filters=list(self.tag_filters),
             ids_map=dict(self.ids_map),
+            candidate_keys=dict(self.candidate_keys),
+            project_key_policy=self.project_key_policy,
+            join_resolution_policy=self.join_resolution_policy,
             ids_flat=list(self.ids_flat),
             remove_terms_for_head=list(self.remove_terms_for_head),
             people_terms_match_mode=self.people_terms_match_mode,
@@ -487,6 +550,28 @@ def derive_project_series_plan(intent: NormalizedIntent, output_type: Optional[s
     )
 
 
+def derive_pattern_analysis_plan(intent: NormalizedIntent) -> Optional[PatternAnalysisPlan]:
+    """Return planner-first pattern-analysis metadata when stage2 fixed a pattern kind."""
+    pattern_kind = str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None
+    if not pattern_kind:
+        return None
+    return PatternAnalysisPlan(kind=pattern_kind)
+
+
+def derive_multi_hop_bundle_plan(intent: NormalizedIntent) -> Optional[MultiHopBundlePlan]:
+    """Return planner-first bundle metadata for project-output bundle questions."""
+    bundle_targets = tuple(str(value).strip().lower() for value in (getattr(intent, "bundle_targets", None) or []) if str(value).strip())
+    if not bundle_targets:
+        return None
+    bundle_kind = str(getattr(intent, "bundle_kind", "") or "").strip().lower() or "project_outputs"
+    return MultiHopBundlePlan(
+        kind=bundle_kind,
+        targets=bundle_targets,
+        representative_only=bool(getattr(intent, "representative_only", False)),
+        guidance_required=bool(getattr(intent, "guidance_required", False)),
+    )
+
+
 def derive_query_graph_plan(
     intent: NormalizedIntent,
     *,
@@ -495,10 +580,29 @@ def derive_query_graph_plan(
     output_type: Optional[str],
     aggregation_plan: Optional[AggregationPlan],
     project_series_plan: Optional[ProjectSeriesPlan],
+    pattern_analysis_plan: Optional[PatternAnalysisPlan],
+    multi_hop_bundle_plan: Optional[MultiHopBundlePlan],
 ) -> QueryGraphPlan:
     """Derive a retrieval-graph skeleton without changing existing mode/relation policy."""
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower() or "project"
     output_type_norm = str(output_type or "").strip().lower() or "summary"
+    if multi_hop_bundle_plan is not None:
+        return QueryGraphPlan(
+            kind="multi_hop_bundle",
+            steps=(
+                PlanStep(kind="resolve_anchor", head=base_route),
+                PlanStep(kind="lookup_projects", head="project", relation=relation),
+                PlanStep(kind="bundle_project_outputs", head=multi_hop_bundle_plan.kind, relation=relation),
+            ),
+        )
+    if pattern_analysis_plan is not None:
+        steps = [PlanStep(kind="lookup_anchor", head=base_route)]
+        if pattern_analysis_plan.kind == "series_member_change" and project_series_plan is not None:
+            steps.append(PlanStep(kind="expand_series", head="project", relation=relation))
+        elif relation in {("project", "perf"), ("perf", "project")}:
+            steps.append(PlanStep(kind="expand_relation", head=relation[1], relation=relation))
+        steps.append(PlanStep(kind="analyze_pattern", head=pattern_analysis_plan.kind, relation=relation))
+        return QueryGraphPlan(kind="pattern_analysis", steps=tuple(steps))
     if project_series_plan is not None:
         return QueryGraphPlan(
             kind="project_series",
@@ -563,6 +667,8 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
             "action": getattr(raw, "action", ""),
             "relation": getattr(raw, "relation", None),
             "join_key_mode": getattr(raw, "join_key_mode", None),
+            "project_key_policy": getattr(raw, "project_key_policy", None),
+            "join_resolution_policy": getattr(raw, "join_resolution_policy", None),
             "join_key_source": getattr(raw, "join_key_source", None),
             "hop1_mode": getattr(raw, "hop1_mode", None),
             "join_compile_selection": getattr(raw, "join_compile_selection", None),
@@ -589,6 +695,10 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
             "resolved_org_count": getattr(raw, "resolved_org_count", None),
             "aggregation_kind": getattr(raw, "aggregation_kind", None),
             "series_kind": getattr(raw, "series_kind", None),
+            "pattern_kind": getattr(raw, "pattern_kind", None),
+            "bundle_kind": getattr(raw, "bundle_kind", None),
+            "bundle_targets": getattr(raw, "bundle_targets", None),
+            "guidance_required": getattr(raw, "guidance_required", None),
             "reverse_trace_enabled": getattr(raw, "reverse_trace_enabled", False),
             "reverse_trace_hop_count": getattr(raw, "reverse_trace_hop_count", None),
             "followup_relation_hint": getattr(raw, "followup_relation_hint", None),
@@ -603,6 +713,8 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
         action=str(data.get("action") or "").strip().lower(),
         relation=tuple(relation) if isinstance(relation, tuple) and len(relation) == 2 else None,
         join_key_mode=(str(data.get("join_key_mode")).strip().lower() or None) if data.get("join_key_mode") is not None else None,
+        project_key_policy=(str(data.get("project_key_policy")).strip().lower() or None) if data.get("project_key_policy") is not None else None,
+        join_resolution_policy=(str(data.get("join_resolution_policy")).strip().lower() or None) if data.get("join_resolution_policy") is not None else None,
         join_key_source=(str(data.get("join_key_source")).strip().lower() or None) if data.get("join_key_source") is not None else None,
         hop1_mode=(str(data.get("hop1_mode")).strip().lower() or None) if data.get("hop1_mode") is not None else None,
         join_compile_selection=(str(data.get("join_compile_selection")).strip().lower() or None) if data.get("join_compile_selection") is not None else None,
@@ -629,6 +741,10 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
         resolved_org_count=(int(data.get("resolved_org_count")) if data.get("resolved_org_count") is not None else None),
         aggregation_kind=(str(data.get("aggregation_kind")).strip().lower() or None) if data.get("aggregation_kind") is not None else None,
         series_kind=(str(data.get("series_kind")).strip().lower() or None) if data.get("series_kind") is not None else None,
+        pattern_kind=(str(data.get("pattern_kind")).strip().lower() or None) if data.get("pattern_kind") is not None else None,
+        bundle_kind=(str(data.get("bundle_kind")).strip().lower() or None) if data.get("bundle_kind") is not None else None,
+        bundle_targets=tuple(str(value).strip().lower() for value in (data.get("bundle_targets") or tuple()) if str(value).strip()),
+        guidance_required=bool(data.get("guidance_required", False)),
         reverse_trace_enabled=bool(data.get("reverse_trace_enabled", False)),
         reverse_trace_hop_count=(int(data.get("reverse_trace_hop_count")) if data.get("reverse_trace_hop_count") is not None else None),
         followup_relation_hint=(str(data.get("followup_relation_hint")).strip().lower() or None) if data.get("followup_relation_hint") is not None else None,
@@ -647,6 +763,8 @@ def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any
         "action": spec.action,
         "relation": list(spec.relation) if spec.relation else None,
         "join_key_mode": spec.join_key_mode,
+        "project_key_policy": spec.project_key_policy,
+        "join_resolution_policy": spec.join_resolution_policy,
         "join_key_source": spec.join_key_source,
         "hop1_mode": spec.hop1_mode,
         "join_compile_selection": spec.join_compile_selection,
@@ -673,6 +791,10 @@ def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any
         "resolved_org_count": spec.resolved_org_count,
         "aggregation_kind": spec.aggregation_kind,
         "series_kind": spec.series_kind,
+        "pattern_kind": spec.pattern_kind,
+        "bundle_kind": spec.bundle_kind,
+        "bundle_targets": list(spec.bundle_targets),
+        "guidance_required": bool(spec.guidance_required),
         "reverse_trace_enabled": bool(spec.reverse_trace_enabled),
         "reverse_trace_hop_count": spec.reverse_trace_hop_count,
         "followup_relation_hint": spec.followup_relation_hint,
@@ -788,6 +910,8 @@ def build_query_plan(
 
     aggregation_plan = derive_aggregation_plan(intent, output_type)
     project_series_plan = derive_project_series_plan(intent, output_type)
+    pattern_analysis_plan = derive_pattern_analysis_plan(intent)
+    multi_hop_bundle_plan = derive_multi_hop_bundle_plan(intent)
     temporal_constraint = derive_temporal_constraint(intent)
     query_graph = derive_query_graph_plan(
         intent,
@@ -796,6 +920,8 @@ def build_query_plan(
         output_type=output_type,
         aggregation_plan=aggregation_plan,
         project_series_plan=project_series_plan,
+        pattern_analysis_plan=pattern_analysis_plan,
+        multi_hop_bundle_plan=multi_hop_bundle_plan,
     )
 
     return QueryPlan(
@@ -816,8 +942,13 @@ def build_query_plan(
         aggregation_plan=aggregation_plan,
         temporal_constraint=temporal_constraint,
         project_series_plan=project_series_plan,
+        pattern_analysis_plan=pattern_analysis_plan,
+        multi_hop_bundle_plan=multi_hop_bundle_plan,
         reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
         followup_relation_hint=(str(getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None),
+        bundle_kind=(getattr(multi_hop_bundle_plan, "kind", None) if multi_hop_bundle_plan is not None else None),
+        bundle_targets=tuple(getattr(multi_hop_bundle_plan, "targets", tuple()) or tuple()),
+        guidance_required=bool(getattr(multi_hop_bundle_plan, "guidance_required", False)) if multi_hop_bundle_plan is not None else bool(getattr(intent, "guidance_required", False)),
     ), mode_reason
 
 
