@@ -282,3 +282,9 @@ def build_followup_clarification_message(strategy_meta: Dict[str, Any]) -> Optio
     if status == "unresolved":
         return f"이전 목록에서 어느 {subject}를 말씀하시는지 확인해 주세요."
     return None
+
+
+def should_short_circuit_followup_clarification(strategy_meta: Dict[str, Any]) -> bool:
+    status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
+    explicit_followup = bool((strategy_meta or {}).get("explicit_followup"))
+    return explicit_followup and status in {"missing_context", "out_of_range", "unresolved"}
