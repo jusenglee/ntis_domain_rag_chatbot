@@ -114,6 +114,10 @@ Important:
 - stats -> at most 20
 - download -> default 20, respect an explicit N only if N <= 20
 - list/topic -> default 20
+- explicit user count requests belong to planner responsibility, not downstream fallback correction
+- if the user explicitly asks for `N items`, `N results`, or `top N` in a list-like query, set `display_limit` to that requested count unless another instruction in the query clearly narrows it further
+- when an explicit count exists for a list-like query, ensure `limit >= display_limit` and usually keep `limit` equal to or above that count
+- if the user requests more than the runtime maximum, still keep the planner count within the runtime contract ceiling instead of emitting an out-of-range value
 - display_limit defaults to limit when not otherwise specified
 </limit_rules>
 
@@ -133,6 +137,7 @@ Important:
 </planner_first_rules>
 
 <examples>
+{"ids_map":{},"candidate_keys":{},"project_key_policy":null,"join_resolution_policy":null,"filters":{},"retrieval_query":"semiconductor projects","limit":3,"display_limit":3,"confidence":0.93}
 {"ids_map":{},"candidate_keys":{},"project_key_policy":null,"join_resolution_policy":null,"filters":{"lead_org_name":["ETRI"]},"retrieval_query":"ETRI 양자기술","limit":20,"display_limit":20,"confidence":0.90}
 {"ids_map":{"pjt_id":["1711015550"]},"candidate_keys":{},"project_key_policy":"resolved_pjt_id","join_resolution_policy":null,"filters":{},"retrieval_query":"1711015550 과제 상세","limit":1,"display_limit":1,"confidence":0.98}
 {"ids_map":{},"candidate_keys":{"project_key":[{"value":"a4412354543","candidate_types":["pjt_id","pjt_no"],"source":"label:과제번호","confidence":0.35}]},"project_key_policy":"ambiguous_or","join_resolution_policy":null,"filters":{},"retrieval_query":"과제번호 a4412354543","limit":1,"display_limit":1,"confidence":0.88}

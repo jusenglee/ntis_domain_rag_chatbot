@@ -5,6 +5,13 @@ import apps.api.services.rag_retriever as rag_retriever_module
 from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
+from apps.api.services.retrieval_workflow import (
+    _extract_explicit_count,
+    _normalize_display_payloads,
+    _resolve_display_request,
+    _resolve_retrieval_budget,
+)
+from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.pipeline_steps import NormalizedIntent, normalize_intent
 from apps.core.planner_staged import compose_locked_strategy
@@ -177,6 +184,170 @@ def test_build_intent_payload_keeps_planner_for_non_id_precheck_signals():
     assert run_calls == ['ETRI papers stats 2021 2023']
     assert question_analysis is not None
     assert payload.normalized_intent['planner_used'] is True
+
+
+def test_build_intent_payload_keeps_planner_list_count_when_valid():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(
+            confidence=0.8,
+            action='list',
+            output_type='list',
+            limit=5,
+            display_limit=3,
+        )
+
+    payload, question_analysis = asyncio.run(
+        build_intent_payload(
+            question='\ubc18\ub3c4\uccb4 \ubd84\uc57c \uacfc\uc81c 3\uac74\uc744 \uc54c\ub824\uc918',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, qa is not None),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert question_analysis is not None
+    assert question_analysis.limit == 5
+    assert question_analysis.display_limit == 3
+    assert payload.question_analysis.limit == 5
+    assert payload.question_analysis.display_limit == 3
+
+
+def test_build_intent_payload_falls_back_for_invalid_planner_count():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(
+            confidence=0.8,
+            action='list',
+            output_type='list',
+            limit=0,
+            display_limit=0,
+        )
+
+    payload, question_analysis = asyncio.run(
+        build_intent_payload(
+            question='\ubc18\ub3c4\uccb4 \ubd84\uc57c \uacfc\uc81c 3\uac74\uc744 \uc54c\ub824\uc918',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, qa is not None),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert question_analysis is not None
+    assert question_analysis.limit == 20
+    assert question_analysis.display_limit == 3
+    assert payload.question_analysis.limit == 20
+    assert payload.question_analysis.display_limit == 3
+
+
+def test_build_intent_payload_clamps_invalid_planner_large_count_to_contract_max():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(
+            confidence=0.8,
+            action='list',
+            output_type='list',
+            limit=0,
+            display_limit=0,
+        )
+
+    payload, question_analysis = asyncio.run(
+        build_intent_payload(
+            question='반도체 분야 과제 100건을 알려줘',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, qa is not None),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert question_analysis is not None
+    assert question_analysis.limit == MAX_TOP_K_SIZE
+    assert question_analysis.display_limit == MAX_TOP_K_SIZE
+    assert payload.question_analysis.limit == MAX_TOP_K_SIZE
+    assert payload.question_analysis.display_limit == MAX_TOP_K_SIZE
+
+
+def test_build_intent_payload_falls_back_for_invalid_detail_count():
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(
+            confidence=0.8,
+            action='detail',
+            output_type='detail',
+            limit=0,
+            display_limit=0,
+        )
+
+    payload, question_analysis = asyncio.run(
+        build_intent_payload(
+            question='\ubc18\ub3c4\uccb4 \uacfc\uc81c 3\uac74 \uc0c1\uc138\ub97c \uc54c\ub824\uc918',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, qa is not None),
+            log_event=lambda *args, **kwargs: None,
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert question_analysis is not None
+    assert question_analysis.limit == 1
+    assert question_analysis.display_limit == 1
+    assert payload.question_analysis.limit == 1
+    assert payload.question_analysis.display_limit == 1
 
 
 def test_normalize_intent_keeps_group_join_mode_for_relation_query():
@@ -369,6 +540,53 @@ def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
     assert applied is True
     assert hinted_intent.people_terms == ['Kim']
     assert any(event == 'PLANNER.FILTER.ORDINAL_STRIPPED' for event, _ in log_calls)
+
+
+def test_resolve_retrieval_budget_uses_question_analysis_limit_as_source_of_truth():
+    qa = SimpleNamespace(limit=7, display_limit=3)
+
+    assert _resolve_retrieval_budget(qa, max_top_k_size=20) == 7
+
+
+def test_resolve_retrieval_budget_clamps_to_contract_max():
+    qa = SimpleNamespace(limit=999, display_limit=999)
+
+    assert _resolve_retrieval_budget(qa, max_top_k_size=20) == 20
+
+
+def test_resolve_display_request_prefers_display_limit_over_limit():
+    qa = SimpleNamespace(limit=10, display_limit=3)
+
+    assert _resolve_display_request(qa, docs_count=8) == 3
+
+
+def test_extract_explicit_count_reads_numeric_request():
+    assert _extract_explicit_count('반도체 분야 과제 3건을 알려줘') == 3
+    assert _extract_explicit_count('반도체 과제 목록을 알려줘') is None
+
+
+def test_normalize_display_payloads_derives_missing_canonical_entries():
+    log_calls = []
+    docs, canonical = _normalize_display_payloads(
+        docs=[
+            {'title': 'first project', 'source_type': 'hit', 'pjt_id': 'PJT-1', 'pjt_no': 'NO-1'},
+            {'title': 'second project', 'source_type': 'hit', 'pjt_id': 'PJT-2', 'pjt_no': 'NO-2'},
+            {'title': 'third project', 'source_type': 'hit', 'pjt_id': 'PJT-3', 'pjt_no': 'NO-3'},
+        ],
+        canonical_evidence=[_project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project')],
+        base_route='project',
+        output_type='list',
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        request_id='rid',
+        conversation_id='cid',
+    )
+
+    assert len(docs) == 3
+    assert len(canonical) == 3
+    assert canonical[1]['ids']['pjt_id'] == 'PJT-2'
+    assert canonical[2]['ids']['pjt_id'] == 'PJT-3'
+    assert any(event == 'RAG.CANONICAL_EVIDENCE.DERIVED' for event, _ in log_calls)
+    assert all(event != 'RAG.DISPLAY_INPUT_MISMATCH' for event, _ in log_calls)
 
 
 def test_custom_rag_retriever_short_circuits_followup_clarification():

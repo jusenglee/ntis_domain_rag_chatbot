@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from apps.api.services.canonical_context import build_prev_context_canonical_text
+from apps.core.canonical_evidence import build_canonical_evidence
+from apps.api.services.followup_anchor import parse_display_limit
 from apps.api.services.detail_contract import (
     compute_detail_coverage,
     coverage_satisfies_fields,
@@ -38,6 +40,92 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+_DISPLAY_LIMIT_SENTINEL = 10**9
+
+
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except Exception:
+        return None
+    return number if number >= 1 else None
+
+
+def _resolve_retrieval_budget(question_analysis: Any, *, max_top_k_size: int) -> int:
+    """Use the assembled question-analysis limit as the retrieval budget source of truth."""
+    planner_limit = _coerce_positive_int(getattr(question_analysis, "limit", None))
+    return min(planner_limit or max_top_k_size, max_top_k_size)
+
+
+def _resolve_display_request(question_analysis: Any, *, docs_count: int) -> int:
+    requested = _coerce_positive_int(getattr(question_analysis, "display_limit", None))
+    if requested is None:
+        requested = _coerce_positive_int(getattr(question_analysis, "limit", None)) or 1
+    return min(requested, max(1, int(docs_count or 0) or 1))
+
+
+def _extract_explicit_count(question: Any) -> Optional[int]:
+    count = parse_display_limit(str(question or ""), default=_DISPLAY_LIMIT_SENTINEL)
+    return None if count == _DISPLAY_LIMIT_SENTINEL else int(count)
+
+
+def _normalize_display_payloads(
+    *,
+    docs: list[dict[str, Any]],
+    canonical_evidence: list[dict[str, Any]],
+    base_route: str,
+    output_type: str,
+    log_event: Any,
+    request_id: str,
+    conversation_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Display snapshot에 들어갈 documents와 canonical evidence 길이를 맞춘다."""
+    normalized_docs = [item for item in (docs or []) if isinstance(item, dict)]
+    normalized_canonical = [item for item in (canonical_evidence or []) if isinstance(item, dict)]
+
+    if len(normalized_canonical) < len(normalized_docs):
+        canonical_before = len(normalized_canonical)
+        for rank, item in enumerate(normalized_docs[canonical_before:], start=canonical_before + 1):
+            normalized_canonical.append(
+                build_canonical_evidence(
+                    item,
+                    rank=rank,
+                    base_route=base_route,
+                    output_type=output_type,
+                ).to_dict()
+            )
+        derived_count = len(normalized_canonical) - canonical_before
+        if derived_count > 0:
+            log_event(
+                "RAG.CANONICAL_EVIDENCE.DERIVED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                docs_count=len(normalized_docs),
+                canonical_count_before=canonical_before,
+                canonical_count_after=len(normalized_canonical),
+                derived_count=derived_count,
+                base_route=base_route,
+                output_type=output_type,
+            )
+
+    if len(normalized_docs) != len(normalized_canonical):
+        aligned_count = min(len(normalized_docs), len(normalized_canonical))
+        log_event(
+            "RAG.DISPLAY_INPUT_MISMATCH",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            docs_count=len(normalized_docs),
+            canonical_count=len(normalized_canonical),
+            aligned_count=aligned_count,
+            base_route=base_route,
+            output_type=output_type,
+        )
+        normalized_docs = normalized_docs[:aligned_count]
+        normalized_canonical = normalized_canonical[:aligned_count]
+
+    return normalized_docs, normalized_canonical
 
 
 async def node_knowledge_sufficiency(
@@ -281,8 +369,20 @@ async def node_rag_search(
             ks=ks,
             min_confidence=0.55,
         )
-        search_num = _pick_attr(query_intent, qa, key="planner_limit") or _pick_attr(qa, key="limit") or max_top_k_size
-        search_num = min(int(search_num), max_top_k_size)
+        explicit_count = _extract_explicit_count(getattr(state, "question", ""))
+        search_num = _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
+        planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
+        planner_display_limit = _coerce_positive_int(getattr(qa, "display_limit", None))
+        log_event(
+            "RAG.COUNT_PIPELINE",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            explicit_count=explicit_count,
+            planner_limit=planner_limit,
+            planner_display_limit=planner_display_limit,
+            runtime_top_k=search_num,
+            retrieval_query=search_query,
+        )
 
         retriever = custom_rag_retriever_cls(
             top_k=search_num,
@@ -302,13 +402,24 @@ async def node_rag_search(
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
         raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
 
-        display_limit = min(int(getattr(qa, "display_limit", getattr(qa, "limit", len(docs) or 1)) or 1), max(1, len(docs) or 1))
+        context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
         list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
+        if list_like_output and docs:
+            docs, canonical_evidence = _normalize_display_payloads(
+                docs=docs,
+                canonical_evidence=canonical_evidence,
+                base_route=context_kind or "project",
+                output_type=output_type,
+                log_event=log_event,
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+            )
+        display_limit = _resolve_display_request(qa, docs_count=len(docs))
         if list_like_output and docs and canonical_evidence and view_state is not None:
             snapshot = build_display_snapshot(
                 conversation_id=state.conversation_id,
                 turn_id=state.request_id,
-                context_kind=str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower(),
+                context_kind=context_kind or "project",
                 requested_count=display_limit,
                 documents=docs,
                 canonical_evidence=canonical_evidence,
@@ -323,6 +434,21 @@ async def node_rag_search(
                 request_id=state.request_id,
                 conversation_id=state.conversation_id,
                 view_id=snapshot.view_id,
+                requested_count=display_limit,
+                docs_count=len(docs),
+                canonical_count=len(canonical_evidence),
+                visible_count=snapshot.visible_count,
+                raw_count=snapshot.raw_count,
+            )
+            log_event(
+                "RAG.COUNT_PIPELINE.RESULT",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                explicit_count=explicit_count,
+                planner_limit=planner_limit,
+                planner_display_limit=planner_display_limit,
+                runtime_top_k=search_num,
+                requested_count=display_limit,
                 visible_count=snapshot.visible_count,
                 raw_count=snapshot.raw_count,
             )

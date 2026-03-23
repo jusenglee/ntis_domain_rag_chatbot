@@ -7,7 +7,12 @@ from langchain_core.messages import BaseMessage
 
 from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, resolve_followup_anchor
 from apps.core.followup_resolution import resolve_reference_context_followup
+from apps.core.settings import MAX_TOP_K_SIZE
 from apps.api.services.view_state import ConversationViewState
+
+_DISPLAY_LIMIT_SENTINEL = 10**9
+_DEFAULT_RETRIEVAL_LIMIT = 20
+_LIST_LIKE_OUTPUT_TYPES = {"list", "relation", "comparison", "series", "stats"}
 
 
 def has_explicit_precheck_signals(precheck: dict[str, Any]) -> bool:
@@ -175,6 +180,79 @@ def _build_intent_payload_object(intent_payload_cls: Any, normalized_intent: Any
         return payload
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except Exception:
+        return None
+    return number if number >= 1 else None
+
+
+def _resolve_question_analysis_count(question_analysis: Any, *, question: str, log_event: Any, request_id: Optional[str], conversation_id: str) -> None:
+    """Trust planner counts first and use deterministic parsing only as a fallback."""
+    if question_analysis is None:
+        return
+
+    action = str(getattr(question_analysis, "action", "") or "").strip().lower()
+    output_type = str(getattr(question_analysis, "output_type", "") or "").strip().lower()
+    is_list_like = action == "list" or output_type in _LIST_LIKE_OUTPUT_TYPES
+
+    planner_limit_raw = getattr(question_analysis, "limit", None)
+    planner_display_limit_raw = getattr(question_analysis, "display_limit", None)
+    planner_limit = _coerce_positive_int(planner_limit_raw)
+    planner_display_limit = _coerce_positive_int(planner_display_limit_raw)
+    planner_valid = planner_limit is not None and planner_display_limit is not None and planner_display_limit <= planner_limit
+
+    if planner_valid:
+        log_event(
+            "PLANNER.COUNT_RESOLUTION",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            source="planner",
+            action=action or None,
+            output_type=output_type or None,
+            planner_limit=planner_limit,
+            planner_display_limit=planner_display_limit,
+            final_limit=planner_limit,
+            final_display_limit=planner_display_limit,
+        )
+        return
+
+    explicit_count = parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
+    default_limit = 1 if output_type == "detail" or action == "detail" else _DEFAULT_RETRIEVAL_LIMIT
+    fallback_limit = min(planner_limit or default_limit, MAX_TOP_K_SIZE)
+    fallback_display_default = planner_display_limit or fallback_limit
+
+    if explicit_count != _DISPLAY_LIMIT_SENTINEL and is_list_like:
+        clamped_explicit_count = min(explicit_count, MAX_TOP_K_SIZE)
+        fallback_limit = min(max(fallback_limit, clamped_explicit_count), MAX_TOP_K_SIZE)
+        fallback_display_limit = min(fallback_limit, clamped_explicit_count)
+        fallback_reason = "invalid_planner_explicit_count"
+    else:
+        fallback_display_limit = min(
+            fallback_limit,
+            min(parse_display_limit(question, default=fallback_display_default), MAX_TOP_K_SIZE),
+        )
+        fallback_reason = "invalid_planner_no_explicit_count"
+
+    question_analysis.limit = fallback_limit
+    question_analysis.display_limit = fallback_display_limit
+    log_event(
+        "PLANNER.COUNT_RESOLUTION",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        source="planner_fallback",
+        reason=fallback_reason,
+        action=action or None,
+        output_type=output_type or None,
+        planner_limit=planner_limit_raw,
+        planner_display_limit=planner_display_limit_raw,
+        final_limit=fallback_limit,
+        final_display_limit=fallback_display_limit,
+        explicit_count=None if explicit_count == _DISPLAY_LIMIT_SENTINEL else explicit_count,
+    )
+
+
 @dataclass(frozen=True)
 class RequestUnderstandingFacade:
     cheap_precheck: Any
@@ -275,9 +353,12 @@ class RequestUnderstandingFacade:
             )
             planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
         if question_analysis is not None:
-            question_analysis.display_limit = min(
-                int(getattr(question_analysis, "limit", 20) or 20),
-                parse_display_limit(question, default=int(getattr(question_analysis, "display_limit", getattr(question_analysis, "limit", 20)) or 20)),
+            _resolve_question_analysis_count(
+                question_analysis,
+                question=question,
+                log_event=self.log_event,
+                request_id=request_id,
+                conversation_id=conversation_id,
             )
         normalized_intent, planner_applied = self.apply_question_analysis_v3(
             normalized_intent_base,
