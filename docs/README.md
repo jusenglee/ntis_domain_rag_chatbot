@@ -90,3 +90,4 @@
 - list 계열 응답은 `display_limit` 기준 visible subset을 먼저 확정하고 `latest_display_snapshot`을 저장한다. retrieval top-k는 assembled `limit`를 기준으로 계산한다.
 - 사용자가 `N건`, `top N`처럼 개수를 명시하면 planner가 `limit/display_limit`를 우선 결정하고, 서버 fallback은 planner 값이 비정상일 때만 계약 상한 안에서 보정한다.
 - detail 계열 응답은 `latest_focus_entity`, `detail_cache`, `DetailCoverage`를 사용해 서버가 기본 프로필/상세 fallback을 보정한다.
+- retrieval query uses planner-first selection, but a runtime guard falls back to the raw query when semantic-axis drift or identifier/year loss is detected.

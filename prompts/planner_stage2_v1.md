@@ -128,6 +128,10 @@ Important:
 - remove filler words
 - keep names, orgs, years, perf types, and topic terms
 - do not conflict with locked strategy
+- preserve the semantic axis of the original question
+- do not turn a project list question into a performance/result question unless the user explicitly asked for outputs or results
+- do not turn a lookup/list question into detail or stats language unless the user explicitly asked for detail or statistics
+- do not drop identifiers, years, or organization names that appear in the original question
 </retrieval_query_rules>
 
 <planner_first_rules>
@@ -138,6 +142,7 @@ Important:
 
 <examples>
 {"ids_map":{},"candidate_keys":{},"project_key_policy":null,"join_resolution_policy":null,"filters":{},"retrieval_query":"semiconductor projects","limit":3,"display_limit":3,"confidence":0.93}
+- bad example: do not rewrite a project list request like "semiconductor projects" into "semiconductor project outputs"
 {"ids_map":{},"candidate_keys":{},"project_key_policy":null,"join_resolution_policy":null,"filters":{"lead_org_name":["ETRI"]},"retrieval_query":"ETRI 양자기술","limit":20,"display_limit":20,"confidence":0.90}
 {"ids_map":{"pjt_id":["1711015550"]},"candidate_keys":{},"project_key_policy":"resolved_pjt_id","join_resolution_policy":null,"filters":{},"retrieval_query":"1711015550 과제 상세","limit":1,"display_limit":1,"confidence":0.98}
 {"ids_map":{},"candidate_keys":{"project_key":[{"value":"a4412354543","candidate_types":["pjt_id","pjt_no"],"source":"label:과제번호","confidence":0.35}]},"project_key_policy":"ambiguous_or","join_resolution_policy":null,"filters":{},"retrieval_query":"과제번호 a4412354543","limit":1,"display_limit":1,"confidence":0.88}

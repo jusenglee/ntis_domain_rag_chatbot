@@ -363,7 +363,7 @@ async def node_rag_search(
                 requested_fields=sorted(requested_fields),
             )
 
-        _, _, search_query, _ = resolve_rag_queries_fn(
+        raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries_fn(
             state=state,
             qa=qa,
             ks=ks,
@@ -374,6 +374,18 @@ async def node_rag_search(
         planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
         planner_display_limit = _coerce_positive_int(getattr(qa, "display_limit", None))
         log_event(
+            "RAG.RETRIEVAL_QUERY.RESOLUTION",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            raw_query=raw_query,
+            planner_query=planner_query,
+            selected_search_query=search_query,
+            confidence=query_confidence,
+            drift_detected=drift_detected,
+            drift_reasons=drift_reasons,
+            fallback_applied=fallback_applied,
+        )
+        log_event(
             "RAG.COUNT_PIPELINE",
             request_id=state.request_id,
             conversation_id=state.conversation_id,
@@ -382,6 +394,10 @@ async def node_rag_search(
             planner_display_limit=planner_display_limit,
             runtime_top_k=search_num,
             retrieval_query=search_query,
+            raw_query=raw_query,
+            planner_query=planner_query,
+            drift_detected=drift_detected,
+            fallback_applied=fallback_applied,
         )
 
         retriever = custom_rag_retriever_cls(
@@ -415,7 +431,9 @@ async def node_rag_search(
                 conversation_id=state.conversation_id,
             )
         display_limit = _resolve_display_request(qa, docs_count=len(docs))
-        if list_like_output and docs and canonical_evidence and view_state is not None:
+        if list_like_output and docs and view_state is not None:
+            docs_count_before_snapshot = len(docs)
+            canonical_count_before_snapshot = len(canonical_evidence)
             snapshot = build_display_snapshot(
                 conversation_id=state.conversation_id,
                 turn_id=state.request_id,
@@ -435,8 +453,8 @@ async def node_rag_search(
                 conversation_id=state.conversation_id,
                 view_id=snapshot.view_id,
                 requested_count=display_limit,
-                docs_count=len(docs),
-                canonical_count=len(canonical_evidence),
+                docs_count=docs_count_before_snapshot,
+                canonical_count=canonical_count_before_snapshot,
                 visible_count=snapshot.visible_count,
                 raw_count=snapshot.raw_count,
             )
@@ -448,7 +466,14 @@ async def node_rag_search(
                 planner_limit=planner_limit,
                 planner_display_limit=planner_display_limit,
                 runtime_top_k=search_num,
+                raw_query=raw_query,
+                planner_query=planner_query,
+                selected_search_query=search_query,
+                drift_detected=drift_detected,
+                fallback_applied=fallback_applied,
                 requested_count=display_limit,
+                docs_count=docs_count_before_snapshot,
+                canonical_count=canonical_count_before_snapshot,
                 visible_count=snapshot.visible_count,
                 raw_count=snapshot.raw_count,
             )

@@ -2,9 +2,11 @@ import asyncio
 from types import SimpleNamespace
 
 import apps.api.services.rag_retriever as rag_retriever_module
+from apps.api.services.rag_retriever import detect_retrieval_query_drift, resolve_rag_queries
 from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
+from apps.api.services.view_state import build_display_snapshot
 from apps.api.services.retrieval_workflow import (
     _extract_explicit_count,
     _normalize_display_payloads,
@@ -563,6 +565,95 @@ def test_resolve_display_request_prefers_display_limit_over_limit():
 def test_extract_explicit_count_reads_numeric_request():
     assert _extract_explicit_count('반도체 분야 과제 3건을 알려줘') == 3
     assert _extract_explicit_count('반도체 과제 목록을 알려줘') is None
+
+
+def test_detect_retrieval_query_drift_allows_compact_topic_preserving_hint():
+    drift_detected, drift_reasons = detect_retrieval_query_drift(
+        raw_query='반도체 분야 과제 3건을 알려줘',
+        hint_query='반도체 과제',
+    )
+
+    assert drift_detected is False
+    assert drift_reasons == []
+
+
+
+def test_detect_retrieval_query_drift_rejects_perf_axis_change():
+    drift_detected, drift_reasons = detect_retrieval_query_drift(
+        raw_query='반도체 분야 과제 3건을 알려줘',
+        hint_query='반도체 과제 성과',
+    )
+
+    assert drift_detected is True
+    assert 'perf_axis_added' in drift_reasons
+
+
+
+def test_resolve_rag_queries_falls_back_to_raw_query_on_drift():
+    state = SimpleNamespace(question='반도체 분야 과제 3건을 알려줘', intent_payload=None)
+    qa = SimpleNamespace(retrieval_query='반도체 과제 성과', confidence=0.95)
+    ks = SimpleNamespace(retrieval_query='반도체 과제 성과', confidence=0.95)
+
+    raw_query, planner_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries(
+        state=state,
+        qa=qa,
+        ks=ks,
+        min_confidence=0.55,
+    )
+
+    assert raw_query == '반도체 분야 과제 3건을 알려줘'
+    assert planner_query == '반도체 과제 성과'
+    assert search_query == raw_query
+    assert confidence == 0.95
+    assert drift_detected is True
+    assert 'perf_axis_added' in drift_reasons
+    assert fallback_applied is True
+
+
+
+def test_resolve_rag_queries_keeps_identifier_and_year_terms():
+    state = SimpleNamespace(question='2023 ETRI 반도체 과제를 알려줘', intent_payload=None)
+    qa = SimpleNamespace(retrieval_query='반도체 과제', confidence=0.95)
+    ks = SimpleNamespace(retrieval_query='반도체 과제', confidence=0.95)
+
+    raw_query, planner_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries(
+        state=state,
+        qa=qa,
+        ks=ks,
+        min_confidence=0.55,
+    )
+
+    assert planner_query == '반도체 과제'
+    assert search_query == raw_query
+    assert confidence == 0.95
+    assert drift_detected is True
+    assert 'missing_identifier_or_year' in drift_reasons
+    assert fallback_applied is True
+
+
+
+def test_build_display_snapshot_uses_documents_as_visible_source_of_truth():
+    snapshot = build_display_snapshot(
+        conversation_id='cid',
+        turn_id='rid',
+        context_kind='project',
+        requested_count=3,
+        documents=[
+            {'title': 'first project', 'source_type': 'hit', 'pjt_id': 'PJT-1', 'pjt_no': 'NO-1'},
+            {'title': 'second project', 'source_type': 'hit', 'pjt_id': 'PJT-2', 'pjt_no': 'NO-2'},
+            {'title': 'third project', 'source_type': 'hit', 'pjt_id': 'PJT-3', 'pjt_no': 'NO-3'},
+            {'title': 'fourth project', 'source_type': 'hit', 'pjt_id': 'PJT-4', 'pjt_no': 'NO-4'},
+        ],
+        canonical_evidence=[_project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project')],
+        raw_count=10,
+    )
+
+    assert snapshot.requested_count == 3
+    assert snapshot.visible_count == 3
+    assert snapshot.raw_count == 10
+    assert [item.pjt_id for item in snapshot.items] == ['PJT-1', 'PJT-2', 'PJT-3']
+    assert snapshot.items[1].title_text == 'second project'
+    assert snapshot.items[2].title_text == 'third project'
 
 
 def test_normalize_display_payloads_derives_missing_canonical_entries():

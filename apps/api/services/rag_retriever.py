@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 
@@ -38,6 +39,98 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[가-힣]{2,}")
+_GENERIC_QUERY_TERMS = {
+    "알려줘",
+    "보여줘",
+    "조회",
+    "목록",
+    "리스트",
+    "정보",
+    "내용",
+    "건",
+    "개",
+    "top",
+    "the",
+    "and",
+    "for",
+}
+_PROJECT_AXIS_TERMS = {"과제", "project", "projects"}
+_PERF_AXIS_TERMS = {"성과", "output", "outputs", "논문", "특허", "보고서"}
+_DETAIL_AXIS_TERMS = {"상세", "detail", "details"}
+_STATS_AXIS_TERMS = {"통계", "현황", "trend", "trends", "집계"}
+
+
+def _normalize_query_text(text: Any) -> str:
+    return str(text or "").strip().lower()
+
+
+def _extract_query_tokens(text: Any) -> list[str]:
+    normalized = _normalize_query_text(text)
+    return [token for token in _QUERY_TOKEN_RE.findall(normalized) if token]
+
+
+def _extract_identifier_like_tokens(text: Any) -> set[str]:
+    protected: set[str] = set()
+    for token in _extract_query_tokens(text):
+        if re.fullmatch(r"\d{4,}", token):
+            protected.add(token)
+        elif any(ch.isdigit() for ch in token) and any(ch.isalpha() for ch in token):
+            protected.add(token)
+    return protected
+
+
+def _extract_topic_terms(text: Any) -> set[str]:
+    return {
+        token
+        for token in _extract_query_tokens(text)
+        if token not in _GENERIC_QUERY_TERMS and not token.isdigit()
+    }
+
+
+def _contains_any_term(terms: set[str], candidates: set[str]) -> bool:
+    return bool(terms.intersection(candidates))
+
+
+def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bool, list[str]]:
+    raw = _normalize_query_text(raw_query)
+    hint = _normalize_query_text(hint_query)
+    if not raw or not hint or raw == hint:
+        return False, []
+
+    reasons: list[str] = []
+    raw_identifiers = _extract_identifier_like_tokens(raw)
+    hint_identifiers = _extract_identifier_like_tokens(hint)
+    if raw_identifiers - hint_identifiers:
+        reasons.append("missing_identifier_or_year")
+
+    raw_topic_terms = _extract_topic_terms(raw)
+    hint_topic_terms = _extract_topic_terms(hint)
+    if raw_topic_terms and not raw_topic_terms.intersection(hint_topic_terms):
+        reasons.append("topic_terms_lost")
+
+    raw_has_project = _contains_any_term(raw_topic_terms, _PROJECT_AXIS_TERMS)
+    raw_has_perf = _contains_any_term(raw_topic_terms, _PERF_AXIS_TERMS)
+    hint_has_project = _contains_any_term(hint_topic_terms, _PROJECT_AXIS_TERMS)
+    hint_has_perf = _contains_any_term(hint_topic_terms, _PERF_AXIS_TERMS)
+    raw_has_detail = _contains_any_term(raw_topic_terms, _DETAIL_AXIS_TERMS)
+    hint_has_detail = _contains_any_term(hint_topic_terms, _DETAIL_AXIS_TERMS)
+    raw_has_stats = _contains_any_term(raw_topic_terms, _STATS_AXIS_TERMS)
+    hint_has_stats = _contains_any_term(hint_topic_terms, _STATS_AXIS_TERMS)
+
+    if not raw_has_perf and hint_has_perf:
+        reasons.append("perf_axis_added")
+    if raw_has_project and not hint_has_project:
+        reasons.append("project_axis_removed")
+    if not raw_has_detail and hint_has_detail:
+        reasons.append("detail_axis_added")
+    if not raw_has_stats and hint_has_stats:
+        reasons.append("stats_axis_added")
+
+    deduped_reasons = list(dict.fromkeys(reasons))
+    return bool(deduped_reasons), deduped_reasons
 
 
 class CustomRAGRetriever(BaseModel):
@@ -366,9 +459,10 @@ def is_hit_source(doc: Dict[str, Any]) -> bool:
     return doc.get("source_type", "hit") == "hit"
 
 
-def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) -> tuple[str, str, str, float]:
-    """raw query, retrieval hint query, 실제 search query와 confidence를 함께 계산한다.
-    knowledge sufficiency나 question analysis가 내놓은 retrieval_query를 바로 쓸지, 원문 query로 돌아갈지를 confidence gate로 결정한다.
+def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) -> tuple[str, str, str, float, bool, list[str], bool]:
+    """Resolve the raw query, planner hint query, selected search query, and drift metadata.
+    Planner hints remain the default source, but the runtime guard falls back to the raw query
+    when semantic-axis drift or confidence failure is detected.
     """
     raw_query = state.question
     normalized_intent = _get_normalized_intent(state)
@@ -376,5 +470,7 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     ks_confidence = float(ks.confidence) if getattr(ks, "confidence", None) is not None else None
     qa_confidence = float(qa.confidence) if getattr(qa, "confidence", None) is not None else None
     confidence = ks_confidence if ks_confidence is not None else (qa_confidence if qa_confidence is not None else 0.0)
-    search_query = hint_query if confidence >= min_confidence else raw_query
-    return raw_query, hint_query, search_query, confidence
+    drift_detected, drift_reasons = detect_retrieval_query_drift(raw_query=raw_query, hint_query=hint_query)
+    fallback_applied = drift_detected or confidence < min_confidence
+    search_query = raw_query if fallback_applied else hint_query
+    return raw_query, hint_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied
