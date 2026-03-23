@@ -1,37 +1,56 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from typing import Any, Dict, Optional
 
 
 _ORDINAL_WORD_TO_INDEX = {
-    "첫": 0,
-    "첫번째": 0,
-    "첫 번째": 0,
-    "첫째": 0,
-    "두": 1,
-    "두번째": 1,
-    "두 번째": 1,
-    "둘째": 1,
-    "세": 2,
-    "세번째": 2,
-    "세 번째": 2,
-    "셋째": 2,
+    "\uccab": 0,
+    "\uccab\ubc88\uc9f8": 0,
+    "\uccab \ubc88\uc9f8": 0,
+    "\uccab\uc9f8": 0,
+    "\ub450": 1,
+    "\ub450\ubc88\uc9f8": 1,
+    "\ub450 \ubc88\uc9f8": 1,
+    "\ub458\uc9f8": 1,
+    "\uc138": 2,
+    "\uc138\ubc88\uc9f8": 2,
+    "\uc138 \ubc88\uc9f8": 2,
+    "\uc14b\uc9f8": 2,
 }
-
 _EXPLICIT_ORDINAL_PATTERNS = (
-    re.compile(r"\b(?:제\s*)?(\d{1,3})\s*번째\b"),
-    re.compile(r"\b(?:제\s*)?(\d{1,3})\s*번\b"),
-    re.compile(r"\b(첫번째|첫\s*번째|첫째|첫)\b"),
-    re.compile(r"\b(두번째|두\s*번째|둘째|두)\b"),
-    re.compile(r"\b(세번째|세\s*번째|셋째|세)\b"),
+    re.compile(r"\b(?:\uc81c\s*)?(\d{1,3})\s*\ubc88\uc9f8\b"),
+    re.compile(r"\b(?:\uc81c\s*)?(\d{1,3})\s*\ubc88\b"),
+    re.compile(r"\b(\uccab\ubc88\uc9f8|\uccab\s*\ubc88\uc9f8|\uccab\uc9f8|\uccab)\b"),
+    re.compile(r"\b(\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450)\b"),
+    re.compile(r"\b(\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)\b"),
 )
-_LAST_ITEM_RE = re.compile(r"(?:맨\s*마지막|마지막)")
-_DEICTIC_PROJECT_PATTERNS = (
-    re.compile("\uadf8 \uacfc\uc81c"),
-    re.compile("\uc774 \uacfc\uc81c"),
-    re.compile("\ubc29\uae08 \uacfc\uc81c"),
-)
+_LAST_ITEM_RE = re.compile(r"(?:\ub9e8\s*\ub9c8\uc9c0\ub9c9|\ub9c8\uc9c0\ub9c9)")
+_DEICTIC_PATTERNS = {
+    "project": (
+        re.compile(r"\uadf8\s*\uacfc\uc81c"),
+        re.compile(r"\uc774\s*\uacfc\uc81c"),
+        re.compile(r"\ubc29\uae08\s*\uacfc\uc81c"),
+    ),
+    "perf": (
+        re.compile(r"\uadf8\s*(?:\uc131\uacfc|\ub17c\ubb38|\ud2b9\ud5c8|\ubcf4\uace0\uc11c|\uae30\uc220)"),
+        re.compile(r"\uc774\s*(?:\uc131\uacfc|\ub17c\ubb38|\ud2b9\ud5c8|\ubcf4\uace0\uc11c|\uae30\uc220)"),
+    ),
+    "people": (
+        re.compile(r"\uadf8\s*(?:\uc5f0\uad6c\uc790|\uc5f0\uad6c\uc6d0|\uc0ac\ub78c)"),
+        re.compile(r"\uc774\s*(?:\uc5f0\uad6c\uc790|\uc5f0\uad6c\uc6d0|\uc0ac\ub78c)"),
+    ),
+    "org": (
+        re.compile(r"\uadf8\s*(?:\uae30\uad00|\ud68c\uc0ac|\uc870\uc9c1)"),
+        re.compile(r"\uc774\s*(?:\uae30\uad00|\ud68c\uc0ac|\uc870\uc9c1)"),
+    ),
+}
+_SEED_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+
+
+def _decode_token(token: str) -> str:
+    text = str(token or "")
+    return text.encode("utf-8").decode("unicode_escape") if "\\u" in text else text
 
 
 def _normalize_text(value: Any) -> str:
@@ -44,9 +63,10 @@ def is_ordinal_reference_token(value: Any) -> bool:
         return False
     if _LAST_ITEM_RE.search(text):
         return True
-    for pattern in _DEICTIC_PROJECT_PATTERNS:
-        if pattern.search(text):
-            return True
+    for patterns in _DEICTIC_PATTERNS.values():
+        for pattern in patterns:
+            if pattern.search(text):
+                return True
     for pattern in _EXPLICIT_ORDINAL_PATTERNS:
         if pattern.search(text):
             return True
@@ -77,20 +97,42 @@ def strip_ordinal_reference_terms(values: Any) -> tuple[list[str], list[str]]:
 
 
 def _infer_context_kind(item: Dict[str, Any], default_context_kind: str) -> str:
-    ids = item.get("ids") or {}
+    ids = item.get("ids") or item
+    if _normalize_text(ids.get("person_no")) or _normalize_text(ids.get("hm_id")):
+        return "people"
+    if _normalize_text(ids.get("org_id")) or _normalize_text(ids.get("org_code")) or _normalize_text(ids.get("biz_no")):
+        return "org"
+    if _normalize_text(ids.get("rst_id")) or _normalize_text(ids.get("doi")) or _normalize_text(ids.get("issn")):
+        return "perf"
     if _normalize_text(ids.get("pjt_id")) or _normalize_text(ids.get("pjt_no")):
         return "project"
-    if _normalize_text(ids.get("rst_id")):
+    source_type = _normalize_text(item.get("source_type") or item.get("doc_type") or item.get("context_kind")).lower()
+    if source_type in {"people", "researcher"}:
+        return "people"
+    if source_type in {"org", "organization"}:
+        return "org"
+    if "perf" in source_type or source_type in {"paper", "patent", "report", "software"}:
         return "perf"
     return default_context_kind
 
 
-def build_reference_items(
-    *,
-    canonical_evidence: list[dict[str, Any]],
-    prev_context: list[dict[str, Any]],
-    default_context_kind: str = "project",
-) -> list[dict[str, Any]]:
+def _build_seed_map(item: Dict[str, Any]) -> dict[str, list[str]]:
+    for key in _SEED_KEYS:
+        value = _normalize_text(item.get(key))
+        if value:
+            return {key: [value]}
+    return {}
+
+
+def _compact_candidate(item: Dict[str, Any]) -> Dict[str, Any]:
+    compact = {"index": item.get("index"), "entity_kind": item.get("context_kind"), "title": item.get("title"), "doc_id": item.get("doc_id")}
+    for key in _SEED_KEYS:
+        if item.get(key):
+            compact[key] = item.get(key)
+    return {key: value for key, value in compact.items() if value is not None and value != ""}
+
+
+def build_reference_items(*, canonical_evidence: list[dict[str, Any]], prev_context: list[dict[str, Any]], default_context_kind: str = "project") -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if canonical_evidence:
         for index, item in enumerate(canonical_evidence, start=1):
@@ -98,33 +140,58 @@ def build_reference_items(
                 continue
             ids = item.get("ids") or {}
             facts = item.get("facts") or {}
-            items.append(
-                {
-                    "index": index,
-                    "pjt_id": _normalize_text(ids.get("pjt_id")) or None,
-                    "pjt_no": _normalize_text(ids.get("pjt_no")) or None,
-                    "rst_id": _normalize_text(ids.get("rst_id")) or None,
-                    "title": _normalize_text(facts.get("title") or item.get("identity")) or None,
-                    "context_kind": _infer_context_kind(item, default_context_kind),
-                    "source": "canonical_evidence",
-                }
-            )
+            roles = item.get("roles") or {}
+            participant_orgs = list(roles.get("participant_org_name") or [])
+            participants = list(roles.get("participant_researcher_name") or [])
+            items.append({
+                "index": index,
+                "doc_id": _normalize_text(ids.get("doc_id")) or None,
+                "pjt_id": _normalize_text(ids.get("pjt_id")) or None,
+                "pjt_no": _normalize_text(ids.get("pjt_no")) or None,
+                "rst_id": _normalize_text(ids.get("rst_id")) or None,
+                "person_no": _normalize_text(ids.get("person_no")) or None,
+                "org_id": _normalize_text(ids.get("org_id")) or None,
+                "org_code": _normalize_text(ids.get("org_code")) or None,
+                "biz_no": _normalize_text(ids.get("biz_no")) or None,
+                "doi": _normalize_text(ids.get("doi")) or None,
+                "issn": _normalize_text(ids.get("issn")) or None,
+                "title": _normalize_text(facts.get("title") or item.get("identity")) or None,
+                "lead_org": _normalize_text((roles.get("lead_org_name") or [None])[0]) or None,
+                "participant_org": participant_orgs[0] if participant_orgs else None,
+                "participant_name": participants[0] if participants else None,
+                "context_kind": _infer_context_kind(item, default_context_kind),
+                "source": "canonical_evidence",
+            })
         return items
 
     for index, item in enumerate(prev_context or [], start=1):
         if not isinstance(item, dict):
             continue
-        items.append(
-            {
-                "index": index,
-                "pjt_id": _normalize_text(item.get("pjt_id")) or None,
-                "pjt_no": _normalize_text(item.get("pjt_no")) or None,
-                "rst_id": _normalize_text(item.get("rst_id")) or None,
-                "title": _normalize_text(item.get("title_text")) or None,
-                "context_kind": "perf" if _normalize_text(item.get("rst_id")) and not (_normalize_text(item.get("pjt_id")) or _normalize_text(item.get("pjt_no"))) else default_context_kind,
-                "source": "prev_context",
-            }
-        )
+        first_org = None
+        if isinstance(item.get("prtcp_org"), list) and item.get("prtcp_org"):
+            first_org = _normalize_text((item.get("prtcp_org") or [{}])[0].get("org_nm")) or None
+        first_person = None
+        if isinstance(item.get("prtcp_mp"), list) and item.get("prtcp_mp"):
+            first_person = _normalize_text((item.get("prtcp_mp") or [{}])[0].get("hm_nm")) or None
+        items.append({
+            "index": index,
+            "doc_id": _normalize_text(item.get("doc_id") or item.get("id")) or None,
+            "pjt_id": _normalize_text(item.get("pjt_id")) or None,
+            "pjt_no": _normalize_text(item.get("pjt_no")) or None,
+            "rst_id": _normalize_text(item.get("rst_id")) or None,
+            "person_no": _normalize_text(item.get("person_no") or item.get("hm_id")) or None,
+            "org_id": _normalize_text(item.get("org_id")) or None,
+            "org_code": _normalize_text(item.get("org_code") or item.get("org_cd")) or None,
+            "biz_no": _normalize_text(item.get("biz_no") or item.get("org_no")) or None,
+            "doi": _normalize_text(item.get("doi")) or None,
+            "issn": _normalize_text(item.get("issn")) or None,
+            "title": _normalize_text(item.get("title_text") or item.get("title")) or None,
+            "lead_org": _normalize_text(item.get("org_nm")) or None,
+            "participant_org": first_org,
+            "participant_name": first_person,
+            "context_kind": _infer_context_kind(item, default_context_kind),
+            "source": "prev_context",
+        })
     return items
 
 
@@ -147,9 +214,9 @@ def _parse_explicit_ordinal(question: str) -> Optional[dict[str, Any]]:
                 return None
             return {"kind": "index", "index": ordinal - 1, "token": token}
         normalized_raw = raw.replace(" ", "")
-        mapped = _ORDINAL_WORD_TO_INDEX.get(normalized_raw)
-        if mapped is not None:
-            return {"kind": "index", "index": mapped, "token": token}
+        for ordinal_token, mapped in _ORDINAL_WORD_TO_INDEX.items():
+            if _decode_token(ordinal_token).replace(" ", "") == normalized_raw:
+                return {"kind": "index", "index": mapped, "token": token}
     return None
 
 
@@ -157,131 +224,88 @@ def _parse_deictic_followup(question: str, *, default_context_kind: str) -> Opti
     text = _normalize_text(question)
     if not text:
         return None
-    if str(default_context_kind or "").strip().lower() != "project" and "과제" not in text:
-        return None
-    for pattern in _DEICTIC_PROJECT_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return {"kind": "deictic", "index": None, "token": _normalize_text(match.group(0))}
+    kinds = [str(default_context_kind or "project").strip().lower(), "project", "perf", "people", "org"]
+    seen: set[str] = set()
+    for kind in kinds:
+        if kind in seen:
+            continue
+        seen.add(kind)
+        for pattern in _DEICTIC_PATTERNS.get(kind, ()):
+            match = pattern.search(text)
+            if match:
+                return {"kind": "deictic", "index": None, "token": _normalize_text(match.group(0)), "context_kind": kind}
     return None
 
 
-def resolve_reference_context_followup(
-    *,
-    question: str,
-    canonical_evidence: list[dict[str, Any]],
-    prev_context: list[dict[str, Any]],
-    default_context_kind: str = "project",
-) -> dict[str, Any]:
+def resolve_reference_context_followup(*, question: str, canonical_evidence: list[dict[str, Any]], prev_context: list[dict[str, Any]], default_context_kind: str = "project") -> dict[str, Any]:
     parsed = _parse_explicit_ordinal(question)
     if parsed is None:
         parsed = _parse_deictic_followup(question, default_context_kind=default_context_kind)
+    items = build_reference_items(canonical_evidence=canonical_evidence, prev_context=prev_context, default_context_kind=default_context_kind)
+    candidate_items = [_compact_candidate(item) for item in items[:5]]
     if parsed is None:
-        return {
-            "followup_resolution_status": "none",
-            "explicit_ordinal": False,
-            "explicit_followup": False,
-            "requested_token": None,
-            "requested_index": None,
-            "available_count": len(build_reference_items(canonical_evidence=canonical_evidence, prev_context=prev_context, default_context_kind=default_context_kind)),
-            "selected_prev_item": None,
-            "seed_map": {},
-            "seed_source": None,
-            "followup_reference_kind": None,
-        }
-
-    items = build_reference_items(
-        canonical_evidence=canonical_evidence,
-        prev_context=prev_context,
-        default_context_kind=default_context_kind,
-    )
+        return {"followup_resolution_status": "none", "explicit_ordinal": False, "explicit_followup": False, "requested_token": None, "requested_index": None, "available_count": len(items), "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": None, "candidate_items": []}
     if not items:
-        return {
-            "followup_resolution_status": "missing_context",
-            "explicit_ordinal": parsed["kind"] != "deictic",
-            "explicit_followup": True,
-            "requested_token": parsed["token"],
-            "requested_index": parsed["index"],
-            "available_count": 0,
-            "selected_prev_item": None,
-            "seed_map": {},
-            "seed_source": None,
-            "followup_reference_kind": parsed["kind"],
-        }
-
+        return {"followup_resolution_status": "missing_context", "explicit_ordinal": parsed["kind"] != "deictic", "explicit_followup": True, "requested_token": parsed["token"], "requested_index": parsed.get("index"), "available_count": 0, "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": parsed["kind"], "candidate_items": []}
     if parsed["kind"] == "deictic":
-        if len(items) != 1:
-            return {
-                "followup_resolution_status": "unresolved",
-                "explicit_ordinal": False,
-                "explicit_followup": True,
-                "requested_token": parsed["token"],
-                "requested_index": None,
-                "available_count": len(items),
-                "selected_prev_item": None,
-                "seed_map": {},
-                "seed_source": None,
-                "followup_reference_kind": parsed["kind"],
-            }
-        index = 0
+        context_kind = parsed.get("context_kind")
+        typed_items = [item for item in items if not context_kind or item.get("context_kind") == context_kind]
+        if len(typed_items) != 1:
+            return {"followup_resolution_status": "unresolved", "explicit_ordinal": False, "explicit_followup": True, "requested_token": parsed["token"], "requested_index": None, "available_count": len(typed_items) if context_kind else len(items), "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": parsed["kind"], "candidate_items": [_compact_candidate(item) for item in (typed_items or items)[:5]]}
+        selected_item = dict(typed_items[0])
+        index = int(selected_item.get("index") or 1) - 1
     else:
         index = len(items) - 1 if parsed["kind"] == "last" else int(parsed["index"])
-    if index < 0 or index >= len(items):
-        return {
-            "followup_resolution_status": "out_of_range",
-            "explicit_ordinal": True,
-            "explicit_followup": True,
-            "requested_token": parsed["token"],
-            "requested_index": index,
-            "available_count": len(items),
-            "selected_prev_item": None,
-            "seed_map": {},
-            "seed_source": None,
-            "followup_reference_kind": parsed["kind"],
-        }
-
-    selected_item = dict(items[index])
-    seed_map: dict[str, list[str]] = {}
-    if selected_item.get("pjt_id"):
-        seed_map["pjt_id"] = [selected_item["pjt_id"]]
-    elif selected_item.get("pjt_no"):
-        seed_map["pjt_no"] = [selected_item["pjt_no"]]
-
+        if index < 0 or index >= len(items):
+            return {"followup_resolution_status": "out_of_range", "explicit_ordinal": True, "explicit_followup": True, "requested_token": parsed["token"], "requested_index": index, "available_count": len(items), "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": parsed["kind"], "candidate_items": candidate_items}
+        selected_item = dict(items[index])
+    seed_map = _build_seed_map(selected_item)
     status = "resolved" if seed_map else "unresolved"
     seed_source = None
     if status == "resolved":
         seed_source = "reference_context_deictic" if parsed["kind"] == "deictic" else "reference_context_ordinal"
-    return {
-        "followup_resolution_status": status,
-        "explicit_ordinal": parsed["kind"] != "deictic",
-        "explicit_followup": True,
-        "requested_token": parsed["token"],
-        "requested_index": index,
-        "available_count": len(items),
-        "selected_prev_item": selected_item if seed_map else None,
-        "seed_map": seed_map,
-        "seed_source": seed_source,
-        "followup_reference_kind": parsed["kind"],
-    }
+    return {"followup_resolution_status": status, "explicit_ordinal": parsed["kind"] != "deictic", "explicit_followup": True, "requested_token": parsed["token"], "requested_index": index, "available_count": len(items), "selected_prev_item": selected_item if seed_map else None, "seed_map": seed_map, "seed_source": seed_source, "followup_reference_kind": parsed["kind"], "candidate_items": candidate_items if status != "resolved" else []}
 
 
 def build_followup_clarification_message(strategy_meta: Dict[str, Any]) -> Optional[str]:
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
-
     selected_prev_item = (strategy_meta or {}).get("selected_prev_item") or {}
     context_kind = _normalize_text(selected_prev_item.get("context_kind") or (strategy_meta or {}).get("selected_prev_context_kind") or "project").lower()
-    subject = "과제" if context_kind == "project" else "항목"
+    subject_map = {"project": "\uacfc\uc81c", "perf": "\uc131\uacfc", "people": "\uc5f0\uad6c\uc790", "org": "\uae30\uad00"}
+    subject = _decode_token(subject_map.get(context_kind, "\ud56d\ubaa9"))
     available_count = int((strategy_meta or {}).get("available_count") or 0)
-
     if status == "missing_context":
-        return f"이전 목록이 없어 몇 번째 {subject}인지 판단하기 어렵습니다. 먼저 목록을 확인한 뒤 다시 질문해 주세요."
+        return f"\uc774\uc804 \ubaa9\ub85d\uc774 \uc5c6\uc5b4 \uba87 \ubc88\uc9f8 {subject}\uc778\uc9c0 \ud310\ub2e8\ud558\uae30 \uc5b4\ub835\uc2b5\ub2c8\ub2e4. \uba3c\uc800 \ubaa9\ub85d\uc744 \ud655\uc778\ud55c \ub4a4 \ub2e4\uc2dc \uc9c8\ubb38\ud574 \uc8fc\uc138\uc694."
     if status == "out_of_range":
-        return f"이전 목록에는 {available_count}개만 있습니다. 몇 번째 {subject}를 말씀하시는지 다시 알려주세요."
+        return f"\uc774\uc804 \ubaa9\ub85d\uc5d0\ub294 {available_count}\uac1c\ub9cc \uc788\uc2b5\ub2c8\ub2e4. \uba87 \ubc88\uc9f8 {subject}\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ub2e4\uc2dc \uc54c\ub824\uc8fc\uc138\uc694."
     if status == "unresolved":
-        return f"이전 목록에서 어느 {subject}를 말씀하시는지 확인해 주세요."
+        return f"\uc774\uc804 \ubaa9\ub85d\uc5d0\uc11c \uc5b4\ub290 {subject}\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ud655\uc778\ud574 \uc8fc\uc138\uc694."
     return None
+    return None
+
+
+def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
+    if not status or status in {"none", "resolved"}:
+        return None
+    candidates = [item for item in ((strategy_meta or {}).get("candidate_items") or []) if isinstance(item, dict)]
+    if not candidates and status != "missing_context":
+        return None
+    return {
+        "clarification_type": "followup_reference",
+        "status": status,
+        "requested_token": (strategy_meta or {}).get("requested_token"),
+        "available_count": int((strategy_meta or {}).get("available_count") or 0),
+        "selection_hint": "ordinal_or_entity_reference",
+        "candidates": candidates,
+        "resume_token": {
+            "followup_reference_kind": (strategy_meta or {}).get("followup_reference_kind"),
+            "requested_token": (strategy_meta or {}).get("requested_token"),
+            "display_view_id": (strategy_meta or {}).get("display_view_id"),
+        },
+    }
 
 
 def should_short_circuit_followup_clarification(strategy_meta: Dict[str, Any]) -> bool:

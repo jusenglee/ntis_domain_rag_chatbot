@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
@@ -7,11 +7,20 @@ from pydantic import BaseModel, Field
 
 class DisplayItem(BaseModel):
     display_rank: int
+    entity_kind: str = "project"
+    doc_type: Optional[str] = None
     doc_id: Optional[str] = None
     col: Optional[str] = None
     title_text: str = ""
     pjt_id: Optional[str] = None
     pjt_no: Optional[str] = None
+    rst_id: Optional[str] = None
+    person_no: Optional[str] = None
+    org_id: Optional[str] = None
+    org_code: Optional[str] = None
+    biz_no: Optional[str] = None
+    doi: Optional[str] = None
+    issn: Optional[str] = None
     year: Optional[int] = None
     lead_org: Optional[str] = None
     participant_org: List[str] = Field(default_factory=list)
@@ -35,9 +44,17 @@ class FocusEntity(BaseModel):
     source: str
     view_id: Optional[str] = None
     display_rank: Optional[int] = None
+    doc_type: Optional[str] = None
     doc_id: Optional[str] = None
     pjt_id: Optional[str] = None
     pjt_no: Optional[str] = None
+    rst_id: Optional[str] = None
+    person_no: Optional[str] = None
+    org_id: Optional[str] = None
+    org_code: Optional[str] = None
+    biz_no: Optional[str] = None
+    doi: Optional[str] = None
+    issn: Optional[str] = None
     title_text: Optional[str] = None
 
 
@@ -63,6 +80,14 @@ class ConversationViewState(BaseModel):
     latest_focus_entity: Optional[FocusEntity] = None
     detail_cache: Dict[str, DetailCacheEntry] = Field(default_factory=dict)
     raw_candidates_cache: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    active_result_set_kind: Optional[str] = None
+    active_result_view_id: Optional[str] = None
+    applied_filters: Dict[str, Any] = Field(default_factory=dict)
+    sort_key: Optional[str] = None
+    sort_dir: Optional[str] = None
+    entity_scope: Optional[str] = None
+    refinement_history: List[Dict[str, Any]] = Field(default_factory=list)
+    last_query_contract: Dict[str, Any] = Field(default_factory=dict)
 
 
 def load_view_state(payload: Any) -> ConversationViewState:
@@ -93,6 +118,57 @@ def _first_text(*values: Any) -> Optional[str]:
     return None
 
 
+def _first_nested_text(source: Any, *keys: str) -> Optional[str]:
+    for key in keys:
+        if isinstance(source, dict):
+            value = source.get(key)
+            text = _first_text(value)
+            if text:
+                return text
+    return None
+
+
+def _normalize_kind(value: Any, *, default: str) -> str:
+    text = str(value or "").strip().lower()
+    return text or default
+
+
+def _infer_entity_kind(*, context_kind: str, doc: Dict[str, Any], evidence: Dict[str, Any], ids: Dict[str, Any], rank_item: Dict[str, Any]) -> str:
+    explicit_kind = _first_text(
+        doc.get("entity_kind"),
+        evidence.get("entity_kind"),
+        rank_item.get("entity_kind"),
+        doc.get("context_kind"),
+        evidence.get("context_kind"),
+    )
+    if explicit_kind:
+        return _normalize_kind(explicit_kind, default="project")
+
+    if _first_text(ids.get("person_no"), doc.get("person_no"), rank_item.get("person_no"), rank_item.get("hm_id"), doc.get("hm_id")):
+        return "people"
+    if _first_text(ids.get("org_id"), ids.get("org_code"), ids.get("biz_no"), doc.get("org_id"), doc.get("org_code"), doc.get("biz_no"), rank_item.get("org_id"), rank_item.get("org_code"), rank_item.get("biz_no")):
+        return "org"
+    if _first_text(ids.get("rst_id"), ids.get("doi"), ids.get("issn"), doc.get("rst_id"), doc.get("doi"), doc.get("issn"), rank_item.get("rst_id"), rank_item.get("doi"), rank_item.get("issn")):
+        return "perf"
+
+    source_type = _normalize_kind(doc.get("source_type") or evidence.get("source_type"), default=context_kind)
+    if "perf" in source_type or source_type in {"paper", "patent", "report", "software", "standard", "compound", "equipment"}:
+        return "perf"
+    if source_type in {"people", "researcher"}:
+        return "people"
+    if source_type in {"org", "organization"}:
+        return "org"
+    return _normalize_kind(context_kind, default="project")
+
+
+def _extract_rank_item(doc: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("rank_item", "series_item", "pattern_item", "origin_project"):
+        value = doc.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def build_display_snapshot(
     *,
     conversation_id: str,
@@ -111,16 +187,27 @@ def build_display_snapshot(
         ids = evidence.get("ids") or {}
         facts = evidence.get("facts") or {}
         roles = evidence.get("roles") or {}
+        rank_item = _extract_rank_item(doc)
+        entity_kind = _infer_entity_kind(context_kind=context_kind, doc=doc, evidence=evidence, ids=ids, rank_item=rank_item)
         items.append(
             DisplayItem(
                 display_rank=index + 1,
-                doc_id=_first_text(doc.get("doc_id"), ids.get("doc_id")),
+                entity_kind=entity_kind,
+                doc_type=_first_text(doc.get("doc_type"), evidence.get("source_type"), doc.get("source_type")),
+                doc_id=_first_text(doc.get("doc_id"), ids.get("doc_id"), rank_item.get("doc_id")),
                 col=_first_text(doc.get("source_type"), evidence.get("source_type")),
-                title_text=_first_text(doc.get("title"), facts.get("title")) or "",
-                pjt_id=_first_text(doc.get("pjt_id"), ids.get("pjt_id")),
-                pjt_no=_first_text(doc.get("pjt_no"), ids.get("pjt_no")),
-                year=_to_int(facts.get("year")),
-                lead_org=_first_text(*list(roles.get("lead_org_name") or [])),
+                title_text=_first_text(doc.get("title"), doc.get("title_text"), facts.get("title"), rank_item.get("project_title"), rank_item.get("org_name"), rank_item.get("hm_nm")) or "",
+                pjt_id=_first_text(doc.get("pjt_id"), ids.get("pjt_id"), rank_item.get("pjt_id")),
+                pjt_no=_first_text(doc.get("pjt_no"), ids.get("pjt_no"), rank_item.get("pjt_no"), rank_item.get("group_key")),
+                rst_id=_first_text(doc.get("rst_id"), ids.get("rst_id"), rank_item.get("rst_id")),
+                person_no=_first_text(doc.get("person_no"), rank_item.get("person_no"), rank_item.get("hm_id"), doc.get("hm_id")),
+                org_id=_first_text(doc.get("org_id"), rank_item.get("org_id")),
+                org_code=_first_text(doc.get("org_code"), rank_item.get("org_code"), doc.get("org_cd"), rank_item.get("org_cd")),
+                biz_no=_first_text(doc.get("biz_no"), rank_item.get("biz_no"), doc.get("org_no"), rank_item.get("org_no")),
+                doi=_first_text(doc.get("doi"), ids.get("doi"), rank_item.get("doi"), (doc.get("meta_basic") or {}).get("doi"), (doc.get("meta_detail") or {}).get("doi")),
+                issn=_first_text(doc.get("issn"), ids.get("issn"), rank_item.get("issn"), (doc.get("meta_basic") or {}).get("issn"), (doc.get("meta_detail") or {}).get("issn")),
+                year=_to_int(facts.get("year") or rank_item.get("year")),
+                lead_org=_first_text(*list(roles.get("lead_org_name") or []), doc.get("org_nm"), rank_item.get("lead_org_name"), rank_item.get("org_name")),
                 participant_org=[str(v).strip() for v in (roles.get("participant_org_name") or []) if str(v).strip()],
                 researchers=[str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()],
                 score=(float(doc.get("score")) if doc.get("score") is not None else None),
@@ -140,13 +227,21 @@ def build_display_snapshot(
 
 def focus_entity_from_item(*, item: DisplayItem, kind: str, source: str, view_id: Optional[str] = None) -> FocusEntity:
     return FocusEntity(
-        kind=str(kind or "project").strip().lower() or "project",
+        kind=_normalize_kind(item.entity_kind or kind, default="project"),
         source=source,
         view_id=view_id,
         display_rank=item.display_rank,
+        doc_type=item.doc_type,
         doc_id=item.doc_id,
         pjt_id=item.pjt_id,
         pjt_no=item.pjt_no,
+        rst_id=item.rst_id,
+        person_no=item.person_no,
+        org_id=item.org_id,
+        org_code=item.org_code,
+        biz_no=item.biz_no,
+        doi=item.doi,
+        issn=item.issn,
         title_text=item.title_text or None,
     )
 
@@ -162,20 +257,40 @@ def focus_entity_from_detail(
     evidence = canonical_item or {}
     ids = evidence.get("ids") or {}
     facts = evidence.get("facts") or {}
-    title_text = _first_text(doc.get("title"), facts.get("title"))
-    pjt_id = _first_text(doc.get("pjt_id"), ids.get("pjt_id"))
-    pjt_no = _first_text(doc.get("pjt_no"), ids.get("pjt_no"))
-    doc_id = _first_text(doc.get("doc_id"), ids.get("doc_id"))
-    if not any([title_text, pjt_id, pjt_no, doc_id]):
-        return None
-    return FocusEntity(
-        kind=str(context_kind or "project").strip().lower() or "project",
+    rank_item = _extract_rank_item(doc)
+    entity_kind = _infer_entity_kind(context_kind=context_kind, doc=doc, evidence=evidence, ids=ids, rank_item=rank_item)
+    title_text = _first_text(doc.get("title"), doc.get("title_text"), facts.get("title"), rank_item.get("project_title"), rank_item.get("org_name"), rank_item.get("hm_nm"))
+    focus = FocusEntity(
+        kind=entity_kind,
         source=source,
-        doc_id=doc_id,
-        pjt_id=pjt_id,
-        pjt_no=pjt_no,
+        doc_type=_first_text(doc.get("doc_type"), evidence.get("source_type"), doc.get("source_type")),
+        doc_id=_first_text(doc.get("doc_id"), ids.get("doc_id"), rank_item.get("doc_id")),
+        pjt_id=_first_text(doc.get("pjt_id"), ids.get("pjt_id"), rank_item.get("pjt_id")),
+        pjt_no=_first_text(doc.get("pjt_no"), ids.get("pjt_no"), rank_item.get("pjt_no"), rank_item.get("group_key")),
+        rst_id=_first_text(doc.get("rst_id"), ids.get("rst_id"), rank_item.get("rst_id")),
+        person_no=_first_text(doc.get("person_no"), doc.get("hm_id"), rank_item.get("person_no"), rank_item.get("hm_id")),
+        org_id=_first_text(doc.get("org_id"), rank_item.get("org_id")),
+        org_code=_first_text(doc.get("org_code"), doc.get("org_cd"), rank_item.get("org_code"), rank_item.get("org_cd")),
+        biz_no=_first_text(doc.get("biz_no"), doc.get("org_no"), rank_item.get("biz_no"), rank_item.get("org_no")),
+        doi=_first_text(doc.get("doi"), ids.get("doi"), rank_item.get("doi"), (doc.get("meta_basic") or {}).get("doi"), (doc.get("meta_detail") or {}).get("doi")),
+        issn=_first_text(doc.get("issn"), ids.get("issn"), rank_item.get("issn"), (doc.get("meta_basic") or {}).get("issn"), (doc.get("meta_detail") or {}).get("issn")),
         title_text=title_text,
     )
+    if not any([
+        focus.title_text,
+        focus.pjt_id,
+        focus.pjt_no,
+        focus.rst_id,
+        focus.person_no,
+        focus.org_id,
+        focus.org_code,
+        focus.biz_no,
+        focus.doi,
+        focus.issn,
+        focus.doc_id,
+    ]):
+        return None
+    return focus
 
 
 def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_chars: int = 1200) -> str:
@@ -183,11 +298,25 @@ def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_cha
         return "NONE"
     lines = [f"[DisplaySnapshot] view_id={snapshot.view_id} kind={snapshot.context_kind} visible={snapshot.visible_count}/{snapshot.raw_count}"]
     for item in snapshot.items:
-        parts = [f"{item.display_rank}. {item.title_text or 'item'}"]
+        parts = [f"{item.display_rank}. {item.title_text or 'item'}", f"ENTITY={item.entity_kind}"]
         if item.pjt_id:
             parts.append(f"PJT_ID={item.pjt_id}")
         if item.pjt_no:
             parts.append(f"PJT_NO={item.pjt_no}")
+        if item.rst_id:
+            parts.append(f"RST_ID={item.rst_id}")
+        if item.person_no:
+            parts.append(f"PERSON_NO={item.person_no}")
+        if item.org_id:
+            parts.append(f"ORG_ID={item.org_id}")
+        if item.org_code:
+            parts.append(f"ORG_CODE={item.org_code}")
+        if item.biz_no:
+            parts.append(f"BIZ_NO={item.biz_no}")
+        if item.doi:
+            parts.append(f"DOI={item.doi}")
+        if item.issn:
+            parts.append(f"ISSN={item.issn}")
         if item.year is not None:
             parts.append(f"YEAR={item.year}")
         if item.lead_org:

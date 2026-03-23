@@ -16,7 +16,7 @@ from apps.api.services.detail_contract import (
 )
 from apps.api.services.view_state import DetailCacheEntry, build_display_snapshot, focus_entity_from_detail
 from apps.api.services.rag_retriever import repair_query_for_resolved_anchor
-from apps.core.followup_resolution import build_followup_clarification_message, should_short_circuit_followup_clarification
+from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, should_short_circuit_followup_clarification
 
 
 def _get_normalized_intent(state: Any) -> Any:
@@ -235,9 +235,10 @@ async def node_knowledge_sufficiency(
     strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
     if should_short_circuit_followup_clarification(strategy_meta):
         no_result_message = build_followup_clarification_message(strategy_meta)
+        clarification = build_followup_clarification_payload(strategy_meta)
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="low",
-                search_intent="?? ??",
+                search_intent="followup clarification required",
                 retrieval_query=state.messages[-1].content,
             confidence=1.0,
         )
@@ -252,7 +253,7 @@ async def node_knowledge_sufficiency(
             followup_resolution_status=strategy_meta.get("followup_resolution_status"),
             early_exit_reason="followup_clarification",
         )
-        return {"knowledge_sufficiency": result, "no_result_message": no_result_message}
+        return {"knowledge_sufficiency": result, "no_result_message": no_result_message, "clarification": clarification}
     retrieval_query = _pick_attr(query_intent, qa, key="retrieval_query", default=state.messages[-1].content)
     action = _pick_attr(query_intent, strategy, qa, key="action")
 
@@ -381,7 +382,7 @@ async def node_knowledge_sufficiency(
         return {
             "knowledge_sufficiency": knowledge_sufficiency_cls(
                 requires_new_knowledge="high",
-                search_intent="?? ??",
+                search_intent="knowledge fallback",
                 retrieval_query=state.messages[-1].content,
                 confidence=0.5,
             )
@@ -518,6 +519,7 @@ async def node_rag_search(
         canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
         render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
+        clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
         raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
 
         context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
@@ -559,6 +561,25 @@ async def node_rag_search(
                 raw_count=raw_result_count,
             )
             view_state.latest_display_snapshot = snapshot
+            view_state.active_result_set_kind = output_type
+            view_state.active_result_view_id = snapshot.view_id
+            view_state.entity_scope = context_kind or "project"
+            view_state.last_query_contract = {
+                "action": str(_pick_attr(query_intent, qa, key="action", default="") or ""),
+                "output_type": output_type,
+                "context_kind": context_kind or "project",
+                "raw_query": raw_query,
+                "planner_query": planner_query,
+                "selected_search_query": search_query,
+            }
+            view_state.refinement_history.append({
+                "turn_id": state.request_id,
+                "output_type": output_type,
+                "context_kind": context_kind or "project",
+                "view_id": snapshot.view_id,
+            })
+            if len(view_state.refinement_history) > 10:
+                view_state.refinement_history = view_state.refinement_history[-10:]
             view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in display_bundle.snapshot_documents[: min(len(display_bundle.snapshot_documents), 20)] if isinstance(item, dict)]
             docs = display_bundle.snapshot_documents[: snapshot.visible_count]
             canonical_evidence = display_bundle.snapshot_canonical_evidence[: snapshot.visible_count]
@@ -624,8 +645,13 @@ async def node_rag_search(
                     source=focus_entity.source,
                     pjt_id=focus_entity.pjt_id,
                     pjt_no=focus_entity.pjt_no,
+                    rst_id=focus_entity.rst_id,
+                    person_no=focus_entity.person_no,
+                    org_id=focus_entity.org_id,
+                    org_code=focus_entity.org_code,
+                    biz_no=focus_entity.biz_no,
                 )
-                coverage = compute_detail_coverage(docs[0])
+                coverage = compute_detail_coverage(docs[0], anchor=focus_entity)
                 cache_key = make_entity_cache_key(focus_entity)
                 requested_fields = extract_requested_fields(state.messages[-1].content)
                 view_state.detail_cache[cache_key] = DetailCacheEntry(
@@ -667,6 +693,7 @@ async def node_rag_search(
             "canonical_evidence": canonical_evidence,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
+            "clarification": clarification,
             "view_state": view_state,
             "detail_server_answer": detail_server_answer,
         }

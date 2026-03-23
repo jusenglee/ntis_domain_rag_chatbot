@@ -240,12 +240,14 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 stage="request_start",
                 q_len=len(question),
                 q_preview=mask_query_for_log(question) if is_debug_logging_enabled() else None,
+                request_overrides=request_overrides or None,
             )
             request_started_at = time.perf_counter()
 
             documents_used = []
             done_meta_by_model: Dict[str, Dict[str, Any]] = {}
             question_analysis: Optional[Any] = None
+            clarification_payload: Optional[Dict[str, Any]] = None
 
             try:
                 set_log_context(request_id=request_id, conversation_id=conversation_id)
@@ -304,6 +306,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         docs = []
                         if isinstance(output, dict):
                             docs = output.get("context") or output.get("documents") or []
+                            if isinstance(output.get("clarification"), dict):
+                                clarification_payload = output.get("clarification")
                         if isinstance(docs, list):
                             documents_used.extend(docs)
 
@@ -324,6 +328,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     ref_docs.append(normalized)
 
                 yield _stream_data("reference", reference=ref_docs)
+                if clarification_payload:
+                    yield _stream_data("clarification", clarification=clarification_payload)
 
                 solar_done = done_meta_by_model.get("SOLAR") or {}
                 gemma_done = done_meta_by_model.get("GEMMA") or {}
@@ -415,8 +421,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 "request_started_at": request_started_at,
                 "messages": [user_message],
                 "kv_store": _get_kv_store(request),
-                    "request_overrides": request_overrides,
-                }
+            }
 
             final_state = await graph.ainvoke(inputs)
 
@@ -442,6 +447,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 "latencies": final_state.get("latencies", {}) if isinstance(final_state, dict) else {},
                 "total_time": total_ms,
                 "processing_strategy": getattr(knowledge_sufficiency, "requires_new_knowledge", None) if knowledge_sufficiency else "unknown",
+                "clarification": final_state.get("clarification") if isinstance(final_state, dict) else None,
             }
 
         except Exception as exc:
@@ -518,9 +524,4 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 await asyncio.sleep(metrics_stream_interval_seconds)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-
-
-
 

@@ -44,12 +44,15 @@ def _has_ids_map_values(ids_map: Any) -> bool:
 
 def _merge_seed_into_ids_map(ids_map: Any, seed_map: dict[str, list[str]]) -> dict[str, list[str]]:
     merged = dict(ids_map or {}) if isinstance(ids_map, dict) else {}
-    if seed_map.get("pjt_id"):
-        merged.pop("pjt_no", None)
-        merged["pjt_id"] = list(seed_map["pjt_id"])
-    elif seed_map.get("pjt_no"):
-        merged.pop("pjt_id", None)
-        merged["pjt_no"] = list(seed_map["pjt_no"])
+    for key, values in (seed_map or {}).items():
+        normalized = [str(value).strip() for value in (values or []) if str(value).strip()]
+        if not normalized:
+            continue
+        if key == "pjt_id":
+            merged.pop("pjt_no", None)
+        elif key == "pjt_no":
+            merged.pop("pjt_id", None)
+        merged[key] = normalized
     return merged
 
 
@@ -91,6 +94,15 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
             "index": anchor.display_rank,
             "pjt_id": anchor.pjt_id,
             "pjt_no": anchor.pjt_no,
+            "rst_id": anchor.rst_id,
+            "person_no": anchor.person_no,
+            "org_id": anchor.org_id,
+            "org_code": anchor.org_code,
+            "biz_no": anchor.biz_no,
+            "doi": anchor.doi,
+            "issn": anchor.issn,
+            "doc_id": anchor.doc_id,
+            "doc_type": anchor.doc_type,
             "title": anchor.title_text,
             "context_kind": anchor.kind,
             "view_id": anchor.view_id,
@@ -146,6 +158,9 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "selected_prev_index": selected_prev_item.get("index") if selected_prev_item else None,
         "selected_prev_pjt_id": selected_prev_item.get("pjt_id") if selected_prev_item else None,
         "selected_prev_pjt_no": selected_prev_item.get("pjt_no") if selected_prev_item else None,
+        "selected_prev_rst_id": selected_prev_item.get("rst_id") if selected_prev_item else None,
+        "selected_prev_person_no": selected_prev_item.get("person_no") if selected_prev_item else None,
+        "selected_prev_org_id": selected_prev_item.get("org_id") if selected_prev_item else None,
         "followup_resolution_status": followup_resolution.get("followup_resolution_status") or "none",
         "followup_reference_kind": followup_resolution.get("followup_reference_kind"),
         "explicit_followup": bool(followup_resolution.get("explicit_followup")),
@@ -154,7 +169,8 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "available_count": followup_resolution.get("available_count"),
         "seed_source": followup_resolution.get("seed_source"),
         "anchor_source": followup_resolution.get("anchor_source"),
-        "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("doc_id"),
+        "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("rst_id") or focus_entity.get("person_no") or focus_entity.get("org_id") or focus_entity.get("org_code") or focus_entity.get("biz_no") or focus_entity.get("doi") or focus_entity.get("issn") or focus_entity.get("doc_id"),
+        "candidate_items": list(followup_resolution.get("candidate_items") or []),
         "display_view_id": selected_prev_item.get("view_id") if selected_prev_item else focus_entity.get("view_id"),
         "display_rank": focus_entity.get("display_rank"),
     }
@@ -350,6 +366,9 @@ class RequestUnderstandingFacade:
                 resolved_display_rank=getattr(anchor, "display_rank", None),
                 pjt_id=getattr(anchor, "pjt_id", None),
                 pjt_no=getattr(anchor, "pjt_no", None),
+                rst_id=getattr(anchor, "rst_id", None),
+                person_no=getattr(anchor, "person_no", None),
+                org_id=getattr(anchor, "org_id", None),
             )
         if not has_explicit_precheck_signals(precheck):
             question_analysis = await self.run_question_analysis(

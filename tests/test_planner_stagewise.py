@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 import apps.api.services.rag_retriever as rag_retriever_module
 from apps.api.services.rag_retriever import detect_retrieval_query_drift, repair_query_for_resolved_anchor, resolve_rag_queries
+from apps.api.services.followup_anchor import anchor_to_seed_map
+from apps.api.services.detail_contract import compute_detail_coverage
+from apps.api.services.view_state import FocusEntity
 from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
@@ -657,6 +660,16 @@ def test_resolve_rag_queries_falls_back_to_raw_query_on_drift():
 
 
 
+def test_detect_retrieval_query_drift_keeps_korean_year_tokens():
+    drift_detected, drift_reasons = detect_retrieval_query_drift(
+        raw_query='2024년 반도체 과제를 알려줘',
+        hint_query='반도체 과제',
+    )
+
+    assert drift_detected is True
+    assert 'missing_identifier_or_year' in drift_reasons
+
+
 def test_resolve_rag_queries_keeps_identifier_and_year_terms():
     state = SimpleNamespace(question='2023 ETRI 반도체 과제를 알려줘', intent_payload=None)
     qa = SimpleNamespace(retrieval_query='반도체 과제', confidence=0.95)
@@ -1034,3 +1047,91 @@ def test_normalize_stage2_slots_payload_keeps_clean_payload_without_logging():
 
     assert payload["display_limit"] == 10
     assert events == []
+
+
+def test_anchor_to_seed_map_supports_perf_people_org_ids():
+    perf_anchor = FocusEntity(kind='perf', source='test', rst_id='RST-1', doi='10.1234/example')
+    people_anchor = FocusEntity(kind='people', source='test', person_no='P-1')
+    org_anchor = FocusEntity(kind='org', source='test', org_id='ORG-1', org_code='ORG-CODE')
+
+    assert anchor_to_seed_map(perf_anchor) == {'rst_id': ['RST-1'], 'doi': ['10.1234/example']}
+    assert anchor_to_seed_map(people_anchor) == {'person_no': ['P-1']}
+    assert anchor_to_seed_map(org_anchor) == {'org_id': ['ORG-1'], 'org_code': ['ORG-CODE']}
+
+
+def test_resolve_reference_context_followup_supports_perf_deictic_seed():
+    resolution = resolve_reference_context_followup(
+        question='그 논문 자세히',
+        canonical_evidence=[
+            {
+                'ids': {'rst_id': 'RST-100', 'doi': '10.1000/test'},
+                'facts': {'title': 'paper title'},
+                'source_type': 'paper',
+            }
+        ],
+        prev_context=[],
+        default_context_kind='perf',
+    )
+
+    assert resolution['followup_resolution_status'] == 'resolved'
+    assert resolution['seed_map'] == {'rst_id': ['RST-100']}
+
+
+def test_resolve_reference_context_followup_supports_people_and_org_deictic_seed():
+    people_resolution = resolve_reference_context_followup(
+        question='그 연구자 다시',
+        canonical_evidence=[
+            {
+                'ids': {'person_no': 'PERSON-9'},
+                'facts': {'title': 'Kim Researcher'},
+                'source_type': 'people',
+            }
+        ],
+        prev_context=[],
+        default_context_kind='people',
+    )
+    org_resolution = resolve_reference_context_followup(
+        question='그 기관 다시',
+        canonical_evidence=[
+            {
+                'ids': {'org_id': 'ORG-9', 'org_code': 'ORG-C9'},
+                'facts': {'title': 'ETRI'},
+                'source_type': 'org',
+            }
+        ],
+        prev_context=[],
+        default_context_kind='org',
+    )
+
+    assert people_resolution['followup_resolution_status'] == 'resolved'
+    assert people_resolution['seed_map'] == {'person_no': ['PERSON-9']}
+    assert org_resolution['followup_resolution_status'] == 'resolved'
+    assert org_resolution['seed_map'] == {'org_id': ['ORG-9']}
+
+
+def test_detect_retrieval_query_drift_flags_org_and_role_loss():
+    drifted, reasons = detect_retrieval_query_drift(
+        raw_query='ETRI 참여기관 반도체 과제',
+        hint_query='반도체 과제',
+    )
+
+    assert drifted is True
+    assert 'org_terms_lost' in reasons
+    assert 'org_role_lost' in reasons
+
+
+def test_compute_detail_coverage_supports_perf_entity_fields():
+    coverage = compute_detail_coverage(
+        {
+            'title': 'paper title',
+            'rst_id': 'RST-222',
+            'doi': '10.2000/example',
+            'meta_detail': {'perf_type': 'paper'},
+        },
+        anchor=FocusEntity(kind='perf', source='test', rst_id='RST-222'),
+    )
+
+    assert coverage.entity_found is True
+    assert coverage.core_profile['rst_id'] == 'RST-222'
+    assert coverage.core_profile['doi'] == '10.2000/example'
+    assert coverage.rich_detail['perf_type'] == 'paper'

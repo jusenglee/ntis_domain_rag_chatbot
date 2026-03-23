@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from apps.core.rag_pipeline import run_rag_ab_compare
 from apps.core.pipeline_steps import NormalizedIntent
 from apps.core.schemas import IntentPayloadV3
-from apps.core.followup_resolution import build_followup_clarification_message
+from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload
 
 from apps.api.services.context_helpers import resolve_title_from_payload
 from apps.api.services.detail_contract import FIELD_ALIASES, extract_requested_fields
@@ -75,17 +75,23 @@ def _first_non_empty_text(*values: Any) -> Optional[str]:
 
 
 def _build_anchor_requested_terms(question: Any) -> list[str]:
-    requested_fields = extract_requested_fields(str(question or ""))
+    question_text = str(question or "").strip()
+    requested_fields = extract_requested_fields(question_text)
     preferred_fields = [
         field
         for field in ("researchers", "lead_org", "participant_org", "year")
         if field in requested_fields
     ]
+    lowered_question = question_text.lower()
     terms: list[str] = []
     seen: set[str] = set()
     for field in preferred_fields:
-        aliases = FIELD_ALIASES.get(field) or []
-        term = str(aliases[0] if aliases else "").strip()
+        aliases = [str(alias or "").strip() for alias in (FIELD_ALIASES.get(field) or []) if str(alias or "").strip()]
+        term = next((alias for alias in aliases if alias.lower() in lowered_question), None)
+        if term is None:
+            term = next((alias for alias in aliases if any(ord(ch) > 127 for ch in alias)), None)
+        if term is None:
+            term = aliases[0] if aliases else ""
         if not term or term in seen:
             continue
         seen.add(term)
@@ -102,8 +108,7 @@ def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
             "present": False,
             "anchor_source": None,
             "entity_key": None,
-            "pjt_id": None,
-            "pjt_no": None,
+            "entity_kind": None,
             "title_text": None,
         }
 
@@ -112,20 +117,29 @@ def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
         ids_map = normalized_intent.get("ids_map") or {}
     selected_prev_item = dict(strategy_meta.get("selected_prev_item") or {})
     focus_entity = dict(strategy_meta.get("focus_entity") or {})
-    pjt_ids = _normalize_id_values((ids_map or {}).get("pjt_id"))
-    pjt_nos = _normalize_id_values((ids_map or {}).get("pjt_no"))
-    pjt_id = _first_non_empty_text(*(pjt_ids[:1] or []), selected_prev_item.get("pjt_id"), focus_entity.get("pjt_id"))
-    pjt_no = _first_non_empty_text(*(pjt_nos[:1] or []), selected_prev_item.get("pjt_no"), focus_entity.get("pjt_no"))
+    entity_kind = _first_non_empty_text(
+        selected_prev_item.get("context_kind"),
+        focus_entity.get("kind"),
+        strategy_meta.get("selected_prev_context_kind"),
+    )
+    resolved_ids: Dict[str, Optional[str]] = {}
+    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+        values = _normalize_id_values((ids_map or {}).get(key))
+        resolved_ids[key] = _first_non_empty_text(*(values[:1] or []), selected_prev_item.get(key), focus_entity.get(key))
     title_text = _first_non_empty_text(selected_prev_item.get("title"), focus_entity.get("title_text"))
-    entity_key = pjt_id or pjt_no or strategy_meta.get("focus_entity_key")
-    return {
+    entity_key = _first_non_empty_text(
+        *(resolved_ids.get(key) for key in ("rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn", "pjt_id", "pjt_no")),
+        strategy_meta.get("focus_entity_key"),
+    )
+    payload: Dict[str, Any] = {
         "present": bool(entity_key or title_text),
         "anchor_source": strategy_meta.get("anchor_source") or strategy_meta.get("seed_source"),
         "entity_key": entity_key,
-        "pjt_id": pjt_id,
-        "pjt_no": pjt_no,
+        "entity_kind": entity_kind,
         "title_text": title_text,
     }
+    payload.update(resolved_ids)
+    return payload
 
 
 def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
@@ -133,8 +147,8 @@ def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
     if not normalized_query:
         return False
     anchor_tokens = [
-        str(anchor_context.get("pjt_id") or "").strip().lower(),
-        str(anchor_context.get("pjt_no") or "").strip().lower(),
+        str(anchor_context.get(key) or "").strip().lower()
+        for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
     ]
     if any(token and token in normalized_query for token in anchor_tokens):
         return True
@@ -186,35 +200,108 @@ def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Di
     return repaired_query, metadata
 
 
-_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[?-?]{2,}")
+_QUERY_TOKEN_RE = re.compile("[A-Za-z0-9_-]+|[?-?]{2,}")
 _GENERIC_QUERY_TERMS = {
-    "???",
-    "???",
-    "??",
-    "??",
-    "???",
-    "??",
-    "??",
-    "?",
-    "?",
+    "알려줘",
+    "보여줘",
+    "조회",
+    "목록",
+    "리스트",
+    "정보",
+    "내용",
+    "건",
+    "개",
     "top",
     "the",
     "and",
     "for",
 }
-_PROJECT_AXIS_TERMS = {"??", "project", "projects"}
-_PERF_AXIS_TERMS = {"??", "output", "outputs", "??", "??", "???"}
-_DETAIL_AXIS_TERMS = {"??", "detail", "details"}
-_STATS_AXIS_TERMS = {"??", "??", "trend", "trends", "??"}
+_PROJECT_AXIS_TERMS = {"과제", "project", "projects"}
+_PERF_AXIS_TERMS = {"성과", "output", "outputs", "논문", "특허", "보고서"}
+_DETAIL_AXIS_TERMS = {"상세", "detail", "details"}
+_STATS_AXIS_TERMS = {"통계", "추이", "trend", "trends", "집계"}
+
+_ORG_ROLE_TERMS = {"\uc8fc\uad00\uae30\uad00", "\uc218\ud589\uae30\uad00", "\ucc38\uc5ec\uae30\uad00", "\uc18c\uc18d\uae30\uad00", "lead_org", "participant_org", "affiliation"}
+_ORG_SUFFIXES = ("\uae30\uad00", "\ub300\ud559", "\uc5f0\uad6c\uc6d0", "\uc5f0\uad6c\uc18c", "\uc13c\ud130", "\ud559\uad50", "\ub7a9", "lab")
+_QUOTED_TERM_RE = re.compile(r"[\"']([^\"']{2,80})[\"']")
+_ORG_TOKEN_RE = re.compile(r'([A-Za-z][A-Za-z0-9&._-]{1,31}|[\uac00-\ud7a3A-Za-z0-9]{2,32}(?:\ub300\ud559|\uc5f0\uad6c\uc6d0|\uc5f0\uad6c\uc18c|\uc13c\ud130|\ud559\uad50|\uae30\uad00))')
+_PEOPLE_TOKEN_RE = re.compile(r'([\uac00-\ud7a3]{2,8}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*(?:\uc5f0\uad6c\uc790|\uc5f0\uad6c\uc6d0|\uad50\uc218)?')
+
+
+def _extract_org_role_terms(text: Any) -> set[str]:
+    normalized = _normalize_query_text(text)
+    return {term for term in _ORG_ROLE_TERMS if term in normalized}
+
+
+def _extract_org_terms(text: Any) -> set[str]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return set()
+    results: set[str] = set()
+    for match in _ORG_TOKEN_RE.finditer(normalized):
+        token = str(match.group(1) or "").strip()
+        lowered = token.lower()
+        if len(token) < 2:
+            continue
+        if any(token.endswith(suffix) for suffix in _ORG_SUFFIXES) or token.isupper():
+            results.add(lowered)
+    return results
+
+
+def _extract_people_terms(text: Any) -> set[str]:
+    normalized = str(text or "").strip()
+    if not normalized or not any(marker in normalized for marker in ("\uc5f0\uad6c\uc790", "\uc5f0\uad6c\uc6d0", "\uad50\uc218", "\ucc45\uc784\uc790")):
+        return set()
+    results: set[str] = set()
+    for match in _PEOPLE_TOKEN_RE.finditer(normalized):
+        token = str(match.group(1) or "").strip()
+        if len(token) >= 2 and not token.isdigit():
+            results.add(token.lower())
+    return results
+
+
+def _extract_title_terms(text: Any) -> set[str]:
+    normalized = str(text or "")
+    return {str(match.group(1) or "").strip().lower() for match in _QUOTED_TERM_RE.finditer(normalized) if str(match.group(1) or "").strip()}
+
 
 
 def _normalize_query_text(text: Any) -> str:
     return str(text or "").strip().lower()
 
 
+def _is_korean_char(ch: str) -> bool:
+    code = ord(ch)
+    return 0xAC00 <= code <= 0xD7A3
+
+
 def _extract_query_tokens(text: Any) -> list[str]:
     normalized = _normalize_query_text(text)
-    return [token for token in _QUERY_TOKEN_RE.findall(normalized) if token]
+    tokens: list[str] = []
+    current: list[str] = []
+    current_kind: Optional[str] = None
+
+    def flush() -> None:
+        nonlocal current, current_kind
+        if current:
+            tokens.append("".join(current))
+            current = []
+            current_kind = None
+
+    for ch in normalized:
+        if _is_korean_char(ch):
+            kind = "ko"
+        elif ch.isalnum() or ch in {"_", "-"}:
+            kind = "ascii"
+        else:
+            flush()
+            continue
+        if current_kind is not None and kind != current_kind:
+            flush()
+        current.append(ch)
+        current_kind = kind
+    flush()
+    return [token for token in tokens if token]
 
 
 def _extract_identifier_like_tokens(text: Any) -> set[str]:
@@ -222,7 +309,7 @@ def _extract_identifier_like_tokens(text: Any) -> set[str]:
     for token in _extract_query_tokens(text):
         if re.fullmatch(r"\d{4,}", token):
             protected.add(token)
-        elif any(ch.isdigit() for ch in token) and any(ch.isalpha() for ch in token):
+        elif any(ch.isdigit() for ch in token) and any(("a" <= ch.lower() <= "z") for ch in token):
             protected.add(token)
     return protected
 
@@ -255,6 +342,26 @@ def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bo
     hint_topic_terms = _extract_topic_terms(hint)
     if raw_topic_terms and not raw_topic_terms.intersection(hint_topic_terms):
         reasons.append("topic_terms_lost")
+
+    raw_org_terms = _extract_org_terms(raw)
+    hint_org_terms = _extract_org_terms(hint)
+    if raw_org_terms - hint_org_terms:
+        reasons.append("org_terms_lost")
+
+    raw_people_terms = _extract_people_terms(raw)
+    hint_people_terms = _extract_people_terms(hint)
+    if raw_people_terms - hint_people_terms:
+        reasons.append("people_terms_lost")
+
+    raw_title_terms = _extract_title_terms(raw)
+    hint_title_terms = _extract_title_terms(hint)
+    if raw_title_terms - hint_title_terms:
+        reasons.append("title_terms_lost")
+
+    raw_role_terms = _extract_org_role_terms(raw)
+    hint_role_terms = _extract_org_role_terms(hint)
+    if raw_role_terms - hint_role_terms:
+        reasons.append("org_role_lost")
 
     raw_has_project = _contains_any_term(raw_topic_terms, _PROJECT_AXIS_TERMS)
     raw_has_perf = _contains_any_term(raw_topic_terms, _PERF_AXIS_TERMS)
@@ -378,6 +485,7 @@ class CustomRAGRetriever(BaseModel):
         aggregation rank_items? ?쇰컲 hit 寃쎈줈瑜?援щ텇???쒕퉬??酉곗뿉 留욌뒗 ?대┛ dict ?뺥깭濡??ы룷?ν븳??
         """
         strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
+        clarification = build_followup_clarification_payload(dict(strategy_meta))
         followup_message = build_followup_clarification_message(dict(strategy_meta))
         if followup_message:
             return {
@@ -385,6 +493,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": [],
                 "render_profile": {},
                 "no_result_message": followup_message,
+                "clarification": clarification,
             }
 
         res_map = run_rag_ab_compare(
@@ -433,7 +542,7 @@ class CustomRAGRetriever(BaseModel):
                     "year_buckets": list(series.get("year_buckets") or []),
                     "candidate_docs": int(series.get("candidate_docs") or 0),
                 })
-            return {"documents": documents, "canonical_evidence": canonical_evidence, "render_profile": render_profile, "no_result_message": no_result_message}
+            return {"documents": documents, "canonical_evidence": canonical_evidence, "render_profile": render_profile, "no_result_message": no_result_message, "clarification": clarification}
         if isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"} and (list(multi_hop_bundle.get("projects") or []) or list(multi_hop_bundle.get("bundles") or [])):
             documents = []
             for idx, project in enumerate(list(multi_hop_bundle.get("projects") or [])[: self.top_k] or [None], start=1):
@@ -457,6 +566,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "no_result_message": no_result_message,
+                "clarification": clarification,
             }
 
         if isinstance(pattern_analysis, dict) and str(pattern_analysis.get("status") or "").strip().lower() in {"ok", "partial"} and list(pattern_analysis.get("items") or []):
@@ -487,6 +597,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "no_result_message": no_result_message,
+                "clarification": clarification,
             }
 
         reverse_trace = getattr(res_m, "reverse_trace", None) or {}
@@ -521,6 +632,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "no_result_message": no_result_message,
+                "clarification": clarification,
             }
 
         rank_items = aggregation.get("rank_items") if isinstance(aggregation, dict) else None
@@ -552,6 +664,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "no_result_message": no_result_message,
+                "clarification": clarification,
             }
 
         if not hits:
@@ -560,6 +673,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "no_result_message": no_result_message,
+                "clarification": clarification,
             }
 
         documents = []
@@ -596,6 +710,7 @@ class CustomRAGRetriever(BaseModel):
             "canonical_evidence": canonical_evidence,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
+            "clarification": clarification,
         }
 
 

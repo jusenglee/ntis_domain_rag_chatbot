@@ -15,6 +15,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
+from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.view_state import DisplaySnapshot, FocusEntity, render_display_snapshot_text
 from apps.core.planner_staged import (
     DeterministicGateStrategy,
@@ -115,16 +116,28 @@ def _extract_prev_context_seed(
     default_context_kind: str = "project",
 ) -> dict[str, list[str]]:
     if focus_entity is not None:
-        if focus_entity.pjt_id:
-            return {"pjt_id": [focus_entity.pjt_id]}
-        if focus_entity.pjt_no:
-            return {"pjt_no": [focus_entity.pjt_no]}
+        seed_map = anchor_to_seed_map(focus_entity)
+        if seed_map:
+            return seed_map
     if display_snapshot is not None and len(display_snapshot.items) == 1:
         item = display_snapshot.items[0]
-        if item.pjt_id:
-            return {"pjt_id": [item.pjt_id]}
-        if item.pjt_no:
-            return {"pjt_no": [item.pjt_no]}
+        seed_map = anchor_to_seed_map(FocusEntity(
+            kind=item.entity_kind,
+            source="display_snapshot",
+            doc_id=item.doc_id,
+            pjt_id=item.pjt_id,
+            pjt_no=item.pjt_no,
+            rst_id=item.rst_id,
+            person_no=item.person_no,
+            org_id=item.org_id,
+            org_code=item.org_code,
+            biz_no=item.biz_no,
+            doi=item.doi,
+            issn=item.issn,
+            title_text=item.title_text,
+        ))
+        if seed_map:
+            return seed_map
     if canonical_evidence:
         pjt_ids, pjt_nos = set(), set()
         for item in canonical_evidence:
