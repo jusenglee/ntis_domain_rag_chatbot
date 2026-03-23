@@ -15,7 +15,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
-from apps.core.followup_resolution import resolve_reference_context_followup
+from apps.api.services.view_state import DisplaySnapshot, FocusEntity, render_display_snapshot_text
 from apps.core.planner_staged import (
     DeterministicGateStrategy,
     collect_regate_seed_map,
@@ -31,8 +31,46 @@ from apps.core.query_intent import (
 )
 
 
+_STAGE2_ALLOWED_OUTPUT_FIELDS = {
+    "ids_map",
+    "candidate_keys",
+    "project_key_policy",
+    "join_resolution_policy",
+    "filters",
+    "retrieval_query",
+    "limit",
+    "display_limit",
+    "confidence",
+}
+
+
+def _normalize_stage2_slots_payload(
+    raw_payload: Any,
+    *,
+    request_id: Optional[str],
+    conversation_id: str,
+    log_event: Any,
+) -> dict[str, Any]:
+    if isinstance(raw_payload, str):
+        payload = json.loads(raw_payload)
+    else:
+        payload = raw_payload
+    if not isinstance(payload, dict):
+        raise ValueError(f"Planner stage2 payload must be an object, got {type(payload).__name__}")
+
+    cleaned = dict(payload)
+    dropped = {key: cleaned.pop(key) for key in list(cleaned.keys()) if key not in _STAGE2_ALLOWED_OUTPUT_FIELDS}
+    if dropped:
+        log_event(
+            "PLANNER.STAGE2.EXTRA_FIELDS_DROPPED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            dropped_fields=sorted(dropped.keys()),
+            dropped_non_null_fields=sorted(key for key, value in dropped.items() if value is not None),
+        )
+    return cleaned
+
 def intent_snapshot(normalized_intent: Any) -> dict[str, Any]:
-    """Build the compact intent snapshot that stage 1 is allowed to inspect."""
     return {
         "action": getattr(normalized_intent, "action", None),
         "base_route": getattr(normalized_intent, "base_route", None),
@@ -49,8 +87,10 @@ def _planner_prev_context_text(
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
     normalized_intent: Any,
+    display_snapshot: Optional[DisplaySnapshot] = None,
 ) -> str:
-    """Render prior context for the stage-1 planner prompt."""
+    if display_snapshot is not None and display_snapshot.items:
+        return render_display_snapshot_text(display_snapshot, max_chars=1200)
     if canonical_evidence:
         return render_canonical_evidence_text(
             canonical_evidence,
@@ -69,10 +109,22 @@ def _extract_prev_context_seed(
     question: str,
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
+    display_snapshot: Optional[DisplaySnapshot] = None,
+    focus_entity: Optional[FocusEntity] = None,
     allow_ordinal_resolution: bool = False,
     default_context_kind: str = "project",
 ) -> dict[str, list[str]]:
-    """Extract reusable project seeds from prior context or canonical evidence."""
+    if focus_entity is not None:
+        if focus_entity.pjt_id:
+            return {"pjt_id": [focus_entity.pjt_id]}
+        if focus_entity.pjt_no:
+            return {"pjt_no": [focus_entity.pjt_no]}
+    if display_snapshot is not None and len(display_snapshot.items) == 1:
+        item = display_snapshot.items[0]
+        if item.pjt_id:
+            return {"pjt_id": [item.pjt_id]}
+        if item.pjt_no:
+            return {"pjt_no": [item.pjt_no]}
     if canonical_evidence:
         pjt_ids, pjt_nos = set(), set()
         for item in canonical_evidence:
@@ -92,15 +144,6 @@ def _extract_prev_context_seed(
     seed = extract_single_project_seed(prev_context)
     if seed:
         return seed
-    if allow_ordinal_resolution:
-        resolution = resolve_reference_context_followup(
-            question=question,
-            canonical_evidence=canonical_evidence,
-            prev_context=prev_context,
-            default_context_kind=default_context_kind,
-        )
-        if str(resolution.get("followup_resolution_status") or "") == "resolved":
-            return dict(resolution.get("seed_map") or {})
     return {}
 
 
@@ -113,6 +156,7 @@ async def run_planner_stage1(
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
     normalized_intent: Any,
+    display_snapshot: Optional[DisplaySnapshot],
     build_llm: Any,
     planner_stage1_decision_cls: Any,
     load_prompt_file: Any,
@@ -122,7 +166,6 @@ async def run_planner_stage1(
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
-    """Run the stage-1 planner and return action, head, and relation hints only."""
     llm = build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=planner_stage1_decision_cls)
     history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in chat_history[-4:]])
@@ -130,6 +173,7 @@ async def run_planner_stage1(
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
         normalized_intent=normalized_intent,
+        display_snapshot=display_snapshot,
     )
     system_prompt = await load_prompt_file(Path(f"prompts/planner_stage1_{planner_stage1_prompt_version}.md"))
     prompt = ChatPromptTemplate.from_messages(
@@ -141,7 +185,6 @@ async def run_planner_stage1(
             ),
         ]
     )
-    # Keep planner reasoning shallow and deterministic for the stage prompt.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -170,7 +213,7 @@ async def run_planner_stage1(
         referential_followup=int(stage1.referential_followup),
         confidence=round(stage1.confidence, 3),
         planner_stage1_prompt_version=planner_stage1_prompt_version,
-        prev_context_source="canonical_evidence" if canonical_evidence else "prev_context_snapshot",
+        prev_context_source="display_snapshot" if display_snapshot and display_snapshot.items else "canonical_evidence" if canonical_evidence else "prev_context_snapshot",
     )
     return stage1
 
@@ -182,15 +225,18 @@ def determine_locked_strategy(
     normalized_intent: Any,
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
+    display_snapshot: Optional[DisplaySnapshot],
+    focus_entity: Optional[FocusEntity],
     planner_stage2_regate_seed_allowed_keys: set[str],
     log_event: Any,
 ) -> DeterministicGateStrategy:
-    """Resolve the deterministic gate artifact from stage 1, ids, and prior anchors."""
     base_ids_map = dict(getattr(normalized_intent, "ids_map", {}) or {})
     prev_context_seed = _extract_prev_context_seed(
         question=question,
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
+        display_snapshot=display_snapshot,
+        focus_entity=focus_entity,
         allow_ordinal_resolution=bool(getattr(stage1, "referential_followup", False)),
         default_context_kind=str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
     )
@@ -221,8 +267,8 @@ def determine_locked_strategy(
         gate_relation=locked.relation,
         gate_join_key_mode=locked.join_key_mode,
         gate_target_cols=locked.target_cols,
-        used_prev_context_seed=int(bool(prev_context_seed) or (bool(getattr(stage1, "referential_followup", False)) and bool(base_ids_map.get("pjt_id") or base_ids_map.get("pjt_no")))),
-        prev_context_seed_source="canonical_evidence" if canonical_evidence else "prev_context_snapshot",
+        used_prev_context_seed=int(bool(prev_context_seed)),
+        prev_context_seed_source="focus_entity" if focus_entity else "display_snapshot" if display_snapshot and display_snapshot.items else "canonical_evidence" if canonical_evidence else "prev_context_snapshot",
     )
     return locked
 
@@ -242,7 +288,6 @@ async def run_planner_stage2(
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
-    """Run the stage-2 planner against the deterministic gate artifact and fill slots."""
     llm = build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=planner_stage2_slots_cls)
     system_prompt = await load_prompt_file(Path(f"prompts/planner_stage2_{planner_stage2_prompt_version}.md"))
@@ -252,7 +297,6 @@ async def run_planner_stage2(
             ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>"),
         ]
     )
-    # Keep planner reasoning shallow and deterministic for the stage prompt.
     planner_llm = llm.bind(
         reasoning_effort="low",
         include_reasoning=False,
@@ -261,14 +305,21 @@ async def run_planner_stage2(
         top_p=1.0,
         max_tokens=300,
     )
-    chain = prompt | planner_llm | sanitize_llm_json | parser
-    slots = await chain.ainvoke(
+    chain = prompt | planner_llm | sanitize_llm_json
+    raw_slots = await chain.ainvoke(
         {
             "format_instructions": parser.get_format_instructions(),
             "question": question,
             "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
         }
     )
+    normalized_slots = _normalize_stage2_slots_payload(
+        raw_slots,
+        request_id=request_id,
+        conversation_id=conversation_id,
+        log_event=log_event,
+    )
+    slots = parser.parse(json.dumps(normalized_slots, ensure_ascii=False))
     log_event(
         "PLANNER.STAGE2",
         request_id=request_id,
@@ -296,9 +347,6 @@ def assemble_question_analysis(
     planner_stage1_prompt_version: str,
     planner_stage2_prompt_version: str,
 ) -> Any:
-    # `question_analysis` is a planner artifact. Retrieval/runtime stages must use
-    # the final assembled execution strategy and normalized intent as source of truth.
-    """Assemble the validated question-analysis artifact from gate and stage-2 slots."""
     ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
     for item in invalids:
         log_event(
@@ -318,6 +366,7 @@ def assemble_question_analysis(
             "join_resolution_policy": getattr(stage2, "join_resolution_policy", None),
             "filters": stage2.filters,
             "limit": min(stage2.limit, max_top_k_size),
+            "display_limit": min(getattr(stage2, "display_limit", stage2.limit), min(stage2.limit, max_top_k_size)),
             "retrieval_query": stage2.retrieval_query or question,
             "confidence": min(stage1.confidence, stage2.confidence),
         },
@@ -420,6 +469,7 @@ async def run_stagewise_question_analysis(
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]],
     normalized_intent: Any,
+    view_state: Any = None,
     build_llm: Any,
     planner_stage1_decision_cls: Any,
     planner_stage2_slots_cls: Any,
@@ -437,7 +487,8 @@ async def run_stagewise_question_analysis(
     planner_stage2_regate_seed_allowed_keys: set[str],
     max_top_k_size: int,
 ) -> Any:
-    """Execute the full stagewise planner flow: stage 1, gate, stage 2, and assemble."""
+    display_snapshot = getattr(view_state, "latest_display_snapshot", None)
+    focus_entity = getattr(view_state, "latest_focus_entity", None)
     stage1 = await run_planner_stage1(
         question=question,
         conversation_id=conversation_id,
@@ -446,6 +497,7 @@ async def run_stagewise_question_analysis(
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
         normalized_intent=normalized_intent,
+        display_snapshot=display_snapshot,
         build_llm=build_llm,
         planner_stage1_decision_cls=planner_stage1_decision_cls,
         load_prompt_file=load_prompt_file,
@@ -461,6 +513,8 @@ async def run_stagewise_question_analysis(
         normalized_intent=normalized_intent,
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
+        display_snapshot=display_snapshot,
+        focus_entity=focus_entity,
         planner_stage2_regate_seed_allowed_keys=planner_stage2_regate_seed_allowed_keys,
         log_event=log_event,
     )
@@ -503,3 +557,5 @@ async def run_stagewise_question_analysis(
         planner_stage1_prompt_version=planner_stage1_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
     )
+
+

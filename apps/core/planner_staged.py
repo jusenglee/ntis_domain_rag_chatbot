@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Stagewise planner and deterministic gate artifact helpers."""
 
@@ -32,7 +32,7 @@ _PERF_SEED_KEYS = (
 class DeterministicGateStrategy:
     """Deterministic gate artifact fixed after stage 1.
 
-    Stage 2 may fill ids, candidate_keys, filters, retrieval_query, and limit only.
+    Stage 2 may fill ids, candidate_keys, filters, retrieval_query, limit, and display_limit only.
     Deferred join is not legal here and is introduced only during assembled question analysis.
     """
 
@@ -279,6 +279,9 @@ def merge_locked_strategy_slots(
         "join_resolution_policy": slots.get("join_resolution_policy"),
         "filters": dict(slots.get("filters") or {}),
         "limit": int(slots.get("limit") or 20),
+        "display_limit": int(slots.get("display_limit") or slots.get("limit") or 20),
         "retrieval_query": slots.get("retrieval_query") or default_query,
         "confidence": float(slots.get("confidence") or 0.0),
     }
+
+

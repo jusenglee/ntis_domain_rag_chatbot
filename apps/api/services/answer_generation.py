@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -10,7 +10,7 @@ from apps.core.canonical_evidence import build_canonical_evidence
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """여러 객체나 dict에서 같은 속성의 첫 비None 값을 찾는다."""
+    """?щ윭 媛앹껜??dict?먯꽌 媛숈? ?띿꽦??泥?鍮껷one 媛믪쓣 李얜뒗??"""
     for source in sources:
         if source is None:
             continue
@@ -44,9 +44,9 @@ def build_answer_context(
     split_sentences_fn: Any,
     logger: Any,
 ) -> dict[str, Any]:
-    """문서나 canonical evidence를 답변 생성용 context text로 정리한다.
+    """臾몄꽌??canonical evidence瑜??듬? ?앹꽦??context text濡??뺣━?쒕떎.
 
-    가능하면 canonical_evidence를 그대로 렌더링하고, 없을 때만 docs를 canonical 형태로 파생시켜 raw payload 의존을 줄인다.
+    媛?ν븯硫?canonical_evidence瑜?洹몃?濡??뚮뜑留곹븯怨? ?놁쓣 ?뚮쭔 docs瑜?canonical ?뺥깭濡??뚯깮?쒖폒 raw payload ?섏〈??以꾩씤??
     """
     is_solar = model_name == "solar_vllm_0"
     profile = dict(render_profile or {})
@@ -119,10 +119,20 @@ async def generate_answer(
     solar_gen_deadline_ms: int,
     solar_stream_max_chars: int,
 ) -> Dict[str, Any]:
-    """한 모델에 대해 system prompt, reference context, user question을 묶어 최종 답변을 생성한다.
+    """??紐⑤뜽?????system prompt, reference context, user question??臾띠뼱 理쒖쥌 ?듬????앹꽦?쒕떎.
 
-    스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게 판단하게 만든다.
+    ?ㅽ듃由щ컢 硫뷀듃由?낵 context ?ъ슜 ?щ?瑜??④퍡 湲곕줉???댄썑 蹂묓빀 ?④퀎媛 紐⑤뜽 ?곹깭瑜?洹쇨굅 ?덇쾶 ?먮떒?섍쾶 留뚮뱺??
     """
+    detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
+    if detail_server_answer:
+        rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
+        return {
+            final_field: detail_server_answer,
+            f"{final_field}_meta": {"detail_server_answer": True},
+            rendered_context_key: False,
+            "stream_meta": {final_field: {"detail_server_answer": True}},
+        }
+
     no_result_message = str(getattr(state, "no_result_message", "") or "").strip()
     if no_result_message:
         log_event(
@@ -292,9 +302,9 @@ async def merge_answers(
     dual_model_fallback_message: str,
     solar_min_answer_chars: int,
 ) -> Dict[str, Any]:
-    """Solar와 Gemma 결과 중 최종 답변을 선택하고 병합 메타를 남긴다.
+    """Solar? Gemma 寃곌낵 以?理쒖쥌 ?듬????좏깮?섍퀬 蹂묓빀 硫뷀?瑜??④릿??
 
-    선택 정책은 외부 함수에 위임하고, 여기서는 선택 이유와 실패 징후를 workflow state에 보존한다.
+    ?좏깮 ?뺤콉? ?몃? ?⑥닔???꾩엫?섍퀬, ?ш린?쒕뒗 ?좏깮 ?댁쑀? ?ㅽ뙣 吏뺥썑瑜?workflow state??蹂댁〈?쒕떎.
     """
     has_docs_context = bool(getattr(state, "context", None) or getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
     rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))
@@ -357,3 +367,4 @@ async def merge_answers(
         "rendered_context_used": rendered_context_used,
         "degraded": degraded,
     }
+

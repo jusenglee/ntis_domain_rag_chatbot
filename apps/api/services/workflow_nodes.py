@@ -34,7 +34,7 @@ async def node_load_memory(
     canonical evidence로부터 prev_context를 재수화해 memory 계약과 workflow 입력 shape를 연결한다.
     """
     cid = state.conversation_id
-    loaded_history, canonical_evidence, render_profile = await load_conversation_memory_fn(
+    loaded_history, canonical_evidence, render_profile, view_state = await load_conversation_memory_fn(
         cid,
         kv_store=getattr(state, "kv_store", None),
     )
@@ -55,6 +55,7 @@ async def node_load_memory(
         "prev_context": effective_prev_context,
         "canonical_evidence": canonical_evidence,
         "render_profile": render_profile,
+        "view_state": view_state,
     }
 
 
@@ -117,6 +118,7 @@ async def node_analyze_question(
         chat_history=state.chat_history,
         prev_context=state.prev_context,
         canonical_evidence=getattr(state, "canonical_evidence", None) or [],
+        view_state=getattr(state, "view_state", None),
         request_id=getattr(state, "request_id", None),
     )
     return {
@@ -165,6 +167,7 @@ async def node_save_history(
         history=save_payload["history"],
         canonical_evidence=save_payload["canonical_evidence"],
         render_profile=save_payload["render_profile"],
+        view_state=save_payload["view_state"],
         history_ttl_seconds=history_ttl_seconds,
     )
     if not saved:

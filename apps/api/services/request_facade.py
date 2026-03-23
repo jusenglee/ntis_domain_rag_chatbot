@@ -1,13 +1,16 @@
-from __future__ import annotations
+﻿from __future__ import annotations
+
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Any, Dict, List, Optional
+
 from langchain_core.messages import BaseMessage
 
+from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, resolve_followup_anchor
 from apps.core.followup_resolution import resolve_reference_context_followup
+from apps.api.services.view_state import ConversationViewState
+
+
 def has_explicit_precheck_signals(precheck: dict[str, Any]) -> bool:
-    """cheap precheck 결과에 명시적 ID 신호가 있는지 검사한다.
-    이 경로는 planner 호출을 건너뛸지 판단하는 최소 게이트로만 쓰며, 사람명·기관명 같은 의미 추론은 맡지 않는다.
-    """
     ids_map = (precheck or {}).get("ids_map")
     if not isinstance(ids_map, dict):
         return False
@@ -19,6 +22,8 @@ def has_explicit_precheck_signals(precheck: dict[str, Any]) -> bool:
         if str(values or "").strip():
             return True
     return False
+
+
 def _has_ids_map_values(ids_map: Any) -> bool:
     if not isinstance(ids_map, dict):
         return False
@@ -60,8 +65,48 @@ def _inject_seed_into_normalized_intent(normalized_intent: Any, seed_map: dict[s
     return normalized_intent
 
 
+def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question: str) -> Dict[str, Any]:
+    if anchor is None:
+        return {
+            "followup_resolution_status": "none",
+            "selected_prev_item": None,
+            "seed_map": {},
+            "seed_source": None,
+            "explicit_followup": False,
+            "followup_reference_kind": None,
+            "requested_token": None,
+            "requested_index": None,
+            "available_count": len(getattr(snapshot, "items", []) or []),
+            "anchor_source": None,
+            "focus_entity": None,
+        }
+    selected_prev_item = None
+    if anchor.display_rank is not None:
+        selected_prev_item = {
+            "index": anchor.display_rank,
+            "pjt_id": anchor.pjt_id,
+            "pjt_no": anchor.pjt_no,
+            "title": anchor.title_text,
+            "context_kind": anchor.kind,
+            "view_id": anchor.view_id,
+        }
+    reference_kind = "deictic" if anchor.source == "display_snapshot" and parse_ordinal_reference(question) is None else "ordinal" if anchor.source == "display_snapshot" else "focus" if anchor.source != "explicit_id" else "explicit_id"
+    return {
+        "followup_resolution_status": "resolved",
+        "selected_prev_item": selected_prev_item,
+        "seed_map": anchor_to_seed_map(anchor),
+        "seed_source": anchor.source,
+        "explicit_followup": anchor.source != "explicit_id",
+        "followup_reference_kind": reference_kind,
+        "requested_token": None,
+        "requested_index": anchor.display_rank,
+        "available_count": len(getattr(snapshot, "items", []) or []),
+        "anchor_source": anchor.source,
+        "focus_entity": anchor.model_dump() if hasattr(anchor, "model_dump") else None,
+    }
+
+
 def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, followup_resolution: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Build the transport-visible v3 strategy metadata bundle."""
     if isinstance(normalized_intent, dict):
         ids_map = normalized_intent.get("ids_map") or {}
         candidate_keys = normalized_intent.get("candidate_keys") or {}
@@ -78,6 +123,7 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         is_exact_key_query = bool(getattr(normalized_intent, "is_exact_key_query", False))
     followup_resolution = dict(followup_resolution or {})
     selected_prev_item = dict(followup_resolution.get("selected_prev_item") or {})
+    focus_entity = dict(followup_resolution.get("focus_entity") or {})
     return {
         "strategy_version": str(getattr(question_analysis, "strategy_version", "v3") or "v3"),
         "candidate_keys": dict(candidate_keys),
@@ -102,9 +148,14 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "requested_index": followup_resolution.get("requested_index"),
         "available_count": followup_resolution.get("available_count"),
         "seed_source": followup_resolution.get("seed_source"),
+        "anchor_source": followup_resolution.get("anchor_source"),
+        "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("doc_id"),
+        "display_view_id": selected_prev_item.get("view_id") if selected_prev_item else focus_entity.get("view_id"),
+        "display_rank": focus_entity.get("display_rank"),
     }
+
+
 def _build_intent_payload_object(intent_payload_cls: Any, normalized_intent: Any, question_analysis: Any, *, followup_resolution: Optional[Dict[str, Any]] = None) -> Any:
-    """Instantiate the configured transport payload, keeping test doubles working."""
     strategy_meta = _build_strategy_meta(normalized_intent, question_analysis, followup_resolution=followup_resolution)
     try:
         return intent_payload_cls(
@@ -122,9 +173,10 @@ def _build_intent_payload_object(intent_payload_cls: Any, normalized_intent: Any
         if hasattr(payload, "strategy_meta"):
             setattr(payload, "strategy_meta", strategy_meta)
         return payload
+
+
 @dataclass(frozen=True)
 class RequestUnderstandingFacade:
-    """질문 이해 단계에서 precheck, intent 정규화, planner 적용을 묶는 얇은 facade다."""
     cheap_precheck: Any
     has_superlative_cue: Any
     extract_years: Any
@@ -139,16 +191,15 @@ class RequestUnderstandingFacade:
     planner_stagewise_enabled: bool
     planner_stage1_prompt_version: str
     planner_stage2_prompt_version: str
+
     def _build_explicit_only_hint(self, question: str) -> Dict[str, Any]:
-        """질문 문자열에서 planner 이전에 확실히 읽을 수 있는 구조 신호만 추린다.
-        year, perf type, title, wants_rank만 포함해 사람·기관 의미를 heuristic truth로 만들지 않는다.
-        """
         return {
             "wants_rank": self.has_superlative_cue(question),
             "years": self.extract_years(question),
             "perf_types": self.extract_perf_types(question),
             "title_terms": self.extract_title_terms(question),
         }
+
     async def build_intent_payload(
         self,
         *,
@@ -157,11 +208,9 @@ class RequestUnderstandingFacade:
         chat_history: List[BaseMessage],
         prev_context: List[Dict[str, Any]],
         canonical_evidence: Optional[List[Dict[str, Any]]] = None,
+        view_state: Optional[ConversationViewState] = None,
         request_id: Optional[str] = None,
     ) -> tuple[Any, Any]:
-        """질문을 normalized_intent와 question_analysis로 분해하는 주 진입점이다.
-        명시적 ID 신호가 없을 때만 planner를 호출하고, 최종 intent는 apply_question_analysis_v3를 거쳐 planner truth와 base intent를 함께 반영한다.
-        """
         precheck = self.cheap_precheck(question)
         explicit_only_hint = self._build_explicit_only_hint(question)
         kws: List[str] = []
@@ -174,53 +223,45 @@ class RequestUnderstandingFacade:
             hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
             hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
         )
+        active_view_state = view_state or ConversationViewState()
+        latest_snapshot = active_view_state.latest_display_snapshot
+        latest_focus_entity = active_view_state.latest_focus_entity
         question_analysis = None
         planner_failed = 0
-        followup_resolution = {"followup_resolution_status": "none", "selected_prev_item": None, "seed_map": {}, "seed_source": None, "explicit_followup": False, "followup_reference_kind": None}
         base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
         base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
+        anchor = None
         if not has_explicit_precheck_signals(precheck) and not _has_ids_map_values(base_ids_map):
+            anchor = resolve_followup_anchor(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                latest_display_snapshot=latest_snapshot,
+                latest_focus_entity=latest_focus_entity,
+            )
+        followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
+        if anchor is None and not has_explicit_precheck_signals(precheck) and not _has_ids_map_values(base_ids_map):
             followup_resolution = resolve_reference_context_followup(
                 question=question,
                 canonical_evidence=list(canonical_evidence or []),
                 prev_context=prev_context,
                 default_context_kind=base_route,
             )
-            status = str(followup_resolution.get("followup_resolution_status") or "none")
-            if status == "resolved":
+            if str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
                 normalized_intent_base = _inject_seed_into_normalized_intent(normalized_intent_base, followup_resolution.get("seed_map") or {})
-                self.log_event(
-                    "FOLLOWUP.ORDINAL.RESOLVED",
-                    request_id=request_id,
-                    conversation_id=conversation_id,
-                    selected_prev_index=(followup_resolution.get("selected_prev_item") or {}).get("index"),
-                    selected_prev_pjt_id=(followup_resolution.get("selected_prev_item") or {}).get("pjt_id"),
-                    selected_prev_pjt_no=(followup_resolution.get("selected_prev_item") or {}).get("pjt_no"),
-                    available_count=followup_resolution.get("available_count"),
-                    requested_token=followup_resolution.get("requested_token"),
-                    seed_source=followup_resolution.get("seed_source"),
-                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
-                )
-            elif status == "out_of_range":
-                self.log_event(
-                    "FOLLOWUP.ORDINAL.OUT_OF_RANGE",
-                    request_id=request_id,
-                    conversation_id=conversation_id,
-                    available_count=followup_resolution.get("available_count"),
-                    requested_index=followup_resolution.get("requested_index"),
-                    requested_token=followup_resolution.get("requested_token"),
-                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
-                )
-            elif status in {"missing_context", "unresolved"}:
-                self.log_event(
-                    "FOLLOWUP.ORDINAL.UNRESOLVED",
-                    request_id=request_id,
-                    conversation_id=conversation_id,
-                    followup_resolution_status=status,
-                    requested_token=followup_resolution.get("requested_token"),
-                    available_count=followup_resolution.get("available_count"),
-                    followup_reference_kind=followup_resolution.get("followup_reference_kind"),
-                )
+        elif anchor is not None:
+            seed_map = anchor_to_seed_map(anchor)
+            normalized_intent_base = _inject_seed_into_normalized_intent(normalized_intent_base, seed_map)
+            self.log_event(
+                "FOLLOWUP.ANCHOR.RESOLVED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                source=anchor.source,
+                view_id=getattr(anchor, "view_id", None),
+                requested_ordinal=parse_ordinal_reference(question),
+                resolved_display_rank=getattr(anchor, "display_rank", None),
+                pjt_id=getattr(anchor, "pjt_id", None),
+                pjt_no=getattr(anchor, "pjt_no", None),
+            )
         if not has_explicit_precheck_signals(precheck):
             question_analysis = await self.run_question_analysis(
                 question=question,
@@ -228,10 +269,16 @@ class RequestUnderstandingFacade:
                 chat_history=chat_history,
                 prev_context=prev_context,
                 canonical_evidence=list(canonical_evidence or []),
+                view_state=active_view_state,
                 request_id=request_id,
                 normalized_intent_base=normalized_intent_base,
             )
             planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
+        if question_analysis is not None:
+            question_analysis.display_limit = min(
+                int(getattr(question_analysis, "limit", 20) or 20),
+                parse_display_limit(question, default=int(getattr(question_analysis, "display_limit", getattr(question_analysis, "limit", 20)) or 20)),
+            )
         normalized_intent, planner_applied = self.apply_question_analysis_v3(
             normalized_intent_base,
             question_analysis,
@@ -252,6 +299,8 @@ class RequestUnderstandingFacade:
             schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
         )
         return _build_intent_payload_object(self.intent_payload_cls, normalized_intent, question_analysis, followup_resolution=followup_resolution), question_analysis
+
+
 async def build_intent_payload(
     *,
     question: str,
@@ -260,6 +309,7 @@ async def build_intent_payload(
     prev_context: List[Dict[str, Any]],
     request_id: Optional[str],
     canonical_evidence: Optional[List[Dict[str, Any]]] = None,
+    view_state: Optional[ConversationViewState] = None,
     cheap_precheck: Any,
     has_superlative_cue: Any,
     extract_years: Any,
@@ -275,7 +325,6 @@ async def build_intent_payload(
     planner_stage1_prompt_version: str,
     planner_stage2_prompt_version: str,
 ) -> tuple[Any, Any]:
-    """RequestUnderstandingFacade를 즉석에서 조립해 동일한 intent build 절차를 실행하는 함수형 래퍼다."""
     facade = RequestUnderstandingFacade(
         cheap_precheck=cheap_precheck,
         has_superlative_cue=has_superlative_cue,
@@ -298,5 +347,8 @@ async def build_intent_payload(
         chat_history=chat_history,
         prev_context=prev_context,
         canonical_evidence=canonical_evidence,
+        view_state=view_state,
         request_id=request_id,
     )
+
+

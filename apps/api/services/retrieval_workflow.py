@@ -4,6 +4,14 @@ import asyncio
 from typing import Any, Dict
 
 from apps.api.services.canonical_context import build_prev_context_canonical_text
+from apps.api.services.detail_contract import (
+    compute_detail_coverage,
+    coverage_satisfies_fields,
+    extract_requested_fields,
+    make_entity_cache_key,
+    render_detail_answer,
+)
+from apps.api.services.view_state import DetailCacheEntry, build_display_snapshot, focus_entity_from_detail
 from apps.core.followup_resolution import build_followup_clarification_message, should_short_circuit_followup_clarification
 
 
@@ -234,8 +242,39 @@ async def node_rag_search(
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
     query_intent = _get_normalized_intent(state)
+    view_state = getattr(state, "view_state", None)
 
     try:
+        output_type = str(_pick_attr(query_intent, qa, key="output_type", default="summary") or "summary").strip().lower()
+        latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
+        if output_type == "detail" and latest_focus_entity is not None:
+            requested_fields = extract_requested_fields(state.messages[-1].content)
+            cache_key = make_entity_cache_key(latest_focus_entity)
+            cache_entry = (getattr(view_state, "detail_cache", {}) or {}).get(cache_key)
+            if cache_entry and coverage_satisfies_fields(cache_entry.coverage, requested_fields):
+                answer_text = render_detail_answer(cache_entry.coverage, requested_fields=requested_fields)
+                log_event(
+                    "DETAIL.CACHE.HIT",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    entity_key=cache_key,
+                    requested_fields=sorted(requested_fields),
+                )
+                log_event(
+                    "ANSWER.FALLBACK.APPLIED",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    reason="detail_cache_hit",
+                )
+                return {"detail_server_answer": answer_text, "view_state": view_state}
+            log_event(
+                "DETAIL.CACHE.MISS",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                entity_key=cache_key,
+                requested_fields=sorted(requested_fields),
+            )
+
         _, _, search_query, _ = resolve_rag_queries_fn(
             state=state,
             qa=qa,
@@ -261,6 +300,84 @@ async def node_rag_search(
         canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
         render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
+        raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
+
+        display_limit = min(int(getattr(qa, "display_limit", getattr(qa, "limit", len(docs) or 1)) or 1), max(1, len(docs) or 1))
+        list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
+        if list_like_output and docs and canonical_evidence and view_state is not None:
+            snapshot = build_display_snapshot(
+                conversation_id=state.conversation_id,
+                turn_id=state.request_id,
+                context_kind=str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower(),
+                requested_count=display_limit,
+                documents=docs,
+                canonical_evidence=canonical_evidence,
+                raw_count=raw_result_count,
+            )
+            view_state.latest_display_snapshot = snapshot
+            view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in docs[: min(len(docs), 20)] if isinstance(item, dict)]
+            docs = docs[: snapshot.visible_count]
+            canonical_evidence = canonical_evidence[: snapshot.visible_count]
+            log_event(
+                "DISPLAY.SNAPSHOT.BUILT",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                view_id=snapshot.view_id,
+                visible_count=snapshot.visible_count,
+                raw_count=snapshot.raw_count,
+            )
+            log_event(
+                "DISPLAY.SNAPSHOT.SAVED",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                view_id=snapshot.view_id,
+            )
+
+        detail_server_answer = None
+        if output_type == "detail" and docs and view_state is not None:
+            focus_entity = focus_entity_from_detail(
+                context_kind=str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower(),
+                document=docs[0] if docs else None,
+                canonical_item=canonical_evidence[0] if canonical_evidence else None,
+                source="detail_lookup",
+            )
+            if focus_entity is not None:
+                view_state.latest_focus_entity = focus_entity
+                log_event(
+                    "FOCUS.ENTITY.SET",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    source=focus_entity.source,
+                    pjt_id=focus_entity.pjt_id,
+                    pjt_no=focus_entity.pjt_no,
+                )
+                coverage = compute_detail_coverage(docs[0])
+                cache_key = make_entity_cache_key(focus_entity)
+                requested_fields = extract_requested_fields(state.messages[-1].content)
+                view_state.detail_cache[cache_key] = DetailCacheEntry(
+                    entity_key=cache_key,
+                    anchor=focus_entity,
+                    coverage=coverage,
+                    hydrated_fields=sorted(set(coverage.available_fields)),
+                    source_turn_id=state.request_id,
+                )
+                detail_server_answer = render_detail_answer(coverage, requested_fields=requested_fields)
+                log_event(
+                    "DETAIL.COVERAGE",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    entity_found=int(coverage.entity_found),
+                    detail_level=coverage.detail_level,
+                    available_fields=coverage.available_fields,
+                    missing_fields=coverage.missing_fields,
+                )
+                log_event(
+                    "ANSWER.FALLBACK.APPLIED",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    reason="detail_contract",
+                )
+
         log_event(
             "RAG.RESULT",
             request_id=state.request_id,
@@ -276,6 +393,8 @@ async def node_rag_search(
             "canonical_evidence": canonical_evidence,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
+            "view_state": view_state,
+            "detail_server_answer": detail_server_answer,
         }
     except strategy_violation_cls:
         raise

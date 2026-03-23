@@ -83,3 +83,9 @@
 ## Final-answer prompt note
 - ?? ??? system prompt? ?? `prompts/ntis_chatbot.md`? ????? ????.
 - ?? ? `GEMMA_SYSTEM_PROMPT_PATH`, `SOLAR_SYSTEM_PROMPT_PATH`? ??? prompt ??? ??? ? ??.
+
+## 최근 반영 사항
+
+- planner/runtime 앞단에 `view_state` 기반 follow-up anchor 해석이 추가됐다.
+- list 계열 응답은 `display_limit` 기준 visible subset을 먼저 확정하고 `latest_display_snapshot`을 저장한다.
+- detail 계열 응답은 `latest_focus_entity`, `detail_cache`, `DetailCoverage`를 사용해 서버가 기본 프로필/상세 fallback을 보정한다.

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """Core planner and runtime schema definitions.
@@ -34,8 +34,8 @@ Stage1Relation = Literal["project_perf", "perf_project"]
 
 
 class PlannerStage1Decision(BaseModel):
-    """stage 1 planner가 고정해야 할 의도 축을 담는 스키마다.
-    stage 1은 action·head·relation_candidate만 결정하고, ids/filter 세부 슬롯은 다음 단계로 미룬다.
+    """stage 1 planner媛 怨좎젙?댁빞 ???섎룄 異뺤쓣 ?대뒗 ?ㅽ궎留덈떎.
+    stage 1? action쨌head쨌relation_candidate留?寃곗젙?섍퀬, ids/filter ?몃? ?щ’? ?ㅼ쓬 ?④퀎濡?誘몃，??
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -48,8 +48,8 @@ class PlannerStage1Decision(BaseModel):
 
 
 class PlannerStage2Slots(BaseModel):
-    """stage 2 planner가 채울 수 있는 가변 슬롯만 분리해 담는다.
-    locked strategy가 잡아둔 mode·routing은 건드리지 않고, ids_map·filters·retrieval_query·limit만 후속에 합성하게 한다.
+    """stage 2 planner媛 梨꾩슱 ???덈뒗 媛蹂 ?щ’留?遺꾨━???대뒗??
+    locked strategy媛 ?≪븘??mode쨌routing? 嫄대뱶由ъ? ?딄퀬, ids_map쨌filters쨌retrieval_query쨌limit留??꾩냽???⑹꽦?섍쾶 ?쒕떎.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -61,6 +61,7 @@ class PlannerStage2Slots(BaseModel):
     filters: Dict[str, Any] = Field(default_factory=dict)
     retrieval_query: Optional[str] = None
     limit: int = Field(default=20, ge=1)
+    display_limit: int = Field(default=20, ge=1)
     confidence: float = Field(ge=0.0, le=1.0)
 
 
@@ -230,8 +231,8 @@ class QueryPlan:
 
 @dataclass
 class ExecutionContext:
-    """한 요청이 runtime을 통과하는 동안 동행하는 가변 컨텍스트다.
-    normalized intent에서 받은 기본 의미를 보존하면서 plan·strategy·target collections같은 runtime 산출물을 차례로 채운다.
+    """???붿껌??runtime???듦낵?섎뒗 ?숈븞 ?숉뻾?섎뒗 媛蹂 而⑦뀓?ㅽ듃??
+    normalized intent?먯꽌 諛쏆? 湲곕낯 ?섎?瑜?蹂댁〈?섎㈃??plan쨌strategy쨌target collections媛숈? runtime ?곗텧臾쇱쓣 李⑤?濡?梨꾩슫??
     """
 
     intent: Any
@@ -288,8 +289,8 @@ class ExecutionContext:
 
     def __post_init__(self) -> None:
 
-        """stats 관련 정책값을 정규화해 ExecutionContext 상태를 안정화한다.
-        planner나 route에서 들어온 여러 설정 조합을 하나의 canonical stats policy로 맞춘 다음 후속 plan 생성에 쓴다.
+        """stats 愿???뺤콉媛믪쓣 ?뺢퇋?뷀빐 ExecutionContext ?곹깭瑜??덉젙?뷀븳??
+        planner??route?먯꽌 ?ㅼ뼱???щ윭 ?ㅼ젙 議고빀???섎굹??canonical stats policy濡?留욎텣 ?ㅼ쓬 ?꾩냽 plan ?앹꽦???대떎.
         """
         policy = normalize_stats_policy_value(
             stats_metric=self.stats_metric,
@@ -307,8 +308,8 @@ class ExecutionContext:
     @classmethod
     def from_intent(cls, intent: Any) -> "ExecutionContext":
 
-        """normalized intent를 ExecutionContext로 복사해 runtime에서 직접 쓸 상태로 만든다.
-        list·dict 필드를 복사해 후속 레이어가 intent 원본을 의도치 않게 변형하지 않게 한다.
+        """normalized intent瑜?ExecutionContext濡?蹂듭궗??runtime?먯꽌 吏곸젒 ???곹깭濡?留뚮뱺??
+        list쨌dict ?꾨뱶瑜?蹂듭궗???꾩냽 ?덉씠?닿? intent ?먮낯???섎룄移??딄쾶 蹂?뺥븯吏 ?딄쾶 ?쒕떎.
         """
         return cls(
             intent=intent,
@@ -362,8 +363,8 @@ class ExecutionContext:
         )
 
     def intent_view(self) -> Any:
-        """현재 ExecutionContext 상태를 intent 형태로 다시 노출한다.
-        runtime에서 조정된 mode·relation·target signal을 intent 호환 뷰로 바꿔 로그나 후속 함수가 읽게 한다.
+        """?꾩옱 ExecutionContext ?곹깭瑜?intent ?뺥깭濡??ㅼ떆 ?몄텧?쒕떎.
+        runtime?먯꽌 議곗젙??mode쨌relation쨌target signal??intent ?명솚 酉곕줈 諛붽퓭 濡쒓렇???꾩냽 ?⑥닔媛 ?쎄쾶 ?쒕떎.
         """
         from dataclasses import replace
 
@@ -651,8 +652,8 @@ def derive_query_graph_plan(
 
 def to_strategy_spec(raw: Any) -> StrategySpec:
 
-    """ExecutionContext에서 executor가 쓸 StrategySpec를 조립한다.
-    lookup/search/join 정책, target collection, title/rerank filter 설정, join runtime meta를 현재 context truth로 고정하는 단계다.
+    """ExecutionContext?먯꽌 executor媛 ??StrategySpec瑜?議곕┰?쒕떎.
+    lookup/search/join ?뺤콉, target collection, title/rerank filter ?ㅼ젙, join runtime meta瑜??꾩옱 context truth濡?怨좎젙?섎뒗 ?④퀎??
     """
     if isinstance(raw, StrategySpec):
         return raw
@@ -750,8 +751,8 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
 
 
 def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any]:
-    """StrategySpec를 API 응답과 debug 메타에 실을 수 있는 dict로 변환한다.
-    tuple·optional 필드를 직렬화 친화적으로 펼어 execution truth을 외부에 반영한다.
+    """StrategySpec瑜?API ?묐떟怨?debug 硫뷀????ㅼ쓣 ???덈뒗 dict濡?蹂?섑븳??
+    tuple쨌optional ?꾨뱶瑜?吏곷젹??移쒗솕?곸쑝濡??쇱뼱 execution truth???몃???諛섏쁺?쒕떎.
     """
     if strategy is None:
         return {}
@@ -800,8 +801,8 @@ def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any
 
 
 def default_target_collections() -> list[str]:
-    """base route와 relation에 맞는 기본 collection 조합을 고른다.
-    JOIN이면 hop 순서에 맞게 project/perf 조합을 고정하고, 아니면 base route의 기본 allowlist로 돌아간다.
+    """base route? relation??留욌뒗 湲곕낯 collection 議고빀??怨좊Ⅸ??
+    JOIN?대㈃ hop ?쒖꽌??留욊쾶 project/perf 議고빀??怨좎젙?섍퀬, ?꾨땲硫?base route??湲곕낯 allowlist濡??뚯븘媛꾨떎.
     """
     allow_list = list(RAG_COLLECTION_ALLOWLIST)
     if allow_list:
@@ -810,15 +811,15 @@ def default_target_collections() -> list[str]:
 
 
 def default_target_collections_for_route(base_route: str, intent: Optional[NormalizedIntent] = None) -> list[str]:
-    """route 만 알 때 적용할 기본 target collection 목록을 돌려준다.
-    route-level 기본값을 중앙화해 planner·runtime·route code가 같은 allowlist를 공유하게 한다.
+    """route 留??????곸슜??湲곕낯 target collection 紐⑸줉???뚮젮以??
+    route-level 湲곕낯媛믪쓣 以묒븰?뷀빐 planner쨌runtime쨌route code媛 媛숈? allowlist瑜?怨듭쑀?섍쾶 ?쒕떎.
     """
     base_route_norm = str(base_route or "").strip().lower()
     route_defaults = {
         "project": [COL_PROJECT],
         "perf": [COL_PERF],
         "support": [COL_SUPPORT],
-        # people/org 정보는 project와 perf 양쪽에 존재하므로 기본 탐색도 둘 다 본다.
+        # people/org ?뺣낫??project? perf ?묒そ??議댁옱?섎?濡?湲곕낯 ?먯깋??????蹂몃떎.
         "people": [COL_PROJECT, COL_PERF],
         "org": [COL_PROJECT, COL_PERF],
     }
@@ -836,8 +837,8 @@ def default_target_collections_for_route(base_route: str, intent: Optional[Norma
 
 
 def select_mode_policy(intent: NormalizedIntent) -> Tuple[str, str]:
-    """의도 signal과 식별자 여부를 기반으로 SEARCH/LOOKUP/JOIN 모드를 결정한다.
-    strict JOIN seed가 있는지, name lookup이 우선인지, topic search로 남길지를 순차적으로 판단하는 중앙 정책이다.
+    """?섎룄 signal怨??앸퀎???щ?瑜?湲곕컲?쇰줈 SEARCH/LOOKUP/JOIN 紐⑤뱶瑜?寃곗젙?쒕떎.
+    strict JOIN seed媛 ?덈뒗吏, name lookup???곗꽑?몄?, topic search濡??④만吏瑜??쒖감?곸쑝濡??먮떒?섎뒗 以묒븰 ?뺤콉?대떎.
     """
     action = intent.action
     relation = intent.relation
@@ -880,8 +881,8 @@ def build_query_plan(
     preferred_mode: Optional[str] = None,
     preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
-    """ExecutionContext에 고정된 실행 정책을 QueryPlan 형태로 압축한다.
-    stats policy, filters, target collections, tie-break 같은 retrieval·aggregation 인자를 후속 런타임이 그대로 소비할 수 있게 만든다.
+    """ExecutionContext??怨좎젙???ㅽ뻾 ?뺤콉??QueryPlan ?뺥깭濡??뺤텞?쒕떎.
+    stats policy, filters, target collections, tie-break 媛숈? retrieval쨌aggregation ?몄옄瑜??꾩냽 ?고??꾩씠 洹몃?濡??뚮퉬?????덇쾶 留뚮뱺??
     """
     action = intent.action
     base_route = intent.base_route
@@ -951,8 +952,8 @@ def build_query_plan(
 
 
 def _has_relation_join_ids(intent: NormalizedIntent) -> bool:
-    """relation에 맞는 JOIN seed id가 실제로 있는지 검사한다.
-    project_perf와 perf_project가 서로 다른 seed 조건을 요구하므로, relation별 필수 식별자 존재 여부를 분리한다.
+    """relation??留욌뒗 JOIN seed id媛 ?ㅼ젣濡??덈뒗吏 寃?ы븳??
+    project_perf? perf_project媛 ?쒕줈 ?ㅻⅨ seed 議곌굔???붽뎄?섎?濡? relation蹂??꾩닔 ?앸퀎??議댁옱 ?щ?瑜?遺꾨━?쒕떎.
     """
     ids_map = getattr(intent, "ids_map", {}) or {}
     relation_keys = ("pjt_id", "pjt_no", "doi", "patent_no", "rst_id", "paper_id")
@@ -967,8 +968,8 @@ def _has_relation_join_ids(intent: NormalizedIntent) -> bool:
 
 
 def _has_any_ids(intent: NormalizedIntent) -> bool:
-    """ids_map에 의미 있는 식별자가 하나라도 들어 있는지 확인한다.
-    LOOKUP/JOIN 선택 정책에서 광범위 시드 존재 여부를 보는 가볍운 gate로 쓴다.
+    """ids_map???섎? ?덈뒗 ?앸퀎?먭? ?섎굹?쇰룄 ?ㅼ뼱 ?덈뒗吏 ?뺤씤?쒕떎.
+    LOOKUP/JOIN ?좏깮 ?뺤콉?먯꽌 愿묐쾾???쒕뱶 議댁옱 ?щ?瑜?蹂대뒗 媛蹂띿슫 gate濡??대떎.
     """
     ids_map = getattr(intent, "ids_map", {}) or {}
     for values in ids_map.values():
@@ -976,3 +977,5 @@ def _has_any_ids(intent: NormalizedIntent) -> bool:
         if normalized:
             return True
     return False
+
+

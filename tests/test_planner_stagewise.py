@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import apps.api.services.rag_retriever as rag_retriever_module
 from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
+from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.pipeline_steps import NormalizedIntent, normalize_intent
@@ -219,15 +220,15 @@ def test_normalize_intent_keeps_existing_contract_violations_without_type_error(
 
 
 def test_query_intent_extracts_labeled_alphanumeric_project_id_only_with_explicit_label():
-    labeled = classify_query('과제고유번호 AI2024X001 detail', [])
-    ambiguous = classify_query('과제번호 AI2024X001 detail', [])
+    labeled = classify_query('\uacfc\uc81c\uace0\uc720\ubc88\ud638 AI2024X001 detail', [])
+    ambiguous = classify_query('\uacfc\uc81c\ubc88\ud638 AI2024X001 detail', [])
 
     assert labeled.ids_map["pjt_id"] == ["AI2024X001"]
     assert ambiguous.ids_map == {}
 
 
 def test_query_intent_does_not_promote_year_only_token_as_project_key():
-    intent = classify_query('과제번호 2024 detail', [])
+    intent = classify_query('\uacfc\uc81c\ubc88\ud638 2024 detail', [])
 
     assert intent.candidate_keys == {}
     assert intent.project_key_policy is None
@@ -243,7 +244,7 @@ def test_intent_payload_version_requires_v3_when_payload_is_present():
 
 
 def test_query_intent_does_not_confuse_issn_with_project_candidate():
-    intent = classify_query('과제번호 ISSN 2020-1234 detail', [])
+    intent = classify_query('\uacfc\uc81c\ubc88\ud638 ISSN 2020-1234 detail', [])
 
     assert intent.candidate_keys == {}
     assert intent.project_key_policy is None
@@ -490,3 +491,63 @@ def test_custom_rag_retriever_short_circuits_deictic_followup_clarification():
 
     assert result['documents'] == []
     assert '\uc774\uc804 \ubaa9\ub85d\uc5d0\uc11c \uc5b4\ub290 \uacfc\uc81c\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ud655\uc778\ud574 \uc8fc\uc138\uc694.' in result['no_result_message']
+
+
+def test_normalize_stage2_slots_payload_drops_legacy_join_key_mode_extra_field():
+    events = []
+
+    payload = _normalize_stage2_slots_payload(
+        {
+            "ids_map": {},
+            "candidate_keys": {},
+            "project_key_policy": None,
+            "join_key_mode": None,
+            "join_resolution_policy": None,
+            "filters": {},
+            "retrieval_query": "semiconductor project outputs",
+            "limit": 20,
+            "display_limit": 20,
+            "confidence": 0.92,
+        },
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda name, **kwargs: events.append((name, kwargs)),
+    )
+
+    assert "join_key_mode" not in payload
+    assert payload["display_limit"] == 20
+    assert events == [
+        (
+            "PLANNER.STAGE2.EXTRA_FIELDS_DROPPED",
+            {
+                "request_id": "rid",
+                "conversation_id": "cid",
+                "dropped_fields": ["join_key_mode"],
+                "dropped_non_null_fields": [],
+            },
+        )
+    ]
+
+
+def test_normalize_stage2_slots_payload_keeps_clean_payload_without_logging():
+    events = []
+
+    payload = _normalize_stage2_slots_payload(
+        {
+            "ids_map": {},
+            "candidate_keys": {},
+            "project_key_policy": None,
+            "join_resolution_policy": None,
+            "filters": {},
+            "retrieval_query": "semiconductor project outputs",
+            "limit": 20,
+            "display_limit": 10,
+            "confidence": 0.92,
+        },
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda name, **kwargs: events.append((name, kwargs)),
+    )
+
+    assert payload["display_limit"] == 10
+    assert events == []

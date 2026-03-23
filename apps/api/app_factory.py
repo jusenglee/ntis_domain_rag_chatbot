@@ -167,8 +167,8 @@ RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT",
 
 
 def log_section(title: str, content: str) -> None:
-    """디버그 로깅이 켜졌을 때만 구간 헤더가 붙은 로그 블록을 남긴다.
-    크게 쓰는 trace 로그를 눈에 띄게 구분해 planner·retrieval·merge 단계를 한눈에 보게 한다.
+    """?붾쾭洹?濡쒓퉭??耳쒖죱???뚮쭔 援ш컙 ?ㅻ뜑媛 遺숈? 濡쒓렇 釉붾줉???④릿??
+    ?ш쾶 ?곕뒗 trace 濡쒓렇瑜??덉뿉 ?꾧쾶 援щ텇??planner쨌retrieval쨌merge ?④퀎瑜??쒕늿??蹂닿쾶 ?쒕떎.
     """
     if not is_debug_logging_enabled():
         return
@@ -185,8 +185,8 @@ _CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
 
 
 def _log_event(name: str, **fields: Any) -> None:
-    """운영 이벤트를 code fingerprint와 함께 구조화해 기록한다.
-    policy mode, request/conversation id, stage meta를 한 형식으로 남기는 중앙 옵스 로깅 입구다.
+    """?댁쁺 ?대깽?몃? code fingerprint? ?④퍡 援ъ“?뷀빐 湲곕줉?쒕떎.
+    policy mode, request/conversation id, stage meta瑜????뺤떇?쇰줈 ?④린??以묒븰 ?듭뒪 濡쒓퉭 ?낃뎄??
     """
     payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
     if fields.get("policy_mode") is None:
@@ -199,8 +199,8 @@ def _log_event(name: str, **fields: Any) -> None:
 
 
 def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:
-    """workflow state에서 요약 로그에 실 필드만 추출한다.
-    planner truth과 execution strategy truth를 분리해 기록함으로써, 어느 단계에서 전략이 고정되었는지 나중에 바로 추적할 수 있게 한다.
+    """workflow state?먯꽌 ?붿빟 濡쒓렇?????꾨뱶留?異붿텧?쒕떎.
+    planner truth怨?execution strategy truth瑜?遺꾨━??湲곕줉?⑥쑝濡쒖뜥, ?대뒓 ?④퀎?먯꽌 ?꾨왂??怨좎젙?섏뿀?붿? ?섏쨷??諛붾줈 異붿쟻?????덇쾶 ?쒕떎.
     """
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
@@ -313,11 +313,12 @@ async def _run_question_analysis(
     chat_history: list[Any],
     prev_context: list[dict[str, Any]],
     canonical_evidence: list[dict[str, Any]] | None = None,
+    view_state: Any = None,
     request_id: Optional[str] = None,
     normalized_intent_base: Any = None,
 ) -> QuestionAnalysis:
-    """request facade, stagewise planner, planner merge를 연결해 최종 question analysis를 만든다.
-    cheap precheck로 끝낼지, stage 1/2 planner를 탈지, merge 결과가 어떤 필드를 바꿈는지를 이 코루틴이 중앙에서 다룬다.
+    """request facade, stagewise planner, planner merge瑜??곌껐??理쒖쥌 question analysis瑜?留뚮뱺??
+    cheap precheck濡??앸궪吏, stage 1/2 planner瑜??덉?, merge 寃곌낵媛 ?대뼡 ?꾨뱶瑜?諛붽퓞?붿?瑜???肄붾（?댁씠 以묒븰?먯꽌 ?ㅻ，??
     """
     return await run_question_analysis(
         question=question,
@@ -325,6 +326,7 @@ async def _run_question_analysis(
         chat_history=chat_history,
         prev_context=prev_context,
         canonical_evidence=canonical_evidence or [],
+        view_state=view_state,
         request_id=request_id,
         normalized_intent_base=normalized_intent_base,
         classify_query_intent=classify_query_intent,
@@ -350,23 +352,23 @@ async def _run_question_analysis(
 
 @measure_latency("generate_answer_gemma")
 async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
-    """Gemma 모델을 사용해 답변 생성 node를 위임 호출한다.
-    dual-model workflow에서 모델 별 책임을 분리하기 위한 연결 헬퍼다.
+    """Gemma 紐⑤뜽???ъ슜???듬? ?앹꽦 node瑜??꾩엫 ?몄텧?쒕떎.
+    dual-model workflow?먯꽌 紐⑤뜽 蹂?梨낆엫??遺꾨━?섍린 ?꾪븳 ?곌껐 ?ы띁??
     """
     return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
 
 @measure_latency("generate_answer_solar")
 async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
-    """Solar 모델을 사용해 답변 생성 node를 위임 호출한다.
-    merge policy가 Solar 우선인지, fallback인지와 무관하게 같은 입출력 계약을 유지한다.
+    """Solar 紐⑤뜽???ъ슜???듬? ?앹꽦 node瑜??꾩엫 ?몄텧?쒕떎.
+    merge policy媛 Solar ?곗꽑?몄?, fallback?몄?? 臾닿??섍쾶 媛숈? ?낆텧??怨꾩빟???좎??쒕떎.
     """
     return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    """현재 state의 context·strategy·deadline 설정을 모아 실제 answer generation을 실행한다.
-    rendered context 사용 여부, max token hint, stream timeout, LLM fallback 설정을 맞추는 실질 생성 관문이다.
+    """?꾩옱 state??context쨌strategy쨌deadline ?ㅼ젙??紐⑥븘 ?ㅼ젣 answer generation???ㅽ뻾?쒕떎.
+    rendered context ?ъ슜 ?щ?, max token hint, stream timeout, LLM fallback ?ㅼ젙??留욎텛???ㅼ쭏 ?앹꽦 愿臾몄씠??
     """
     return await generate_answer(
         state,
@@ -411,8 +413,8 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
 @measure_latency("merge_answers")
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
-    """dual-model 결과를 merge policy에 따라 하나의 답변으로 선정한다.
-    빈 답변, 짧은 답변, 호출 실패 상태를 감안해 최종 사용자 visible answer를 고른다.
+    """dual-model 寃곌낵瑜?merge policy???곕씪 ?섎굹???듬??쇰줈 ?좎젙?쒕떎.
+    鍮??듬?, 吏㏃? ?듬?, ?몄텧 ?ㅽ뙣 ?곹깭瑜?媛먯븞??理쒖쥌 ?ъ슜??visible answer瑜?怨좊Ⅸ??
     """
     return await merge_answers(
         state,
@@ -426,8 +428,8 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
 
 def build_advanced_workflow() -> Any:
-    """memory, planner, retrieval, answer merge를 엮는 LangGraph workflow를 구성한다.
-    node 연결 순서와 branch 조건을 이 함수에서 고정해 app 부트 시 재사용할 수 있는 그래프를 만든다.
+    """memory, planner, retrieval, answer merge瑜???뒗 LangGraph workflow瑜?援ъ꽦?쒕떎.
+    node ?곌껐 ?쒖꽌? branch 議곌굔?????⑥닔?먯꽌 怨좎젙??app 遺?????ъ궗?⑺븷 ???덈뒗 洹몃옒?꾨? 留뚮뱺??
     """
     load_memory_node = partial(
         node_load_memory,
@@ -538,13 +540,13 @@ def build_advanced_workflow() -> Any:
 
 
 def create_app() -> FastAPI:
-    """runtime 자원을 조립하고 route와 workflow를 등록한 FastAPI app을 만든다.
-    RAG object, redis, LLM, route dependency, workflow node wiring이 부트스트랩 단계에서 한 번에 엮결된다.
+    """runtime ?먯썝??議곕┰?섍퀬 route? workflow瑜??깅줉??FastAPI app??留뚮뱺??
+    RAG object, redis, LLM, route dependency, workflow node wiring??遺?몄뒪?몃옪 ?④퀎?먯꽌 ??踰덉뿉 ??껐?쒕떎.
     """
     @asynccontextmanager
     async def runtime_lifespan(app: FastAPI):
-        """app lifespan 동안 runtime 자원을 초기화하고 종료 시 정리한다.
-        warmup, payload index 확보, sparse encoder 준비, shutdown cleanup까지 서비스 생명주기 후처리를 담당한다.
+        """app lifespan ?숈븞 runtime ?먯썝??珥덇린?뷀븯怨?醫낅즺 ???뺣━?쒕떎.
+        warmup, payload index ?뺣낫, sparse encoder 以鍮? shutdown cleanup源뚯? ?쒕퉬???앸챸二쇨린 ?꾩쿂由щ? ?대떦?쒕떎.
         """
         try:
             await initialize_app_runtime(

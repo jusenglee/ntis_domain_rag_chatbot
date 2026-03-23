@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import time
@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from apps.core.schemas import IntentPayloadV3
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.storage import KVStore
+from apps.api.services.view_state import ConversationViewState
 
 
 PLANNER_SCHEMA_VERSION = "v3"
@@ -28,6 +29,7 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "join_resolution_policy",
     "filters",
     "limit",
+    "display_limit",
     "retrieval_query",
     "confidence",
 }
@@ -60,6 +62,7 @@ class QuestionAnalysisV3(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     target_cols: list[str] = Field(default_factory=list)
     limit: int = Field(MAX_TOP_K_SIZE, le=MAX_TOP_K_SIZE)
+    display_limit: int = Field(MAX_TOP_K_SIZE, ge=1, le=MAX_TOP_K_SIZE)
     retrieval_query: Optional[str] = None
     confidence: float = Field(ge=0.0, le=1.0)
     planner_source: Optional[Literal["legacy", "stagewise"]] = None
@@ -242,6 +245,11 @@ class QuestionAnalysisV3(BaseModel):
                 d["limit"] = int(float(str(d.get("limit"))))
             except Exception:
                 pass
+        if "display_limit" in d and not isinstance(d.get("display_limit"), int):
+            try:
+                d["display_limit"] = int(float(str(d.get("display_limit"))))
+            except Exception:
+                pass
         if "confidence" in d and not isinstance(d.get("confidence"), (int, float)):
             try:
                 d["confidence"] = float(str(d.get("confidence")))
@@ -274,6 +282,8 @@ class QuestionAnalysisV3(BaseModel):
                 object.__setattr__(self, "join_key_mode", None)
             except Exception:
                 pass
+        if int(self.display_limit or 0) > int(self.limit or 0):
+            raise ValueError("PLANNER_DISPLAY_LIMIT_EXCEEDS_LIMIT")
         return self
 
 
@@ -330,6 +340,8 @@ class AgentState(BaseModel):
     context: List[Dict] = Field(default_factory=list)
     canonical_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     render_profile: Dict[str, Any] = Field(default_factory=dict)
+    view_state: ConversationViewState = Field(default_factory=ConversationViewState)
+    detail_server_answer: Optional[str] = None
     no_result_message: Optional[str] = None
     rendered_context_used: Annotated[bool, merge_bool_flag] = False
     rendered_context_used_gemma: bool = False
@@ -384,5 +396,6 @@ def measure_latency(node_name: str, *, logger_obj: Any):
             return result
         return wrapper
     return decorator
+
 
 
