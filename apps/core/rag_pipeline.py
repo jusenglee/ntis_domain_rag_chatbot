@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Main RAG execution pipeline for SEARCH, LOOKUP, and JOIN.\n\nThis module remains large, but `apps/core/*` is the source of truth. Runtime behavior should be described from this module outward.\n"""
 from __future__ import annotations
 from collections.abc import Mapping
@@ -243,7 +243,7 @@ _dense_score_weight = dense_runtime_support.dense_score_weight_fn
 # Plan
 # -------------------------
 def _has_any_ids(it: NormalizedIntent) -> bool:
-    """정규화 intent에 어떤 형태로든 식별자가 들어왔는지 본다."""
+    """?뺢퇋??intent???대뼡 ?뺥깭濡쒕뱺 ?앸퀎?먭? ?ㅼ뼱?붾뒗吏 蹂몃떎."""
     ids_map = getattr(it, "ids_map", None)
     if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
         return True
@@ -259,7 +259,7 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
     return False
 
 def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
-    """사용자가 식별자 조회를 명시한 질의인지 판정한다."""
+    """?ъ슜?먭? ?앸퀎??議고쉶瑜?紐낆떆??吏덉쓽?몄? ?먯젙?쒕떎."""
     if bool(getattr(it, "is_id_query", False)):
         return True
     if getattr(it, "action", None) in ("id_exact", "id_fuzzy"):
@@ -279,7 +279,7 @@ def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
     return False
 
 def _has_relation_join_ids(it: NormalizedIntent) -> bool:
-    """JOIN 또는 followup seed로 쓸 수 있는 식별자가 있는지 확인한다."""
+    """JOIN ?먮뒗 followup seed濡??????덈뒗 ?앸퀎?먭? ?덈뒗吏 ?뺤씤?쒕떎."""
     ids_map = getattr(it, "ids_map", None) or {}
     if not isinstance(ids_map, dict):
         return False
@@ -300,7 +300,7 @@ def _has_relation_join_ids(it: NormalizedIntent) -> bool:
 
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
-    """mode 선택 정책의 실제 구현을 schema 계층에 위임한다."""
+    """mode ?좏깮 ?뺤콉???ㅼ젣 援ы쁽??schema 怨꾩링???꾩엫?쒕떎."""
     return _select_mode_policy_policy(it)
 
 
@@ -310,7 +310,7 @@ def _build_plan(
         preferred_mode: Optional[str] = None,
         preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
-    """정규화 intent와 선택된 mode를 바탕으로 실행 계획을 만든다."""
+    """?뺢퇋??intent? ?좏깮??mode瑜?諛뷀깢?쇰줈 ?ㅽ뻾 怨꾪쉷??留뚮뱺??"""
     return _build_query_plan_policy(
         it,
         preferred_mode=preferred_mode,
@@ -319,12 +319,12 @@ def _build_plan(
 
 
 def _default_target_collections() -> List[str]:
-    """planner가 컬렉션을 잠그지 않았을 때의 기본 조회 대상을 돌려준다."""
+    """planner媛 而щ젆?섏쓣 ?좉렇吏 ?딆븯???뚯쓽 湲곕낯 議고쉶 ??곸쓣 ?뚮젮以??"""
     return list(_default_target_collections_policy())
 
 
 def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], source: str) -> None:
-    """planner가 고른 target_cols가 런타임 allowlist를 넘지 않도록 강제한다."""
+    """planner媛 怨좊Ⅸ target_cols媛 ?고???allowlist瑜??섏? ?딅룄濡?媛뺤젣?쒕떎."""
     normalized_targets = normalize_strategy_target_cols(target_cols)
     normalized_allow = normalize_strategy_target_cols(allow_cols)
     if not normalized_allow:
@@ -356,9 +356,9 @@ def _diff_filter_spec(
         executed_filter_spec: Dict[str, Any],
         list_match_mode: str = "exact",
 ) -> Dict[str, Any]:
-    """planner filter와 executor filter의 의미 차이를 비교해 로그용 diff를 만든다.
+    """planner filter? executor filter???섎? 李⑥씠瑜?鍮꾧탳??濡쒓렇??diff瑜?留뚮뱺??
     
-    executor가 planner 계약을 약화하거나 다른 필드를 섞었는지 추적할 때 사용한다."""
+    executor媛 planner 怨꾩빟???쏀솕?섍굅???ㅻⅨ ?꾨뱶瑜??욎뿀?붿? 異붿쟻?????ъ슜?쒕떎."""
 
     list_mode = str(list_match_mode or "exact").strip().lower()
     if list_mode not in {"exact", "subset"}:
@@ -418,7 +418,7 @@ def _diff_filter_spec(
 # 2-hop JOIN helpers
 # -------------------------
 def _extract_quoted_terms(q: str) -> List[str]:
-    """따옴표 구문만 떄어 후단 제목 매칭이나 보조 해석에 재사용한다."""
+    """?곗샂??援щЦ留??꾩뼱 ?꾨떒 ?쒕ぉ 留ㅼ묶?대굹 蹂댁“ ?댁꽍???ъ궗?⑺븳??"""
     if not q:
         return []
     out = re.findall(r'"([^"]+)"', q) + re.findall(r"'([^']+)'", q)
@@ -431,7 +431,8 @@ def _run_rag_with_vectors(
         *,
         query: str,
         model_name: str,
-        intent_payload: Any = None,
+        intent_payload: Any = None,
+        request_overrides: Optional[Dict[str, Any]] = None,
         stack: str,
         vector_names: List[str],
         w_dense_map: Dict[str, float],
@@ -441,11 +442,10 @@ def _run_rag_with_vectors(
         sparse_weight: Optional[float] = None,
         domain_hint: Optional[str] = None,
 ) -> RagResult:
-    """RAG 실행의 실제 진입점이다.
+    """RAG ?ㅽ뻾???ㅼ젣 吏꾩엯?먯씠??
     
-    runtime prelude로 계약을 고정한 뒤, JOIN이면 2-hop orchestration으로,
-    아니면 base orchestration으로 보낸다. raw retrieval 결과는 여기서 바로 prompt에
-    넣지 않고, 후단 context builder를 거쳐 output_type별 prompt view로 변환한다."""
+    runtime prelude濡?怨꾩빟??怨좎젙???? JOIN?대㈃ 2-hop orchestration?쇰줈,
+    ?꾨땲硫?base orchestration?쇰줈 蹂대궦?? raw retrieval 寃곌낵???ш린??諛붾줈 prompt??    ?ｌ? ?딄퀬, ?꾨떒 context builder瑜?嫄곗퀜 output_type蹂?prompt view濡?蹂?섑븳??"""
     t_all0 = time.time()
     timings: Dict[str, Any] = _init_timings()
 
@@ -489,7 +489,8 @@ def _run_rag_with_vectors(
         request=RuntimePreludeRequest(
             query=q,
             model_name=model_name,
-            intent_payload=intent_payload,
+            intent_payload=intent_payload,
+            request_overrides=dict(request_overrides or {}),
             domain_hint=domain_hint,
             stack=stack,
             lexical_field_weights=lexical_field_weights,
@@ -885,9 +886,10 @@ def _run_rag_with_vectors(
 def run_rag_once(
         query: str,
         model_name: str = DEFAULT_MODEL_NAME,
-        intent_payload: Any = None,
+        intent_payload: Any = None,
+        request_overrides: Optional[Dict[str, Any]] = None,
 ) -> RagResult:
-    """기본 vector 설정으로 단일 RAG 실행을 수행하는 공개 엔트리포인트다."""
+    """湲곕낯 vector ?ㅼ젙?쇰줈 ?⑥씪 RAG ?ㅽ뻾???섑뻾?섎뒗 怨듦컻 ?뷀듃由ы룷?명듃??"""
     _validate_intent_payload_version(intent_payload)
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
@@ -901,7 +903,8 @@ def run_rag_once(
     return _run_rag_with_vectors(
         query=query,
         model_name=model_name,
-        intent_payload=intent_payload,
+        intent_payload=intent_payload,
+        request_overrides=request_overrides,
         stack="M",
         vector_names=vector_names or ["e5i_qa", "e5_qa"],
         w_dense_map=w_dense_map,
@@ -912,10 +915,15 @@ def run_rag_once(
 def run_rag_ab_compare(
         query: str,
         model_name: str = DEFAULT_MODEL_NAME,
-        intent_payload: Any = None,
+        intent_payload: Any = None,
+        request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, RagResult]:
-    """현재는 단일 스택 결과만 감싼 간이 비교 엔트리포인트다."""
-    res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload)
+    """?꾩옱???⑥씪 ?ㅽ깮 寃곌낵留?媛먯떬 媛꾩씠 鍮꾧탳 ?뷀듃由ы룷?명듃??"""
+    res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload, request_overrides=request_overrides)
     return {"M": res_m}
+
+
+
+
 
 

@@ -1,4 +1,4 @@
-"""RAG retrieval helpers for execution-layer query dispatch and shaping."""
+﻿"""RAG retrieval helpers for execution-layer query dispatch and shaping."""
 
 from __future__ import annotations
 
@@ -14,20 +14,21 @@ from apps.core.schemas import IntentPayloadV3
 from apps.core.followup_resolution import build_followup_clarification_message
 
 from apps.api.services.context_helpers import resolve_title_from_payload
+from apps.api.services.detail_contract import FIELD_ALIASES, extract_requested_fields
 from apps.api.contracts.runtime_contracts import friendly_strategy_violation_message
 
 
 def _get_normalized_intent(state: Any) -> Any:
-    """state나 intent payload에서 실제 `normalized_intent` 객체를 꺼내온다.
-    wrapper shape가 다른 state·payload에서 공통으로 의도 정보를 읽기 위한 엔트리 헬퍼다.
+    """state??intent payload?먯꽌 ?ㅼ젣 `normalized_intent` 媛앹껜瑜?爰쇰궡?⑤떎.
+    wrapper shape媛 ?ㅻⅨ state쨌payload?먯꽌 怨듯넻?쇰줈 ?섎룄 ?뺣낫瑜??쎄린 ?꾪븳 ?뷀듃由??ы띁??
     """
     payload = getattr(state, "intent_payload", None)
     return getattr(payload, "normalized_intent", None) if payload else None
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """여러 후보 source에서 특정 속성을 차례로 찾아 첫 값을 반환한다.
-    knowledge sufficiency, normalized intent, question analysis가 같은 필드를 공유할 때 우선순위를 주고 함께 읽게 한다.
+    """?щ윭 ?꾨낫 source?먯꽌 ?뱀젙 ?띿꽦??李⑤?濡?李얠븘 泥?媛믪쓣 諛섑솚?쒕떎.
+    knowledge sufficiency, normalized intent, question analysis媛 媛숈? ?꾨뱶瑜?怨듭쑀?????곗꽑?쒖쐞瑜?二쇨퀬 ?④퍡 ?쎄쾶 ?쒕떎.
     """
     for source in sources:
         if source is None:
@@ -41,26 +42,170 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[가-힣]{2,}")
+def _get_strategy_meta(state: Any) -> Dict[str, Any]:
+    payload = getattr(state, "intent_payload", None)
+    strategy_meta = getattr(payload, "strategy_meta", None) if payload else None
+    return dict(strategy_meta or {})
+
+
+def _normalize_id_values(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        values = [values]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _first_non_empty_text(*values: Any) -> Optional[str]:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _build_anchor_requested_terms(question: Any) -> list[str]:
+    requested_fields = extract_requested_fields(str(question or ""))
+    preferred_fields = [
+        field
+        for field in ("researchers", "lead_org", "participant_org", "year")
+        if field in requested_fields
+    ]
+    terms: list[str] = []
+    seen: set[str] = set()
+    for field in preferred_fields:
+        aliases = FIELD_ALIASES.get(field) or []
+        term = str(aliases[0] if aliases else "").strip()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
+    normalized_intent = _get_normalized_intent(state)
+    strategy_meta = _get_strategy_meta(state)
+    followup_status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
+    if followup_status != "resolved":
+        return {
+            "present": False,
+            "anchor_source": None,
+            "entity_key": None,
+            "pjt_id": None,
+            "pjt_no": None,
+            "title_text": None,
+        }
+
+    ids_map = getattr(normalized_intent, "ids_map", None) or {}
+    if isinstance(normalized_intent, dict):
+        ids_map = normalized_intent.get("ids_map") or {}
+    selected_prev_item = dict(strategy_meta.get("selected_prev_item") or {})
+    focus_entity = dict(strategy_meta.get("focus_entity") or {})
+    pjt_ids = _normalize_id_values((ids_map or {}).get("pjt_id"))
+    pjt_nos = _normalize_id_values((ids_map or {}).get("pjt_no"))
+    pjt_id = _first_non_empty_text(*(pjt_ids[:1] or []), selected_prev_item.get("pjt_id"), focus_entity.get("pjt_id"))
+    pjt_no = _first_non_empty_text(*(pjt_nos[:1] or []), selected_prev_item.get("pjt_no"), focus_entity.get("pjt_no"))
+    title_text = _first_non_empty_text(selected_prev_item.get("title"), focus_entity.get("title_text"))
+    entity_key = pjt_id or pjt_no or strategy_meta.get("focus_entity_key")
+    return {
+        "present": bool(entity_key or title_text),
+        "anchor_source": strategy_meta.get("anchor_source") or strategy_meta.get("seed_source"),
+        "entity_key": entity_key,
+        "pjt_id": pjt_id,
+        "pjt_no": pjt_no,
+        "title_text": title_text,
+    }
+
+
+def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
+    normalized_query = _normalize_query_text(query)
+    if not normalized_query:
+        return False
+    anchor_tokens = [
+        str(anchor_context.get("pjt_id") or "").strip().lower(),
+        str(anchor_context.get("pjt_no") or "").strip().lower(),
+    ]
+    if any(token and token in normalized_query for token in anchor_tokens):
+        return True
+
+    title_text = str(anchor_context.get("title_text") or "").strip()
+    if not title_text:
+        return False
+    normalized_title = title_text.lower()
+    if normalized_title and normalized_title in normalized_query:
+        return True
+    title_terms = {term for term in _extract_topic_terms(title_text) if len(term) >= 2}
+    query_terms = _extract_topic_terms(query)
+    return bool(title_terms and title_terms.intersection(query_terms))
+
+
+def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Dict[str, Any]]:
+    normalized_intent = _get_normalized_intent(state)
+    output_type = str(_pick_attr(normalized_intent, key="output_type", default="") or "").strip().lower()
+    action = str(_pick_attr(normalized_intent, key="action", default="") or "").strip().lower()
+    anchor_context = _resolve_followup_anchor_context(state)
+    metadata = {
+        "anchor_present": anchor_context.get("present", False),
+        "anchor_source": anchor_context.get("anchor_source"),
+        "anchor_entity_key": anchor_context.get("entity_key"),
+        "anchor_query_repaired": False,
+        "anchor_repair_reason": None,
+    }
+    if not anchor_context.get("present"):
+        return str(query or ""), metadata
+    if action != "detail" and output_type != "detail":
+        return str(query or ""), metadata
+    if _query_mentions_anchor(query, anchor_context):
+        return str(query or ""), metadata
+
+    anchor_phrase = _first_non_empty_text(anchor_context.get("title_text"), anchor_context.get("pjt_id"), anchor_context.get("pjt_no"), query) or ""
+    requested_terms = _build_anchor_requested_terms(getattr(state, "question", ""))
+    parts = [anchor_phrase, *requested_terms]
+    repaired_terms: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        repaired_terms.append(text)
+    repaired_query = " ".join(repaired_terms) or str(query or "")
+    metadata["anchor_query_repaired"] = repaired_query != str(query or "")
+    metadata["anchor_repair_reason"] = "anchor_axis_lost" if metadata["anchor_query_repaired"] else None
+    return repaired_query, metadata
+
+
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[?-?]{2,}")
 _GENERIC_QUERY_TERMS = {
-    "알려줘",
-    "보여줘",
-    "조회",
-    "목록",
-    "리스트",
-    "정보",
-    "내용",
-    "건",
-    "개",
+    "???",
+    "???",
+    "??",
+    "??",
+    "???",
+    "??",
+    "??",
+    "?",
+    "?",
     "top",
     "the",
     "and",
     "for",
 }
-_PROJECT_AXIS_TERMS = {"과제", "project", "projects"}
-_PERF_AXIS_TERMS = {"성과", "output", "outputs", "논문", "특허", "보고서"}
-_DETAIL_AXIS_TERMS = {"상세", "detail", "details"}
-_STATS_AXIS_TERMS = {"통계", "현황", "trend", "trends", "집계"}
+_PROJECT_AXIS_TERMS = {"??", "project", "projects"}
+_PERF_AXIS_TERMS = {"??", "output", "outputs", "??", "??", "???"}
+_DETAIL_AXIS_TERMS = {"??", "detail", "details"}
+_STATS_AXIS_TERMS = {"??", "??", "trend", "trends", "??"}
 
 
 def _normalize_query_text(text: Any) -> str:
@@ -134,8 +279,8 @@ def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bo
 
 
 class CustomRAGRetriever(BaseModel):
-    """LangChain/서비스 측에서 일관된 RAG 조회 엔트리로 쓸 간단한 retriever 어댑터다.
-    AB 비교 결과에서 히트, aggregation, canonical evidence, render profile를 꺼내 외부 소비자가 읽기 쉬운 shape로 바꾼다.
+    """LangChain/?쒕퉬??痢≪뿉???쇨???RAG 議고쉶 ?뷀듃由щ줈 ??媛꾨떒??retriever ?대뙌?곕떎.
+    AB 鍮꾧탳 寃곌낵?먯꽌 ?덊듃, aggregation, canonical evidence, render profile瑜?爰쇰궡 ?몃? ?뚮퉬?먭? ?쎄린 ?ъ슫 shape濡?諛붽씔??
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -144,11 +289,12 @@ class CustomRAGRetriever(BaseModel):
     model_name: str = "gemma_triton_0"
     top_k: int = 5
     intent_payload: Optional[IntentPayloadV3] = None
+    request_overrides: Dict[str, Any] = {}
 
     @staticmethod
     def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV3] = None) -> Optional[str]:
-        """히트 payload와 intent target collection을 바탕으로 문서 태그를 추정한다.
-        payload에 태그가 없어도 project/perf 계열 템플릿을 맞게 렌더할 수 있도록 보조 태그를 만든다.
+        """?덊듃 payload? intent target collection??諛뷀깢?쇰줈 臾몄꽌 ?쒓렇瑜?異붿젙?쒕떎.
+        payload???쒓렇媛 ?놁뼱??project/perf 怨꾩뿴 ?쒗뵆由우쓣 留욊쾶 ?뚮뜑?????덈룄濡?蹂댁“ ?쒓렇瑜?留뚮뱺??
         """
         tag = hit_data.get("tag")
         if tag:
@@ -173,8 +319,8 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _has_minimum_document_fields(hit_data: Dict[str, Any]) -> bool:
-        """히트가 외부 문서 뷰로 내보낼 최소한의 정보를 가졌는지 검사한다.
-        title·content·meta·nested member 중 하나라도 의미 있는 값이 없으면 retriever 응답에서 제외한다.
+        """?덊듃媛 ?몃? 臾몄꽌 酉곕줈 ?대낫??理쒖냼?쒖쓽 ?뺣낫瑜?媛議뚮뒗吏 寃?ы븳??
+        title쨌content쨌meta쨌nested member 以??섎굹?쇰룄 ?섎? ?덈뒗 媛믪씠 ?놁쑝硫?retriever ?묐떟?먯꽌 ?쒖쇅?쒕떎.
         """
         candidates = [
             hit_data.get("doc_id"),
@@ -197,8 +343,8 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
-        """`IntentPayloadV3`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
-        normalized intent가 올바른 타입일 때만 넘기며, 아니면 retriever가 planner/runtime contract 바깥 shape를 집어넣지 않게 한다.
+        """`IntentPayloadV3`?먯꽌 RAG runtime??吏곸젒 ??payload 酉곕쭔 異붿텧?쒕떎.
+        normalized intent媛 ?щ컮瑜???낆씪 ?뚮쭔 ?섍린硫? ?꾨땲硫?retriever媛 planner/runtime contract 諛붽묑 shape瑜?吏묒뼱?ｌ? ?딄쾶 ?쒕떎.
         """
         if intent_payload is None:
             return None
@@ -228,8 +374,8 @@ class CustomRAGRetriever(BaseModel):
         return f"{index}. {project_title}" + (f" ({year})" if year else "")
 
     def retrieve(self, query: str) -> Dict[str, Any]:
-        """AB 비교 RAG 실행 결과에서 사용자가 보기 쉬운 documents/canonical_evidence/render_profile 구조를 만든다.
-        aggregation rank_items와 일반 hit 경로를 구분해 서비스 뷰에 맞는 열린 dict 형태로 재포장한다.
+        """AB 鍮꾧탳 RAG ?ㅽ뻾 寃곌낵?먯꽌 ?ъ슜?먭? 蹂닿린 ?ъ슫 documents/canonical_evidence/render_profile 援ъ“瑜?留뚮뱺??
+        aggregation rank_items? ?쇰컲 hit 寃쎈줈瑜?援щ텇???쒕퉬??酉곗뿉 留욌뒗 ?대┛ dict ?뺥깭濡??ы룷?ν븳??
         """
         strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
         followup_message = build_followup_clarification_message(dict(strategy_meta))
@@ -245,6 +391,7 @@ class CustomRAGRetriever(BaseModel):
             query=query,
             model_name=self.model_name,
             intent_payload=self._build_rag_intent_payload(self.intent_payload),
+            request_overrides=dict(self.request_overrides or {}),
         )
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
@@ -453,8 +600,8 @@ class CustomRAGRetriever(BaseModel):
 
 
 def is_hit_source(doc: Dict[str, Any]) -> bool:
-    """retriever 뷰 문서가 일반 hit source인지 여부를 판별한다.
-    aggregation 결과와 hit 결과를 소비 측에서 쉽게 구분하는 짧은 헬퍼다.
+    """retriever 酉?臾몄꽌媛 ?쇰컲 hit source?몄? ?щ?瑜??먮퀎?쒕떎.
+    aggregation 寃곌낵? hit 寃곌낵瑜??뚮퉬 痢≪뿉???쎄쾶 援щ텇?섎뒗 吏㏃? ?ы띁??
     """
     return doc.get("source_type", "hit") == "hit"
 
@@ -474,3 +621,7 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     fallback_applied = drift_detected or confidence < min_confidence
     search_query = raw_query if fallback_applied else hint_query
     return raw_query, hint_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied
+
+
+
+

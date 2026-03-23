@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from apps.api.services.canonical_context import build_prev_context_canonical_text
@@ -14,22 +15,23 @@ from apps.api.services.detail_contract import (
     render_detail_answer,
 )
 from apps.api.services.view_state import DetailCacheEntry, build_display_snapshot, focus_entity_from_detail
+from apps.api.services.rag_retriever import repair_query_for_resolved_anchor
 from apps.core.followup_resolution import build_followup_clarification_message, should_short_circuit_followup_clarification
 
 
 def _get_normalized_intent(state: Any) -> Any:
-    """workflow state에서 normalized_intent만 안전하게 꺼낸다."""
+    """workflow state?먯꽌 normalized_intent留??덉쟾?섍쾶 爰쇰궦??"""
     payload = getattr(state, "intent_payload", None)
     return getattr(payload, "normalized_intent", None) if payload else None
 
 
 def _get_strategy(state: Any) -> Any:
-    """workflow state에 실린 strategy 객체를 반환한다."""
+    """workflow state???ㅻ┛ strategy 媛앹껜瑜?諛섑솚?쒕떎."""
     return getattr(state, "strategy", None)
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """여러 source를 순서대로 보며 key에 해당하는 첫 비None 값을 고른다."""
+    """?щ윭 source瑜??쒖꽌?濡?蹂대ŉ key???대떦?섎뒗 泥?鍮껷one 媛믪쓣 怨좊Ⅸ??"""
     for source in sources:
         if source is None:
             continue
@@ -59,16 +61,56 @@ def _resolve_retrieval_budget(question_analysis: Any, *, max_top_k_size: int) ->
     return min(planner_limit or max_top_k_size, max_top_k_size)
 
 
-def _resolve_display_request(question_analysis: Any, *, docs_count: int) -> int:
+def _resolve_display_request(question_analysis: Any) -> int:
     requested = _coerce_positive_int(getattr(question_analysis, "display_limit", None))
     if requested is None:
         requested = _coerce_positive_int(getattr(question_analysis, "limit", None)) or 1
-    return min(requested, max(1, int(docs_count or 0) or 1))
+    return requested
 
 
 def _extract_explicit_count(question: Any) -> Optional[int]:
     count = parse_display_limit(str(question or ""), default=_DISPLAY_LIMIT_SENTINEL)
     return None if count == _DISPLAY_LIMIT_SENTINEL else int(count)
+
+
+def _classify_docs_kind(docs: list[dict[str, Any]]) -> str:
+    if not docs:
+        return "item_list"
+    source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
+    source_types.discard("")
+    return "item_list" if not source_types or source_types == {"hit"} else "collection_wrapper"
+
+
+def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    synthetic_docs: list[dict[str, Any]] = []
+    for index, item in enumerate(canonical_evidence, start=1):
+        if not isinstance(item, dict):
+            continue
+        ids = item.get("ids") or {}
+        facts = item.get("facts") or {}
+        synthetic_docs.append(
+            {
+                "title": facts.get("title"),
+                "title_text": facts.get("title"),
+                "source_index": index,
+                "source_type": "canonical_item",
+                "doc_id": ids.get("doc_id"),
+                "pjt_id": ids.get("pjt_id"),
+                "pjt_no": ids.get("pjt_no"),
+            }
+        )
+    return synthetic_docs
+
+
+@dataclass(frozen=True)
+class DisplayPayloadBundle:
+    snapshot_documents: list[dict[str, Any]]
+    snapshot_canonical_evidence: list[dict[str, Any]]
+    docs_count: int
+    canonical_count: int
+    docs_kind: str
+    canonical_kind: str
+    display_source: str
 
 
 def _normalize_display_payloads(
@@ -77,11 +119,13 @@ def _normalize_display_payloads(
     canonical_evidence: list[dict[str, Any]],
     base_route: str,
     output_type: str,
+    requested_count: int,
+    explicit_count: Optional[int],
     log_event: Any,
     request_id: str,
     conversation_id: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Display snapshot에 들어갈 documents와 canonical evidence 길이를 맞춘다."""
+) -> DisplayPayloadBundle:
+    """Normalize display inputs and choose the snapshot source of truth."""
     normalized_docs = [item for item in (docs or []) if isinstance(item, dict)]
     normalized_canonical = [item for item in (canonical_evidence or []) if isinstance(item, dict)]
 
@@ -110,22 +154,54 @@ def _normalize_display_payloads(
                 output_type=output_type,
             )
 
-    if len(normalized_docs) != len(normalized_canonical):
-        aligned_count = min(len(normalized_docs), len(normalized_canonical))
+    docs_count = len(normalized_docs)
+    canonical_count = len(normalized_canonical)
+    docs_kind = _classify_docs_kind(normalized_docs)
+    canonical_kind = "item_list"
+    display_source = "docs"
+
+    if docs_count != canonical_count:
+        aligned_count = min(docs_count, canonical_count)
+        fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+        prefer_canonical = (
+            str(output_type or "").strip().lower() == "list"
+            and canonical_count > docs_count
+            and canonical_count >= max(1, fallback_threshold)
+            and (docs_kind == "collection_wrapper" or docs_count < max(1, fallback_threshold))
+        )
+        if prefer_canonical:
+            display_source = "synthetic_from_canonical"
+            snapshot_documents = _build_display_docs_from_canonical(normalized_canonical)
+            snapshot_canonical = normalized_canonical
+        else:
+            snapshot_documents = normalized_docs[:aligned_count]
+            snapshot_canonical = normalized_canonical[:aligned_count]
         log_event(
             "RAG.DISPLAY_INPUT_MISMATCH",
             request_id=request_id,
             conversation_id=conversation_id,
-            docs_count=len(normalized_docs),
-            canonical_count=len(normalized_canonical),
+            docs_count=docs_count,
+            canonical_count=canonical_count,
             aligned_count=aligned_count,
             base_route=base_route,
             output_type=output_type,
+            docs_kind=docs_kind,
+            canonical_kind=canonical_kind,
+            display_source=display_source,
         )
-        normalized_docs = normalized_docs[:aligned_count]
-        normalized_canonical = normalized_canonical[:aligned_count]
+    else:
+        snapshot_documents = normalized_docs
+        snapshot_canonical = normalized_canonical
 
-    return normalized_docs, normalized_canonical
+    return DisplayPayloadBundle(
+        snapshot_documents=snapshot_documents,
+        snapshot_canonical_evidence=snapshot_canonical,
+        docs_count=docs_count,
+        canonical_count=canonical_count,
+        docs_kind=docs_kind,
+        canonical_kind=canonical_kind,
+        display_source=display_source,
+    )
 
 
 async def node_knowledge_sufficiency(
@@ -145,9 +221,9 @@ async def node_knowledge_sufficiency(
     logger: Any,
     log_event: Any,
 ) -> Dict[str, Any]:
-    """이전 문맥만으로 답할 수 있는지 판단하고, 필요하면 retrieval 의도를 만든다.
+    """?댁쟾 臾몃㎘留뚯쑝濡??듯븷 ???덈뒗吏 ?먮떒?섍퀬, ?꾩슂?섎㈃ retrieval ?섎룄瑜?留뚮뱺??
 
-    planner/strategy 신호가 이미 충분히 강하면 LLM 판단을 건너뛰고 즉시 high로 고정해 불필요한 우회를 줄인다.
+    planner/strategy ?좏샇媛 ?대? 異⑸텇??媛뺥븯硫?LLM ?먮떒??嫄대꼫?곌퀬 利됱떆 high濡?怨좎젙??遺덊븘?뷀븳 ?고쉶瑜?以꾩씤??
     """
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(message).__name__}: {message.content}" for message in history])
@@ -161,8 +237,8 @@ async def node_knowledge_sufficiency(
         no_result_message = build_followup_clarification_message(strategy_meta)
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="low",
-            search_intent="followup clarification short-circuit",
-            retrieval_query=state.messages[-1].content,
+                search_intent="?? ??",
+                retrieval_query=state.messages[-1].content,
             confidence=1.0,
         )
         log_event(
@@ -194,7 +270,7 @@ async def node_knowledge_sufficiency(
     if (query_intent or strategy or qa) and not state.prev_context:
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="high",
-            search_intent="이전 문맥이 없어 새로운 검색이 필요합니다.",
+            search_intent="?댁쟾 臾몃㎘???놁뼱 ?덈줈??寃?됱씠 ?꾩슂?⑸땲??",
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
@@ -252,21 +328,21 @@ async def node_knowledge_sufficiency(
     )
 
     system_prompt = (
-        "당신은 지식 검색 필요성을 판단하는 분석기입니다.\n"
-        "이 시스템에서 사용하는 용어는 모두 국내 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
-        "[이전 대화]와 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
-        "판단 기준:\n"
+        "?뱀떊? 吏??寃???꾩슂?깆쓣 ?먮떒?섎뒗 遺꾩꽍湲곗엯?덈떎.\n"
+        "???쒖뒪?쒖뿉???ъ슜?섎뒗 ?⑹뼱??紐⑤몢 援?궡 ?곌뎄媛쒕컻(R&D) ?됱젙 諛??쒕룄 留λ씫?쇰줈 ?댁꽍?⑸땲??\n"
+        "[?댁쟾 ???? [李멸퀬 臾몄꽌]瑜?湲곕컲?쇰줈, [?꾩옱 吏덈Ц]???듯븯湲??꾪빐 ?덈줈??寃?됱씠 ?꾩슂?쒖? ?먮떒?섏꽭??\n\n"
+        "?먮떒 湲곗?:\n"
         "1. requires_new_knowledge:\n"
-        "   - low: [참고 문서]만으로 충분히 답변 가능\n"
-        "   - medium: [참고 문서]로 일부 답변 가능하나 보강 필요\n"
-        "   - high: [참고 문서]로 답변 불가하거나 새로운 정보 요청\n\n"
-        "2. search_intent: 검색이 필요한 경우, 무엇을 찾아야 하는지 설명\n"
+        "   - low: [李멸퀬 臾몄꽌]留뚯쑝濡?異⑸텇???듬? 媛??n"
+        "   - medium: [李멸퀬 臾몄꽌]濡??쇰? ?듬? 媛?ν븯??蹂닿컯 ?꾩슂\n"
+        "   - high: [李멸퀬 臾몄꽌]濡??듬? 遺덇??섍굅???덈줈???뺣낫 ?붿껌\n\n"
+        "2. search_intent: 寃?됱씠 ?꾩슂??寃쎌슦, 臾댁뾿??李얠븘???섎뒗吏 ?ㅻ챸\n"
         "3. retrieval_query:\n"
-        "   - search_intent 기반 벡터 검색에 최적화된 질의형 쿼리\n"
-        "   - 키워드 또는 짧은 구문 형태\n"
-        "   - 핵심 개념 5개 이내\n"
-        "   - 최대 120자 이내\n"
-        "4. confidence: 판단 신뢰도(0.0~1.0)\n\n"
+        "   - search_intent 湲곕컲 踰≫꽣 寃?됱뿉 理쒖쟻?붾맂 吏덉쓽??荑쇰━\n"
+        "   - ?ㅼ썙???먮뒗 吏㏃? 援щЦ ?뺥깭\n"
+        "   - ?듭떖 媛쒕뀗 5媛??대궡\n"
+        "   - 理쒕? 120???대궡\n"
+        "4. confidence: ?먮떒 ?좊ː??0.0~1.0)\n\n"
         "{format_instructions}"
     )
 
@@ -275,7 +351,7 @@ async def node_knowledge_sufficiency(
             ("system", system_prompt),
             (
                 "human",
-                "[이전 대화]\n{history}\n\n[참고 문서]\n{prev_context}\n\n[현재 질문]\n{question}",
+                "[?댁쟾 ???\n{history}\n\n[李멸퀬 臾몄꽌]\n{prev_context}\n\n[?꾩옱 吏덈Ц]\n{question}",
             ),
         ]
     )
@@ -285,8 +361,8 @@ async def node_knowledge_sufficiency(
         result = await chain.ainvoke(
             {
                 "format_instructions": parser.get_format_instructions(),
-                "history": history_str or "없음",
-                "prev_context": prev_context_str or "없음",
+                "history": history_str or "?놁쓬",
+                "prev_context": prev_context_str or "?놁쓬",
                 "question": state.messages[-1].content,
             }
         )
@@ -305,7 +381,7 @@ async def node_knowledge_sufficiency(
         return {
             "knowledge_sufficiency": knowledge_sufficiency_cls(
                 requires_new_knowledge="high",
-                search_intent="일반 검색",
+                search_intent="?? ??",
                 retrieval_query=state.messages[-1].content,
                 confidence=0.5,
             )
@@ -323,9 +399,9 @@ async def node_rag_search(
     logger: Any,
     log_event: Any,
 ) -> Dict[str, Any]:
-    """knowledge sufficiency 단계가 정한 query로 실제 RAG 검색을 수행한다.
+    """knowledge sufficiency ?④퀎媛 ?뺥븳 query濡??ㅼ젣 RAG 寃?됱쓣 ?섑뻾?쒕떎.
 
-    retriever 결과에서 문서, canonical_evidence, render_profile만 꺼내 workflow state로 넘겨 후속 답변 생성이 raw payload에 직접 의존하지 않게 한다.
+    retriever 寃곌낵?먯꽌 臾몄꽌, canonical_evidence, render_profile留?爰쇰궡 workflow state濡??섍꺼 ?꾩냽 ?듬? ?앹꽦??raw payload??吏곸젒 ?섏〈?섏? ?딄쾶 ?쒕떎.
     """
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
@@ -369,6 +445,21 @@ async def node_rag_search(
             ks=ks,
             min_confidence=0.55,
         )
+        search_query, anchor_query_meta = repair_query_for_resolved_anchor(
+            state=state,
+            query=search_query,
+        )
+        if anchor_query_meta.get("anchor_query_repaired"):
+            log_event(
+                "RAG.RETRIEVAL_QUERY.ANCHOR_REWRITE",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                planner_query=planner_query,
+                repaired_search_query=search_query,
+                anchor_source=anchor_query_meta.get("anchor_source"),
+                anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
+                reason=anchor_query_meta.get("anchor_repair_reason"),
+            )
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
         search_num = _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
         planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
@@ -384,6 +475,11 @@ async def node_rag_search(
             drift_detected=drift_detected,
             drift_reasons=drift_reasons,
             fallback_applied=fallback_applied,
+            anchor_present=anchor_query_meta.get("anchor_present"),
+            anchor_source=anchor_query_meta.get("anchor_source"),
+            anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
+            anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
+            anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
         )
         log_event(
             "RAG.COUNT_PIPELINE",
@@ -398,12 +494,18 @@ async def node_rag_search(
             planner_query=planner_query,
             drift_detected=drift_detected,
             fallback_applied=fallback_applied,
+            anchor_present=anchor_query_meta.get("anchor_present"),
+            anchor_source=anchor_query_meta.get("anchor_source"),
+            anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
+            anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
+            anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
         )
 
         retriever = custom_rag_retriever_cls(
             top_k=search_num,
             model_name="gemma_triton_0",
             intent_payload=state.intent_payload,
+            request_overrides=getattr(state, "request_overrides", None) or {},
         )
         rag_tool = tool_cls(
             name="RAG_Search",
@@ -420,33 +522,46 @@ async def node_rag_search(
 
         context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
         list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
+        display_limit = _resolve_display_request(qa)
+        requested_count_source = "question_analysis.display_limit" if _coerce_positive_int(getattr(qa, "display_limit", None)) is not None else "question_analysis.limit"
         if list_like_output and docs:
-            docs, canonical_evidence = _normalize_display_payloads(
+            display_bundle = _normalize_display_payloads(
                 docs=docs,
                 canonical_evidence=canonical_evidence,
                 base_route=context_kind or "project",
                 output_type=output_type,
+                requested_count=display_limit,
+                explicit_count=explicit_count,
                 log_event=log_event,
                 request_id=state.request_id,
                 conversation_id=state.conversation_id,
             )
-        display_limit = _resolve_display_request(qa, docs_count=len(docs))
+        else:
+            display_bundle = DisplayPayloadBundle(
+                snapshot_documents=docs,
+                snapshot_canonical_evidence=canonical_evidence,
+                docs_count=len(docs),
+                canonical_count=len(canonical_evidence),
+                docs_kind=_classify_docs_kind(docs),
+                canonical_kind="item_list",
+                display_source="docs",
+            )
         if list_like_output and docs and view_state is not None:
-            docs_count_before_snapshot = len(docs)
-            canonical_count_before_snapshot = len(canonical_evidence)
+            docs_count_before_snapshot = display_bundle.docs_count
+            canonical_count_before_snapshot = display_bundle.canonical_count
             snapshot = build_display_snapshot(
                 conversation_id=state.conversation_id,
                 turn_id=state.request_id,
                 context_kind=context_kind or "project",
                 requested_count=display_limit,
-                documents=docs,
-                canonical_evidence=canonical_evidence,
+                documents=display_bundle.snapshot_documents,
+                canonical_evidence=display_bundle.snapshot_canonical_evidence,
                 raw_count=raw_result_count,
             )
             view_state.latest_display_snapshot = snapshot
-            view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in docs[: min(len(docs), 20)] if isinstance(item, dict)]
-            docs = docs[: snapshot.visible_count]
-            canonical_evidence = canonical_evidence[: snapshot.visible_count]
+            view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in display_bundle.snapshot_documents[: min(len(display_bundle.snapshot_documents), 20)] if isinstance(item, dict)]
+            docs = display_bundle.snapshot_documents[: snapshot.visible_count]
+            canonical_evidence = display_bundle.snapshot_canonical_evidence[: snapshot.visible_count]
             log_event(
                 "DISPLAY.SNAPSHOT.BUILT",
                 request_id=state.request_id,
@@ -457,6 +572,10 @@ async def node_rag_search(
                 canonical_count=canonical_count_before_snapshot,
                 visible_count=snapshot.visible_count,
                 raw_count=snapshot.raw_count,
+                docs_kind=display_bundle.docs_kind,
+                canonical_kind=display_bundle.canonical_kind,
+                display_source=display_bundle.display_source,
+                requested_count_source=requested_count_source,
             )
             log_event(
                 "RAG.COUNT_PIPELINE.RESULT",
@@ -476,6 +595,10 @@ async def node_rag_search(
                 canonical_count=canonical_count_before_snapshot,
                 visible_count=snapshot.visible_count,
                 raw_count=snapshot.raw_count,
+                docs_kind=display_bundle.docs_kind,
+                canonical_kind=display_bundle.canonical_kind,
+                display_source=display_bundle.display_source,
+                requested_count_source=requested_count_source,
             )
             log_event(
                 "DISPLAY.SNAPSHOT.SAVED",
@@ -560,3 +683,6 @@ async def node_rag_search(
             reason=str(exc),
         )
         raise
+
+
+

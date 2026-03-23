@@ -1,4 +1,4 @@
-"""HTTP route layer for the NTIS RAG server.\n\nThis module owns FastAPI request and response contracts only.\nHeavy domain logic stays in the graph and service helpers so `apps/api/main.py` remains the composition root.\n"""
+﻿"""HTTP route layer for the NTIS RAG server.\n\nThis module owns FastAPI request and response contracts only.\nHeavy domain logic stays in the graph and service helpers so `apps/api/main.py` remains the composition root.\n"""
 
 import asyncio
 import json
@@ -17,7 +17,7 @@ from apps.core.schemas import strategy_spec_to_response
 
 
 class QueryRequest(BaseModel):
-    """`/query/*` 요청에 일관되게 쓰는 HTTP 입력 모델이다."""
+    """`/query/*` ?붿껌???쇨??섍쾶 ?곕뒗 HTTP ?낅젰 紐⑤뜽?대떎."""
     question: str
     conversation_id: Optional[str] = None
     temperature: Optional[float] = Field(default=None, alias="Temperature")
@@ -34,7 +34,7 @@ class QueryRequest(BaseModel):
 class RouteDeps:
     # Keep route dependencies explicit so runtime wiring changes do not require hidden globals.
     # Keep route wiring explicit so the app factory remains the composition root.
-    """route layer가 필요로 하는 runtime 의존성을 명시적으로 묶는다."""
+    """route layer媛 ?꾩슂濡??섎뒗 runtime ?섏〈?깆쓣 紐낆떆?곸쑝濡?臾띕뒗??"""
     template_index_path: Any
     logger: Any
     log_event: Any
@@ -55,7 +55,7 @@ class RouteDeps:
 
 
 def register_routes(app: FastAPI, deps: RouteDeps) -> None:
-    """FastAPI app에 home, query, health, metrics route를 등록한다."""
+    """FastAPI app??home, query, health, metrics route瑜??깅줉?쒕떎."""
     template_index_path = deps.template_index_path
     logger = deps.logger
     log_event = deps.log_event
@@ -75,19 +75,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
     strategy_violation = deps.strategy_violation
 
     def _get_graph(request: Request) -> Any:
-        """app.state에서 컴파일된 graph를 가져온다."""
+        """app.state?먯꽌 而댄뙆?쇰맂 graph瑜?媛?몄삩??"""
         return getattr(getattr(request.app, "state", None), "graph", None)
 
     def _get_metrics_http(request: Request) -> Any:
-        """app.state에서 metrics client를 가져온다."""
+        """app.state?먯꽌 metrics client瑜?媛?몄삩??"""
         return getattr(getattr(request.app, "state", None), "metrics_http", None)
 
     def _get_kv_store(request: Request) -> Any:
-        """app.state에서 memory/kv store를 가져온다."""
+        """app.state?먯꽌 memory/kv store瑜?媛?몄삩??"""
         return getattr(getattr(request.app, "state", None), "kv_store", None)
 
     def _dump_model(value: Any) -> Any:
-        """pydantic model을 JSON-serializable dict로 풀고, 아니면 값을 그대로 둔다."""
+        """pydantic model??JSON-serializable dict濡??怨? ?꾨땲硫?媛믪쓣 洹몃?濡??붾떎."""
         if value is None:
             return None
         model_dump = getattr(value, "model_dump", None)
@@ -96,7 +96,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return value
 
     def _stream_data(tag: str, **payload: Any) -> str:
-        """SSE 한 이벤트를 `data: ...` 형태로 직렬화한다."""
+        """SSE ???대깽?몃? `data: ...` ?뺥깭濡?吏곷젹?뷀븳??"""
         body = {"tag": tag, **payload}
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
@@ -134,7 +134,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return _pick_reference_value(reference, doc, "rst_id")
 
     def _resolve_reference_title(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
-        """reference/doc payload에서 사용자에게 보여줄 제목을 고른다."""
+        """reference/doc payload?먯꽌 ?ъ슜?먯뿉寃?蹂댁뿬以??쒕ぉ??怨좊Ⅸ??"""
         for key in ("title", "title_text", "title1", "title2"):
             value = reference.get(key)
             if value is None and isinstance(doc, dict):
@@ -151,7 +151,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return None
 
     def _normalize_reference_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
-        """context doc를 API 응답용 reference payload로 정규화한다."""
+        """context doc瑜?API ?묐떟??reference payload濡??뺢퇋?뷀븳??"""
         mapped = rag_mapper.get_references(doc)
         if not isinstance(mapped, dict):
             mapped = {}
@@ -161,7 +161,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         result["title"] = _resolve_reference_title(result, doc)
         return result
 
-    #외부 요청에서 동적 파라미터가 있을경우 내부에 세팅 하는 함수
+    #?몃? ?붿껌?먯꽌 ?숈쟻 ?뚮씪誘명꽣媛 ?덉쓣寃쎌슦 ?대????명똿 ?섎뒗 ?⑥닔
     def _build_request_overrides(payload: QueryRequest) -> dict[str, Any]:
         overrides: dict[str, Any] = {}
 
@@ -187,7 +187,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
 
     async def _runtime_status(request: Request) -> dict[str, Any]:
-        """graph, kv, metrics 상태를 합쳐 health payload로 만든다."""
+        """graph, kv, metrics ?곹깭瑜??⑹퀜 health payload濡?留뚮뱺??"""
         kv_store = _get_kv_store(request)
         graph_ready = _get_graph(request) is not None
         metrics_ready = _get_metrics_http(request) is not None
@@ -208,7 +208,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/", response_class=HTMLResponse)
     async def home() -> HTMLResponse:
-        """index template이 있으면 채팅 UI를, 없으면 간단한 fallback HTML을 내보낸다."""
+        """index template???덉쑝硫?梨꾪똿 UI瑜? ?놁쑝硫?媛꾨떒??fallback HTML???대낫?몃떎."""
         if not template_index_path.exists():
             return HTMLResponse(
                 content="<html><body><h3>NTIS RAG Chatbot</h3><p>index template unavailable.</p></body></html>",
@@ -218,7 +218,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.post("/query/stream")
     async def query_stream(payload: QueryRequest, request: Request) -> StreamingResponse:
-        """스트리밍 응답을 위한 SSE endpoint다."""
+        """?ㅽ듃由щ컢 ?묐떟???꾪븳 SSE endpoint??"""
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
@@ -227,7 +227,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         graph = _get_graph(request)
 
         async def event_generator():
-            """graph event stream을 소비해 chunk, status, reference, error 이벤트로 바꿔 흘려보낸다."""
+            """graph event stream???뚮퉬??chunk, status, reference, error ?대깽?몃줈 諛붽퓭 ?섎젮蹂대궦??"""
             if graph is None:
                 yield _stream_data("error", error="runtime_not_ready", error_code="RUNTIME_NOT_READY")
                 yield _stream_data("status", status="done", error=True)
@@ -256,6 +256,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     "request_started_at": request_started_at,
                     "messages": [user_message],
                     "kv_store": _get_kv_store(request),
+                    "request_overrides": request_overrides,
                 }
 
                 async for event in graph.astream_events(inputs, version="v2"):
@@ -386,7 +387,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.post("/query/debug")
     async def query_debug(payload: QueryRequest, request: Request) -> Dict[str, Any]:
-        """graph를 한 번 실행하고 answer, question_analysis, strategy_summary를 포함한 디버그 JSON을 돌려준다."""
+        """graph瑜???踰??ㅽ뻾?섍퀬 answer, question_analysis, strategy_summary瑜??ы븿???붾쾭洹?JSON???뚮젮以??"""
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
@@ -414,7 +415,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 "request_started_at": request_started_at,
                 "messages": [user_message],
                 "kv_store": _get_kv_store(request),
-            }
+                    "request_overrides": request_overrides,
+                }
 
             final_state = await graph.ainvoke(inputs)
 
@@ -474,19 +476,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/health")
     async def health_check(request: Request) -> JSONResponse:
-        """런타임 준비 여부를 health payload과 함께 반환한다."""
+        """?고???以鍮??щ?瑜?health payload怨??④퍡 諛섑솚?쒕떎."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200 if payload["ready"] else 503)
 
     @app.get("/health/details")
     async def health_details(request: Request) -> JSONResponse:
-        """상세 health payload를 항상 200 응답으로 내보낸다."""
+        """?곸꽭 health payload瑜???긽 200 ?묐떟?쇰줈 ?대낫?몃떎."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200)
 
     @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
     async def get_metrics(request: Request) -> MetricSnapshot | JSONResponse:
-        """metrics client가 있으면 현재 메트릭 스냅샷을 반환한다."""
+        """metrics client媛 ?덉쑝硫??꾩옱 硫뷀듃由??ㅻ깄?룹쓣 諛섑솚?쒕떎."""
         metrics_http = _get_metrics_http(request)
         if metrics_http is None:
             return JSONResponse(
@@ -497,11 +499,11 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/metrics/stream")
     async def stream_metrics(request: Request) -> StreamingResponse:
-        """메트릭 스냅샷을 주기적으로 SSE로 흘려보낸다."""
+        """硫뷀듃由??ㅻ깄?룹쓣 二쇨린?곸쑝濡?SSE濡??섎젮蹂대궦??"""
         metrics_http = _get_metrics_http(request)
 
         async def event_generator() -> Any:
-            """graph event stream을 소비해 chunk, status, reference, error 이벤트로 바꿔 흘려보낸다."""
+            """graph event stream???뚮퉬??chunk, status, reference, error ?대깽?몃줈 諛붽퓭 ?섎젮蹂대궦??"""
             if metrics_http is None:
                 yield "event: error\ndata: {\"error\":\"runtime_not_ready\",\"error_code\":\"RUNTIME_NOT_READY\"}\n\n"
                 return
@@ -516,5 +518,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 await asyncio.sleep(metrics_stream_interval_seconds)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+
+
 
 

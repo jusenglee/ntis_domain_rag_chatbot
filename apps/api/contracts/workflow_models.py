@@ -356,6 +356,7 @@ class AgentState(BaseModel):
     conversation_id: str = ""
     request_id: str = ""
     request_started_at: Optional[float] = None
+    request_overrides: Dict[str, Any] = Field(default_factory=dict)
     question: str = ""
     rule_decision: Optional[RuleDecision] = None
     question_analysis: Optional[QuestionAnalysis] = None
@@ -396,6 +397,9 @@ def measure_latency(node_name: str, *, logger_obj: Any):
             return result
         return wrapper
     return decorator
+
+
+
 
 
 

@@ -103,7 +103,7 @@ def build_display_snapshot(
     canonical_evidence: List[Dict[str, Any]],
     raw_count: int,
 ) -> DisplaySnapshot:
-    visible_count = min(max(0, int(requested_count or 0)), len(documents))
+    visible_count = min(max(0, int(requested_count or 0)), max(len(documents), len(canonical_evidence)))
     items: List[DisplayItem] = []
     for index in range(visible_count):
         doc = documents[index] if index < len(documents) and isinstance(documents[index], dict) else {}

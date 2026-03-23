@@ -196,12 +196,20 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, l
     action = str(getattr(question_analysis, "action", "") or "").strip().lower()
     output_type = str(getattr(question_analysis, "output_type", "") or "").strip().lower()
     is_list_like = action == "list" or output_type in _LIST_LIKE_OUTPUT_TYPES
+    explicit_count = parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
+    has_explicit_count = explicit_count != _DISPLAY_LIMIT_SENTINEL
 
     planner_limit_raw = getattr(question_analysis, "limit", None)
     planner_display_limit_raw = getattr(question_analysis, "display_limit", None)
     planner_limit = _coerce_positive_int(planner_limit_raw)
     planner_display_limit = _coerce_positive_int(planner_display_limit_raw)
-    planner_valid = planner_limit is not None and planner_display_limit is not None and planner_display_limit <= planner_limit
+    planner_matches_explicit_count = not (is_list_like and has_explicit_count) or planner_display_limit == explicit_count
+    planner_valid = (
+        planner_limit is not None
+        and planner_display_limit is not None
+        and planner_display_limit <= planner_limit
+        and planner_matches_explicit_count
+    )
 
     if planner_valid:
         log_event(
@@ -215,19 +223,22 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, l
             planner_display_limit=planner_display_limit,
             final_limit=planner_limit,
             final_display_limit=planner_display_limit,
+            explicit_count=None if not has_explicit_count else explicit_count,
         )
         return
 
-    explicit_count = parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
     default_limit = 1 if output_type == "detail" or action == "detail" else _DEFAULT_RETRIEVAL_LIMIT
     fallback_limit = min(planner_limit or default_limit, MAX_TOP_K_SIZE)
     fallback_display_default = planner_display_limit or fallback_limit
 
-    if explicit_count != _DISPLAY_LIMIT_SENTINEL and is_list_like:
+    if has_explicit_count and is_list_like:
         clamped_explicit_count = min(explicit_count, MAX_TOP_K_SIZE)
         fallback_limit = min(max(fallback_limit, clamped_explicit_count), MAX_TOP_K_SIZE)
         fallback_display_limit = min(fallback_limit, clamped_explicit_count)
-        fallback_reason = "invalid_planner_explicit_count"
+        if planner_limit is not None and planner_display_limit is not None and planner_display_limit <= planner_limit:
+            fallback_reason = "planner_explicit_count_mismatch"
+        else:
+            fallback_reason = "invalid_planner_explicit_count"
     else:
         fallback_display_limit = min(
             fallback_limit,
@@ -249,7 +260,7 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, l
         planner_display_limit=planner_display_limit_raw,
         final_limit=fallback_limit,
         final_display_limit=fallback_display_limit,
-        explicit_count=None if explicit_count == _DISPLAY_LIMIT_SENTINEL else explicit_count,
+        explicit_count=None if not has_explicit_count else explicit_count,
     )
 
 

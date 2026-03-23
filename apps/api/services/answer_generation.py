@@ -9,8 +9,44 @@ from apps.api.services.canonical_context import render_canonical_evidence_text
 from apps.core.canonical_evidence import build_canonical_evidence
 
 
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _resolve_llm_request_overrides(state: Any) -> dict[str, Any]:
+    overrides = getattr(state, "request_overrides", None) or {}
+    if not isinstance(overrides, dict):
+        return {}
+
+    llm_overrides: dict[str, Any] = {}
+    temperature = _coerce_float(overrides.get("temperature"))
+    top_p = _coerce_float(overrides.get("top_p"))
+    max_tokens = _coerce_int(overrides.get("max_tokens"))
+    top_k = _coerce_int(overrides.get("top_k"))
+
+    if temperature is not None:
+        llm_overrides["temperature"] = temperature
+    if top_p is not None:
+        llm_overrides["top_p"] = top_p
+    if max_tokens is not None:
+        llm_overrides["max_tokens_hint"] = max_tokens
+    if top_k is not None:
+        llm_overrides["top_k"] = top_k
+    return llm_overrides
+
+
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """?щ윭 媛앹껜??dict?먯꽌 媛숈? ?띿꽦??泥?鍮껷one 媛믪쓣 李얜뒗??"""
+    """여러 객체나 dict에서 같은 속성의 첫 non-None 값을 찾는다."""
     for source in sources:
         if source is None:
             continue
@@ -21,7 +57,6 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
-
 
 def build_answer_context(
     *,
@@ -198,6 +233,8 @@ async def generate_answer(
     if strategy_mode:
         token_hint_source = type("TokenHintSource", (), {"mode": str(strategy_mode).strip().upper()})()
     max_tokens_hint = select_max_tokens_hint_fn(token_hint_source)
+    llm_request_overrides = _resolve_llm_request_overrides(state)
+    max_tokens_hint = int(llm_request_overrides.get("max_tokens_hint", max_tokens_hint))
     final_answer, stream_metrics = await run_llm_streaming_fn(
         llm,
         messages,
@@ -206,6 +243,7 @@ async def generate_answer(
         ttft_deadline_ms=solar_ttft_deadline_ms if model_name == "solar_vllm_0" else None,
         gen_deadline_ms=solar_gen_deadline_ms if model_name == "solar_vllm_0" else None,
         max_chars=solar_stream_max_chars if model_name == "solar_vllm_0" else None,
+        astream_kwargs={key: value for key, value in llm_request_overrides.items() if key != "max_tokens_hint"},
     )
 
     ttft_any_ms = stream_metrics.get("ttft_any_ms")
@@ -276,6 +314,10 @@ async def generate_answer(
         conversation_id=getattr(state, "conversation_id", None),
         stage="generate_answer",
         model=model_name,
+        request_temperature=llm_request_overrides.get("temperature"),
+        request_top_p=llm_request_overrides.get("top_p"),
+        request_max_tokens=max_tokens_hint,
+        request_top_k=llm_request_overrides.get("top_k"),
         ks_level=(getattr(ks, "requires_new_knowledge", None) if ks else "unknown"),
         ctx_chars=len(context_text),
         ctx_sentences=context_sentences,
@@ -367,4 +409,9 @@ async def merge_answers(
         "rendered_context_used": rendered_context_used,
         "degraded": degraded,
     }
+
+
+
+
+
 

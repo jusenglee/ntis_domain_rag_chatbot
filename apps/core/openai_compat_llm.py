@@ -1,4 +1,4 @@
-import inspect
+﻿import inspect
 import logging
 import time
 from typing import Any, AsyncIterator, List, Optional
@@ -17,73 +17,71 @@ from pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
-# 이 래퍼는 vLLM/OpenAI-compat 응답을 LangChain 메시지로 정규화한다.
-# 특히 reasoning delta를 content와 분리해 downstream 스트리밍 계층이
-# 안전하게 필터링할 수 있도록 `stream_field` 규약을 붙여주는 것이 중요하다.
+# ???섑띁??vLLM/OpenAI-compat ?묐떟??LangChain 硫붿떆吏濡??뺢퇋?뷀븳??
+# ?뱁엳 reasoning delta瑜?content? 遺꾨━??downstream ?ㅽ듃由щ컢 怨꾩링??# ?덉쟾?섍쾶 ?꾪꽣留곹븷 ???덈룄濡?`stream_field` 洹쒖빟??遺숈뿬二쇰뒗 寃껋씠 以묒슂?섎떎.
 
 STREAM_FIELD_KEY = "stream_field"          # "content" | "reasoning"
-STREAM_REASONING_KEY = "reasoning_text"    # additional_kwargs에만 저장
-
+STREAM_REASONING_KEY = "reasoning_text"    # additional_kwargs?먮쭔 ???
 
 class OpenAICompatStreamError(RuntimeError):
-    """OpenAI 호환 스트림에서 구조가 깨지거나 필수 필드가 비었을 때 쓰는 예외다.
-    상위 호출자는 이 예외를 통해 provider 응답이 무효했다는 사실을 일반 타임아웃과 구분할 수 있다.
+    """OpenAI ?명솚 ?ㅽ듃由쇱뿉??援ъ“媛 源⑥?嫄곕굹 ?꾩닔 ?꾨뱶媛 鍮꾩뿀?????곕뒗 ?덉쇅??
+    ?곸쐞 ?몄텧?먮뒗 ???덉쇅瑜??듯빐 provider ?묐떟??臾댄슚?덈떎???ъ떎???쇰컲 ??꾩븘?껉낵 援щ텇?????덈떎.
     """
 
 
 class EmptyStreamContentError(OpenAICompatStreamError):
-    """streaming 응답이 끝났는데도 사용자에게 발행할 content가 전혀 없을 때 발생시키는 예외다.
-    이유와 trace id를 함께 보존해 stream triage에서 빈 응답의 원인을 따로 추적할 수 있게 한다.
+    """streaming ?묐떟???앸궗?붾뜲???ъ슜?먯뿉寃?諛쒗뻾??content媛 ?꾪? ?놁쓣 ??諛쒖깮?쒗궎???덉쇅??
+    ?댁쑀? trace id瑜??④퍡 蹂댁〈??stream triage?먯꽌 鍮??묐떟???먯씤???곕줈 異붿쟻?????덇쾶 ?쒕떎.
     """
 
 
 class OpenAICompatChatModel(BaseChatModel):
-    """LangChain ChatModel 계약을 OpenAI 호환 provider 위에 얹은 어댑터다.
-    non-stream, stream, reasoning content 분리, trace id 수집, provider별 extra body 구성을 한 곳에서 다룬다.
+    """LangChain ChatModel 怨꾩빟??OpenAI ?명솚 provider ?꾩뿉 ?뱀? ?대뙌?곕떎.
+    non-stream, stream, reasoning content 遺꾨━, trace id ?섏쭛, provider蹂?extra body 援ъ꽦????怨녹뿉???ㅻ，??
     """
-    """OpenAI 호환 API(vLLM 등)용 LangChain 래퍼"""
+    """OpenAI ?명솚 API(vLLM ????LangChain ?섑띁"""
 
-    # 기본 연결 설정
+    # 湲곕낯 ?곌껐 ?ㅼ젙
     model_name: str = "/model"
     base_url: str = "http://vllm_solar:8010/v1"
     api_key: str = "EMPTY"
     timeout: float = 120.0
 
-    # 기본 샘플링 설정
+    # 湲곕낯 ?섑뵆留??ㅼ젙
     default_temperature: float = 0.2
     default_top_p: float = 0.8
 
-    # Solar/vLLM reasoning 제어(기본: thinking 끄기 + reasoning 출력 포함 안 함)
+    # Solar/vLLM reasoning ?쒖뼱(湲곕낯: thinking ?꾧린 + reasoning 異쒕젰 ?ы븿 ????
     # - reasoning_effort: "low" | "medium" | "high" | None
-    # - include_reasoning: True | False | None  (vLLM 프로토콜에 존재)
+    # - include_reasoning: True | False | None  (vLLM ?꾨줈?좎퐳??議댁옱)
     default_reasoning_effort: Optional[str] = "low"
     default_include_reasoning: Optional[bool] = False
 
-    # stream에서 reasoning delta가 먼저 와도 최종 답변(content)에 섞이지 않게:
-    # - True  : reasoning을 "이벤트"로는 내보내되(content=""), reasoning 텍스트는 additional_kwargs에만 담음(추천)
-    # - False : reasoning 이벤트 자체를 내보내지 않음(클라이언트는 content 나올 때까지 무응답처럼 보일 수 있음)
+    # stream?먯꽌 reasoning delta媛 癒쇱? ???理쒖쥌 ?듬?(content)???욎씠吏 ?딄쾶:
+    # - True  : reasoning??"?대깽??濡쒕뒗 ?대낫?대릺(content=""), reasoning ?띿뒪?몃뒗 additional_kwargs?먮쭔 ?댁쓬(異붿쿇)
+    # - False : reasoning ?대깽???먯껜瑜??대낫?댁? ?딆쓬(?대씪?댁뼵?몃뒗 content ?섏삱 ?뚭퉴吏 臾댁쓳?듭쿂??蹂댁씪 ???덉쓬)
     emit_reasoning_events: bool = True
 
     _client: Optional[AsyncOpenAI] = PrivateAttr(default=None)
 
     # ---- LangChain required ----
     def _generate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
-        """LangChain의 동기 generate 계약을 non-stream invoke 경로로 연결한다.
-        내부적으로는 `ainvoke_non_stream`을 호출하고, 반환된 text와 trace 정보를 `ChatResult` 형태로 재포장한다.
+        """LangChain???숆린 generate 怨꾩빟??non-stream invoke 寃쎈줈濡??곌껐?쒕떎.
+        ?대??곸쑝濡쒕뒗 `ainvoke_non_stream`???몄텧?섍퀬, 諛섑솚??text? trace ?뺣낫瑜?`ChatResult` ?뺥깭濡??ы룷?ν븳??
         """
         raise NotImplementedError("Use ainvoke/astream")
 
     @property
     def _llm_type(self) -> str:
-        """LangChain이 이 모델을 구분할 때 쓸 안정적인 type name을 돌려준다.
-        provider 차이와 무관하게 같은 adapter로 인식되게 해 tracing과 serialization을 단순화한다.
+        """LangChain????紐⑤뜽??援щ텇???????덉젙?곸씤 type name???뚮젮以??
+        provider 李⑥씠? 臾닿??섍쾶 媛숈? adapter濡??몄떇?섍쾶 ??tracing怨?serialization???⑥닚?뷀븳??
         """
         return "openai_compat_chat"
 
     # ---- internal helpers ----
     def _get_client(self) -> AsyncOpenAI:
-        """provider base URL과 API key로 OpenAI 호환 async client를 지연 생성한다.
-        같은 모델 인스턴스에서는 한 번 만든 client를 재사용하여 연결 오버헤드를 줄인다.
+        """provider base URL怨?API key濡?OpenAI ?명솚 async client瑜?吏???앹꽦?쒕떎.
+        媛숈? 紐⑤뜽 ?몄뒪?댁뒪?먯꽌????踰?留뚮뱺 client瑜??ъ궗?⑺븯???곌껐 ?ㅻ쾭?ㅻ뱶瑜?以꾩씤??
         """
         if self._client is None:
             self._client = AsyncOpenAI(
@@ -94,8 +92,8 @@ class OpenAICompatChatModel(BaseChatModel):
         return self._client
 
     async def aclose(self) -> None:
-        """내부 async client와 매달려 있는 transport 자원을 정리한다.
-        서비스 종료나 테스트 마무리 시점에 connection leak을 남기지 않게 하는 종결 후처리다.
+        """?대? async client? 留ㅻ떖???덈뒗 transport ?먯썝???뺣━?쒕떎.
+        ?쒕퉬??醫낅즺???뚯뒪??留덈Т由??쒖젏??connection leak???④린吏 ?딄쾶 ?섎뒗 醫낃껐 ?꾩쿂由щ떎.
         """
         if self._client is not None:
             await self._client.close()
@@ -103,8 +101,8 @@ class OpenAICompatChatModel(BaseChatModel):
 
     @staticmethod
     def _delta_get(delta: Any, key: str) -> Any:
-        """stream chunk에서 provider별 delta field를 안전하게 가져온다.
-        OpenAI 호환 API라고 해도 chunk shape가 미묘하게 다를 수 있어 이 헬퍼가 필드 접근 차이를 흡수한다.
+        """stream chunk?먯꽌 provider蹂?delta field瑜??덉쟾?섍쾶 媛?몄삩??
+        OpenAI ?명솚 API?쇨퀬 ?대룄 chunk shape媛 誘몃쵖?섍쾶 ?ㅻ? ???덉뼱 ???ы띁媛 ?꾨뱶 ?묎렐 李⑥씠瑜??≪닔?쒕떎.
         """
         if delta is None:
             return None
@@ -114,8 +112,8 @@ class OpenAICompatChatModel(BaseChatModel):
 
     @staticmethod
     def _resolve_trace_ids(kwargs: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-        """response header와 body에서 추적 가능한 trace/request id를 수집한다.
-        빈 응답이나 provider 오류를 triage할 때 같은 호출을 다시 찾을 수 있게 하는 진단 메타데이터다.
+        """response header? body?먯꽌 異붿쟻 媛?ν븳 trace/request id瑜??섏쭛?쒕떎.
+        鍮??묐떟?대굹 provider ?ㅻ쪟瑜?triage????媛숈? ?몄텧???ㅼ떆 李얠쓣 ???덇쾶 ?섎뒗 吏꾨떒 硫뷀??곗씠?곕떎.
         """
         request_id = kwargs.get("request_id")
         conversation_id = kwargs.get("conversation_id")
@@ -134,8 +132,8 @@ class OpenAICompatChatModel(BaseChatModel):
         return (request_id_str or None, conversation_id_str or None)
 
     def _to_openai_messages(self, messages: List[BaseMessage]) -> List[dict[str, str]]:
-        """LangChain message 목록을 OpenAI chat completion 메시지 형식으로 변환한다.
-        system/human/assistant/tool role을 보존하고, provider가 못 읽는 부가 필드는 제거하여 요청 body를 간결하게 유지한다.
+        """LangChain message 紐⑸줉??OpenAI chat completion 硫붿떆吏 ?뺤떇?쇰줈 蹂?섑븳??
+        system/human/assistant/tool role??蹂댁〈?섍퀬, provider媛 紐??쎈뒗 遺媛 ?꾨뱶???쒓굅?섏뿬 ?붿껌 body瑜?媛꾧껐?섍쾶 ?좎??쒕떎.
         """
         converted: List[dict[str, str]] = []
         for m in messages:
@@ -144,7 +142,7 @@ class OpenAICompatChatModel(BaseChatModel):
             elif isinstance(m, HumanMessage):
                 role = "user"
             else:
-                # AIMessage 포함 (그 외 BaseMessage도 안전하게 assistant로 처리)
+                # AIMessage ?ы븿 (洹???BaseMessage???덉쟾?섍쾶 assistant濡?泥섎━)
                 role = "assistant"
             converted.append({"role": role, "content": str(m.content)})
         return converted
@@ -156,8 +154,8 @@ class OpenAICompatChatModel(BaseChatModel):
             stop: Optional[List[str]],
             kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """model, messages, timeout, streaming 플래그를 provider 요청 kwargs로 조합한다.
-        공통 body와 provider-specific extra body를 분리해 reasoning 옵션이 일반 chat payload를 오염시키지 않게 한다.
+        """model, messages, timeout, streaming ?뚮옒洹몃? provider ?붿껌 kwargs濡?議고빀?쒕떎.
+        怨듯넻 body? provider-specific extra body瑜?遺꾨━??reasoning ?듭뀡???쇰컲 chat payload瑜??ㅼ뿼?쒗궎吏 ?딄쾶 ?쒕떎.
         """
         max_tokens_hint = kwargs.get("max_tokens_hint", kwargs.get("max_tokens"))
         request_kwargs: dict[str, Any] = {
@@ -174,8 +172,8 @@ class OpenAICompatChatModel(BaseChatModel):
         return request_kwargs
 
     def _build_extra_body(self, kwargs: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """provider별로 허용되는 추가 request body를 선별해 만든다.
-        reasoning effort, parallel tool calls, response format 같은 선택 옵션을 호환 범위 내에서만 싣어 보낸다.
+        """provider蹂꾨줈 ?덉슜?섎뒗 異붽? request body瑜??좊퀎??留뚮뱺??
+        reasoning effort, parallel tool calls, response format 媛숈? ?좏깮 ?듭뀡???명솚 踰붿쐞 ?댁뿉?쒕쭔 ?ｌ뼱 蹂대궦??
         """
         extra_body = kwargs.get("extra_body")
         body: dict[str, Any] = dict(extra_body) if isinstance(extra_body, dict) else {}
@@ -189,8 +187,12 @@ class OpenAICompatChatModel(BaseChatModel):
         if include_reasoning is not None:
             body.setdefault("include_reasoning", include_reasoning)
 
+        top_k = kwargs.get("top_k")
+        if top_k is not None:
+            body.setdefault("top_k", int(top_k))
+
         # --- chat template hints (vLLM examples) ---
-        # 일부 서버/모델에서 키가 다를 수 있어 thinking + enable_thinking 둘 다 넣어 호환성 확보
+        # ?쇰? ?쒕쾭/紐⑤뜽?먯꽌 ?ㅺ? ?ㅻ? ???덉뼱 thinking + enable_thinking ?????ｌ뼱 ?명솚???뺣낫
         chat_template_kwargs = body.get("chat_template_kwargs")
         if not isinstance(chat_template_kwargs, dict):
             chat_template_kwargs = {}
@@ -206,8 +208,8 @@ class OpenAICompatChatModel(BaseChatModel):
         return body or None
 
     async def _close_stream(self, stream: Any, *, request_id: Optional[str]) -> None:
-        """provider stream object가 노출한 aclose/close 후크를 안전하게 호출한다.
-        예외 도중에도 stream transport가 남지 않게 정리를 보장하는 후처리 헬퍼다.
+        """provider stream object媛 ?몄텧??aclose/close ?꾪겕瑜??덉쟾?섍쾶 ?몄텧?쒕떎.
+        ?덉쇅 ?꾩쨷?먮룄 stream transport媛 ?⑥? ?딄쾶 ?뺣━瑜?蹂댁옣?섎뒗 ?꾩쿂由??ы띁??
         """
         stream_type = type(stream).__name__
         has_aclose = callable(getattr(stream, "aclose", None))
@@ -232,8 +234,8 @@ class OpenAICompatChatModel(BaseChatModel):
 
     # ---- non-stream ----
     async def _agenerate(self, messages: List[BaseMessage], **kwargs: Any) -> ChatResult:
-        """LangChain의 비동기 generate 계약을 non-stream invoke 경로로 연결한다.
-        `_generate`와 같은 결과 shape를 맞추되, event loop 안에서 직접 await 가능하게 제공한다.
+        """LangChain??鍮꾨룞湲?generate 怨꾩빟??non-stream invoke 寃쎈줈濡??곌껐?쒕떎.
+        `_generate`? 媛숈? 寃곌낵 shape瑜?留욎텛?? event loop ?덉뿉??吏곸젒 await 媛?ν븯寃??쒓났?쒕떎.
         """
         client = self._get_client()
         request_id, conversation_id = self._resolve_trace_ids(kwargs)
@@ -256,7 +258,7 @@ class OpenAICompatChatModel(BaseChatModel):
 
         msg = response.choices[0].message if response.choices else None
         content = (getattr(msg, "content", None) if msg is not None else None) or ""
-        # reasoning은 섞지 않고 참고용으로만 (필요시 로그/메트릭으로 사용)
+        # reasoning? ?욎? ?딄퀬 李멸퀬?⑹쑝濡쒕쭔 (?꾩슂??濡쒓렇/硫뷀듃由?쑝濡??ъ슜)
         reasoning = (
                 (getattr(msg, "reasoning", None) if msg is not None else None)
                 or (getattr(msg, "reasoning_content", None) if msg is not None else None)
@@ -282,8 +284,8 @@ class OpenAICompatChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
     async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
-        """streaming을 사용하지 않는 일반 chat completion 호출을 실행한다.
-        provider 응답에서 answer text, reasoning text, usage, trace id를 분리해 상위 레이어가 그대로 소비할 수 있는 딕셔너리로 돌려준다.
+        """streaming???ъ슜?섏? ?딅뒗 ?쇰컲 chat completion ?몄텧???ㅽ뻾?쒕떎.
+        provider ?묐떟?먯꽌 answer text, reasoning text, usage, trace id瑜?遺꾨━???곸쐞 ?덉씠?닿? 洹몃?濡??뚮퉬?????덈뒗 ?뺤뀛?덈━濡??뚮젮以??
         """
         result = await self._agenerate(messages, **kwargs)
         if result.generations:
@@ -297,8 +299,8 @@ class OpenAICompatChatModel(BaseChatModel):
             stop: Optional[List[str]] = None,
             **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        """OpenAI 호환 streaming 응답을 LangChain `ChatGenerationChunk` 흐름으로 바꾼다.
-        reasoning content와 user-visible content를 구분해 누적하고, 빈 콘텐츠 종료는 `EmptyStreamContentError`로 변환해 상위에 알린다.
+        """OpenAI ?명솚 streaming ?묐떟??LangChain `ChatGenerationChunk` ?먮쫫?쇰줈 諛붽씔??
+        reasoning content? user-visible content瑜?援щ텇???꾩쟻?섍퀬, 鍮?肄섑뀗痢?醫낅즺??`EmptyStreamContentError`濡?蹂?섑빐 ?곸쐞???뚮┛??
         """
         client = self._get_client()
         request_id, conversation_id = self._resolve_trace_ids(kwargs)
@@ -349,12 +351,12 @@ class OpenAICompatChatModel(BaseChatModel):
                 content = self._delta_get(delta, "content")
                 reasoning = self._delta_get(delta, "reasoning") or self._delta_get(delta, "reasoning_content")
 
-                # ttft_any: content/reasoning 중 뭐든 처음 도착한 시점
+                # ttft_any: content/reasoning 以?萸먮뱺 泥섏쓬 ?꾩갑???쒖젏
                 if ttft_any_ms is None and (content or reasoning):
                     ttft_any_ms = (time.monotonic() - t0) * 1000
 
-                # reasoning-only 이벤트: 최종 content에 섞지 않도록 content=""로 내보내고,
-                # reasoning 텍스트는 additional_kwargs에만 실어 보냄.
+                # reasoning-only ?대깽?? 理쒖쥌 content???욎? ?딅룄濡?content=""濡??대낫?닿퀬,
+                # reasoning ?띿뒪?몃뒗 additional_kwargs?먮쭔 ?ㅼ뼱 蹂대깂.
                 if reasoning and not content:
                     reasoning_char_n += len(reasoning)
                     emitted_any_chunk_n += 1
@@ -362,7 +364,7 @@ class OpenAICompatChatModel(BaseChatModel):
                         emitted_reasoning_event_n += 1
                         yield ChatGenerationChunk(
                             message=AIMessageChunk(
-                                content="",  # 중요: 최종 답변 문자열에 섞이지 않게
+                                content="",  # 以묒슂: 理쒖쥌 ?듬? 臾몄옄?댁뿉 ?욎씠吏 ?딄쾶
                                 additional_kwargs={
                                     STREAM_FIELD_KEY: "reasoning",
                                     STREAM_REASONING_KEY: reasoning,
@@ -371,8 +373,7 @@ class OpenAICompatChatModel(BaseChatModel):
                         )
                     continue
 
-                # content 이벤트
-                if content:
+                # content ?대깽??                if content:
                     if ttft_content_ms is None:
                         ttft_content_ms = (time.monotonic() - t0) * 1000
                     emitted_any_chunk_n += 1
@@ -387,9 +388,9 @@ class OpenAICompatChatModel(BaseChatModel):
                     )
 
             if emitted_content_chunk_n == 0:
-                # 계약 위반으로 간주: 스트림은 끝났지만 사용자에게 전달 가능한 content 토큰이 0개.
-                # 여기서는 재시도/폴백을 수행하지 않고 EmptyStreamContentError를 상위로 전파한다.
-                # 실제 재시도 횟수/폴백 방식(예: non-stream 호출)은 상위 오케스트레이션 레이어에서 결정한다.
+                # 怨꾩빟 ?꾨컲?쇰줈 媛꾩＜: ?ㅽ듃由쇱? ?앸궗吏留??ъ슜?먯뿉寃??꾨떖 媛?ν븳 content ?좏겙??0媛?
+                # ?ш린?쒕뒗 ?ъ떆???대갚???섑뻾?섏? ?딄퀬 EmptyStreamContentError瑜??곸쐞濡??꾪뙆?쒕떎.
+                # ?ㅼ젣 ?ъ떆???잛닔/?대갚 諛⑹떇(?? non-stream ?몄텧)? ?곸쐞 ?ㅼ??ㅽ듃?덉씠???덉씠?댁뿉??寃곗젙?쒕떎.
                 raise EmptyStreamContentError(
                     "No content emitted in stream. "
                     f"model={self.model_name}, base_url={self.base_url}, request_kwargs={request_kwargs}, extra_body={extra_body}"
@@ -403,7 +404,7 @@ class OpenAICompatChatModel(BaseChatModel):
                 await self._close_stream(stream, request_id=request_id)
                 closed = True
             except Exception:
-                # close 실패는 _close_stream에서 로깅/raise 처리
+                # close ?ㅽ뙣??_close_stream?먯꽌 濡쒓퉭/raise 泥섎━
                 if primary_exc is None:
                     raise
 
@@ -429,3 +430,4 @@ class OpenAICompatChatModel(BaseChatModel):
                 self.model_name,
                 self.base_url,
             )
+

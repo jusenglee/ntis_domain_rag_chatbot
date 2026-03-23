@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass, fields, replace
@@ -44,12 +44,13 @@ except Exception:
 
 @dataclass(frozen=True)
 class RuntimePreludeRequest:
-    """runtime prelude가 실행 전에 받는 요청 입력을 묶는 구조체다.
-    query, normalized intent payload, allowlist, lexical/dense hint, 한도 설정을 한 바구니에 모아 prelude 조립을 순수 함수처럼 다룰 수 있게 한다.
+    """runtime prelude媛 ?ㅽ뻾 ?꾩뿉 諛쏅뒗 ?붿껌 ?낅젰??臾띕뒗 援ъ“泥대떎.
+    query, normalized intent payload, allowlist, lexical/dense hint, ?쒕룄 ?ㅼ젙????諛붽뎄?덉뿉 紐⑥븘 prelude 議곕┰???쒖닔 ?⑥닔泥섎읆 ?ㅻ０ ???덇쾶 ?쒕떎.
     """
     query: str
     model_name: str
     intent_payload: Any
+    request_overrides: Dict[str, Any]
     domain_hint: Optional[str]
     stack: str
     lexical_field_weights: Optional[Dict[str, float]]
@@ -64,8 +65,8 @@ class RuntimePreludeRequest:
 
 @dataclass(frozen=True)
 class RuntimePreludeRuntime:
-    """runtime prelude 중 호출할 로깅·계측·보조 callback을 묶는다.
-    strategy guard, diff logging, id flattening, join-seed check를 주입받아 prelude가 현재 환경에 맞는 계측과 검증을 수행한다.
+    """runtime prelude 以??몄텧??濡쒓퉭쨌怨꾩륫쨌蹂댁“ callback??臾띕뒗??
+    strategy guard, diff logging, id flattening, join-seed check瑜?二쇱엯諛쏆븘 prelude媛 ?꾩옱 ?섍꼍??留욌뒗 怨꾩륫怨?寃利앹쓣 ?섑뻾?쒕떎.
     """
     logger: Any
     log_kv_fn: Callable[..., None]
@@ -78,8 +79,8 @@ class RuntimePreludeRuntime:
 
 @dataclass(frozen=True)
 class RuntimePreludeResult:
-    """runtime prelude가 조립한 실행 truth 전체를 보관하는 결과 구조체다.
-    plan, strategy, target collections, search/rerank preset, filter objects, people/org/title signal을 함께 실어 후속 retrieval·join·render가 같은 truth를 읽게 한다.
+    """runtime prelude媛 議곕┰???ㅽ뻾 truth ?꾩껜瑜?蹂닿??섎뒗 寃곌낵 援ъ“泥대떎.
+    plan, strategy, target collections, search/rerank preset, filter objects, people/org/title signal???④퍡 ?ㅼ뼱 ?꾩냽 retrieval쨌join쨌render媛 媛숈? truth瑜??쎄쾶 ?쒕떎.
     """
     query_text: str
     keywords: List[str]
@@ -150,15 +151,15 @@ class RuntimePreludeResult:
 
 
 def build_runtime_prelude_result(**kwargs: Any) -> RuntimePreludeResult:
-    """keyword 인자로 모은 prelude 산출물을 `RuntimePreludeResult`로 재포장한다.
-    prelude 조립 코드가 긴 인자 목록을 다룰 때 목적값을 명시하는 엔트리 포인트로 쓴다.
+    """keyword ?몄옄濡?紐⑥? prelude ?곗텧臾쇱쓣 `RuntimePreludeResult`濡??ы룷?ν븳??
+    prelude 議곕┰ 肄붾뱶媛 湲??몄옄 紐⑸줉???ㅻ０ ??紐⑹쟻媛믪쓣 紐낆떆?섎뒗 ?뷀듃由??ъ씤?몃줈 ?대떎.
     """
     return RuntimePreludeResult(**kwargs)
 
 
 def _normalize_hint_terms(values: Any) -> List[str]:
-    """hint로 들어온 용어 목록을 중복 없는 문자열 리스트로 정리한다.
-    title/org/people 히트가 여러 형태로 들어와도 후속 filter 빌더가 같은 shape를 보게 한다.
+    """hint濡??ㅼ뼱???⑹뼱 紐⑸줉??以묐났 ?녿뒗 臾몄옄??由ъ뒪?몃줈 ?뺣━?쒕떎.
+    title/org/people ?덊듃媛 ?щ윭 ?뺥깭濡??ㅼ뼱????꾩냽 filter 鍮뚮뜑媛 媛숈? shape瑜?蹂닿쾶 ?쒕떎.
     """
     if values is None:
         return []
@@ -178,8 +179,8 @@ def _normalize_hint_terms(values: Any) -> List[str]:
 
 
 def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
-    """planner 또는 hint에서 들어온 ids_map을 정규화한다.
-    scalar/list/set 차이를 흡수하고 빈 값을 제거해 contract validation과 join seed 판단에 쓸 canonical ids_map를 만든다.
+    """planner ?먮뒗 hint?먯꽌 ?ㅼ뼱??ids_map???뺢퇋?뷀븳??
+    scalar/list/set 李⑥씠瑜??≪닔?섍퀬 鍮?媛믪쓣 ?쒓굅??contract validation怨?join seed ?먮떒????canonical ids_map瑜?留뚮뱺??
     """
     if not isinstance(ids_map, dict):
         return {}
@@ -192,9 +193,25 @@ def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
     return out
 
 
+def _coerce_override_int(overrides: Mapping[str, Any], key: str) -> Optional[int]:
+    try:
+        value = overrides.get(key)
+        return None if value is None else int(value)
+    except Exception:
+        return None
+
+
+def _coerce_override_float(overrides: Mapping[str, Any], key: str) -> Optional[float]:
+    try:
+        value = overrides.get(key)
+        return None if value is None else float(value)
+    except Exception:
+        return None
+
+
 def _normalize_target_collections(raw: Any) -> List[str]:
-    """target collection 후보를 순서 유지를 하면서 중복 없이 정리한다.
-    enum value·문자열·리스트 형태 차이를 흡수해 strategy truth에 실 target collection 목록을 고정한다.
+    """target collection ?꾨낫瑜??쒖꽌 ?좎?瑜??섎㈃??以묐났 ?놁씠 ?뺣━?쒕떎.
+    enum value쨌臾몄옄?는룸━?ㅽ듃 ?뺥깭 李⑥씠瑜??≪닔??strategy truth????target collection 紐⑸줉??怨좎젙?쒕떎.
     """
     if raw is None:
         return []
@@ -215,8 +232,8 @@ def _normalize_target_collections(raw: Any) -> List[str]:
 
 
 def _extract_payload_normalized_intent(payload: Any) -> Any:
-    """intent payload 래퍼에서 `normalized_intent` 본문만 꺼내온다.
-    mapping/object wrapper 양쪽을 허용해 prelude가 payload shape에 덤 민감하게 한다.
+    """intent payload ?섑띁?먯꽌 `normalized_intent` 蹂몃Ц留?爰쇰궡?⑤떎.
+    mapping/object wrapper ?묒そ???덉슜??prelude媛 payload shape????誘쇨컧?섍쾶 ?쒕떎.
     """
     if payload is None:
         return None
@@ -226,8 +243,8 @@ def _extract_payload_normalized_intent(payload: Any) -> Any:
 
 
 def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
-    """payload 내 normalized intent를 `NormalizedIntent` 형식으로 복원한다.
-    mapping/object에서 필드를 주워담고 relation·categories같은 복합 필드를 추가 정규화해 runtime contract에 맞춘다.
+    """payload ??normalized intent瑜?`NormalizedIntent` ?뺤떇?쇰줈 蹂듭썝?쒕떎.
+    mapping/object?먯꽌 ?꾨뱶瑜?二쇱썙?닿퀬 relation쨌categories媛숈? 蹂듯빀 ?꾨뱶瑜?異붽? ?뺢퇋?뷀빐 runtime contract??留욎텣??
     """
     if isinstance(raw, NormalizedIntent):
         return raw
@@ -260,8 +277,8 @@ def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
 
 
 def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str]) -> None:
-    """현재 target collection이 허용된 allowlist 내에 있는지 fail-close로 검증한다.
-    planner나 hint가 루트 밖 collection을 집어넣는 경로를 막아 retrieval-first 위반을 초기에 차단한다.
+    """?꾩옱 target collection???덉슜??allowlist ?댁뿉 ?덈뒗吏 fail-close濡?寃利앺븳??
+    planner??hint媛 猷⑦듃 諛?collection??吏묒뼱?ｋ뒗 寃쎈줈瑜?留됱븘 retrieval-first ?꾨컲??珥덇린??李⑤떒?쒕떎.
     """
     normalized_targets = normalize_strategy_target_cols(target_cols)
     normalized_allow = normalize_strategy_target_cols(allow_cols)
@@ -270,8 +287,8 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str]) -> 
 
 
 def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePreludeRuntime, timings: Dict[str, Any]) -> RuntimePreludeResult:
-    """normalized intent, planner compile result, filter policy를 합친 runtime prelude truth를 조립한다.
-    plan·strategy·search preset·rerank spec·filter object·allowlist check를 한 곳에서 완결하는 retrieval 실행 전 최종 관문이다.
+    """normalized intent, planner compile result, filter policy瑜??⑹튇 runtime prelude truth瑜?議곕┰?쒕떎.
+    plan쨌strategy쨌search preset쨌rerank spec쨌filter object쨌allowlist check瑜???怨녹뿉???꾧껐?섎뒗 retrieval ?ㅽ뻾 ??理쒖쥌 愿臾몄씠??
     """
     q = request.query
     hinted_limit = int(request.hinted_limit or 0)
@@ -376,6 +393,21 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     sparse_topk_eff = int(request.sparse_topk or preset.sparse_topk or preset.top_k_lex)
     sparse_weight_eff = float(request.sparse_weight or preset.sparse_weight or preset.w_lex)
     topk_spec = _build_topk_spec(preset, sparse_vector_name=sparse_vector_name_eff, sparse_topk=sparse_topk_eff, sparse_weight=sparse_weight_eff)
+    request_overrides = dict(request.request_overrides or {})
+    rag_override_topk_dense = _coerce_override_int(request_overrides, "RAG_TOPK_DENSE")
+    rag_override_topk_lex_cand = _coerce_override_int(request_overrides, "RAG_TOPK_LEX_CAND")
+    rag_override_w_lex = _coerce_override_float(request_overrides, "RAG_W_LEX")
+    rag_override_min_dense_score = _coerce_override_float(request_overrides, "RAG_MIN_DENSE_SCORE")
+    if rag_override_w_lex is not None:
+        sparse_weight_eff = float(rag_override_w_lex)
+        topk_spec["sparse_weight"] = float(rag_override_w_lex)
+        topk_spec["w_lex"] = float(rag_override_w_lex)
+    if rag_override_topk_dense is not None:
+        topk_spec["top_k_dense"] = int(rag_override_topk_dense)
+    if rag_override_topk_lex_cand is not None:
+        topk_spec["top_k_lex_cand"] = int(rag_override_topk_lex_cand)
+    if rag_override_min_dense_score is not None:
+        topk_spec["min_dense_score"] = float(rag_override_min_dense_score)
     rerank_spec = _build_rerank_spec(plan.mode)
     rerank_spec.setdefault("final_keep", 80)
 
@@ -455,3 +487,9 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     min_dense_score_policy = float(policy_topk.get("min_dense_score", preset.min_dense_score))
 
     return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_runtime_join_mode=resolved_runtime_join_mode, assembled_question_analysis_join_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter, resolved_anchors=resolved_anchors, reverse_trace_followup=bool(reverse_trace_followup), followup_relation_hint=followup_relation_hint, pattern_kind=(getattr(getattr(plan, "pattern_analysis_plan", None), "kind", None) if getattr(plan, "pattern_analysis_plan", None) is not None else None), bundle_kind=(getattr(getattr(plan, "multi_hop_bundle_plan", None), "kind", None) if getattr(plan, "multi_hop_bundle_plan", None) is not None else None), bundle_targets=list(getattr(getattr(plan, "multi_hop_bundle_plan", None), "targets", tuple()) or tuple()), guidance_required=bool(getattr(getattr(plan, "multi_hop_bundle_plan", None), "guidance_required", False)) if getattr(plan, "multi_hop_bundle_plan", None) is not None else bool(getattr(plan, "guidance_required", False)))
+
+
+
+
+
+

@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import apps.api.services.rag_retriever as rag_retriever_module
-from apps.api.services.rag_retriever import detect_retrieval_query_drift, resolve_rag_queries
+from apps.api.services.rag_retriever import detect_retrieval_query_drift, repair_query_for_resolved_anchor, resolve_rag_queries
 from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
@@ -268,6 +268,52 @@ def test_build_intent_payload_falls_back_for_invalid_planner_count():
     assert question_analysis.display_limit == 3
     assert payload.question_analysis.limit == 20
     assert payload.question_analysis.display_limit == 3
+
+
+def test_build_intent_payload_overrides_planner_default_when_explicit_count_mismatches():
+    log_calls = []
+
+    async def fake_run_question_analysis(**kwargs):
+        return SimpleNamespace(
+            confidence=0.8,
+            action='list',
+            output_type='list',
+            limit=20,
+            display_limit=20,
+        )
+
+    payload, question_analysis = asyncio.run(
+        build_intent_payload(
+            question='\ubc18\ub3c4\uccb4\ubd84\uc57c \uacfc\uc81c 3\uac74\uc744 \ubcf4\uc5ec\uc918',
+            conversation_id='cid',
+            chat_history=[],
+            prev_context=[],
+            request_id='rid',
+            cheap_precheck=lambda question: {'years': [], 'people_terms': [], 'org_terms': [], 'perf_tag_filters': [], 'perf_types': [], 'ids_map': {}, 'title_terms': []},
+            has_superlative_cue=lambda question: False,
+            extract_years=lambda question: [],
+            extract_perf_types=lambda question: [],
+            extract_title_terms=lambda question: [],
+            classify_query_intent=lambda question, kws, hint=None: {'raw': question, 'hint': hint},
+            normalize_intent=lambda raw_intent, **kwargs: {'normalized': raw_intent},
+            run_question_analysis=fake_run_question_analysis,
+            apply_question_analysis_v3=lambda intent, qa, **kwargs: (intent, qa is not None),
+            log_event=lambda *args, **kwargs: log_calls.append((args, kwargs)),
+            intent_payload_cls=Payload,
+            planner_stagewise_enabled=True,
+            planner_stage1_prompt_version='v1',
+            planner_stage2_prompt_version='v1',
+        )
+    )
+
+    assert question_analysis is not None
+    assert question_analysis.limit == 20
+    assert question_analysis.display_limit == 3
+    assert payload.question_analysis.display_limit == 3
+    count_resolution = next(fields for args, fields in log_calls if args and args[0] == 'PLANNER.COUNT_RESOLUTION')
+    assert count_resolution['source'] == 'planner_fallback'
+    assert count_resolution['reason'] == 'planner_explicit_count_mismatch'
+    assert count_resolution['explicit_count'] == 3
 
 
 def test_build_intent_payload_clamps_invalid_planner_large_count_to_contract_max():
@@ -559,7 +605,7 @@ def test_resolve_retrieval_budget_clamps_to_contract_max():
 def test_resolve_display_request_prefers_display_limit_over_limit():
     qa = SimpleNamespace(limit=10, display_limit=3)
 
-    assert _resolve_display_request(qa, docs_count=8) == 3
+    assert _resolve_display_request(qa) == 3
 
 
 def test_extract_explicit_count_reads_numeric_request():
@@ -632,7 +678,76 @@ def test_resolve_rag_queries_keeps_identifier_and_year_terms():
 
 
 
-def test_build_display_snapshot_uses_documents_as_visible_source_of_truth():
+def test_repair_query_for_resolved_anchor_uses_selected_title_for_detail_followup():
+    state = SimpleNamespace(
+        question='1번 프로젝트의 상세정보',
+        intent_payload=Payload(
+            normalized_intent=NormalizedIntent(
+                action='detail',
+                base_route='project',
+                relation=None,
+                is_id_query=False,
+                output_type='detail',
+                ids_map={'pjt_id': ['1345376671']},
+            ),
+            strategy_meta={
+                'followup_resolution_status': 'resolved',
+                'anchor_source': 'display_snapshot',
+                'selected_prev_item': {
+                    'index': 1,
+                    'pjt_id': '1345376671',
+                    'title': '반도체 전공트랙 사업',
+                },
+            },
+        ),
+    )
+
+    repaired_query, metadata = repair_query_for_resolved_anchor(
+        state=state,
+        query='1번 프로젝트의 상세정보',
+    )
+
+    assert repaired_query == '반도체 전공트랙 사업'
+    assert metadata['anchor_present'] is True
+    assert metadata['anchor_query_repaired'] is True
+    assert metadata['anchor_repair_reason'] == 'anchor_axis_lost'
+
+
+def test_repair_query_for_resolved_anchor_preserves_requested_field_terms():
+    state = SimpleNamespace(
+        question='첫번째 과제의 연구자는?',
+        intent_payload=Payload(
+            normalized_intent=NormalizedIntent(
+                action='detail',
+                base_route='project',
+                relation=None,
+                is_id_query=False,
+                output_type='detail',
+                ids_map={'pjt_id': ['1345376671']},
+            ),
+            strategy_meta={
+                'followup_resolution_status': 'resolved',
+                'anchor_source': 'display_snapshot',
+                'selected_prev_item': {
+                    'index': 1,
+                    'pjt_id': '1345376671',
+                    'title': '반도체 전공트랙 사업',
+                },
+            },
+        ),
+    )
+
+    repaired_query, metadata = repair_query_for_resolved_anchor(
+        state=state,
+        query='첫번째 연구자',
+    )
+
+    assert repaired_query.startswith('반도체 전공트랙 사업')
+    assert repaired_query.endswith('연구자')
+    assert metadata['anchor_query_repaired'] is True
+
+
+def test_build_display_snapshot_keeps_requested_count_when_canonical_outnumbers_docs():
     snapshot = build_display_snapshot(
         conversation_id='cid',
         turn_id='rid',
@@ -658,7 +773,7 @@ def test_build_display_snapshot_uses_documents_as_visible_source_of_truth():
 
 def test_normalize_display_payloads_derives_missing_canonical_entries():
     log_calls = []
-    docs, canonical = _normalize_display_payloads(
+    bundle = _normalize_display_payloads(
         docs=[
             {'title': 'first project', 'source_type': 'hit', 'pjt_id': 'PJT-1', 'pjt_no': 'NO-1'},
             {'title': 'second project', 'source_type': 'hit', 'pjt_id': 'PJT-2', 'pjt_no': 'NO-2'},
@@ -667,17 +782,76 @@ def test_normalize_display_payloads_derives_missing_canonical_entries():
         canonical_evidence=[_project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project')],
         base_route='project',
         output_type='list',
+        requested_count=3,
+        explicit_count=3,
         log_event=lambda event, **fields: log_calls.append((event, fields)),
         request_id='rid',
         conversation_id='cid',
     )
 
-    assert len(docs) == 3
-    assert len(canonical) == 3
-    assert canonical[1]['ids']['pjt_id'] == 'PJT-2'
-    assert canonical[2]['ids']['pjt_id'] == 'PJT-3'
+    assert len(bundle.snapshot_documents) == 3
+    assert len(bundle.snapshot_canonical_evidence) == 3
+    assert bundle.snapshot_canonical_evidence[1]['ids']['pjt_id'] == 'PJT-2'
+    assert bundle.snapshot_canonical_evidence[2]['ids']['pjt_id'] == 'PJT-3'
     assert any(event == 'RAG.CANONICAL_EVIDENCE.DERIVED' for event, _ in log_calls)
     assert all(event != 'RAG.DISPLAY_INPUT_MISMATCH' for event, _ in log_calls)
+
+
+def test_normalize_display_payloads_recovers_list_snapshot_from_canonical_items():
+    log_calls = []
+    bundle = _normalize_display_payloads(
+        docs=[
+            {'title': 'wrapper row', 'source_type': 'aggregation'},
+        ],
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+            _project_canonical_item(pjt_id='PJT-3', pjt_no='NO-3', title='third project'),
+        ],
+        base_route='project',
+        output_type='list',
+        requested_count=3,
+        explicit_count=3,
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        request_id='rid',
+        conversation_id='cid',
+    )
+
+    assert bundle.docs_count == 1
+    assert bundle.canonical_count == 3
+    assert bundle.docs_kind == 'collection_wrapper'
+    assert bundle.display_source == 'synthetic_from_canonical'
+    assert len(bundle.snapshot_documents) == 3
+    assert bundle.snapshot_documents[1]['pjt_id'] == 'PJT-2'
+    mismatch_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_INPUT_MISMATCH')
+    assert mismatch_fields['docs_kind'] == 'collection_wrapper'
+    assert mismatch_fields['display_source'] == 'synthetic_from_canonical'
+
+
+def test_normalize_display_payloads_prefers_explicit_count_over_requested_count_for_recovery():
+    log_calls = []
+    bundle = _normalize_display_payloads(
+        docs=[
+            {'title': 'wrapper row', 'source_type': 'aggregation'},
+        ],
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+            _project_canonical_item(pjt_id='PJT-3', pjt_no='NO-3', title='third project'),
+        ],
+        base_route='project',
+        output_type='list',
+        requested_count=20,
+        explicit_count=3,
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        request_id='rid',
+        conversation_id='cid',
+    )
+
+    assert bundle.display_source == 'synthetic_from_canonical'
+    assert len(bundle.snapshot_documents) == 3
+    mismatch_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_INPUT_MISMATCH')
+    assert mismatch_fields['display_source'] == 'synthetic_from_canonical'
 
 
 def test_custom_rag_retriever_short_circuits_followup_clarification():
