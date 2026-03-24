@@ -642,14 +642,14 @@ async def node_rag_search(
                     "FOCUS.ENTITY.SET",
                     request_id=state.request_id,
                     conversation_id=state.conversation_id,
-                    source=focus_entity.source,
-                    pjt_id=focus_entity.pjt_id,
-                    pjt_no=focus_entity.pjt_no,
-                    rst_id=focus_entity.rst_id,
-                    person_no=focus_entity.person_no,
-                    org_id=focus_entity.org_id,
-                    org_code=focus_entity.org_code,
-                    biz_no=focus_entity.biz_no,
+                    source=getattr(focus_entity, "source", None),
+                    pjt_id=getattr(focus_entity, "pjt_id", None),
+                    pjt_no=getattr(focus_entity, "pjt_no", None),
+                    rst_id=getattr(focus_entity, "rst_id", None),
+                    person_no=getattr(focus_entity, "person_no", None),
+                    org_id=getattr(focus_entity, "org_id", None),
+                    org_code=getattr(focus_entity, "org_code", None),
+                    biz_no=getattr(focus_entity, "biz_no", None),
                 )
                 coverage = compute_detail_coverage(docs[0], anchor=focus_entity)
                 cache_key = make_entity_cache_key(focus_entity)

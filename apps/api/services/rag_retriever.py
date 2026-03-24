@@ -164,6 +164,42 @@ def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
     return bool(title_terms and title_terms.intersection(query_terms))
 
 
+def _build_anchor_preserving_query_from_context(*, state: Any, query: Any, anchor_context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    metadata = {
+        "anchor_present": anchor_context.get("present", False),
+        "anchor_source": anchor_context.get("anchor_source"),
+        "anchor_entity_key": anchor_context.get("entity_key"),
+        "anchor_query_repaired": False,
+        "anchor_repair_reason": None,
+    }
+    if not anchor_context.get("present"):
+        return str(query or ""), metadata
+
+    anchor_phrase = _first_non_empty_text(
+        anchor_context.get("title_text"),
+        anchor_context.get("pjt_id"),
+        anchor_context.get("pjt_no"),
+        anchor_context.get("rst_id"),
+        anchor_context.get("person_no"),
+        anchor_context.get("org_id"),
+        anchor_context.get("org_code"),
+        query,
+    ) or ""
+    requested_terms = _build_anchor_requested_terms(getattr(state, "question", ""))
+    repaired_terms: list[str] = []
+    seen: set[str] = set()
+    for part in [anchor_phrase, *requested_terms]:
+        text = str(part or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        repaired_terms.append(text)
+    repaired_query = " ".join(repaired_terms) or str(query or "")
+    metadata["anchor_query_repaired"] = repaired_query != str(query or "")
+    metadata["anchor_repair_reason"] = "anchor_axis_lost" if metadata["anchor_query_repaired"] else None
+    return repaired_query, metadata
+
+
 def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Dict[str, Any]]:
     normalized_intent = _get_normalized_intent(state)
     output_type = str(_pick_attr(normalized_intent, key="output_type", default="") or "").strip().lower()
@@ -182,22 +218,7 @@ def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Di
         return str(query or ""), metadata
     if _query_mentions_anchor(query, anchor_context):
         return str(query or ""), metadata
-
-    anchor_phrase = _first_non_empty_text(anchor_context.get("title_text"), anchor_context.get("pjt_id"), anchor_context.get("pjt_no"), query) or ""
-    requested_terms = _build_anchor_requested_terms(getattr(state, "question", ""))
-    parts = [anchor_phrase, *requested_terms]
-    repaired_terms: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        text = str(part or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        repaired_terms.append(text)
-    repaired_query = " ".join(repaired_terms) or str(query or "")
-    metadata["anchor_query_repaired"] = repaired_query != str(query or "")
-    metadata["anchor_repair_reason"] = "anchor_axis_lost" if metadata["anchor_query_repaired"] else None
-    return repaired_query, metadata
+    return _build_anchor_preserving_query_from_context(state=state, query=query, anchor_context=anchor_context)
 
 
 _QUERY_TOKEN_RE = re.compile("[A-Za-z0-9_-]+|[?-?]{2,}")
@@ -729,12 +750,32 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     raw_query = state.question
     normalized_intent = _get_normalized_intent(state)
     hint_query = _pick_attr(ks, normalized_intent, qa, key="retrieval_query", default=raw_query)
+    action = str(_pick_attr(normalized_intent, qa, key="action", default="") or "").strip().lower()
+    output_type = str(_pick_attr(normalized_intent, qa, key="output_type", default="") or "").strip().lower()
+    anchor_context = _resolve_followup_anchor_context(state)
     ks_confidence = float(ks.confidence) if getattr(ks, "confidence", None) is not None else None
     qa_confidence = float(qa.confidence) if getattr(qa, "confidence", None) is not None else None
     confidence = ks_confidence if ks_confidence is not None else (qa_confidence if qa_confidence is not None else 0.0)
     drift_detected, drift_reasons = detect_retrieval_query_drift(raw_query=raw_query, hint_query=hint_query)
     fallback_applied = drift_detected or confidence < min_confidence
     search_query = raw_query if fallback_applied else hint_query
+
+    if anchor_context.get("present") and action == "detail" and output_type == "detail":
+        anchor_kind = str(anchor_context.get("entity_kind") or "").strip().lower()
+        if anchor_kind == "project" and "perf_axis_added" in drift_reasons:
+            fallback_applied = True
+            drift_detected = True
+        if anchor_kind == "project" and (
+            fallback_applied
+            or "perf_axis_added" in drift_reasons
+            or "project_axis_removed" in drift_reasons
+            or not _query_mentions_anchor(search_query, anchor_context)
+        ):
+            search_query, _ = _build_anchor_preserving_query_from_context(
+                state=state,
+                query=search_query,
+                anchor_context=anchor_context,
+            )
     return raw_query, hint_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied
 
 

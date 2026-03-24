@@ -397,6 +397,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
+        request_overrides = _build_request_overrides(payload)
         graph = _get_graph(request)
 
         if graph is None:
@@ -411,7 +412,14 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         stage = "debug_request_start"
         try:
             set_log_context(request_id=request_id, conversation_id=conversation_id)
-            log_event("REQ.START", request_id=request_id, conversation_id=conversation_id, stage=stage, q_len=len(question))
+            log_event(
+                "REQ.START",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                stage=stage,
+                q_len=len(question),
+                request_overrides=request_overrides or None,
+            )
             user_message = human_message(content=question)
 
             stage = "planner_memory_build"
@@ -421,6 +429,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 "request_started_at": request_started_at,
                 "messages": [user_message],
                 "kv_store": _get_kv_store(request),
+                "request_overrides": request_overrides,
             }
 
             final_state = await graph.ainvoke(inputs)

@@ -760,6 +760,85 @@ def test_repair_query_for_resolved_anchor_preserves_requested_field_terms():
     assert metadata['anchor_query_repaired'] is True
 
 
+
+def test_resolve_rag_queries_repairs_project_detail_followup_with_resolved_anchor():
+    state = SimpleNamespace(
+        question='detail for item three',
+        intent_payload=Payload(
+            normalized_intent=NormalizedIntent(
+                action='detail',
+                base_route='project',
+                relation=None,
+                is_id_query=False,
+                output_type='detail',
+                ids_map={'pjt_id': ['1415144250']},
+            ),
+            strategy_meta={
+                'followup_resolution_status': 'resolved',
+                'anchor_source': 'display_snapshot',
+                'selected_prev_item': {
+                    'index': 3,
+                    'pjt_id': '1415144250',
+                    'pjt_no': 'N0001058-1',
+                    'title': 'Project Alpha Detail',
+                    'context_kind': 'project',
+                },
+            },
+        ),
+    )
+    qa = SimpleNamespace(retrieval_query='project number three outputs', confidence=0.88, action='detail', output_type='detail')
+    ks = SimpleNamespace(retrieval_query='project number three outputs', confidence=1.0)
+
+    raw_query, planner_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries(
+        state=state,
+        qa=qa,
+        ks=ks,
+        min_confidence=0.55,
+    )
+
+    assert raw_query == 'detail for item three'
+    assert planner_query == 'project number three outputs'
+    assert search_query == 'Project Alpha Detail'
+    assert confidence == 1.0
+    assert drift_detected is True
+    assert 'perf_axis_added' in drift_reasons
+    assert fallback_applied is True
+
+
+def test_repair_query_for_resolved_anchor_uses_project_identifier_without_title():
+    state = SimpleNamespace(
+        question='detail for item three',
+        intent_payload=Payload(
+            normalized_intent=NormalizedIntent(
+                action='detail',
+                base_route='project',
+                relation=None,
+                is_id_query=False,
+                output_type='detail',
+                ids_map={'pjt_id': ['1415144250']},
+            ),
+            strategy_meta={
+                'followup_resolution_status': 'resolved',
+                'anchor_source': 'display_snapshot',
+                'selected_prev_item': {
+                    'index': 3,
+                    'pjt_id': '1415144250',
+                    'pjt_no': 'N0001058-1',
+                    'context_kind': 'project',
+                },
+            },
+        ),
+    )
+
+    repaired_query, metadata = repair_query_for_resolved_anchor(
+        state=state,
+        query='detail for item three',
+    )
+
+    assert repaired_query == '1415144250'
+    assert metadata['anchor_query_repaired'] is True
+    assert metadata['anchor_repair_reason'] == 'anchor_axis_lost'
+
 def test_build_display_snapshot_keeps_requested_count_when_canonical_outnumbers_docs():
     snapshot = build_display_snapshot(
         conversation_id='cid',
