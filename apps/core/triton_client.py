@@ -1,5 +1,5 @@
 ﻿# rag_pipeline/triton_client.py
-"""\nTriton Inference Server gRPC ?대씪?댁뼵???섑띁 紐⑤뱢.\n\n二쇱슂 湲곕뒫:\n- 紐⑤뜽蹂??좏겕?섏씠? 罹먯떛 諛??꾨＼?꾪듃 ?좏겙 湲몄씠 怨꾩궛\n- max_new_tokens瑜??쒗??湲몄씠??留욊쾶 ?숈쟻?쇰줈 怨꾩궛\n- ?ㅽ듃由щ컢/鍮꾩뒪?몃━諛?怨듭슜 ?뷀듃由??ъ씤??triton_infer()\n\n二쇱쓽 ?ы빆:\n- Triton Python gRPC ?대씪?댁뼵?몃뒗 "?섎굹??InferenceServerClient ?몄뒪?댁뒪??n  ?숈떆 active stream? 1媛?留??덉슜?쒕떎.\n  ????紐⑤뱢?먯꽌??**?ㅽ듃由щ컢?⑹? 留??몄텧留덈떎 蹂꾨룄???대씪?댁뼵???몄뒪?댁뒪**瑜??앹꽦?섍퀬,\n    ?깃????대씪?댁뼵?몃뒗 non-stream(愿由ъ슜) API?먮쭔 ?ъ슜?쒕떎.\n"""
+"""Utilities for Triton Inference Server gRPC text generation."""
 
 import hashlib
 import json
@@ -23,40 +23,36 @@ from apps.core.settings import (
     TRITON_TIMEOUTS,
     get_model_max_output_tokens,
 )
-from apps.core.settings import logger  # 怨듭슜 logger
+from apps.core.settings import logger  # Shared pipeline logger.
 
-# ?깃???Triton ?대씪?댁뼵??(紐⑤뜽 愿由? non-stream ?몄텧??
+# Shared Triton client for non-stream requests.
 _triton_client: InferenceServerClient | None = None
 
-# 紐⑤뜽蹂??좏겕?섏씠? 罹먯떆
+# Lazy tokenizer cache.
 _tokenizers: Dict[str, AutoTokenizer] = {}
 
-# ?꾨＼?꾪듃 ?좏겙 湲몄씠 罹먯떆 (?댁떆 湲곕컲, LRU)
+# Prompt token-count cache (thread-safe LRU).
 _PROMPT_TOKEN_CACHE: "OrderedDict[str, int]" = OrderedDict()
 _PROMPT_TOKEN_CACHE_LOCK = threading.Lock()
 _PROMPT_TOKEN_CACHE_MAX = 1024
 _SHORT_PROMPT_CHAR_THRESHOLD = 2000
 _SHORT_PROMPT_CHAR_TOKEN_RATIO = 4
 
-# gpt-oss 怨꾩뿴??理쒖쥌 ?듬? ?욎뿉 遺숈씠??留덉빱
+# Marker used by gpt-oss style responses.
 ASSISTANT_FINAL_MARKER = "assistantfinal"
 
 
 # ---------------------------------------------------------------------------
-# 0. gpt-oss ?먮퀎 / ?좏겕?섏씠? 愿???좏떥
+# 0. gpt-oss helpers and tokenizer cache
 # ---------------------------------------------------------------------------
 def _is_gpt_oss_model(model_name: str) -> bool:
-    """紐⑤뜽 ?대쫫??gpt-oss 怨꾩뿴?몄? ?⑥닚 ?⑦꽩?쇰줈 ?먯젙?쒕떎.
-    理쒖쥌 ?듬? 留덉빱 泥섎━瑜??곸슜?좎? 寃곗젙?섎뒗 珥덇린 gate濡??대떎.
-    """
+    """Return True when the model name refers to the gpt-oss family."""
     name = model_name.lower()
     return ("gpt" in name) and ("oss" in name)
 
 
 def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
-    """紐⑤뜽蹂?Hugging Face tokenizer瑜?lazy cache濡?媛?몄삩??
-    ?꾨＼?꾪듃 ?좏겙 ??怨꾩궛? 鍮덈쾲?섎?濡?媛숈? 紐⑤뜽?????tokenizer 珥덇린??鍮꾩슜?????⑥닔?먯꽌 ?≪닔?쒕떎.
-    """
+    """Load and cache the Hugging Face tokenizer for the model."""
     if model_name not in _tokenizers:
         tok_id = TOKENIZER_MAP[model_name]
         _tokenizers[model_name] = AutoTokenizer.from_pretrained(
@@ -67,9 +63,7 @@ def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
 
 
 def _prompt_cache_key(model_name: str, prompt: str) -> str:
-    """紐⑤뜽怨?prompt 議고빀??LRU cache ?ㅻ줈 ?덉젙?곴쾶 ?뺢퇋?뷀븳??
-    ?꾨＼?꾪듃 ?꾨Ц??吏곸젒 ?ㅻ줈 ?곗? ?딄퀬 sha256 digest濡?以꾩뿬 硫붾え由??ъ슜?됱쓣 ?듭젣?쒕떎.
-    """
+    """Build a stable cache key for prompt token counting."""
     digest = hashlib.sha256()
     digest.update(model_name.encode("utf-8"))
     digest.update(b"|")
@@ -78,9 +72,7 @@ def _prompt_cache_key(model_name: str, prompt: str) -> str:
 
 
 def _get_cached_prompt_tokens(cache_key: str) -> int | None:
-    """?꾨＼?꾪듃 ?좏겙 罹먯떆?먯꽌 媛믪쓣 ?쎌쑝硫?LRU ?쒖꽌瑜?媛깆떊?쒕떎.
-    ?ㅻ젅??寃쏀빀???쇳븯湲??꾪빐 lock ?덉뿉?쒕쭔 cache瑜?議곗옉?쒕떎.
-    """
+    """Read the prompt-token cache under the shared lock."""
     with _PROMPT_TOKEN_CACHE_LOCK:
         cached = _PROMPT_TOKEN_CACHE.get(cache_key)
         if cached is None:
@@ -90,9 +82,7 @@ def _get_cached_prompt_tokens(cache_key: str) -> int | None:
 
 
 def _set_cached_prompt_tokens(cache_key: str, token_count: int) -> None:
-    """怨꾩궛???좏겙 ?섎? prompt cache??湲곕줉?섍퀬 LRU ?ш린瑜??좎??쒕떎.
-    ?곹븳???섏쑝硫?媛???ㅻ옒????ぉ??踰꾨젮 ?좏겙 罹먯떆媛 臾댁젣???깆옣?섏? ?딄쾶 ?쒕떎.
-    """
+    """Write a prompt-token count into the LRU cache."""
     with _PROMPT_TOKEN_CACHE_LOCK:
         _PROMPT_TOKEN_CACHE[cache_key] = token_count
         _PROMPT_TOKEN_CACHE.move_to_end(cache_key)
@@ -101,9 +91,7 @@ def _set_cached_prompt_tokens(cache_key: str, token_count: int) -> None:
 
 
 def _get_prompt_tokens(model_name: str, prompt: str) -> int:
-    """?꾨＼?꾪듃 湲몄씠瑜??좏겙 ?섎줈 ?섏궛?섍퀬 ?ㅽ뙣 ??fallback 異붿젙移섎? ?ъ슜?쒕떎.
-    吏㏃? ?꾨＼?꾪듃??臾몄옄 ??鍮꾨? 異붿젙?쇰줈 泥섎━?섍퀬, 湲??꾨＼?꾪듃???ㅼ젣 tokenizer瑜??ъ슜??max_new_tokens 怨꾩궛 ?뺥솗?꾨? 吏?⑤떎.
-    """
+    """Estimate prompt tokens with a fast path and tokenizer fallback."""
     cache_key = _prompt_cache_key(model_name, prompt)
     cached = _get_cached_prompt_tokens(cache_key)
     if cached is not None:
@@ -116,26 +104,24 @@ def _get_prompt_tokens(model_name: str, prompt: str) -> int:
 
     try:
         tok = get_tokenizer_for_model(model_name)
-        # special token? ?쒖뒪???꾨＼?꾪듃 ?깆뿉 ?대? ?ы븿?섏뼱 ?덉쓣 ???덉쑝??False
+        # Keep special tokens out of the prompt budget estimate.
         ids = tok.encode(prompt, add_special_tokens=False)
         token_count = len(ids)
         _set_cached_prompt_tokens(cache_key, token_count)
         return token_count
     except Exception as e:
-        logger.warning(f"[TRITON] prompt token 怨꾩궛 ?ㅽ뙣, fallback ?ъ슜: {e}")
-        # ?꾩쟾 鍮꾩뿀?쇰㈃ 0 蹂대떎??1 ?댁긽?쇰줈 諛섑솚
+        logger.warning(f"[TRITON] prompt token count failed, using fallback estimate: {e}")
+        # Never return a zero-token fallback estimate.
         fallback = max(1, len(prompt) // 2)
         _set_cached_prompt_tokens(cache_key, fallback)
         return fallback
 
 
 # ---------------------------------------------------------------------------
-# 1. max_new_tokens ?숈쟻 怨꾩궛
+# 1. max_new_tokens helpers
 # ---------------------------------------------------------------------------
 def _get_max_seq_len(model_name: str) -> int:
-    """紐⑤뜽???ㅼ젣濡??뚰솕?????덈뒗 理쒕? context length瑜??삳뒗??
-    ?ㅼ젙 ?ㅻ쾭?쇱씠?? tokenizer metadata, default fallback ?쒖꽌濡??덉쟾???곹븳??怨좊Ⅸ??
-    """
+    """Resolve the model context window from settings or tokenizer metadata."""
     max_seq_len = MODEL_MAX_CONTEXT.get(model_name)
     if max_seq_len:
         return int(max_seq_len)
@@ -143,7 +129,7 @@ def _get_max_seq_len(model_name: str) -> int:
     try:
         tok = get_tokenizer_for_model(model_name)
         max_seq_len = getattr(tok, "model_max_length", DEFAULT_MAX_MODEL_LEN)
-        # HF 履쎌뿉??醫낆쥌 ?꾩껌 ??媛?1e30 媛숈?) ?ｌ뼱?먮뒗 寃쎌슦 諛⑹뼱
+        # Ignore unrealistic Hugging Face sentinel values.
         if max_seq_len is None or max_seq_len > 100_000:
             return int(DEFAULT_MAX_MODEL_LEN)
         return int(max_seq_len)
@@ -155,9 +141,7 @@ def _compute_max_new_tokens(
         prompt: str,
         max_tokens_hint: int | None = None,
 ) -> int:
-    """?꾨＼?꾪듃 湲몄씠? 紐⑤뜽 context ?곹븳??怨좊젮???앹꽦 ?좏겙 ?곹븳??怨꾩궛?쒕떎.
-    ?꾨＼?꾪듃媛 湲곕땲 max context瑜?嫄곗쓽 ???곕뜑?쇰룄 ?꾩쟾??0?쇰줈 留뚮뱾吏 ?딄퀬 理쒖냼 ?앹꽦 遺꾨웾???④꺼 ?쒕퉬???묐떟??蹂댁옣?쒕떎.
-    """
+    """Compute a safe output budget from prompt size and model context."""
     prompt_tokens = _get_prompt_tokens(model_name, prompt)
 
     max_seq_len = MODEL_MAX_CONTEXT.get(model_name)
@@ -165,15 +149,15 @@ def _compute_max_new_tokens(
         try:
             tok = get_tokenizer_for_model(model_name)
             max_seq_len = getattr(tok, "model_max_length", DEFAULT_MAX_MODEL_LEN)
-            # HF 履쎌뿉??醫낆쥌 ?꾩껌 ??媛?1e30 媛숈?) ?ｌ뼱?먮뒗 寃쎌슦 諛⑹뼱
+            # Ignore unrealistic Hugging Face sentinel values.
             if max_seq_len is None or max_seq_len > 100_000:
                 max_seq_len = DEFAULT_MAX_MODEL_LEN
         except Exception:
             max_seq_len = DEFAULT_MAX_MODEL_LEN
 
-    MIN_NEW_TOKENS = 64      # 理쒖냼 ?앹꽦 ?좏겙
+    MIN_NEW_TOKENS = 64      # Keep a minimum generation budget.
 
-    # 紐⑤뜽蹂?湲곕낯 ?곹븳???ъ슜?섍퀬, ?몄옄濡??ㅼ뼱?ㅻ㈃ 洹멸쾬?쇰줈 override
+    # Respect an explicit max-token hint when one is provided.
     cap = (
         int(max_tokens_hint)
         if max_tokens_hint is not None
@@ -183,42 +167,38 @@ def _compute_max_new_tokens(
     available = max_seq_len - prompt_tokens - CTX_SAFETY_MARGIN
     if available <= 0:
         logger.warning(
-            f"[TRITON] prompt媛 ?대? max_seq_len??嫄곗쓽 ?????곹깭?낅땲?? "
+            f"[TRITON] prompt exceeds safe context budget. "
             f"prompt_tokens={prompt_tokens}, max_seq_len={max_seq_len}"
         )
-        # 洹몃옒??理쒖냼??議곌툑? ?앹꽦?섎룄濡?        return max(MIN_NEW_TOKENS, min(cap, 128))
-
+        # Return a bounded fallback even when the prompt is too large.
+        return max(MIN_NEW_TOKENS, min(cap, 128))
     max_new = min(cap, available)
     return max(MIN_NEW_TOKENS, max_new)
 
 
 # ---------------------------------------------------------------------------
-# 2. gpt-oss assistantfinal ?щ㎎ 泥섎━
+# 2. gpt-oss assistantfinal helpers
 # ---------------------------------------------------------------------------
 def extract_final_answer(raw: str) -> str:
-    """gpt-oss ?묐떟 ?띿뒪?몄뿉??`assistantfinal` ?ㅼ쓽 理쒖쥌 ?듬?留?異붿텧?쒕떎.
-    留덉빱媛 ?놁쑝硫??먮Ц???좎??섍퀬, ?덉쑝硫??욎そ control text瑜?踰꾨젮 ?ъ슜??媛???듬?留??④릿??
-    """
+    """Extract the final answer segment from gpt-oss output."""
     if not raw:
         return ""
 
     text = str(raw).strip()
     idx = text.rfind(ASSISTANT_FINAL_MARKER)
     if idx == -1:
-        # 留덉빱 ?놁쑝硫?洹몃깷 ?먮낯 諛섑솚
+        # If the marker is missing, return the original text.
         return text
 
     final = text[idx + len(ASSISTANT_FINAL_MARKER):]
-    # 肄쒕줎/怨듬갚 ?뺣━
+    # Trim marker-adjacent separators before returning.
     final = final.lstrip(" :\n\t")
     logger.info(final)
     return final.strip()
 
 
 def stream_after_assistantfinal(chunks):
-    """stream chunk ?먮쫫?먯꽌 `assistantfinal` 留덉빱瑜?李얠? ?ㅻ??곕쭔 ?몃?濡??섎젮蹂대궦??
-    留덉빱瑜?蹂닿린 ?꾧퉴吏??踰꾪띁留곹븯怨? 留덉빱 ?댄썑??理쒖쥌 ?듬? ?ㅽ듃由쇱쑝濡?媛꾩＜?쒕떎.
-    """
+    """Yield only the text that appears after the assistantfinal marker."""
     marker = ASSISTANT_FINAL_MARKER.lower()
     seen = False
     buf = ""
@@ -232,49 +212,47 @@ def stream_after_assistantfinal(chunks):
         if not seen:
             pos = buf.lower().find(marker)
             if pos == -1:
-                # ?꾩쭅 留덉빱 ???섏솕?쇰㈃ 怨꾩냽 踰꾪띁?먮쭔 ?볦쓬
+                # Keep buffering until the marker appears.
                 continue
 
-            # 泥섏쓬?쇰줈 留덉빱瑜?諛쒓껄???쒖젏
+            # Start emitting once the marker has been seen.
             seen = True
             start = pos + len(ASSISTANT_FINAL_MARKER)
-            # 留덉빱 ?욌?遺꾩? 踰꾨━怨? 留덉빱 ?ㅻ????ъ슜
+            # Drop the marker and leading separators.
             buf = buf[start:]
             buf = buf.lstrip(" :\n\t")
 
             if not buf:
                 continue
 
-        # ?ш린遺?곕뒗 ?꾨? '理쒖쥌 ?듬?'???대떦
+        # Emit only the buffered answer segment.
         yield buf
         buf = ""
 
-    # ?ㅽ듃由?醫낅즺 ??留덈Т由?泥섎━
+    # Flush any buffered tail content.
     if seen and buf:
-        # assistantfinal ?? ?? ??? ??? ???? ??
+        # Marker was found but buffered text remained at shutdown.
         yield buf
     elif not seen and buf:
-        # assistantfinal????踰덈룄 ???섏삩 寃쎌슦 fallback:
-        # ?꾩껜 踰꾪띁瑜?洹몃깷 蹂대궡嫄곕굹, ?뺤콉???곕씪 踰꾨┫ ?섎룄 ?덉쓬.
+        # Fallback for models that never emit the marker.
+        # Emit the raw stream so the caller still gets output.
         logger.warning(
-            "[gpt-oss] assistantfinal 留덉빱瑜?李얠? 紐삵뻽?듬땲?? ?꾩껜 踰꾪띁瑜?洹몃?濡??꾩넚?⑸땲??"
+            "[gpt-oss] assistantfinal marker missing. Falling back to raw stream output."
         )
         yield buf
 
 
 # ---------------------------------------------------------------------------
-# 3. Triton ?대씪?댁뼵???앹꽦/?ъ궗??# ---------------------------------------------------------------------------
+# 3. Triton client and input builders
 def get_triton_client() -> InferenceServerClient:
-    """non-stream ?몄텧怨?愿由ъ슜 API???ъ궗?⑺븷 singleton Triton client瑜??뚮젮以??
-    ?ㅽ듃由щ컢? 蹂꾨룄 client瑜??앹꽦?섎?濡? ???⑥닔??寃곌낵瑜?concurrent stream???곕㈃ ???쒕떎.
-    """
+    """Return the shared Triton client used for non-stream inference."""
     global _triton_client
     if _triton_client is None:
         try:
             _triton_client = InferenceServerClient(url=TRITON_URL, verbose=False)
-            logger.info(f"??Triton Client connected to {TRITON_URL}")
+            logger.info(f"[TRITON] client connected to {TRITON_URL}")
         except Exception as e:
-            logger.error(f"??Triton Client connection failed: {e}")
+            logger.error(f"[TRITON] client connection failed: {e}")
             raise e
     return _triton_client
 
@@ -285,24 +263,25 @@ def _make_inputs(
         max_tokens: int,
         temperature: float,
         top_p: float,
+        top_k: int | None = None,
 ):
-    """Triton text-generation model??湲곕??섎뒗 numpy input tensor ?명듃瑜?議곕┰?쒕떎.
-    ?꾨＼?꾪듃, ?앹꽦 ?곹븳, ?섑뵆留??뚮씪誘명꽣瑜?Triton gRPC ?뺤떇?쇰줈 吏곷젹?뷀븳??
-    """
+    """Build Triton input tensors for text generation requests."""
     text = InferInput("text_input", [1], "BYTES")
     text.set_data_from_numpy(
         np.array([prompt.encode("utf-8")], dtype=object)
     )
 
-    # vLLM-backend 沅뚯옣 紐낆묶: sampling_parameters
+    # vLLM backend expects sampling parameters as JSON bytes.
     sparams = InferInput("sampling_parameters", [1], "BYTES")
-    # vLLM Python backend 履?援ы쁽??臾몄옄??湲곕컲 ?뚯떛???ъ슜?섎뒗 寃쎌슦媛 留롮쓬
+    # Serialize only sampling fields the backend understands.
     params = {
         "temperature": str(float(temperature)),
         "top_p": str(float(top_p)),
         "max_tokens": str(int(max_tokens)),
-        # stream ?뚮옒洹몃뒗 蹂꾨룄 BOOL ?명뭼("stream")?쇰줈 ?꾨떖
+        # Streaming mode uses a dedicated BOOL tensor instead.
     }
+    if top_k is not None:
+        params["top_k"] = str(int(top_k))
 
     sparams.set_data_from_numpy(
         np.array([json.dumps(params).encode("utf-8")], dtype=object)
@@ -311,12 +290,10 @@ def _make_inputs(
 
 
 # ---------------------------------------------------------------------------
-# 4. ?ㅽ듃由щ컢 ?쒕꼫?덉씠??(Triton gRPC streaming)
+# 4. Triton gRPC streaming helpers
 # ---------------------------------------------------------------------------
 def _create_stream_client() -> InferenceServerClient:
-    """?ㅽ듃由щ컢 ?몄텧???쇳쉶??Triton client瑜??앹꽦?쒕떎.
-    ??client??active stream ?섎굹留??덉슜?섎뒗 Triton ?쒖빟 ?뚮Ц???붿껌留덈떎 ???몄뒪?댁뒪瑜?留뚮뱺??
-    """
+    """Create a dedicated Triton client for a single active stream."""
     return InferenceServerClient(url=TRITON_URL, verbose=False)
 
 
@@ -326,9 +303,7 @@ def _resolve_stream_timeouts(
         first_token_timeout: int | None,
         idle_timeout: int | None,
 ) -> tuple[int, int]:
-    """?ㅽ듃由щ컢 ?몄뀡???곸슜??TTFT쨌?앹꽦쨌?꾩껜 ?곕뱶?쇱씤???ㅼ젙?먯꽌 ?댁꽍?쒕떎.
-    ?몄텧?먭? ?ъ젙?섑븳 ??꾩븘?껋씠 ?덉쑝硫?洹?媛믪쓣 ?곗꽑?섍퀬, ?놁쑝硫?紐⑤뜽蹂?default濡??뚯븘媛꾨떎.
-    """
+    """Resolve TTFT and idle timeouts for the request type."""
     fallback_first = 10 if first_token_timeout is None else int(first_token_timeout)
     fallback_idle = 20 if idle_timeout is None else int(idle_timeout)
     request_timeouts = TRITON_TIMEOUTS.get(model_name, {})
@@ -351,16 +326,14 @@ def _triton_stream_generator(
         idle_timeout: int | None = 20,
         request_type: str = "stream",
 ):
-    """Triton ?ㅽ듃由щ컢 callback??Python generator濡?諛붽퓞 ?곸쐞 ?덉씠?닿? ?쒖감 ?뚮퉬?섍쾶 ?쒕떎.
-    肄쒕갚?먯꽌 ?ㅼ뼱??chunk, ?ㅻ쪟, timeout ?곹깭瑜??섎굹???먮쫫?쇰줈 蹂?섑빐 SSE ?몄텧怨?濡쒓렇 怨꾩륫??媛숈? 怨꾩빟???곌쾶 ?쒕떎.
-    """
+    """Expose Triton streaming callbacks as a Python generator."""
     first_token_timeout, idle_timeout = _resolve_stream_timeouts(
         model_name,
         request_type,
         first_token_timeout,
         idle_timeout,
     )
-    cli = _create_stream_client()  # ?좑툘 ?ㅽ듃由щ컢?⑹쑝濡?蹂꾨룄 ?대씪?댁뼵???앹꽦
+    cli = _create_stream_client()  # Streams require their own client instance.
 
     stream_flag = InferInput("stream", [1], "BOOL")
     stream_flag.set_data_from_numpy(np.array([True], dtype=bool))
@@ -371,9 +344,7 @@ def _triton_stream_generator(
     done = threading.Event()
 
     def on_resp(result, error):
-        """Triton stream callback?먯꽌 ?묐떟 chunk???덉쇅瑜?queue???곸옱?쒕떎.
-        ?앹꽦???ㅻ젅?쒖? callback ?ㅻ젅???ъ씠??寃쎄퀎瑜???queue媛 留욎텛硫? 醫낅즺 sentinel??媛숈씠 ?ｋ뒗??
-        """
+        """Push callback chunks into the local queue and watch for final signals."""
         if error:
             logger.error(f"[ERR] Triton Callback Error: {error}")
             done.set()
@@ -404,7 +375,7 @@ def _triton_stream_generator(
             done.set()
             return
 
-    # ?ㅽ듃由??쒖옉
+    # Start the stream.
     cli.start_stream(callback=on_resp)
     cli.async_stream_infer(
         model_name,
@@ -433,7 +404,7 @@ def _triton_stream_generator(
                     break
                 time.sleep(0.005)
     finally:
-        # ?ㅽ듃由?醫낅즺 (?먮윭/?뺤긽 ?щ?? ?곴??놁씠)
+        # Always stop the stream on exit.
         try:
             cli.stop_stream()
         except Exception as e:
@@ -441,7 +412,7 @@ def _triton_stream_generator(
 
 
 # ---------------------------------------------------------------------------
-# 5. ?숆린(internal) infer (?ㅽ듃由щ컢 ??accumulate)
+# 5. Internal sync inference path
 # ---------------------------------------------------------------------------
 def _triton_infer_sync(
         model_name: str,
@@ -450,19 +421,18 @@ def _triton_infer_sync(
         max_tokens: int,
         temperature: float,
         top_p: float,
+        top_k: int | None = None,
 ) -> str:
-    # 1) Triton ?낅젰 ?먯꽌 援ъ꽦
-    """non-stream Triton inference瑜??ㅽ뻾?섍퀬 ?띿뒪???묐떟??諛섑솚?쒕떎.
-    異쒕젰 tensor ?뺤떇??bytes?대뱺 string?대뱺 媛숈? 臾몄옄?대줈 蹂듭썝???곸쐞 ?뚯씠?꾨씪?몄씠 紐⑤뜽 醫낅쪟 李⑥씠瑜??섏떇?섏? ?딄쾶 ?쒕떎.
-    """
+    """Run the sync path by consuming the stream generator into one string."""
     text, sparams = _make_inputs(
         prompt,
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
+        top_k=top_k,
     )
 
-    # 2) ?ㅽ듃由щ컢 ???꾩껜 臾몄옄??accumulate
+    # Accumulate the streamed chunks into one response.
     accumulated_text = ""
     for chunk in _triton_stream_generator(
             model_name,
@@ -477,7 +447,7 @@ def _triton_infer_sync(
 
     accumulated_text = accumulated_text.strip()
 
-    # 3) gpt-oss 怨꾩뿴?대㈃ assistantfinal ?댄썑留?異붿텧
+    # Strip gpt-oss control text before returning.
     if _is_gpt_oss_model(model_name):
         return extract_final_answer(accumulated_text)
 
@@ -485,12 +455,10 @@ def _triton_infer_sync(
 
 
 # ---------------------------------------------------------------------------
-# 6. 怨듭슜 ?뷀듃由??ъ씤?? triton_infer()
+# 6. Public Triton inference entrypoint
 # ---------------------------------------------------------------------------
 def log_prompt_tokens(model_name: str, prompt: str, tag: str = ""):
-    """?꾩옱 prompt??????좏겙 異붿젙移섏? ?앹꽦 ?곹븳??濡쒓렇濡??④릿??
-    紐⑤뜽??context limit??媛源앹＜ ?뚯븘?쒕뒗吏 triage????蹂대뒗 愿痢??ъ씤?몃떎.
-    """
+    """Log prompt token counts for context-budget triage."""
     try:
         tok = get_tokenizer_for_model(model_name)
         ids = tok.encode(prompt, add_special_tokens=False)
@@ -509,12 +477,11 @@ def triton_infer(
         max_tokens: int | None = None,
         temperature: float = TEMPERATURE,
         top_p: float = TOP_P,
+        top_k: int | None = None,
         timeout_first: int | None = None,
         timeout_idle: int | None = None,
 ):
-    """?ㅽ듃由щ컢怨?鍮꾩뒪?몃━諛?Triton ?몄텧???듯빀?섎뒗 理쒖긽???뷀듃由ы룷?명듃??
-    紐⑤뜽蹂?max_new_tokens 怨꾩궛, gpt-oss final answer ?뺣━, timeout 怨꾩륫, stream/filter ?꾩쿂由щ? ??怨녹뿉??留욎텣??
-    """
+    """Public Triton inference wrapper for sync and streaming requests."""
     logger.info(f"[TRITON] infer start - model={model_name}, len={len(prompt)}")
     log_prompt_tokens(model_name, prompt, tag="infer")
 
@@ -528,7 +495,7 @@ def triton_infer(
     )
 
     if stream:
-        # ?ㅽ듃由щ컢 紐⑤뱶
+        # Resolve stream-specific timeouts.
         timeout_first, timeout_idle = _resolve_stream_timeouts(
             model_name,
             "stream",
@@ -553,20 +520,21 @@ def triton_infer(
             request_type="stream",
         )
 
-        # gpt-oss 怨꾩뿴?대㈃ assistantfinal ?댄썑留??ㅽ듃由щ컢
+        # Emit only the answer portion for gpt-oss streams.
         if _is_gpt_oss_model(model_name):
-            logger.info("[TRITON] gpt-oss 紐⑤뜽 媛먯? ??assistantfinal ?댄썑留??ㅽ듃由щ컢")
+            logger.info("[TRITON] gpt-oss detected, filtering assistantfinal stream")
             return stream_after_assistantfinal(base_gen)
 
-        # 洹???紐⑤뜽? raw ?ㅽ듃由?洹몃?濡?        return base_gen
-
-    # Sync Path: ?ㅽ듃由щ컢???대??곸쑝濡??ъ슜?섏뿬 理쒖쥌 臾몄옄??諛섑솚
+        # Non-gpt-oss models can stream raw chunks directly.
+        return base_gen
+    # Sync path consumes the same generator into a final string.
     return _triton_infer_sync(
         model_name,
         prompt,
         max_tokens=dynamic_max_tokens,
         temperature=float(TEMPERATURE if temperature is None else temperature),
         top_p=float(TOP_P if top_p is None else top_p),
+        top_k=top_k,
     )
 
 
