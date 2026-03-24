@@ -16,7 +16,7 @@ from apps.api.services.detail_contract import (
     render_detail_answer,
 )
 from apps.api.services.view_state import DetailCacheEntry, FocusEntity, build_display_snapshot, focus_entity_from_detail
-from apps.api.services.rag_retriever import repair_query_for_resolved_anchor
+from apps.api.services.rag_retriever import has_active_anchor_seed, repair_query_for_resolved_anchor
 from apps.api.services.request_facade import _apply_anchor_lock
 from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, should_short_circuit_followup_clarification
 
@@ -475,7 +475,8 @@ async def node_rag_search(
             except Exception:
                 pass
         latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
-        if output_type == "detail" and latest_focus_entity is not None:
+        detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
+        if output_type == "detail" and latest_focus_entity is not None and detail_anchor_active:
             requested_fields = extract_requested_fields(state.messages[-1].content)
             cache_key = make_entity_cache_key(latest_focus_entity)
             cache_entry = (getattr(view_state, "detail_cache", {}) or {}).get(cache_key)
@@ -508,7 +509,7 @@ async def node_rag_search(
         ids_map = getattr(query_intent, "ids_map", None) or {}
         if isinstance(query_intent, dict):
             ids_map = query_intent.get("ids_map") or {}
-        if output_type == "detail" and _detail_anchor_active(query_intent=query_intent, strategy_meta=strategy_meta, latest_focus_entity=latest_focus_entity):
+        if output_type == "detail" and detail_anchor_active:
             for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
                 values = ids_map.get(key) or []
                 if values:

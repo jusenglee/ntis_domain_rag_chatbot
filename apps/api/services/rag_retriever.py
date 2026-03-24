@@ -52,6 +52,10 @@ def _get_strategy_meta(state: Any) -> Dict[str, Any]:
     return dict(strategy_meta or {})
 
 
+def _get_view_state(state: Any) -> Any:
+    return getattr(state, "view_state", None)
+
+
 def _normalize_id_values(values: Any) -> list[str]:
     if values is None:
         return []
@@ -103,13 +107,50 @@ def _build_anchor_requested_terms(question: Any) -> list[str]:
     return terms
 
 
-def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
+def _has_anchor_seed_ids(ids_map: Any) -> bool:
+    if not isinstance(ids_map, dict):
+        return False
+    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+        if _normalize_id_values(ids_map.get(key)):
+            return True
+    return False
+
+
+def has_active_anchor_seed(state: Any) -> bool:
+    normalized_intent = _get_normalized_intent(state)
+    strategy_meta = _get_strategy_meta(state)
+
+    ids_map = getattr(normalized_intent, "ids_map", None) or {}
+    if isinstance(normalized_intent, dict):
+        ids_map = normalized_intent.get("ids_map") or {}
+
+    if _has_anchor_seed_ids(ids_map):
+        return True
+
+    followup_status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
+    return bool(
+        strategy_meta.get("explicit_followup")
+        or strategy_meta.get("anchor_source")
+        or followup_status == "resolved"
+    )
+
+
+def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dict[str, Any]:
     normalized_intent = _get_normalized_intent(state)
     ids_map = getattr(normalized_intent, "ids_map", None) or {}
     if isinstance(normalized_intent, dict):
         ids_map = normalized_intent.get("ids_map") or {}
 
-    view_state = getattr(state, "view_state", None)
+    if active_only and not has_active_anchor_seed(state):
+        return {
+            "present": False,
+            "anchor_source": None,
+            "entity_key": None,
+            "entity_kind": None,
+            "title_text": None,
+        }
+
+    view_state = _get_view_state(state)
     latest_focus = getattr(view_state, "latest_focus_entity", None) if view_state is not None else None
 
     strategy_meta = _get_strategy_meta(state)
@@ -118,12 +159,11 @@ def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
 
     def first_value(key: str) -> Optional[str]:
         values = _normalize_id_values((ids_map or {}).get(key))
-        return (
-            _first_non_empty_text(*(values[:1] or []))
-            or _first_non_empty_text(getattr(latest_focus, key, None))
-            or _first_non_empty_text(focus_entity.get(key))
-            or _first_non_empty_text(selected_prev_item.get(key))
-        )
+        candidates = [*(values[:1] or [])]
+        if not active_only:
+            candidates.append(getattr(latest_focus, key, None))
+        candidates.extend([focus_entity.get(key), selected_prev_item.get(key)])
+        return _first_non_empty_text(*candidates)
 
     resolved_ids = {
         "pjt_id": first_value("pjt_id"),
@@ -137,11 +177,14 @@ def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
         "issn": first_value("issn"),
     }
 
-    title_text = (
-        _first_non_empty_text(getattr(latest_focus, "title_text", None))
-        or _first_non_empty_text(focus_entity.get("title_text"))
-        or _first_non_empty_text(selected_prev_item.get("title"))
-    )
+    title_candidates = []
+    if not active_only:
+        title_candidates.append(getattr(latest_focus, "title_text", None))
+    title_candidates.extend([
+        focus_entity.get("title_text"),
+        selected_prev_item.get("title"),
+    ])
+    title_text = _first_non_empty_text(*title_candidates)
 
     entity_key = _first_non_empty_text(
         resolved_ids["pjt_id"],
@@ -156,19 +199,31 @@ def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
         strategy_meta.get("focus_entity_key"),
     )
 
+    entity_kind_candidates = []
+    if not active_only:
+        entity_kind_candidates.append(getattr(latest_focus, "kind", None))
+    entity_kind_candidates.extend([
+        focus_entity.get("kind"),
+        selected_prev_item.get("context_kind"),
+    ])
+
     payload: Dict[str, Any] = {
         "present": bool(entity_key or title_text),
-        "anchor_source": strategy_meta.get("anchor_source") or getattr(latest_focus, "source", None) or strategy_meta.get("seed_source"),
+        "anchor_source": (
+            strategy_meta.get("anchor_source")
+            or (None if active_only else getattr(latest_focus, "source", None))
+            or strategy_meta.get("seed_source")
+        ),
         "entity_key": entity_key,
-        "entity_kind": _first_non_empty_text(
-            getattr(latest_focus, "kind", None),
-            focus_entity.get("kind"),
-            selected_prev_item.get("context_kind"),
-        ) or "project",
+        "entity_kind": _first_non_empty_text(*entity_kind_candidates) or "project",
         "title_text": title_text,
     }
     payload.update(resolved_ids)
     return payload
+
+
+def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
+    return get_followup_anchor_context(state, active_only=False)
 
 
 def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
@@ -233,7 +288,7 @@ def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Di
     normalized_intent = _get_normalized_intent(state)
     output_type = str(_pick_attr(normalized_intent, key="output_type", default="") or "").strip().lower()
     action = str(_pick_attr(normalized_intent, key="action", default="") or "").strip().lower()
-    anchor_context = _resolve_followup_anchor_context(state)
+    anchor_context = get_followup_anchor_context(state, active_only=True)
     metadata = {
         "anchor_present": anchor_context.get("present", False),
         "anchor_source": anchor_context.get("anchor_source"),
@@ -801,7 +856,7 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     hint_query = _pick_attr(ks, normalized_intent, qa, key="retrieval_query", default=raw_query)
     action = str(_pick_attr(normalized_intent, qa, key="action", default="") or "").strip().lower()
     output_type = str(_pick_attr(normalized_intent, qa, key="output_type", default="") or "").strip().lower()
-    anchor_context = _resolve_followup_anchor_context(state)
+    anchor_context = get_followup_anchor_context(state, active_only=True)
     ks_confidence = float(ks.confidence) if getattr(ks, "confidence", None) is not None else None
     qa_confidence = float(qa.confidence) if getattr(qa, "confidence", None) is not None else None
     confidence = ks_confidence if ks_confidence is not None else (qa_confidence if qa_confidence is not None else 0.0)
