@@ -242,6 +242,16 @@ retrieval view를 prompt에 그대로 넣지 않는다.
 - join/filter contract 확인
 - UTF-8 무결성 확인
 
+### UTF-8 Safety Rules
+
+- Keep docs and Korean-bearing source files in UTF-8.
+- Do not rewrite Korean files with shell-wide string replacement.
+- Do not use `Get-Content -Raw` plus full-file `Set-Content` rewrites on Korean files.
+- Prefer minimal line-based patches for Korean files.
+- Do not mix semantic feature changes and encoding recovery in one opaque rewrite.
+- After editing, check for mojibake, replacement `?` characters, and unintended large diffs.
+- Do not finish work while Korean text is visibly broken.
+
 ## 문서를 같이 갱신해야 하는 경우
 
 - contract / strategy 변경

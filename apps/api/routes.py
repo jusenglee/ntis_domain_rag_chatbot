@@ -17,7 +17,7 @@ from apps.core.schemas import strategy_spec_to_response
 
 
 class QueryRequest(BaseModel):
-    """`/query/*` ?붿껌???쇨??섍쾶 ?곕뒗 HTTP ?낅젰 紐⑤뜽?대떎."""
+    """`/query/*` ??? ???? HTTP ?? ????."""
     question: str
     conversation_id: Optional[str] = None
     temperature: Optional[float] = Field(default=None, alias="Temperature")
@@ -34,7 +34,7 @@ class QueryRequest(BaseModel):
 class RouteDeps:
     # Keep route dependencies explicit so runtime wiring changes do not require hidden globals.
     # Keep route wiring explicit so the app factory remains the composition root.
-    """route layer媛 ?꾩슂濡??섎뒗 runtime ?섏〈?깆쓣 紐낆떆?곸쑝濡?臾띕뒗??"""
+    """route layer? ??? ?? runtime ???? ????? ???."""
     template_index_path: Any
     logger: Any
     log_event: Any
@@ -55,7 +55,7 @@ class RouteDeps:
 
 
 def register_routes(app: FastAPI, deps: RouteDeps) -> None:
-    """FastAPI app??home, query, health, metrics route瑜??깅줉?쒕떎."""
+    """FastAPI app? home, query, health, metrics route? ????."""
     template_index_path = deps.template_index_path
     logger = deps.logger
     log_event = deps.log_event
@@ -75,19 +75,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
     strategy_violation = deps.strategy_violation
 
     def _get_graph(request: Request) -> Any:
-        """app.state?먯꽌 而댄뙆?쇰맂 graph瑜?媛?몄삩??"""
+        """app.state?? ???? graph? ????."""
         return getattr(getattr(request.app, "state", None), "graph", None)
 
     def _get_metrics_http(request: Request) -> Any:
-        """app.state?먯꽌 metrics client瑜?媛?몄삩??"""
+        """app.state?? metrics client? ????."""
         return getattr(getattr(request.app, "state", None), "metrics_http", None)
 
     def _get_kv_store(request: Request) -> Any:
-        """app.state?먯꽌 memory/kv store瑜?媛?몄삩??"""
+        """app.state?? memory/kv store? ????."""
         return getattr(getattr(request.app, "state", None), "kv_store", None)
 
     def _dump_model(value: Any) -> Any:
-        """pydantic model??JSON-serializable dict濡??怨? ?꾨땲硫?媛믪쓣 洹몃?濡??붾떎."""
+        """pydantic model? JSON-serializable dict? ??? ??? ?? ??? ??."""
         if value is None:
             return None
         model_dump = getattr(value, "model_dump", None)
@@ -96,7 +96,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return value
 
     def _stream_data(tag: str, **payload: Any) -> str:
-        """SSE ???대깽?몃? `data: ...` ?뺥깭濡?吏곷젹?뷀븳??"""
+        """SSE ???? `data: ...` ??? ?????."""
         body = {"tag": tag, **payload}
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
@@ -134,7 +134,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return _pick_reference_value(reference, doc, "rst_id")
 
     def _resolve_reference_title(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
-        """reference/doc payload?먯꽌 ?ъ슜?먯뿉寃?蹂댁뿬以??쒕ぉ??怨좊Ⅸ??"""
+        """reference/doc payload?? ????? ??? ??? ???."""
         for key in ("title", "title_text", "title1", "title2"):
             value = reference.get(key)
             if value is None and isinstance(doc, dict):
@@ -151,7 +151,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return None
 
     def _normalize_reference_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
-        """context doc瑜?API ?묐떟??reference payload濡??뺢퇋?뷀븳??"""
+        """context doc? API ??? reference payload? ?????."""
         mapped = rag_mapper.get_references(doc)
         if not isinstance(mapped, dict):
             mapped = {}
@@ -161,7 +161,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         result["title"] = _resolve_reference_title(result, doc)
         return result
 
-    #?몃? ?붿껌?먯꽌 ?숈쟻 ?뚮씪誘명꽣媛 ?덉쓣寃쎌슦 ?대????명똿 ?섎뒗 ?⑥닔
+    # ??? ?? ????? ?? ?? ??? ?????? ???? ??
     def _build_request_overrides(payload: QueryRequest) -> dict[str, Any]:
         overrides: dict[str, Any] = {}
 
@@ -187,7 +187,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
 
     async def _runtime_status(request: Request) -> dict[str, Any]:
-        """graph, kv, metrics ?곹깭瑜??⑹퀜 health payload濡?留뚮뱺??"""
+        """graph, kv, metrics ??? ??? health payload? ???."""
         kv_store = _get_kv_store(request)
         graph_ready = _get_graph(request) is not None
         metrics_ready = _get_metrics_http(request) is not None
@@ -208,7 +208,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/", response_class=HTMLResponse)
     async def home() -> HTMLResponse:
-        """index template???덉쑝硫?梨꾪똿 UI瑜? ?놁쑝硫?媛꾨떒??fallback HTML???대낫?몃떎."""
+        """index template? ??? ?? UI?, ??? ??? fallback HTML? ????."""
         if not template_index_path.exists():
             return HTMLResponse(
                 content="<html><body><h3>NTIS RAG Chatbot</h3><p>index template unavailable.</p></body></html>",
@@ -218,7 +218,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.post("/query/stream")
     async def query_stream(payload: QueryRequest, request: Request) -> StreamingResponse:
-        """?ㅽ듃由щ컢 ?묐떟???꾪븳 SSE endpoint??"""
+        """???? ??? ?? SSE endpoint?."""
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
@@ -227,7 +227,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         graph = _get_graph(request)
 
         async def event_generator():
-            """graph event stream???뚮퉬??chunk, status, reference, error ?대깽?몃줈 諛붽퓭 ?섎젮蹂대궦??"""
+            """graph event stream? chunk, status, reference, error ???? ?? ?????."""
             if graph is None:
                 yield _stream_data("error", error="runtime_not_ready", error_code="RUNTIME_NOT_READY")
                 yield _stream_data("status", status="done", error=True)
@@ -393,7 +393,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.post("/query/debug")
     async def query_debug(payload: QueryRequest, request: Request) -> Dict[str, Any]:
-        """graph瑜???踰??ㅽ뻾?섍퀬 answer, question_analysis, strategy_summary瑜??ы븿???붾쾭洹?JSON???뚮젮以??"""
+        """graph? ???? answer, question_analysis, strategy_summary? ??? JSON? ????."""
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
@@ -491,19 +491,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/health")
     async def health_check(request: Request) -> JSONResponse:
-        """?고???以鍮??щ?瑜?health payload怨??④퍡 諛섑솚?쒕떎."""
+        """?? ?? ??? health payload ??? ?? ????."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200 if payload["ready"] else 503)
 
     @app.get("/health/details")
     async def health_details(request: Request) -> JSONResponse:
-        """?곸꽭 health payload瑜???긽 200 ?묐떟?쇰줈 ?대낫?몃떎."""
+        """?? health payload???? ?? ??? 200 ??? ????."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200)
 
     @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
     async def get_metrics(request: Request) -> MetricSnapshot | JSONResponse:
-        """metrics client媛 ?덉쑝硫??꾩옱 硫뷀듃由??ㅻ깄?룹쓣 諛섑솚?쒕떎."""
+        """metrics client? ???? ?? ???? ??? ????."""
         metrics_http = _get_metrics_http(request)
         if metrics_http is None:
             return JSONResponse(
@@ -514,11 +514,11 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/metrics/stream")
     async def stream_metrics(request: Request) -> StreamingResponse:
-        """硫뷀듃由??ㅻ깄?룹쓣 二쇨린?곸쑝濡?SSE濡??섎젮蹂대궦??"""
+        """???? ???? ?? ??? SSE? ?????."""
         metrics_http = _get_metrics_http(request)
 
         async def event_generator() -> Any:
-            """graph event stream???뚮퉬??chunk, status, reference, error ?대깽?몃줈 諛붽퓭 ?섎젮蹂대궦??"""
+            """graph event stream? chunk, status, reference, error ???? ?? ?????."""
             if metrics_http is None:
                 yield "event: error\ndata: {\"error\":\"runtime_not_ready\",\"error_code\":\"RUNTIME_NOT_READY\"}\n\n"
                 return

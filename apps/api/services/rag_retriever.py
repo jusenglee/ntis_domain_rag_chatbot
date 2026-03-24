@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from inspect import signature
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 
@@ -19,16 +20,19 @@ from apps.api.contracts.runtime_contracts import friendly_strategy_violation_mes
 
 
 def _get_normalized_intent(state: Any) -> Any:
-    """state??intent payload?먯꽌 ?ㅼ젣 `normalized_intent` 媛앹껜瑜?爰쇰궡?⑤떎.
-    wrapper shape媛 ?ㅻⅨ state쨌payload?먯꽌 怨듯넻?쇰줈 ?섎룄 ?뺣낫瑜??쎄린 ?꾪븳 ?뷀듃由??ы띁??
+    """state의 intent payload에서 실제 `normalized_intent` 객체를 꺼낸다.
+
+    wrapper shape가 다른 state/payload에서도 공통적으로 필요한 정보를 읽기 위한 헬퍼다.
     """
     payload = getattr(state, "intent_payload", None)
     return getattr(payload, "normalized_intent", None) if payload else None
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """?щ윭 ?꾨낫 source?먯꽌 ?뱀젙 ?띿꽦??李⑤?濡?李얠븘 泥?媛믪쓣 諛섑솚?쒕떎.
-    knowledge sufficiency, normalized intent, question analysis媛 媛숈? ?꾨뱶瑜?怨듭쑀?????곗꽑?쒖쐞瑜?二쇨퀬 ?④퍡 ?쎄쾶 ?쒕떎.
+    """여러 후보 source에서 특정 속성의 첫 값을 찾아 반환한다.
+
+    knowledge sufficiency, normalized intent, question analysis가 같은 필드를 공유하므로
+    우선순위를 두고 읽기 위해 사용한다.
     """
     for source in sources:
         if source is None:
@@ -221,7 +225,7 @@ def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Di
     return _build_anchor_preserving_query_from_context(state=state, query=query, anchor_context=anchor_context)
 
 
-_QUERY_TOKEN_RE = re.compile("[A-Za-z0-9_-]+|[?-?]{2,}")
+_QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+|[\uac00-\ud7a3]{2,}")
 _GENERIC_QUERY_TERMS = {
     "알려줘",
     "보여줘",
@@ -406,9 +410,21 @@ def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bo
     return bool(deduped_reasons), deduped_reasons
 
 
+def _ensure_run_rag_ab_compare_supports_request_overrides() -> None:
+    params = signature(run_rag_ab_compare).parameters
+    if "request_overrides" in params:
+        return
+    raise TypeError(
+        "run_rag_ab_compare() does not accept request_overrides; "
+        "loaded runtime appears stale or out of sync with rag_retriever"
+    )
+
+
 class CustomRAGRetriever(BaseModel):
-    """LangChain/?쒕퉬??痢≪뿉???쇨???RAG 議고쉶 ?뷀듃由щ줈 ??媛꾨떒??retriever ?대뙌?곕떎.
-    AB 鍮꾧탳 寃곌낵?먯꽌 ?덊듃, aggregation, canonical evidence, render profile瑜?爰쇰궡 ?몃? ?뚮퉬?먭? ?쎄린 ?ъ슫 shape濡?諛붽씔??
+    """LangChain/서비스 계층에서 쓰기 쉬운 RAG 조회 래퍼 retriever 모델이다.
+
+    AB 비교 결과에서 히트, aggregation, canonical evidence, render profile을 꺼내
+    상위 서비스 계층이 쓰기 쉬운 shape로 바꾼다.
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -421,8 +437,9 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _infer_tag_from_hit_data(hit_data: Dict[str, Any], intent_payload: Optional[IntentPayloadV3] = None) -> Optional[str]:
-        """?덊듃 payload? intent target collection??諛뷀깢?쇰줈 臾몄꽌 ?쒓렇瑜?異붿젙?쒕떎.
-        payload???쒓렇媛 ?놁뼱??project/perf 怨꾩뿴 ?쒗뵆由우쓣 留욊쾶 ?뚮뜑?????덈룄濡?蹂댁“ ?쒓렇瑜?留뚮뱺??
+        """히트 payload와 intent target collection을 바탕으로 문서 태그를 추정한다.
+
+        payload에 태그가 없으면 project/perf 계열 분기를 맞추기 위한 보조 태그를 만든다.
         """
         tag = hit_data.get("tag")
         if tag:
@@ -447,8 +464,9 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _has_minimum_document_fields(hit_data: Dict[str, Any]) -> bool:
-        """?덊듃媛 ?몃? 臾몄꽌 酉곕줈 ?대낫??理쒖냼?쒖쓽 ?뺣낫瑜?媛議뚮뒗吏 寃?ы븳??
-        title쨌content쨌meta쨌nested member 以??섎굹?쇰룄 ?섎? ?덈뒗 媛믪씠 ?놁쑝硫?retriever ?묐떟?먯꽌 ?쒖쇅?쒕떎.
+        """히트가 상위 문서 뷰로 올라올 최소한의 정보를 갖추는지 검사한다.
+
+        title, content, meta, nested member 중 하나라도 유효한 값이 없으면 retriever 응답에서 제외한다.
         """
         candidates = [
             hit_data.get("doc_id"),
@@ -471,8 +489,10 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
-        """`IntentPayloadV3`?먯꽌 RAG runtime??吏곸젒 ??payload 酉곕쭔 異붿텧?쒕떎.
-        normalized intent媛 ?щ컮瑜???낆씪 ?뚮쭔 ?섍린硫? ?꾨땲硫?retriever媛 planner/runtime contract 諛붽묑 shape瑜?吏묒뼱?ｌ? ?딄쾶 ?쒕떎.
+        """`IntentPayloadV3`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
+
+        normalized intent가 올바른 타입일 때만 넘기며, retriever가 planner/runtime contract 바깥 shape를
+        직접 끌어오지 않게 한다.
         """
         if intent_payload is None:
             return None
@@ -502,8 +522,9 @@ class CustomRAGRetriever(BaseModel):
         return f"{index}. {project_title}" + (f" ({year})" if year else "")
 
     def retrieve(self, query: str) -> Dict[str, Any]:
-        """AB 鍮꾧탳 RAG ?ㅽ뻾 寃곌낵?먯꽌 ?ъ슜?먭? 蹂닿린 ?ъ슫 documents/canonical_evidence/render_profile 援ъ“瑜?留뚮뱺??
-        aggregation rank_items? ?쇰컲 hit 寃쎈줈瑜?援щ텇???쒕퉬??酉곗뿉 留욌뒗 ?대┛ dict ?뺥깭濡??ы룷?ν븳??
+        """AB 비교 RAG 실행 결과에서 상위 계층이 바로 쓰는 documents/canonical_evidence/render_profile 구조를 만든다.
+
+        aggregation rank_items와 일반 hit 경로를 구분해 서비스 뷰에 맞는 단일 dict 형태로 반환한다.
         """
         strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
         clarification = build_followup_clarification_payload(dict(strategy_meta))
@@ -517,6 +538,7 @@ class CustomRAGRetriever(BaseModel):
                 "clarification": clarification,
             }
 
+        _ensure_run_rag_ab_compare_supports_request_overrides()
         res_map = run_rag_ab_compare(
             query=query,
             model_name=self.model_name,
@@ -736,10 +758,12 @@ class CustomRAGRetriever(BaseModel):
 
 
 def is_hit_source(doc: Dict[str, Any]) -> bool:
-    """retriever 酉?臾몄꽌媛 ?쇰컲 hit source?몄? ?щ?瑜??먮퀎?쒕떎.
-    aggregation 寃곌낵? hit 寃곌낵瑜??뚮퉬 痢≪뿉???쎄쾶 援щ텇?섎뒗 吏㏃? ?ы띁??
+    """retriever 뷰 문서가 일반 hit source인지 여부를 판별한다.
+
+    aggregation 결과와 hit 결과를 상위 계층에서 쉽게 구분하기 위한 얇은 헬퍼다.
     """
     return doc.get("source_type", "hit") == "hit"
+
 
 
 def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) -> tuple[str, str, str, float, bool, list[str], bool]:

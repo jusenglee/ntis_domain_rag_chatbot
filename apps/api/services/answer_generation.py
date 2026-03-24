@@ -79,9 +79,10 @@ def build_answer_context(
     split_sentences_fn: Any,
     logger: Any,
 ) -> dict[str, Any]:
-    """臾몄꽌??canonical evidence瑜??듬? ?앹꽦??context text濡??뺣━?쒕떎.
+    """문서와 canonical evidence를 답변 생성용 context text로 정리한다.
 
-    媛?ν븯硫?canonical_evidence瑜?洹몃?濡??뚮뜑留곹븯怨? ?놁쓣 ?뚮쭔 docs瑜?canonical ?뺥깭濡??뚯깮?쒖폒 raw payload ?섏〈??以꾩씤??
+    가능하면 canonical_evidence를 그대로 렌더링하고, 없을 때만 docs를 canonical 형태로 파생해
+    raw payload 직접 참조를 줄인다.
     """
     is_solar = model_name == "solar_vllm_0"
     profile = dict(render_profile or {})
@@ -154,9 +155,10 @@ async def generate_answer(
     solar_gen_deadline_ms: int,
     solar_stream_max_chars: int,
 ) -> Dict[str, Any]:
-    """??紐⑤뜽?????system prompt, reference context, user question??臾띠뼱 理쒖쥌 ?듬????앹꽦?쒕떎.
+    """모델별 system prompt, reference context, user question을 묶어 최종 답변을 생성한다.
 
-    ?ㅽ듃由щ컢 硫뷀듃由?낵 context ?ъ슜 ?щ?瑜??④퍡 湲곕줉???댄썑 蹂묓빀 ?④퀎媛 紐⑤뜽 ?곹깭瑜?洹쇨굅 ?덇쾶 ?먮떒?섍쾶 留뚮뱺??
+    스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게
+    판단할 수 있도록 만든다.
     """
     detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
     if detail_server_answer:
@@ -344,9 +346,9 @@ async def merge_answers(
     dual_model_fallback_message: str,
     solar_min_answer_chars: int,
 ) -> Dict[str, Any]:
-    """Solar? Gemma 寃곌낵 以?理쒖쥌 ?듬????좏깮?섍퀬 蹂묓빀 硫뷀?瑜??④릿??
+    """Solar과 Gemma 결과 중 최종 답변을 선택하고 병합 메타를 기록한다.
 
-    ?좏깮 ?뺤콉? ?몃? ?⑥닔???꾩엫?섍퀬, ?ш린?쒕뒗 ?좏깮 ?댁쑀? ?ㅽ뙣 吏뺥썑瑜?workflow state??蹂댁〈?쒕떎.
+    선택 정책은 별도 함수에 위임하고, 여기서는 선택 사유와 실패 징후를 workflow state에 보존한다.
     """
     has_docs_context = bool(getattr(state, "context", None) or getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
     rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))

@@ -20,18 +20,18 @@ from apps.core.followup_resolution import build_followup_clarification_message, 
 
 
 def _get_normalized_intent(state: Any) -> Any:
-    """workflow state?먯꽌 normalized_intent留??덉쟾?섍쾶 爰쇰궦??"""
+    """workflow state에서 normalized_intent만 안전하게 꺼낸다."""
     payload = getattr(state, "intent_payload", None)
     return getattr(payload, "normalized_intent", None) if payload else None
 
 
 def _get_strategy(state: Any) -> Any:
-    """workflow state???ㅻ┛ strategy 媛앹껜瑜?諛섑솚?쒕떎."""
+    """workflow state에서 현재 strategy 객체를 반환한다."""
     return getattr(state, "strategy", None)
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """?щ윭 source瑜??쒖꽌?濡?蹂대ŉ key???대떦?섎뒗 泥?鍮껷one 媛믪쓣 怨좊Ⅸ??"""
+    """여러 source를 순서대로 보며 key에 해당하는 첫 non-None 값을 고른다."""
     for source in sources:
         if source is None:
             continue
@@ -221,9 +221,10 @@ async def node_knowledge_sufficiency(
     logger: Any,
     log_event: Any,
 ) -> Dict[str, Any]:
-    """?댁쟾 臾몃㎘留뚯쑝濡??듯븷 ???덈뒗吏 ?먮떒?섍퀬, ?꾩슂?섎㈃ retrieval ?섎룄瑜?留뚮뱺??
+    """이전 문맥만으로 답할 수 있는지 판단하고, 필요하면 retrieval 의도를 만든다.
 
-    planner/strategy ?좏샇媛 ?대? 異⑸텇??媛뺥븯硫?LLM ?먮떒??嫄대꼫?곌퀬 利됱떆 high濡?怨좎젙??遺덊븘?뷀븳 ?고쉶瑜?以꾩씤??
+    planner/strategy 신호가 이미 충분히 강하면 LLM 판단을 건너뛰고 즉시 high로 고정해
+    불안정한 우회를 줄인다.
     """
     history = state.chat_history[-6:]
     history_str = "\n".join([f"{type(message).__name__}: {message.content}" for message in history])
@@ -271,7 +272,7 @@ async def node_knowledge_sufficiency(
     if (query_intent or strategy or qa) and not state.prev_context:
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="high",
-            search_intent="?댁쟾 臾몃㎘???놁뼱 ?덈줈??寃?됱씠 ?꾩슂?⑸땲??",
+            search_intent="이전 문맥이 없어 새로운 검색이 필요합니다.",
             retrieval_query=retrieval_query,
             confidence=1.0,
         )
@@ -329,21 +330,21 @@ async def node_knowledge_sufficiency(
     )
 
     system_prompt = (
-        "?뱀떊? 吏??寃???꾩슂?깆쓣 ?먮떒?섎뒗 遺꾩꽍湲곗엯?덈떎.\n"
-        "???쒖뒪?쒖뿉???ъ슜?섎뒗 ?⑹뼱??紐⑤몢 援?궡 ?곌뎄媛쒕컻(R&D) ?됱젙 諛??쒕룄 留λ씫?쇰줈 ?댁꽍?⑸땲??\n"
-        "[?댁쟾 ???? [李멸퀬 臾몄꽌]瑜?湲곕컲?쇰줈, [?꾩옱 吏덈Ц]???듯븯湲??꾪빐 ?덈줈??寃?됱씠 ?꾩슂?쒖? ?먮떒?섏꽭??\n\n"
-        "?먮떒 湲곗?:\n"
+        "당신은 추가 검색 필요성을 판단하는 분석기입니다.\n"
+        "이 시스템에서 사용하는 용어는 모두 국내 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
+        "[이전 대화]와 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
+        "판단 기준:\n"
         "1. requires_new_knowledge:\n"
-        "   - low: [李멸퀬 臾몄꽌]留뚯쑝濡?異⑸텇???듬? 媛??n"
-        "   - medium: [李멸퀬 臾몄꽌]濡??쇰? ?듬? 媛?ν븯??蹂닿컯 ?꾩슂\n"
-        "   - high: [李멸퀬 臾몄꽌]濡??듬? 遺덇??섍굅???덈줈???뺣낫 ?붿껌\n\n"
-        "2. search_intent: 寃?됱씠 ?꾩슂??寃쎌슦, 臾댁뾿??李얠븘???섎뒗吏 ?ㅻ챸\n"
+        "   - low: [참고 문서]만으로 충분히 답할 수 있음\n"
+        "   - medium: [참고 문서]로 일부 답은 가능하나 보강 검색이 필요함\n"
+        "   - high: [참고 문서]로 답변이 부족하거나 새로운 정보가 필요함\n\n"
+        "2. search_intent: 검색이 필요한 경우, 무엇을 찾아야 하는지 설명\n"
         "3. retrieval_query:\n"
-        "   - search_intent 湲곕컲 踰≫꽣 寃?됱뿉 理쒖쟻?붾맂 吏덉쓽??荑쇰━\n"
-        "   - ?ㅼ썙???먮뒗 吏㏃? 援щЦ ?뺥깭\n"
-        "   - ?듭떖 媛쒕뀗 5媛??대궡\n"
-        "   - 理쒕? 120???대궡\n"
-        "4. confidence: ?먮떒 ?좊ː??0.0~1.0)\n\n"
+        "   - search_intent 기반 벡터 검색에 적합한 질의형 쿼리\n"
+        "   - 짧고 명확한 자연어 구문 형태\n"
+        "   - 핵심 개념 5개 이내\n"
+        "   - 최대 120자 이내\n"
+        "4. confidence: 판단 신뢰도 (0.0~1.0)\n\n"
         "{format_instructions}"
     )
 
@@ -352,7 +353,7 @@ async def node_knowledge_sufficiency(
             ("system", system_prompt),
             (
                 "human",
-                "[?댁쟾 ???\n{history}\n\n[李멸퀬 臾몄꽌]\n{prev_context}\n\n[?꾩옱 吏덈Ц]\n{question}",
+                "[이전 대화]\n{history}\n\n[참고 문서]\n{prev_context}\n\n[현재 질문]\n{question}",
             ),
         ]
     )
@@ -362,8 +363,8 @@ async def node_knowledge_sufficiency(
         result = await chain.ainvoke(
             {
                 "format_instructions": parser.get_format_instructions(),
-                "history": history_str or "?놁쓬",
-                "prev_context": prev_context_str or "?놁쓬",
+                "history": history_str or "없음",
+                "prev_context": prev_context_str or "없음",
                 "question": state.messages[-1].content,
             }
         )
@@ -400,9 +401,10 @@ async def node_rag_search(
     logger: Any,
     log_event: Any,
 ) -> Dict[str, Any]:
-    """knowledge sufficiency ?④퀎媛 ?뺥븳 query濡??ㅼ젣 RAG 寃?됱쓣 ?섑뻾?쒕떎.
+    """knowledge sufficiency 단계가 정한 query로 실제 RAG 검색을 수행한다.
 
-    retriever 寃곌낵?먯꽌 臾몄꽌, canonical_evidence, render_profile留?爰쇰궡 workflow state濡??섍꺼 ?꾩냽 ?듬? ?앹꽦??raw payload??吏곸젒 ?섏〈?섏? ?딄쾶 ?쒕떎.
+    retriever 결과에서 문서, canonical_evidence, render_profile만 꺼내 workflow state로 넘겨
+    후속 답변 생성이 raw payload에 직접 의존하지 않게 한다.
     """
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
