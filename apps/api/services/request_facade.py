@@ -118,6 +118,127 @@ def _apply_anchor_lock(normalized_intent: Any, seed_map: dict[str, list[str]]) -
     return normalized_intent
 
 
+def _get_field(source: Any, key: str, default: Any = None) -> Any:
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+
+def _replace_fields(source: Any, **updates: Any) -> Any:
+    if source is None:
+        return None
+    if isinstance(source, dict):
+        patched = dict(source)
+        patched.update(updates)
+        return patched
+    if is_dataclass(source):
+        return replace(source, **updates)
+    for key, value in updates.items():
+        try:
+            setattr(source, key, value)
+        except Exception:
+            pass
+    return source
+
+
+def _normalize_org_role_hint(normalized_intent: Any, question: str) -> Optional[str]:
+    org_role = str(_get_field(normalized_intent, "org_role", "") or "").strip().lower()
+    if org_role in {"performer", "performing"}:
+        return "lead"
+    if org_role:
+        return org_role
+    text = str(question or "").strip()
+    if any(token in text for token in ("참여기관", "협력기관")):
+        return "participant"
+    if any(token in text for token in ("수행기관", "주관기관")):
+        return "lead"
+    if any(token in text for token in ("소속기관", "소속")):
+        return "affiliation"
+    return None
+
+
+def _has_project_anchor_seed(normalized_intent: Any) -> bool:
+    ids_map = _get_field(normalized_intent, "ids_map", {}) or {}
+    if not isinstance(ids_map, dict):
+        return False
+    return bool(ids_map.get("pjt_id") or ids_map.get("pjt_no"))
+
+
+def _has_role_scoped_org_request(normalized_intent: Any, question: str) -> bool:
+    if _normalize_org_role_hint(normalized_intent, question):
+        return True
+    for key in ("lead_org_terms", "participant_org_terms", "people_affiliation_org_terms"):
+        values = _get_field(normalized_intent, key, None) or []
+        if any(str(value or "").strip() for value in values):
+            return True
+    return False
+
+
+def _coerce_project_anchor_role_followup(
+    normalized_intent: Any,
+    question_analysis: Any,
+    *,
+    question: str,
+    followup_resolution: Dict[str, Any],
+    log_event: Any,
+    request_id: Optional[str],
+    conversation_id: str,
+) -> tuple[Any, Any]:
+    status = str((followup_resolution or {}).get("followup_resolution_status") or "").strip().lower()
+    if status != "resolved":
+        return normalized_intent, question_analysis
+    if not _has_project_anchor_seed(normalized_intent):
+        return normalized_intent, question_analysis
+    if not _has_role_scoped_org_request(normalized_intent, question):
+        return normalized_intent, question_analysis
+
+    role_hint = _normalize_org_role_hint(normalized_intent, question)
+    org_terms = list(_get_field(normalized_intent, "org_terms", []) or [])
+    lead_terms = list(_get_field(normalized_intent, "lead_org_terms", []) or [])
+    participant_terms = list(_get_field(normalized_intent, "participant_org_terms", []) or [])
+    affiliation_terms = list(_get_field(normalized_intent, "people_affiliation_org_terms", []) or [])
+
+    intent_updates = {
+        "base_route": "project",
+        "action": "detail",
+        "output_type": "detail",
+    }
+    if role_hint:
+        intent_updates["org_role"] = role_hint
+        if role_hint == "lead" and not lead_terms and org_terms:
+            intent_updates["lead_org_terms"] = list(org_terms)
+        elif role_hint == "participant" and not participant_terms and org_terms:
+            intent_updates["participant_org_terms"] = list(org_terms)
+        elif role_hint == "affiliation" and not affiliation_terms and org_terms:
+            intent_updates["people_affiliation_org_terms"] = list(org_terms)
+
+    normalized_intent = _replace_fields(normalized_intent, **intent_updates)
+
+    if question_analysis is not None:
+        qa_updates = {
+            "head": "project",
+            "action": "detail",
+            "output_type": "detail",
+            "limit": 1,
+            "display_limit": 1,
+            "retrieval_query": str(question or "").strip() or _get_field(question_analysis, "retrieval_query", None),
+        }
+        question_analysis = _replace_fields(question_analysis, **qa_updates)
+
+    log_event(
+        "FOLLOWUP.ROLE_DETAIL.COERCED",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        role_kind=role_hint,
+        anchor_kind="project",
+        has_pjt_id_seed=int(bool((_get_field(normalized_intent, "ids_map", {}) or {}).get("pjt_id"))),
+        has_pjt_no_seed=int(bool((_get_field(normalized_intent, "ids_map", {}) or {}).get("pjt_no"))),
+    )
+    return normalized_intent, question_analysis
+
+
 def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question: str) -> Dict[str, Any]:
     if anchor is None:
         return {
@@ -401,6 +522,15 @@ class RequestUnderstandingFacade:
             )
             if str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
                 normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
+                normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
+                    normalized_intent_base,
+                    question_analysis,
+                    question=question,
+                    followup_resolution=followup_resolution,
+                    log_event=self.log_event,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                )
         elif anchor is not None:
             seed_map = anchor_to_seed_map(anchor)
             normalized_intent_base = _apply_anchor_lock(normalized_intent_base, seed_map)
@@ -418,6 +548,15 @@ class RequestUnderstandingFacade:
                 person_no=getattr(anchor, "person_no", None),
                 org_id=getattr(anchor, "org_id", None),
             )
+            normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
+                normalized_intent_base,
+                question_analysis,
+                question=question,
+                followup_resolution=followup_resolution,
+                log_event=self.log_event,
+                request_id=request_id,
+                conversation_id=conversation_id,
+            )
         if not has_explicit_precheck_signals(precheck):
             question_analysis = await self.run_question_analysis(
                 question=question,
@@ -431,6 +570,15 @@ class RequestUnderstandingFacade:
             )
             planner_failed = int(float(getattr(question_analysis, "confidence", 0.0) or 0.0) <= 0.0)
         if question_analysis is not None:
+            normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
+                normalized_intent_base,
+                question_analysis,
+                question=question,
+                followup_resolution=followup_resolution,
+                log_event=self.log_event,
+                request_id=request_id,
+                conversation_id=conversation_id,
+            )
             _resolve_question_analysis_count(
                 question_analysis,
                 question=question,
@@ -447,6 +595,15 @@ class RequestUnderstandingFacade:
         normalized_intent = _apply_anchor_lock(
             normalized_intent,
             followup_resolution.get("seed_map") or {},
+        )
+        normalized_intent, question_analysis = _coerce_project_anchor_role_followup(
+            normalized_intent,
+            question_analysis,
+            question=question,
+            followup_resolution=followup_resolution,
+            log_event=self.log_event,
+            request_id=request_id,
+            conversation_id=conversation_id,
         )
         self.log_event(
             "PLANNER.PIPELINE",

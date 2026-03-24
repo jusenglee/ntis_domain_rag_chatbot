@@ -910,15 +910,16 @@ def test_normalize_display_payloads_recovers_list_snapshot_from_canonical_items(
         conversation_id='cid',
     )
 
-    assert bundle.docs_count == 1
+    assert bundle.docs_count == 3
     assert bundle.canonical_count == 3
-    assert bundle.docs_kind == 'collection_wrapper'
-    assert bundle.display_source == 'synthetic_from_canonical'
+    assert bundle.docs_kind == 'item_list'
+    assert bundle.display_source == 'canonical_axis'
     assert len(bundle.snapshot_documents) == 3
     assert bundle.snapshot_documents[1]['pjt_id'] == 'PJT-2'
-    mismatch_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_INPUT_MISMATCH')
-    assert mismatch_fields['docs_kind'] == 'collection_wrapper'
-    assert mismatch_fields['display_source'] == 'synthetic_from_canonical'
+    promoted_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_CANONICAL_AXIS.PROMOTED')
+    assert promoted_fields['docs_count_before'] == 1
+    assert promoted_fields['canonical_count'] == 3
+    assert all(event != 'RAG.DISPLAY_INPUT_MISMATCH' for event, _ in log_calls)
 
 
 def test_normalize_display_payloads_prefers_explicit_count_over_requested_count_for_recovery():
@@ -941,10 +942,11 @@ def test_normalize_display_payloads_prefers_explicit_count_over_requested_count_
         conversation_id='cid',
     )
 
-    assert bundle.display_source == 'synthetic_from_canonical'
+    assert bundle.display_source == 'canonical_axis'
     assert len(bundle.snapshot_documents) == 3
-    mismatch_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_INPUT_MISMATCH')
-    assert mismatch_fields['display_source'] == 'synthetic_from_canonical'
+    promoted_fields = next(fields for event, fields in log_calls if event == 'RAG.DISPLAY_CANONICAL_AXIS.PROMOTED')
+    assert promoted_fields['canonical_count'] == 3
+    assert all(event != 'RAG.DISPLAY_INPUT_MISMATCH' for event, _ in log_calls)
 
 
 def test_custom_rag_retriever_short_circuits_followup_clarification():

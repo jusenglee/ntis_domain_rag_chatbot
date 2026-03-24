@@ -237,6 +237,19 @@ def _parse_deictic_followup(question: str, *, default_context_kind: str) -> Opti
     return None
 
 
+
+
+def _select_deictic_candidate_items(items: list[dict[str, Any]], *, context_kind: Optional[str]) -> list[dict[str, Any]]:
+    typed_items = [item for item in items if not context_kind or item.get("context_kind") == context_kind]
+    if context_kind != "org" or typed_items:
+        return typed_items
+    project_org_carriers = [
+        item
+        for item in items
+        if item.get("context_kind") == "project" and (item.get("lead_org") or item.get("participant_org"))
+    ]
+    return project_org_carriers
+
 def resolve_reference_context_followup(*, question: str, canonical_evidence: list[dict[str, Any]], prev_context: list[dict[str, Any]], default_context_kind: str = "project") -> dict[str, Any]:
     parsed = _parse_explicit_ordinal(question)
     if parsed is None:
@@ -249,7 +262,7 @@ def resolve_reference_context_followup(*, question: str, canonical_evidence: lis
         return {"followup_resolution_status": "missing_context", "explicit_ordinal": parsed["kind"] != "deictic", "explicit_followup": True, "requested_token": parsed["token"], "requested_index": parsed.get("index"), "available_count": 0, "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": parsed["kind"], "candidate_items": []}
     if parsed["kind"] == "deictic":
         context_kind = parsed.get("context_kind")
-        typed_items = [item for item in items if not context_kind or item.get("context_kind") == context_kind]
+        typed_items = _select_deictic_candidate_items(items, context_kind=context_kind)
         if len(typed_items) != 1:
             return {"followup_resolution_status": "unresolved", "explicit_ordinal": False, "explicit_followup": True, "requested_token": parsed["token"], "requested_index": None, "available_count": len(typed_items) if context_kind else len(items), "selected_prev_item": None, "seed_map": {}, "seed_source": None, "followup_reference_kind": parsed["kind"], "candidate_items": [_compact_candidate(item) for item in (typed_items or items)[:5]]}
         selected_item = dict(typed_items[0])

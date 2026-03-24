@@ -78,7 +78,8 @@ def _classify_docs_kind(docs: list[dict[str, Any]]) -> str:
         return "item_list"
     source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
     source_types.discard("")
-    return "item_list" if not source_types or source_types == {"hit"} else "collection_wrapper"
+    item_like_types = {"hit", "canonical_item", "item", "document"}
+    return "item_list" if not source_types or source_types <= item_like_types else "collection_wrapper"
 
 
 def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -119,6 +120,68 @@ def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
     incoming_values = tuple(str(getattr(incoming, key, "") or "").strip() for key in keys)
     return any(current_values) and current_values == incoming_values
 
+
+
+
+def _build_detail_coverage_input(document: Optional[dict[str, Any]], canonical_item: Optional[dict[str, Any]]) -> dict[str, Any]:
+    merged = dict(document or {}) if isinstance(document, dict) else {}
+    if not isinstance(canonical_item, dict):
+        return merged
+
+    ids = dict(canonical_item.get("ids") or {})
+    facts = dict(canonical_item.get("facts") or {})
+    roles = dict(canonical_item.get("roles") or {})
+
+    if ids and not isinstance(merged.get("ids"), dict):
+        merged["ids"] = ids
+    elif ids:
+        merged["ids"] = {**ids, **dict(merged.get("ids") or {})}
+
+    if facts and not isinstance(merged.get("facts"), dict):
+        merged["facts"] = facts
+    elif facts:
+        merged["facts"] = {**facts, **dict(merged.get("facts") or {})}
+
+    if roles and not isinstance(merged.get("roles"), dict):
+        merged["roles"] = roles
+    elif roles:
+        merged["roles"] = {**roles, **dict(merged.get("roles") or {})}
+
+    if facts.get("title") and not str(merged.get("title") or merged.get("title_text") or "").strip():
+        merged["title"] = facts.get("title")
+        merged["title_text"] = facts.get("title")
+    if facts.get("year") and not str(merged.get("stan_yr") or "").strip():
+        merged["stan_yr"] = facts.get("year")
+    if ids.get("pjt_id") and not str(merged.get("pjt_id") or "").strip():
+        merged["pjt_id"] = ids.get("pjt_id")
+    if ids.get("pjt_no") and not str(merged.get("pjt_no") or "").strip():
+        merged["pjt_no"] = ids.get("pjt_no")
+    if ids.get("rst_id") and not str(merged.get("rst_id") or "").strip():
+        merged["rst_id"] = ids.get("rst_id")
+    if ids.get("person_no") and not str(merged.get("person_no") or merged.get("hm_id") or "").strip():
+        merged["person_no"] = ids.get("person_no")
+    if ids.get("org_id") and not str(merged.get("org_id") or "").strip():
+        merged["org_id"] = ids.get("org_id")
+    if ids.get("org_code") and not str(merged.get("org_code") or merged.get("org_cd") or "").strip():
+        merged["org_code"] = ids.get("org_code")
+    if ids.get("biz_no") and not str(merged.get("biz_no") or merged.get("org_no") or "").strip():
+        merged["biz_no"] = ids.get("biz_no")
+    if ids.get("doi") and not str(merged.get("doi") or "").strip():
+        merged["doi"] = ids.get("doi")
+    if ids.get("issn") and not str(merged.get("issn") or "").strip():
+        merged["issn"] = ids.get("issn")
+    lead_org = ((roles.get("lead_org_name") or [None])[0]) if isinstance(roles.get("lead_org_name"), list) else None
+    if lead_org and not str(merged.get("org_nm") or "").strip():
+        merged["org_nm"] = lead_org
+    if (roles.get("participant_org_name") or []) and not isinstance(merged.get("prtcp_org"), list):
+        merged["prtcp_org"] = [{"org_nm": value} for value in (roles.get("participant_org_name") or []) if str(value).strip()]
+    if (roles.get("participant_researcher_name") or []) and not isinstance(merged.get("prtcp_mp"), list):
+        merged["prtcp_mp"] = [{"hm_nm": value} for value in (roles.get("participant_researcher_name") or []) if str(value).strip()]
+    if isinstance(merged.get("prtcp_mp"), list) and (roles.get("people_affiliation_org_name") or []):
+        for item, affiliation in zip(merged.get("prtcp_mp") or [], roles.get("people_affiliation_org_name") or []):
+            if isinstance(item, dict) and affiliation and not str(item.get("blng_org_nm") or "").strip():
+                item["blng_org_nm"] = affiliation
+    return merged
 
 def _detail_anchor_active(*, query_intent: Any) -> bool:
     ids_map = getattr(query_intent, "ids_map", None) or {}
@@ -171,11 +234,31 @@ def _normalize_display_payloads(
                 output_type=output_type,
             )
 
-    docs_count = len(normalized_docs)
-    canonical_count = len(normalized_canonical)
     docs_kind = _classify_docs_kind(normalized_docs)
     canonical_kind = "item_list"
-    display_source = "docs"
+    fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+    promoted_canonical_axis = False
+    if (
+        str(output_type or "").strip().lower() in {"list", "relation", "comparison", "series", "stats"}
+        and normalized_canonical
+        and docs_kind == "collection_wrapper"
+        and len(normalized_canonical) >= max(1, fallback_threshold)
+    ):
+        normalized_docs = _build_display_docs_from_canonical(normalized_canonical)
+        docs_kind = _classify_docs_kind(normalized_docs)
+        promoted_canonical_axis = True
+        log_event(
+            "RAG.DISPLAY_CANONICAL_AXIS.PROMOTED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            docs_count_before=len(docs or []),
+            canonical_count=len(normalized_canonical),
+            output_type=output_type,
+        )
+
+    docs_count = len(normalized_docs)
+    canonical_count = len(normalized_canonical)
+    display_source = "canonical_axis" if promoted_canonical_axis else "docs"
 
     if docs_count != canonical_count:
         aligned_count = min(docs_count, canonical_count)
@@ -529,7 +612,9 @@ async def node_rag_search(
                 anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
                 reason=anchor_query_meta.get("anchor_repair_reason"),
             )
-        if output_type == "detail" and anchor_query_meta.get("anchor_present") and not anchor_query_meta.get("anchor_query_repaired"):
+        if output_type == "detail" and exact_detail_lookup and focus_seed_map:
+            search_query = str(next(iter(focus_seed_map.values()))[0]).strip()
+        if output_type == "detail" and anchor_query_meta.get("anchor_present") and not anchor_query_meta.get("anchor_query_repaired") and not exact_detail_lookup:
             log_event(
                 "RAG.DETAIL.ANCHOR.NOT_APPLIED",
                 request_id=state.request_id,
@@ -738,7 +823,8 @@ async def node_rag_search(
                     org_code=getattr(focus_entity, "org_code", None),
                     biz_no=getattr(focus_entity, "biz_no", None),
                 )
-                coverage = compute_detail_coverage(docs[0], anchor=focus_entity)
+                coverage_input = _build_detail_coverage_input(docs[0], canonical_evidence[0] if canonical_evidence else None)
+                coverage = compute_detail_coverage(coverage_input, anchor=focus_entity)
                 cache_key = make_entity_cache_key(focus_entity)
                 requested_fields = extract_requested_fields(state.messages[-1].content)
                 view_state.detail_cache[cache_key] = DetailCacheEntry(

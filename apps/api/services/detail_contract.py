@@ -164,7 +164,7 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
         "budget": _text(meta_detail.get("budget") or meta_detail.get("research_expense") or meta_detail.get("total_budget")),
         "outputs": _pick_nested(meta_detail.get("outputs"), "name") or _pick_nested(doc.get("outputs"), "name") or ([_text(meta_detail.get("outputs"))] if _text(meta_detail.get("outputs")) else []),
         "perf_type": _text(meta_detail.get("perf_type") or facts.get("tag") or doc.get("tag")),
-        "affiliation": _text(meta_detail.get("affiliation") or meta_detail.get("blng_org_nm") or meta_basic.get("affiliation")),
+        "affiliation": _text(meta_detail.get("affiliation") or meta_detail.get("blng_org_nm") or meta_basic.get("affiliation") or ((roles.get("people_affiliation_org_name") or [None])[0]) or getattr(anchor, "lead_org", None)),
     }
     available = [key for key, value in {**core_profile, **rich_detail}.items() if _present(value)]
     missing = [key for key in list(CORE_FIELDS) + list(RICH_FIELDS) if key not in available]
