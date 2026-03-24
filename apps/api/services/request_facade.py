@@ -15,6 +15,67 @@ _DEFAULT_RETRIEVAL_LIMIT = 20
 _LIST_LIKE_OUTPUT_TYPES = {"list", "relation", "comparison", "series", "stats"}
 
 
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _resolve_followup_locked_route(followup_resolution: dict[str, Any]) -> tuple[str | None, list[str] | None, str | None]:
+    if not isinstance(followup_resolution, dict):
+        return None, None, None
+
+    status = str(followup_resolution.get("followup_resolution_status") or "").strip().lower()
+    if status != "resolved":
+        return None, None, None
+
+    selected_prev_item = dict(followup_resolution.get("selected_prev_item") or {})
+    focus_entity = dict(followup_resolution.get("focus_entity") or {})
+    context_kind = _first_text(
+        selected_prev_item.get("context_kind"),
+        focus_entity.get("kind"),
+        followup_resolution.get("selected_prev_context_kind"),
+    ).lower()
+
+    if context_kind == "perf":
+        return "perf", ["ntis_perf_v1"], "followup_context_perf"
+    if context_kind == "project":
+        return "project", ["ntis_project_v1"], "followup_context_project"
+    return None, None, None
+
+
+def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: dict[str, Any]) -> Any:
+    locked_base_route, locked_target_cols, _ = _resolve_followup_locked_route(followup_resolution)
+    if not locked_base_route or not locked_target_cols:
+        return normalized_intent
+
+    if isinstance(normalized_intent, dict):
+        patched = dict(normalized_intent)
+        patched["base_route"] = locked_base_route
+        patched["target_cols"] = list(locked_target_cols)
+        return patched
+
+    if is_dataclass(normalized_intent):
+        updates: dict[str, Any] = {}
+        if hasattr(normalized_intent, "base_route"):
+            updates["base_route"] = locked_base_route
+        if hasattr(normalized_intent, "target_cols"):
+            updates["target_cols"] = list(locked_target_cols)
+        return replace(normalized_intent, **updates) if updates else normalized_intent
+
+    if hasattr(normalized_intent, "base_route") or hasattr(normalized_intent, "target_cols"):
+        try:
+            if hasattr(normalized_intent, "base_route"):
+                setattr(normalized_intent, "base_route", locked_base_route)
+            if hasattr(normalized_intent, "target_cols"):
+                setattr(normalized_intent, "target_cols", list(locked_target_cols))
+        except Exception:
+            pass
+    return normalized_intent
+
+
 def has_explicit_precheck_signals(precheck: dict[str, Any]) -> bool:
     ids_map = (precheck or {}).get("ids_map")
     if not isinstance(ids_map, dict):
@@ -522,6 +583,7 @@ class RequestUnderstandingFacade:
             )
             if str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
                 normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
+                normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
                 normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
                     normalized_intent_base,
                     question_analysis,
@@ -534,6 +596,7 @@ class RequestUnderstandingFacade:
         elif anchor is not None:
             seed_map = anchor_to_seed_map(anchor)
             normalized_intent_base = _apply_anchor_lock(normalized_intent_base, seed_map)
+            normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
             self.log_event(
                 "FOLLOWUP.ANCHOR.RESOLVED",
                 request_id=request_id,
@@ -592,10 +655,34 @@ class RequestUnderstandingFacade:
             request_id=request_id,
             conversation_id=conversation_id,
         )
+        before_base_route = normalized_intent.get("base_route") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "base_route", None)
+        before_target_cols = normalized_intent.get("target_cols") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "target_cols", None)
         normalized_intent = _apply_anchor_lock(
             normalized_intent,
             followup_resolution.get("seed_map") or {},
         )
+        normalized_intent = _apply_followup_context_lock(
+            normalized_intent,
+            followup_resolution,
+        )
+        after_base_route = normalized_intent.get("base_route") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "base_route", None)
+        after_target_cols = normalized_intent.get("target_cols") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "target_cols", None)
+        if self.log_event is not None and (
+            before_base_route != after_base_route or list(before_target_cols or []) != list(after_target_cols or [])
+        ):
+            locked_base_route, locked_target_cols, lock_reason = _resolve_followup_locked_route(followup_resolution)
+            self.log_event(
+                "FOLLOWUP.CONTEXT.RESTORED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                reason=lock_reason,
+                before_base_route=before_base_route,
+                after_base_route=after_base_route,
+                before_target_cols=list(before_target_cols or []),
+                after_target_cols=list(after_target_cols or []),
+                locked_base_route=locked_base_route,
+                locked_target_cols=list(locked_target_cols or []),
+            )
         normalized_intent, question_analysis = _coerce_project_anchor_role_followup(
             normalized_intent,
             question_analysis,
