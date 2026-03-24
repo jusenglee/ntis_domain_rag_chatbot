@@ -163,11 +163,21 @@ async def generate_answer(
     detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
     if detail_server_answer:
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
+        short_circuit_meta = {
+            "detail_server_answer": True,
+            "stream_bypassed": True,
+            "bypass_reason": "detail_server_answer",
+            "content_chars": len(detail_server_answer),
+            "stream_content_emitted_chunks": 1,
+            "emitted_chars": len(detail_server_answer),
+            "ttft_any_ms": 0.0,
+            "ttft_content_ms": 0.0,
+        }
         return {
             final_field: detail_server_answer,
-            f"{final_field}_meta": {"detail_server_answer": True},
+            f"{final_field}_meta": short_circuit_meta,
             rendered_context_key: False,
-            "stream_meta": {final_field: {"detail_server_answer": True}},
+            "stream_meta": {final_field: short_circuit_meta},
         }
 
     no_result_message = str(getattr(state, "no_result_message", "") or "").strip()
@@ -186,11 +196,21 @@ async def generate_answer(
             emitted_chars=len(no_result_message),
         )
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
+        short_circuit_meta = {
+            "no_result_short_circuit": True,
+            "stream_bypassed": True,
+            "bypass_reason": "no_result_message",
+            "content_chars": len(no_result_message),
+            "stream_content_emitted_chunks": 1,
+            "emitted_chars": len(no_result_message),
+            "ttft_any_ms": 0.0,
+            "ttft_content_ms": 0.0,
+        }
         return {
             final_field: no_result_message,
-            f"{final_field}_meta": {"no_result_short_circuit": True},
+            f"{final_field}_meta": short_circuit_meta,
             rendered_context_key: False,
-            "stream_meta": {final_field: {"no_result_short_circuit": True}},
+            "stream_meta": {final_field: short_circuit_meta},
         }
 
     llm = build_llm_fn(model_name=model_name)

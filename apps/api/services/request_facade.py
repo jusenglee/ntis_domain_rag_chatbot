@@ -44,14 +44,38 @@ def _has_ids_map_values(ids_map: Any) -> bool:
 
 def _merge_seed_into_ids_map(ids_map: Any, seed_map: dict[str, list[str]]) -> dict[str, list[str]]:
     merged = dict(ids_map or {}) if isinstance(ids_map, dict) else {}
+
+    def _normalize(values: Any) -> list[str]:
+        if isinstance(values, str):
+            values = [values]
+        elif not isinstance(values, (list, tuple, set)):
+            values = [values]
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        return out
+
+    seed_pjt_ids = _normalize(seed_map.get("pjt_id"))
+    seed_pjt_nos = _normalize(seed_map.get("pjt_no"))
+
+    if seed_pjt_ids:
+        merged.pop("pjt_no", None)
+        merged["pjt_id"] = seed_pjt_ids
+    elif seed_pjt_nos:
+        merged.pop("pjt_id", None)
+        merged["pjt_no"] = seed_pjt_nos
+
     for key, values in (seed_map or {}).items():
-        normalized = [str(value).strip() for value in (values or []) if str(value).strip()]
+        if key in {"pjt_id", "pjt_no"}:
+            continue
+        normalized = _normalize(values)
         if not normalized:
             continue
-        if key == "pjt_id":
-            merged.pop("pjt_no", None)
-        elif key == "pjt_no":
-            merged.pop("pjt_id", None)
         merged[key] = normalized
     return merged
 
@@ -170,6 +194,7 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "seed_source": followup_resolution.get("seed_source"),
         "anchor_source": followup_resolution.get("anchor_source"),
         "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("rst_id") or focus_entity.get("person_no") or focus_entity.get("org_id") or focus_entity.get("org_code") or focus_entity.get("biz_no") or focus_entity.get("doi") or focus_entity.get("issn") or focus_entity.get("doc_id"),
+        "focus_entity": focus_entity or None,
         "candidate_items": list(followup_resolution.get("candidate_items") or []),
         "display_view_id": selected_prev_item.get("view_id") if selected_prev_item else focus_entity.get("view_id"),
         "display_rank": focus_entity.get("display_rank"),
@@ -395,6 +420,10 @@ class RequestUnderstandingFacade:
             question_analysis,
             request_id=request_id,
             conversation_id=conversation_id,
+        )
+        normalized_intent = _inject_seed_into_normalized_intent(
+            normalized_intent,
+            followup_resolution.get("seed_map") or {},
         )
         self.log_event(
             "PLANNER.PIPELINE",

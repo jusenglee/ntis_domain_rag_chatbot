@@ -14,7 +14,7 @@ from apps.api.services.detail_contract import (
     make_entity_cache_key,
     render_detail_answer,
 )
-from apps.api.services.view_state import DetailCacheEntry, build_display_snapshot, focus_entity_from_detail
+from apps.api.services.view_state import DetailCacheEntry, FocusEntity, build_display_snapshot, focus_entity_from_detail
 from apps.api.services.rag_retriever import repair_query_for_resolved_anchor
 from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, should_short_circuit_followup_clarification
 
@@ -410,9 +410,29 @@ async def node_rag_search(
     qa = state.question_analysis
     query_intent = _get_normalized_intent(state)
     view_state = getattr(state, "view_state", None)
+    strategy_meta = dict(getattr(state.intent_payload, "strategy_meta", None) or {})
 
     try:
         output_type = str(_pick_attr(query_intent, qa, key="output_type", default="summary") or "summary").strip().lower()
+        focus_entity_payload = strategy_meta.get("focus_entity") or {}
+        if view_state is not None and isinstance(focus_entity_payload, dict) and focus_entity_payload:
+            try:
+                view_state.latest_focus_entity = FocusEntity.model_validate(focus_entity_payload)
+                log_event(
+                    "FOCUS.ENTITY.SET",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    source="followup_anchor",
+                    pjt_id=getattr(view_state.latest_focus_entity, "pjt_id", None),
+                    pjt_no=getattr(view_state.latest_focus_entity, "pjt_no", None),
+                    rst_id=getattr(view_state.latest_focus_entity, "rst_id", None),
+                    person_no=getattr(view_state.latest_focus_entity, "person_no", None),
+                    org_id=getattr(view_state.latest_focus_entity, "org_id", None),
+                    org_code=getattr(view_state.latest_focus_entity, "org_code", None),
+                    biz_no=getattr(view_state.latest_focus_entity, "biz_no", None),
+                )
+            except Exception:
+                pass
         latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
         if output_type == "detail" and latest_focus_entity is not None:
             requested_fields = extract_requested_fields(state.messages[-1].content)
@@ -462,6 +482,17 @@ async def node_rag_search(
                 anchor_source=anchor_query_meta.get("anchor_source"),
                 anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
                 reason=anchor_query_meta.get("anchor_repair_reason"),
+            )
+        if output_type == "detail" and anchor_query_meta.get("anchor_present") and not anchor_query_meta.get("anchor_query_repaired"):
+            log_event(
+                "RAG.DETAIL.ANCHOR.NOT_APPLIED",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                raw_query=raw_query,
+                planner_query=planner_query,
+                selected_search_query=search_query,
+                anchor_source=anchor_query_meta.get("anchor_source"),
+                anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
             )
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
         search_num = _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
