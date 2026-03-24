@@ -19,6 +19,7 @@ from apps.api.services.retrieval_workflow import (
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.pipeline_steps import NormalizedIntent, normalize_intent
+from apps.core.planner_contract import validate_planner_contract
 from apps.core.planner_staged import compose_locked_strategy
 from apps.core.query_intent import QueryIntent, classify_query
 from apps.core.rag_pipeline import _validate_intent_payload_version
@@ -1214,3 +1215,36 @@ def test_compute_detail_coverage_supports_perf_entity_fields():
     assert coverage.core_profile['rst_id'] == 'RST-222'
     assert coverage.core_profile['doi'] == '10.2000/example'
     assert coverage.rich_detail['perf_type'] == 'paper'
+
+
+def test_validate_planner_contract_accepts_anchor_locked_project_key_policies():
+    for project_key_policy in ("anchor_locked_pjt_id", "anchor_locked_pjt_no"):
+        violations = validate_planner_contract(
+            mode="lookup",
+            head="project",
+            relation=None,
+            target_cols=["ntis_project_v1"],
+            ids_map={"pjt_id": ["PJT-1"]} if project_key_policy.endswith("pjt_id") else {"pjt_no": ["NO-1"]},
+            relation_target_cols=None,
+            join_key_mode=None,
+            candidate_keys=None,
+            project_key_policy=project_key_policy,
+        )
+
+        assert violations == []
+
+
+def test_validate_planner_contract_rejects_unknown_project_key_policy():
+    violations = validate_planner_contract(
+        mode="lookup",
+        head="project",
+        relation=None,
+        target_cols=["ntis_project_v1"],
+        ids_map={"pjt_id": ["PJT-1"]},
+        relation_target_cols=None,
+        join_key_mode=None,
+        candidate_keys=None,
+        project_key_policy="invalid_policy",
+    )
+
+    assert any(v.error_code == "PLANNER_PROJECT_KEY_POLICY_INVALID" for v in violations)

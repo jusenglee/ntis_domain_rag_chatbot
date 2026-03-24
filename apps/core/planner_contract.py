@@ -5,6 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
 
+PROJECT_KEY_POLICY_AMBIGUOUS_OR = "ambiguous_or"
+PROJECT_KEY_POLICY_RESOLVED_PJT_ID = "resolved_pjt_id"
+PROJECT_KEY_POLICY_RESOLVED_PJT_NO = "resolved_pjt_no"
+PROJECT_KEY_POLICY_ANCHOR_LOCKED_PJT_ID = "anchor_locked_pjt_id"
+PROJECT_KEY_POLICY_ANCHOR_LOCKED_PJT_NO = "anchor_locked_pjt_no"
+
+PROJECT_KEY_POLICIES = {
+    PROJECT_KEY_POLICY_AMBIGUOUS_OR,
+    PROJECT_KEY_POLICY_RESOLVED_PJT_ID,
+    PROJECT_KEY_POLICY_RESOLVED_PJT_NO,
+    PROJECT_KEY_POLICY_ANCHOR_LOCKED_PJT_ID,
+    PROJECT_KEY_POLICY_ANCHOR_LOCKED_PJT_NO,
+}
+
 
 @dataclass(frozen=True)
 class PlannerContractViolation:
@@ -125,6 +139,14 @@ def validate_planner_contract(
     pjt_nos = _as_str_list(normalized_ids_map.get("pjt_no"))
     project_key_candidates = list((candidate_keys or {}).get("project_key") or []) if isinstance(candidate_keys, dict) else []
     project_key_policy_norm = str(project_key_policy or "").strip().lower()
+
+    if project_key_policy_norm and project_key_policy_norm not in PROJECT_KEY_POLICIES:
+        violations.append(
+            PlannerContractViolation(
+                error_code="PLANNER_PROJECT_KEY_POLICY_INVALID",
+                reason=f"unsupported project_key_policy={project_key_policy_norm}",
+            )
+        )
 
     # 구조적 계약 위반은 상위 레이어에서 StrategyViolation으로 fail-close 한다.
     # 표현상의 경고는 parsing_warnings로 남길 수 있지만, 여기서 다루는 것은 fail-close 대상이다.

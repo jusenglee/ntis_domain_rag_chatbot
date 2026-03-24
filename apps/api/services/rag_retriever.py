@@ -118,21 +118,14 @@ def _has_anchor_seed_ids(ids_map: Any) -> bool:
 
 def has_active_anchor_seed(state: Any) -> bool:
     normalized_intent = _get_normalized_intent(state)
-    strategy_meta = _get_strategy_meta(state)
 
     ids_map = getattr(normalized_intent, "ids_map", None) or {}
     if isinstance(normalized_intent, dict):
         ids_map = normalized_intent.get("ids_map") or {}
 
-    if _has_anchor_seed_ids(ids_map):
-        return True
-
-    followup_status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
-    return bool(
-        strategy_meta.get("explicit_followup")
-        or strategy_meta.get("anchor_source")
-        or followup_status == "resolved"
-    )
+    # execution truth? ids_map ???.
+    # strategy_meta / latest_focus_entity ? ?? ?? ???? active execution seed? ???.
+    return _has_anchor_seed_ids(ids_map)
 
 
 def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dict[str, Any]:

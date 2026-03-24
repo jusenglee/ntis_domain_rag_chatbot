@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -17,7 +16,6 @@ from apps.api.services.detail_contract import (
 )
 from apps.api.services.view_state import DetailCacheEntry, FocusEntity, build_display_snapshot, focus_entity_from_detail
 from apps.api.services.rag_retriever import has_active_anchor_seed, repair_query_for_resolved_anchor
-from apps.api.services.request_facade import _apply_anchor_lock
 from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, should_short_circuit_followup_clarification
 
 
@@ -122,33 +120,14 @@ def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
     return any(current_values) and current_values == incoming_values
 
 
-def _build_focus_seed_map(focus_entity: Any) -> dict[str, list[str]]:
-    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
-        value = str(getattr(focus_entity, key, "") or "").strip()
-        if value:
-            return {key: [value]}
-    return {}
-
-
-def _detail_anchor_active(*, query_intent: Any, strategy_meta: dict[str, Any], latest_focus_entity: Any) -> bool:
+def _detail_anchor_active(*, query_intent: Any) -> bool:
     ids_map = getattr(query_intent, "ids_map", None) or {}
     if isinstance(query_intent, dict):
         ids_map = query_intent.get("ids_map") or {}
-    if any(ids_map.get(key) for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")):
-        return True
-    if latest_focus_entity is None:
-        return False
-    return bool(strategy_meta.get("explicit_followup") or strategy_meta.get("anchor_source") or strategy_meta.get("followup_resolution_status") == "resolved")
-
-
-def _build_anchor_locked_payload(intent_payload: Any, focus_seed: dict[str, list[str]]) -> Any:
-    if not focus_seed:
-        return intent_payload
-    patched_payload = deepcopy(intent_payload)
-    normalized_intent = getattr(patched_payload, "normalized_intent", None)
-    if normalized_intent is not None:
-        setattr(patched_payload, "normalized_intent", _apply_anchor_lock(normalized_intent, focus_seed))
-    return patched_payload
+    return any(
+        ids_map.get(key)
+        for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+    )
 
 
 def _normalize_display_payloads(
@@ -476,6 +455,18 @@ async def node_rag_search(
                 pass
         latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
         detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
+        if output_type == "detail" and not detail_anchor_active:
+            if bool(
+                strategy_meta.get("explicit_followup")
+                or strategy_meta.get("anchor_source")
+                or str(strategy_meta.get("followup_resolution_status") or "").strip().lower() == "resolved"
+            ):
+                log_event(
+                    "RAG.DETAIL.ANCHOR.SEED_MISSING",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    reason="detail follow-up signal exists but ids_map has no active anchor seed",
+                )
         if output_type == "detail" and latest_focus_entity is not None and detail_anchor_active:
             requested_fields = extract_requested_fields(state.messages[-1].content)
             cache_key = make_entity_cache_key(latest_focus_entity)
@@ -515,8 +506,6 @@ async def node_rag_search(
                 if values:
                     focus_seed_map = {key: [str(values[0]).strip()]}
                     break
-            if not focus_seed_map and latest_focus_entity is not None:
-                focus_seed_map = _build_focus_seed_map(latest_focus_entity)
             exact_detail_lookup = bool(focus_seed_map)
 
         raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries_fn(
@@ -592,7 +581,6 @@ async def node_rag_search(
             anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
         )
 
-        retriever_intent_payload = _build_anchor_locked_payload(state.intent_payload, focus_seed_map) if exact_detail_lookup else state.intent_payload
         if exact_detail_lookup:
             log_event(
                 "RAG.DETAIL.ANCHOR.EXACT_LOOKUP",
@@ -604,7 +592,7 @@ async def node_rag_search(
         retriever = custom_rag_retriever_cls(
             top_k=search_num,
             model_name="gemma_triton_0",
-            intent_payload=retriever_intent_payload,
+            intent_payload=state.intent_payload,
             request_overrides=getattr(state, "request_overrides", None) or {},
         )
         rag_tool = tool_cls(
