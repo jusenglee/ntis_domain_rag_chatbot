@@ -353,6 +353,7 @@ class AgentState(BaseModel):
     answer_solar_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_solar_raw: Optional[str] = None
     merge_debug: Dict[str, Any] = Field(default_factory=dict)
+    selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
     conversation_id: str = ""
     request_id: str = ""
     request_started_at: Optional[float] = None

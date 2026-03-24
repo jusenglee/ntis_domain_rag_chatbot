@@ -55,7 +55,7 @@ def select_final_answer(
     if marker and marker in solar_answer:
         solar_fail_reasons.append("contains_fallback_notice")
 
-    if len(solar_answer) < min_answer_chars:
+    if len(solar_answer) < min_answer_chars and not bool(meta.get("stream_bypassed")):
         solar_fail_reasons.append(f"too_short<{min_answer_chars}")
 
     solar_failed = bool(solar_fail_reasons)

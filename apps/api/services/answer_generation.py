@@ -160,19 +160,30 @@ async def generate_answer(
     스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게
     판단할 수 있도록 만든다.
     """
-    detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
-    if detail_server_answer:
-        rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-        short_circuit_meta = {
-            "detail_server_answer": True,
+    def _build_short_circuit_meta(*, content: str, bypass_reason: str, answer_source: str, flag_key: str) -> dict[str, Any]:
+        return {
+            flag_key: True,
             "stream_bypassed": True,
-            "bypass_reason": "detail_server_answer",
-            "content_chars": len(detail_server_answer),
+            "bypass_reason": bypass_reason,
+            "answer_source": answer_source,
+            "ui_emit_required": True,
+            "synthetic_chunk_required": True,
+            "content_chars": len(content),
             "stream_content_emitted_chunks": 1,
-            "emitted_chars": len(detail_server_answer),
+            "emitted_chars": len(content),
             "ttft_any_ms": 0.0,
             "ttft_content_ms": 0.0,
         }
+
+    detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
+    if detail_server_answer:
+        rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
+        short_circuit_meta = _build_short_circuit_meta(
+            content=detail_server_answer,
+            bypass_reason="detail_server_answer",
+            answer_source="detail_server_answer",
+            flag_key="detail_server_answer",
+        )
         return {
             final_field: detail_server_answer,
             f"{final_field}_meta": short_circuit_meta,
@@ -196,16 +207,12 @@ async def generate_answer(
             emitted_chars=len(no_result_message),
         )
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-        short_circuit_meta = {
-            "no_result_short_circuit": True,
-            "stream_bypassed": True,
-            "bypass_reason": "no_result_message",
-            "content_chars": len(no_result_message),
-            "stream_content_emitted_chunks": 1,
-            "emitted_chars": len(no_result_message),
-            "ttft_any_ms": 0.0,
-            "ttft_content_ms": 0.0,
-        }
+        short_circuit_meta = _build_short_circuit_meta(
+            content=no_result_message,
+            bypass_reason="no_result_message",
+            answer_source="no_result_message",
+            flag_key="no_result_short_circuit",
+        )
         return {
             final_field: no_result_message,
             f"{final_field}_meta": short_circuit_meta,
@@ -374,6 +381,7 @@ async def merge_answers(
     rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))
 
     answer_gemma = (getattr(state, "answer_gemma", "") or "").strip()
+    answer_gemma_meta = getattr(state, "answer_gemma_meta", None) or {}
     answer_solar_raw = getattr(state, "answer_solar", None) or ""
     answer_solar = answer_solar_raw.strip()
     solar_meta = getattr(state, "answer_solar_meta", None) or {}
@@ -391,10 +399,21 @@ async def merge_answers(
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
     degraded = bool(getattr(state, "degraded", False)) or (selected_answer == dual_model_fallback_message)
+    selected_meta = {}
+    if selected_model == "solar":
+        selected_meta = solar_meta
+    elif selected_model == "gemma":
+        selected_meta = answer_gemma_meta
+    stream_bypassed = bool(selected_meta.get("stream_bypassed"))
+    synthetic_chunk_required = bool(selected_meta.get("synthetic_chunk_required")) and bool(selected_answer)
+    selected_answer_source = str(selected_meta.get("answer_source") or selected_model)
+    selected_bypass_reason = str(selected_meta.get("bypass_reason") or "") or None
 
     merge_debug = {
         "policy": dual_model_merge_policy,
         "selected_model": selected_model,
+        "selected_answer_source": selected_answer_source,
+        "selected_bypass_reason": selected_bypass_reason,
         "selection_reason": selection["selection_reason"],
         "solar_failed": solar_failed,
         "solar_fail_reasons": solar_fail_reasons,
@@ -403,6 +422,8 @@ async def merge_answers(
         "solar_answer_chars": selection["solar_answer_chars"],
         "gemma_answer_chars": selection["gemma_answer_chars"],
         "min_chars_threshold": solar_min_answer_chars,
+        "stream_bypassed": stream_bypassed,
+        "synthetic_chunk_required": synthetic_chunk_required,
     }
 
     log_event(
@@ -428,6 +449,7 @@ async def merge_answers(
         "answer": selected_answer,
         "answer_solar_raw": answer_solar_raw,
         "merge_debug": merge_debug,
+        "selected_answer_meta": selected_meta,
         "rendered_context_used": rendered_context_used,
         "degraded": degraded,
     }

@@ -42,3 +42,8 @@
 - `Get-Content -Raw` 후 전체 재저장, 콘솔 문자열 치환, 코드페이지 의존 편집은 금지한다.
 - 한글 파일은 최소 라인 패치 방식으로 수정하고, 수정 후 깨진 문자와 의도치 않은 대량 diff를 확인한다.
 - 한글이 깨진 상태로 문서나 코드를 남기지 않는다.
+
+## Streaming note
+
+- detail/no-result short-circuit? answer generation ??? ??? ?? fallback ?? ???.
+- UI blank response? ?? ?? ?? merge ???? synthetic `chunk`? 1? emit??.
