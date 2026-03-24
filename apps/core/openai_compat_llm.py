@@ -180,6 +180,10 @@ class OpenAICompatChatModel(BaseChatModel):
         extra_body = kwargs.get("extra_body")
         body: dict[str, Any] = dict(extra_body) if isinstance(extra_body, dict) else {}
 
+        top_k = kwargs.get("top_k")
+        if top_k is not None:
+            body.setdefault("top_k", int(top_k))
+
         # --- reasoning controls ---
         reasoning_effort = kwargs.get("reasoning_effort", self.default_reasoning_effort)
         if reasoning_effort is not None:
@@ -267,7 +271,7 @@ class OpenAICompatChatModel(BaseChatModel):
         usage = response.usage.model_dump() if getattr(response, "usage", None) else None
 
         logger.info(
-            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d request_max_tokens=%s usage=%s base_url=%s",
+            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s usage=%s base_url=%s",
             request_id,
             conversation_id,
             self.model_name,
@@ -276,6 +280,7 @@ class OpenAICompatChatModel(BaseChatModel):
             len(content),
             len(reasoning),
             request_kwargs.get("max_tokens"),
+            extra_body.get("top_k") if isinstance(extra_body, dict) else None,
             usage,
             self.base_url,
         )
@@ -411,7 +416,7 @@ class OpenAICompatChatModel(BaseChatModel):
             logger.info(
                 "[openai_compat_llm] stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
                 "chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d emitted_reasoning_event_n=%d "
-                "content_char_n=%d reasoning_char_n=%d request_max_tokens=%s finish_reason=%s closed=%s model=%s base_url=%s",
+                "content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s finish_reason=%s closed=%s model=%s base_url=%s",
                 request_id,
                 conversation_id,
                 dt_ms,
@@ -424,6 +429,7 @@ class OpenAICompatChatModel(BaseChatModel):
                 content_char_n,
                 reasoning_char_n,
                 request_kwargs.get("max_tokens"),
+                extra_body.get("top_k") if isinstance(extra_body, dict) else None,
                 last_finish_reason,
                 closed,
                 self.model_name,

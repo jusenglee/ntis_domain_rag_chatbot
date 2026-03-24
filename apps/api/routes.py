@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -161,6 +161,24 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         result["title"] = _resolve_reference_title(result, doc)
         return result
 
+    def _validate_request_override_ranges(overrides: dict[str, Any]) -> None:
+        """Reject malformed LLM override values before they reach provider backends."""
+        temperature = overrides.get("temperature")
+        if temperature is not None and float(temperature) < 0:
+            raise HTTPException(status_code=422, detail="Temperature must be >= 0")
+
+        top_p = overrides.get("top_p")
+        if top_p is not None and not (0 < float(top_p) <= 1):
+            raise HTTPException(status_code=422, detail="Top-P must be > 0 and <= 1")
+
+        max_tokens = overrides.get("max_tokens")
+        if max_tokens is not None and int(max_tokens) < 1:
+            raise HTTPException(status_code=422, detail="Max-Token must be >= 1")
+
+        top_k = overrides.get("top_k")
+        if top_k is not None and int(top_k) < 1:
+            raise HTTPException(status_code=422, detail="Top-K must be >= 1")
+
     # ??? ?? ????? ?? ?? ??? ?????? ???? ??
     def _build_request_overrides(payload: QueryRequest) -> dict[str, Any]:
         overrides: dict[str, Any] = {}
@@ -183,6 +201,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         if payload.rag_topk_lex_cand is not None:
             overrides["RAG_TOPK_LEX_CAND"] = int(payload.rag_topk_lex_cand)
 
+        _validate_request_override_ranges(overrides)
         return overrides
 
 

@@ -205,11 +205,27 @@ GEMMA_SYNC_TIMEOUTS = _get_model_timeout_pair(
     default_idle=GEMMA_STREAM_TIMEOUTS[1],
     deprecated_env_prefix="GEMMA",
 )
+GPT_OSS_STREAM_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GPT_OSS_TRITON_0",
+    request_type="STREAM",
+    default_first=10,
+    default_idle=20,
+)
+GPT_OSS_SYNC_TIMEOUTS = _get_model_timeout_pair(
+    model_env_prefix="GPT_OSS_TRITON_0",
+    request_type="SYNC",
+    default_first=GPT_OSS_STREAM_TIMEOUTS[0],
+    default_idle=GPT_OSS_STREAM_TIMEOUTS[1],
+)
 
 TRITON_TIMEOUTS = {
     "gemma_triton_0": {
         "stream": GEMMA_STREAM_TIMEOUTS,
         "sync": GEMMA_SYNC_TIMEOUTS,
+    },
+    "gpt_triton_0": {
+        "stream": GPT_OSS_STREAM_TIMEOUTS,
+        "sync": GPT_OSS_SYNC_TIMEOUTS,
     },
 }
 
