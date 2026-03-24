@@ -833,7 +833,14 @@ def build_project_id_filter(pjt_ids: List[str], pjt_nos: List[str], *, candidate
 
     policy = str(project_key_policy or "").strip().lower()
     if pjt_id_values and pjt_no_values:
-        raise ValueError("build_project_id_filter requires either pjt_id or pjt_no, but not both")
+        if policy == "anchor_locked_pjt_id":
+            logger.warning("anchor_locked_pjt_id ignoring pjt_no values in build_project_id_filter")
+            pjt_no_values = []
+        elif policy == "anchor_locked_pjt_no":
+            logger.warning("anchor_locked_pjt_no ignoring pjt_id values in build_project_id_filter")
+            pjt_id_values = []
+        else:
+            raise ValueError("build_project_id_filter requires either pjt_id or pjt_no, but not both")
     if candidate_values and policy not in {"", "ambiguous_or"}:
         raise ValueError(f"build_project_id_filter candidate_project_keys requires ambiguous_or policy, got {project_key_policy}")
 

@@ -105,41 +105,66 @@ def _build_anchor_requested_terms(question: Any) -> list[str]:
 
 def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
     normalized_intent = _get_normalized_intent(state)
-    strategy_meta = _get_strategy_meta(state)
-    followup_status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
-    if followup_status != "resolved":
-        return {
-            "present": False,
-            "anchor_source": None,
-            "entity_key": None,
-            "entity_kind": None,
-            "title_text": None,
-        }
-
     ids_map = getattr(normalized_intent, "ids_map", None) or {}
     if isinstance(normalized_intent, dict):
         ids_map = normalized_intent.get("ids_map") or {}
+
+    view_state = getattr(state, "view_state", None)
+    latest_focus = getattr(view_state, "latest_focus_entity", None) if view_state is not None else None
+
+    strategy_meta = _get_strategy_meta(state)
     selected_prev_item = dict(strategy_meta.get("selected_prev_item") or {})
     focus_entity = dict(strategy_meta.get("focus_entity") or {})
-    entity_kind = _first_non_empty_text(
-        selected_prev_item.get("context_kind"),
-        focus_entity.get("kind"),
-        strategy_meta.get("selected_prev_context_kind"),
-    )
-    resolved_ids: Dict[str, Optional[str]] = {}
-    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+
+    def first_value(key: str) -> Optional[str]:
         values = _normalize_id_values((ids_map or {}).get(key))
-        resolved_ids[key] = _first_non_empty_text(*(values[:1] or []), selected_prev_item.get(key), focus_entity.get(key))
-    title_text = _first_non_empty_text(selected_prev_item.get("title"), focus_entity.get("title_text"))
+        return (
+            _first_non_empty_text(*(values[:1] or []))
+            or _first_non_empty_text(getattr(latest_focus, key, None))
+            or _first_non_empty_text(focus_entity.get(key))
+            or _first_non_empty_text(selected_prev_item.get(key))
+        )
+
+    resolved_ids = {
+        "pjt_id": first_value("pjt_id"),
+        "pjt_no": first_value("pjt_no"),
+        "rst_id": first_value("rst_id"),
+        "person_no": first_value("person_no"),
+        "org_id": first_value("org_id"),
+        "org_code": first_value("org_code"),
+        "biz_no": first_value("biz_no"),
+        "doi": first_value("doi"),
+        "issn": first_value("issn"),
+    }
+
+    title_text = (
+        _first_non_empty_text(getattr(latest_focus, "title_text", None))
+        or _first_non_empty_text(focus_entity.get("title_text"))
+        or _first_non_empty_text(selected_prev_item.get("title"))
+    )
+
     entity_key = _first_non_empty_text(
-        *(resolved_ids.get(key) for key in ("rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn", "pjt_id", "pjt_no")),
+        resolved_ids["pjt_id"],
+        resolved_ids["rst_id"],
+        resolved_ids["person_no"],
+        resolved_ids["org_id"],
+        resolved_ids["org_code"],
+        resolved_ids["biz_no"],
+        resolved_ids["doi"],
+        resolved_ids["issn"],
+        resolved_ids["pjt_no"],
         strategy_meta.get("focus_entity_key"),
     )
+
     payload: Dict[str, Any] = {
         "present": bool(entity_key or title_text),
-        "anchor_source": strategy_meta.get("anchor_source") or strategy_meta.get("seed_source"),
+        "anchor_source": strategy_meta.get("anchor_source") or getattr(latest_focus, "source", None) or strategy_meta.get("seed_source"),
         "entity_key": entity_key,
-        "entity_kind": entity_kind,
+        "entity_kind": _first_non_empty_text(
+            getattr(latest_focus, "kind", None),
+            focus_entity.get("kind"),
+            selected_prev_item.get("context_kind"),
+        ) or "project",
         "title_text": title_text,
     }
     payload.update(resolved_ids)

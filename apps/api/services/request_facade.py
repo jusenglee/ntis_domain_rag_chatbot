@@ -80,18 +80,39 @@ def _merge_seed_into_ids_map(ids_map: Any, seed_map: dict[str, list[str]]) -> di
     return merged
 
 
-def _inject_seed_into_normalized_intent(normalized_intent: Any, seed_map: dict[str, list[str]]) -> Any:
+def _apply_anchor_lock(normalized_intent: Any, seed_map: dict[str, list[str]]) -> Any:
     if not seed_map:
         return normalized_intent
+
+    def _resolve_policy(ids_map: dict[str, list[str]]) -> Optional[str]:
+        if ids_map.get("pjt_id"):
+            return "anchor_locked_pjt_id"
+        if ids_map.get("pjt_no"):
+            return "anchor_locked_pjt_no"
+        return None
+
     if isinstance(normalized_intent, dict):
         patched = dict(normalized_intent)
-        patched["ids_map"] = _merge_seed_into_ids_map(patched.get("ids_map") or {}, seed_map)
+        merged_ids_map = _merge_seed_into_ids_map(patched.get("ids_map") or {}, seed_map)
+        patched["ids_map"] = merged_ids_map
+        policy = _resolve_policy(merged_ids_map)
+        if policy is not None:
+            patched["project_key_policy"] = policy
         return patched
     if is_dataclass(normalized_intent):
-        return replace(normalized_intent, ids_map=_merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map))
+        merged_ids_map = _merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map)
+        project_key_policy = getattr(normalized_intent, "project_key_policy", None)
+        policy = _resolve_policy(merged_ids_map)
+        if policy is not None:
+            project_key_policy = policy
+        return replace(normalized_intent, ids_map=merged_ids_map, project_key_policy=project_key_policy)
     if hasattr(normalized_intent, "ids_map"):
         try:
-            setattr(normalized_intent, "ids_map", _merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map))
+            merged_ids_map = _merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map)
+            setattr(normalized_intent, "ids_map", merged_ids_map)
+            policy = _resolve_policy(merged_ids_map)
+            if policy is not None and hasattr(normalized_intent, "project_key_policy"):
+                setattr(normalized_intent, "project_key_policy", policy)
         except Exception:
             pass
     return normalized_intent
@@ -169,6 +190,8 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "strategy_version": str(getattr(question_analysis, "strategy_version", "v3") or "v3"),
         "candidate_keys": dict(candidate_keys),
         "project_key_policy": project_key_policy,
+        "anchor_locked": bool(str(project_key_policy or "").strip().lower() in {"anchor_locked_pjt_id", "anchor_locked_pjt_no"}),
+        "anchor_locked_key_kind": "pjt_id" if str(project_key_policy or "").strip().lower() == "anchor_locked_pjt_id" else ("pjt_no" if str(project_key_policy or "").strip().lower() == "anchor_locked_pjt_no" else None),
         "join_resolution_policy": join_resolution_policy,
         "join_key_mode": join_key_mode,
         "ids_map": dict(ids_map),
@@ -377,10 +400,10 @@ class RequestUnderstandingFacade:
                 default_context_kind=base_route,
             )
             if str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
-                normalized_intent_base = _inject_seed_into_normalized_intent(normalized_intent_base, followup_resolution.get("seed_map") or {})
+                normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
         elif anchor is not None:
             seed_map = anchor_to_seed_map(anchor)
-            normalized_intent_base = _inject_seed_into_normalized_intent(normalized_intent_base, seed_map)
+            normalized_intent_base = _apply_anchor_lock(normalized_intent_base, seed_map)
             self.log_event(
                 "FOLLOWUP.ANCHOR.RESOLVED",
                 request_id=request_id,
@@ -421,7 +444,7 @@ class RequestUnderstandingFacade:
             request_id=request_id,
             conversation_id=conversation_id,
         )
-        normalized_intent = _inject_seed_into_normalized_intent(
+        normalized_intent = _apply_anchor_lock(
             normalized_intent,
             followup_resolution.get("seed_map") or {},
         )

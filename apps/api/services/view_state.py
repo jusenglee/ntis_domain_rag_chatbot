@@ -56,6 +56,10 @@ class FocusEntity(BaseModel):
     doi: Optional[str] = None
     issn: Optional[str] = None
     title_text: Optional[str] = None
+    year: Optional[int] = None
+    lead_org: Optional[str] = None
+    participant_org: List[str] = Field(default_factory=list)
+    researchers: List[str] = Field(default_factory=list)
 
 
 class DetailCoverage(BaseModel):
@@ -126,6 +130,19 @@ def _first_nested_text(source: Any, *keys: str) -> Optional[str]:
             if text:
                 return text
     return None
+
+
+def _list_texts(items: Any, key: str) -> List[str]:
+    out: List[str] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = _first_text(item.get(key))
+        if text and text not in out:
+            out.append(text)
+    return out
 
 
 def _normalize_kind(value: Any, *, default: str) -> str:
@@ -243,6 +260,10 @@ def focus_entity_from_item(*, item: DisplayItem, kind: str, source: str, view_id
         doi=item.doi,
         issn=item.issn,
         title_text=item.title_text or None,
+        year=item.year,
+        lead_org=item.lead_org,
+        participant_org=list(item.participant_org or []),
+        researchers=list(item.researchers or []),
     )
 
 
@@ -275,6 +296,10 @@ def focus_entity_from_detail(
         doi=_first_text(doc.get("doi"), ids.get("doi"), rank_item.get("doi"), (doc.get("meta_basic") or {}).get("doi"), (doc.get("meta_detail") or {}).get("doi")),
         issn=_first_text(doc.get("issn"), ids.get("issn"), rank_item.get("issn"), (doc.get("meta_basic") or {}).get("issn"), (doc.get("meta_detail") or {}).get("issn")),
         title_text=title_text,
+        year=_to_int(facts.get("year") or doc.get("stan_yr") or (doc.get("meta_basic") or {}).get("stan_yr") or (doc.get("meta_detail") or {}).get("stan_yr")),
+        lead_org=_first_text(*list((evidence.get("roles") or {}).get("lead_org_name") or []), doc.get("org_nm"), (doc.get("meta_detail") or {}).get("org_nm"), rank_item.get("lead_org_name"), rank_item.get("org_name")),
+        participant_org=[str(v).strip() for v in ((evidence.get("roles") or {}).get("participant_org_name") or []) if str(v).strip()] or _list_texts(doc.get("prtcp_org"), "org_nm"),
+        researchers=[str(v).strip() for v in ((evidence.get("roles") or {}).get("participant_researcher_name") or []) if str(v).strip()] or _list_texts(doc.get("prtcp_mp"), "hm_nm"),
     )
     if not any([
         focus.title_text,
