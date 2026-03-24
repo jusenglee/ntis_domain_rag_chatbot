@@ -100,21 +100,39 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         body = {"tag": tag, **payload}
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
-    def _resolve_stream_model_label(model_key: str) -> str:
+    def _normalize_stream_model_key(model_key: str) -> str:
         normalized = str(model_key or "").strip().lower()
+        if normalized in {"solar", "upstage"}:
+            return "solar"
+        if normalized == "gemma":
+            return "gemma"
+        return normalized
+
+    def _resolve_stream_model_label(model_key: str) -> str:
+        normalized = _normalize_stream_model_key(model_key)
         if normalized == "solar":
-            return "UPSTAGE"
+            return "SOLAR"
         if normalized == "gemma":
             return "GEMMA"
         return normalized.upper() or "UNKNOWN"
 
-    def _should_emit_synthetic_chunk(merge_debug: Dict[str, Any], answer: str, streamed_chunk_count: int) -> bool:
+    def _stream_chunk(model_key: str, content: str, **extra: Any) -> str:
+        normalized = _normalize_stream_model_key(model_key)
+        return _stream_data(
+            "chunk",
+            model=_resolve_stream_model_label(normalized),
+            model_key=normalized or None,
+            content=content,
+            **extra,
+        )
+
+    def _should_emit_synthetic_chunk(meta: Dict[str, Any], answer: str, streamed_chunk_count: int) -> bool:
         return bool(
             answer
             and streamed_chunk_count == 0
-            and isinstance(merge_debug, dict)
-            and merge_debug.get("stream_bypassed")
-            and merge_debug.get("synthetic_chunk_required")
+            and isinstance(meta, dict)
+            and meta.get("stream_bypassed")
+            and (meta.get("synthetic_chunk_required") or meta.get("ui_emit_required"))
         )
 
     def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
@@ -284,7 +302,14 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             done_meta_by_model: Dict[str, Dict[str, Any]] = {}
             question_analysis: Optional[Any] = None
             clarification_payload: Optional[Dict[str, Any]] = None
-            streamed_chunk_count = 0
+            streamed_chunk_count_by_model: Dict[str, int] = {
+                "solar": 0,
+                "gemma": 0,
+            }
+
+            def _inc_model_chunk(model_key: str) -> None:
+                normalized = _normalize_stream_model_key(model_key)
+                streamed_chunk_count_by_model[normalized] = streamed_chunk_count_by_model.get(normalized, 0) + 1
 
             try:
                 set_log_context(request_id=request_id, conversation_id=conversation_id)
@@ -308,8 +333,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         if stream_field == "reasoning":
                             continue
                         if chunk_text:
-                            streamed_chunk_count += 1
-                            yield _stream_data("chunk", model="UPSTAGE", content=chunk_text)
+                            _inc_model_chunk("solar")
+                            yield _stream_chunk("solar", chunk_text)
 
                     elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
                         chunk = data.get("chunk")
@@ -317,16 +342,28 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         if stream_field == "reasoning":
                             continue
                         if chunk_text:
-                            streamed_chunk_count += 1
-                            yield _stream_data("chunk", model="GEMMA", content=chunk_text)
+                            _inc_model_chunk("gemma")
+                            yield _stream_chunk("gemma", chunk_text)
 
                     elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
                         output = data.get("output", {})
-                        model = "SOLAR" if node == "generate_answer_solar" else "GEMMA"
+                        model_key = "solar" if node == "generate_answer_solar" else "gemma"
+                        model = "SOLAR" if model_key == "solar" else "GEMMA"
                         answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
                         answer_meta_key = f"{answer_key}_meta"
                         stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
                         done_meta_by_model[model] = stream_meta or {}
+                        answer_text = str(output.get(answer_key) or "").strip()
+                        current_count = streamed_chunk_count_by_model.get(model_key, 0)
+                        if _should_emit_synthetic_chunk(stream_meta, answer_text, current_count):
+                            _inc_model_chunk(model_key)
+                            yield _stream_chunk(
+                                model_key,
+                                answer_text,
+                                synthetic=True,
+                                answer_source=stream_meta.get("answer_source"),
+                                bypass_reason=stream_meta.get("bypass_reason"),
+                            )
 
                     elif kind == "on_chain_end" and node == "analyze_question":
                         question_analysis = data.get("output", {})
@@ -335,8 +372,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         output = data.get("output", {})
                         if "answer_gemma" in output:
                             answer = output["answer_gemma"]
-                            streamed_chunk_count += 1
-                            yield _stream_data("chunk", model="GEMMA", content=answer)
+                            _inc_model_chunk("gemma")
+                            yield _stream_chunk("gemma", answer)
 
                     elif kind == "on_chain_start" and node == "rag_search":
                         yield _stream_data("status", status="retrieve")
@@ -351,12 +388,13 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                             if node == "merge_answers":
                                 merge_debug = output.get("merge_debug") or {}
                                 merged_answer = str(output.get("answer") or "").strip()
-                                if _should_emit_synthetic_chunk(merge_debug, merged_answer, streamed_chunk_count):
-                                    streamed_chunk_count += 1
-                                    yield _stream_data(
-                                        "chunk",
-                                        model=_resolve_stream_model_label(merge_debug.get("selected_model")),
-                                        content=merged_answer,
+                                selected_model_key = _normalize_stream_model_key(merge_debug.get("selected_model"))
+                                current_count = streamed_chunk_count_by_model.get(selected_model_key, 0)
+                                if _should_emit_synthetic_chunk(merge_debug, merged_answer, current_count):
+                                    _inc_model_chunk(selected_model_key)
+                                    yield _stream_chunk(
+                                        selected_model_key,
+                                        merged_answer,
                                         synthetic=True,
                                         answer_source=merge_debug.get("selected_answer_source"),
                                         bypass_reason=merge_debug.get("selected_bypass_reason"),
