@@ -95,8 +95,8 @@ def _extract_ids_from_hits(search_hits: List[Any], *, limit: int = 20) -> Dict[s
             continue
 
         _log_project_key_policy_once()
-        pjt_id_keys = ["pjt_id"] + (["meta_basic.pjt_id"] if _allow_legacy_meta_keys() else [])
-        pjt_no_keys = ["pjt_no"] + (["meta_basic.pjt_no"] if _allow_legacy_meta_keys() else [])
+        pjt_id_keys = ["pjt_id", "meta_basic.pjt_id"]
+        pjt_no_keys = ["pjt_no", "meta_basic.pjt_no"]
         _add("pjt_id", _payload_get(payload, *pjt_id_keys))
         _add("pjt_no", _payload_get(payload, *pjt_no_keys))
         _add("rst_id", _payload_get(payload, "rst_id", "meta_basic.rst_id", "id"))
@@ -119,8 +119,11 @@ def _merge_ids_map(base: Dict[str, List[str]], extra: Dict[str, List[str]]) -> D
 
 
 def _infer_join_relation(planner_relation: Any, planner_action: Optional[str]) -> Optional[str]:
-    if isinstance(planner_relation, tuple) and len(planner_relation) == 2:
-        return f"{planner_relation[0]}_{planner_relation[1]}"
+    if isinstance(planner_relation, (tuple, list)) and len(planner_relation) == 2:
+        lhs = str(planner_relation[0] or "").strip().lower()
+        rhs = str(planner_relation[1] or "").strip().lower()
+        if lhs and rhs:
+            return f"{lhs}_{rhs}"
     rel = str(planner_relation or "").strip().lower()
     if rel in ("project_perf", "perf_project"):
         return rel

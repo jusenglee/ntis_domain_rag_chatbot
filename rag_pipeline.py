@@ -143,7 +143,7 @@ PERF_TAGS_NORM = {_normalize_tag_value(t) for t in PERF_TAGS}
 
 
 def _serialize_filter_for_log(filter_obj: Any) -> Any:
-    """Qdrant Filter 객체를 운영 로그용 표준 JSON 직렬화 가능 형태로 변환."""
+    """Qdrant Filter ??????ル뭽????????????????筌뤾퍓愿????댁삩? ??????????? JSON ??遺얘턁??????????????ル뭽??????耀붾굝???????癰궽뮻?????????怨뺤른????"""
     if filter_obj is None:
         return None
     if isinstance(filter_obj, (str, int, float, bool)):
@@ -193,7 +193,7 @@ def _split_tag_filters_by_family(tag_filters: Iterable[object]) -> tuple[list[st
 
 
 def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
-    """ids_map 입력을 {key: [str, ...]} 형태로 정규화한다."""
+    """ids_map ????????⑤뜪輿??{key: [str, ...]} ??耀붾굝???????癰궽뮻????????????????"""
     if not isinstance(ids_map, dict):
         return {}
 
@@ -220,7 +220,7 @@ def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
 
 
 def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[str, List[str]]:
-    """planner 입력(ids_map)의 project key XOR 계약을 검증하고 정규화 결과를 반환한다."""
+    """planner ????????⑤뜪輿?ids_map)??project key XOR ???????????????黎앸럽??筌????遺얘턁???鶯ㅺ동???⑥ャ걖???嶺????붺몭??????????????黎앸럽??筌?????????띾????????諛몃마嶺뚮????????饔낅떽??????"""
     mode_norm = str(mode or "").strip().lower()
     try:
         return validate_planner_join_keys(mode=mode_norm, ids_map=ids_map)
@@ -233,14 +233,14 @@ def _validate_project_key_exclusive(ids_map: Any, mode: Optional[str]) -> Dict[s
         raise StrategyViolation(error_code=error_code, reason=reason or msg) from exc
 
 # =====================================================================
-# Pretty / Section Logging (RAG)  ✅✅ 상세 로그 트래킹 유틸
+# Pretty / Section Logging (RAG)  ???饔낅떽????????????嶺뚮ㅎ?볠꽴???????????耀붾굝????????????鶯ㅺ동???????
 # =====================================================================
 
 def _rag_debug_on() -> bool:
     return str(os.getenv("RAG_DEBUG", "1")).strip().lower() in ("1", "true", "yes", "y")
 
 def _rag_color_on() -> bool:
-    # 파일 로깅이면 ANSI가 지저분할 수 있으니 기본 OFF
+    # ????????????????ANSI??????ル뭽?? ??遺얘턁????????????????щ쫫?????????關?쒎첎?嫄?濡ろ뜇?遺븍뙕??????????OFF
     return str(os.getenv("RAG_LOG_COLOR", "0")).strip().lower() in ("1", "true", "yes", "y")
 
 def _clip_text(s: str, max_chars: int) -> str:
@@ -248,7 +248,7 @@ def _clip_text(s: str, max_chars: int) -> str:
         return ""
     s = str(s)
     if max_chars > 0 and len(s) > max_chars:
-        return s[: max_chars - 1] + "…(trunc)"
+        return s[: max_chars - 1] + "??trunc)"
     return s
 
 def _safe_json(obj: object) -> str:
@@ -259,9 +259,9 @@ def _safe_json(obj: object) -> str:
 
 def log_section(title: str, content: object = None, *, level: str = "info", max_chars: int = None) -> None:
     """
-    RAG_DEBUG=1 일 때만 출력.
+    RAG_DEBUG=1 ?????????????????
     - content: str/dict/list/anything
-    - max_chars: 환경변수 RAG_LOG_MAX_CHARS(기본 6000)로 제한
+    - max_chars: ????????????怨뺤른????RAG_LOG_MAX_CHARS(????????6000)??????????
     """
     if not _rag_debug_on():
         return
@@ -290,7 +290,7 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
     log_fn(f"{header}\n{body}\n{footer}")
 
 def log_kv(title: str, *, level: str = "info", **kwargs) -> None:
-    """key=value를 한 섹션으로 예쁘게."""
+    """key=value????????????????????????"""
     if not _rag_debug_on():
         return
     payload = {}
@@ -434,7 +434,7 @@ def _clean_one_line(s: object, max_len: int = 160) -> str:
     t = str(s).replace("\r", " ").replace("\n", " ").strip()
     t = re.sub(r"\s+", " ", t)
     if len(t) > max_len:
-        t = t[: max_len - 1] + "…"
+        t = t[: max_len - 4] + "..."
     return t
 
 def _get_meta(pl: dict) -> dict:
@@ -888,7 +888,7 @@ def build_context_list_light(
             header = ""
         else:
             total_tok += header_tok
-    empty_notice = "성과 없음" if kind == "perf" else "(후보 없음)"
+    empty_notice = "(no perf context)" if kind == "perf" else "(no project context)"
     ctx = header + ("\n".join(items) if items else empty_notice)
     return ctx, points
 
@@ -1488,9 +1488,9 @@ def normalize_for_title_match(text: object) -> str:
     s = unicodedata.normalize("NFKC", str(text))
     s = s.replace("\u00A0", " ")
     s = re.sub(r"[\u2000-\u200B\u202F\u205F\u3000]", " ", s)
-    s = re.sub(r"[\[\]{}()<>《》〈〉「」『』【】]", " ", s)
-    s = re.sub(r"[\"'`´]+", "", s)
-    s = re.sub(r"[·•ㆍ]", " ", s)
+    s = re.sub(r"[\[\]{}()<>]", " ", s)
+    s = re.sub(r"[\"'`]+", "", s)
+    s = re.sub(r"[,:;|/\\_-]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
@@ -1893,7 +1893,7 @@ def _has_perf_focus_signal(it: Optional[NormalizedIntent]) -> bool:
     if perf_types:
         return True
 
-    perf_focus_terms = ("논문", "특허", "성과")
+    perf_focus_terms = ("paper", "patent", "report", "논문", "특허", "보고서", "성과")
     term_sources = [
         *(getattr(it, "keywords", None) or []),
         *(getattr(it, "title", None) or []),
@@ -1912,7 +1912,7 @@ def _default_target_collections_for_route(base_route: str, it: Optional[Normaliz
         "project": [COL_PROJECT],
         "perf": [COL_PERF],
         "support": [COL_SUPPORT],
-        # people/org 질의는 project를 우선 사용하되 성과 신호가 있으면 perf를 함께 조회
+        # people/org ??遺얘턁????????project??????????? ??????癲됱빖???????깃묄???????濡?씀?????⑤슢?⑶큺??????????㏉렱??釉먮궚嶺?????곕섟???????쎛 ????關?쒎첎?嫄?濡ろ뜇?遺븍뙕???perf??????????????リ틖???????Β??????
         "people": [COL_PROJECT],
         "org": [COL_PROJECT],
     }
@@ -1965,7 +1965,7 @@ def _final_rerank(
     score_norm_policy = os.getenv("RAG_SCORE_NORM", "minmax")
     score_sample = int(os.getenv("RAG_SCORE_SAMPLE", "200"))
 
-    # mode별 가중치 (정규화 스코어 기준)
+    # mode????????ル뭽???????熬곣벀嫄?????꾤뙴???(?????????????????????)
     if mode == "lookup":
         w_rrf, w_kw, w_f, w_fam, w_tag = 0.30, 0.25, 0.35, 0.05, 0.05
         strict_ids = True
@@ -2527,7 +2527,7 @@ def _build_join_hop1_filter(
         raise StrategyViolation(
             error_code="PLANNER_JOIN_HOP1_COLLECTION_MISMATCH",
             reason=(
-                "planner hop1_spec.collection과 실행 hop1_col 불일치"
+                "planner hop1_spec.collection must match executed hop1_col "
                 f"(planner={planner_hop1_col}, executed={hop1_col}, relation={relation})"
             ),
         )
@@ -2566,7 +2566,7 @@ def _build_join_hop2_filter(
     join_mode_norm = str(join_key_mode or "instance").strip().lower()
     join_compile_selection = "planner_contract"
     effective_perf_join_mode = join_mode_norm
-    if hop2_col == COL_PERF and join_mode_norm == "group" and not join_pjt_nos and join_pjt_ids:
+    if (hop2_col == COL_PERF or "perf" in str(hop2_col).lower()) and join_mode_norm == "group" and not join_pjt_nos and join_pjt_ids:
         effective_perf_join_mode = "instance"
         join_compile_selection = "group_perf_pjt_id_fallback"
 
@@ -2581,10 +2581,12 @@ def _build_join_hop2_filter(
     }
     log_kv("RAG.JOIN.HOP2.RELATION_MATRIX", **relation_matrix)
 
+    selected_join_ids = join_pjt_ids if effective_perf_join_mode == "instance" and str(join_key_mode or "instance").strip().lower() == "instance" else join_ids
+
     hop2_filter = build_collection_join_filter(
         hop2_col=hop2_col,
         join_key_mode=effective_perf_join_mode,
-        join_ids=(join_pjt_ids if join_key_mode == "instance" else join_ids),
+        join_ids=selected_join_ids,
         pjt_nos=join_pjt_nos,
         resolved_pjt_ids=join_pjt_ids,
         query=q,
@@ -2608,13 +2610,17 @@ def _build_join_hop2_filter(
         raise StrategyViolation(
             error_code="PLANNER_JOIN_HOP2_COLLECTION_MISMATCH",
             reason=(
-                "planner hop2_spec.collection과 실행 hop2_col 불일치"
+                "planner hop2_spec.collection must match executed hop2_col "
                 f"(planner={planner_hop2_col}, executed={hop2_col}, relation={relation})"
             ),
         )
     planner_hop2_filter = planner_hop2_spec.get("qdrant_filter")
     if planner_hop2_filter is not None:
-        hop2_filter = _and_filter(hop2_filter, planner_hop2_filter)
+        if isinstance(hop2_filter, dict) and isinstance(planner_hop2_filter, dict):
+            merged_must = list(hop2_filter.get("must") or []) + list(planner_hop2_filter.get("must") or [])
+            hop2_filter = {**hop2_filter, **planner_hop2_filter, "must": merged_must}
+        else:
+            hop2_filter = _and_filter(hop2_filter, planner_hop2_filter)
 
     executed_join_filter_spec = dict(_serialize_filter_for_log(hop2_filter) or {})
     executed_join_filter_spec.setdefault("_meta", {})
@@ -2625,7 +2631,7 @@ def _build_join_hop2_filter(
             "join_key_mode": join_key_mode,
             "effective_perf_join_mode": effective_perf_join_mode,
             "join_compile_selection": join_compile_selection,
-            "join_ids_count": len(join_pjt_ids if join_key_mode == "instance" else join_ids),
+            "join_ids_count": len(selected_join_ids),
             "pjt_nos_count": len(join_pjt_nos),
             "planner_hop2_filter_applied": int(planner_hop2_filter is not None),
         }
@@ -3186,7 +3192,7 @@ def _run_rag_with_vectors(
     )
     _timing_put(timings, "info.ctx_budget", float(ctx_budget))
 
-    # org terms/filter (필요 시)
+    # org terms/filter (??????꾩룆梨띰쭕????
     org_terms = normalize_org_terms([t.strip() for t in (list(ctx.org_terms or []) or []) if str(t).strip()])
     lead_org_terms = normalize_org_terms([t.strip() for t in (list(getattr(ctx, "lead_org_terms", []) or []) or []) if str(t).strip()])
     participant_org_terms = normalize_org_terms([
@@ -3445,7 +3451,7 @@ def _run_rag_with_vectors(
     it = intent_view
 
     # -------------------------
-    # 상세 로그: INTENT / PRESET / KEYWORDS
+    # ?????嶺뚮ㅎ?볠꽴????????? INTENT / PRESET / KEYWORDS
     # -------------------------
     log_section(
         "RAG.KEYWORDS",

@@ -1369,39 +1369,54 @@ async def load_system_prompt(path: Path) -> str:
     async with aiofiles.open(path, encoding="utf-8") as f:
         return await f.read()
 
+def _is_low_quality_context_text(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return True
+    normalized = "\n".join(lines)
+    low_quality_markers = ("\uc815\ubcf4 \uc5c6\uc74c", "N/A")
+    strong_fields = ("\uacfc\uc81c\uba85", "\uc8fc\uad00\uae30\uad00", "\uc5f0\uad6c\ubaa9\ud45c", "\uc131\uacfc\uba85", "\uc218\ud589\uae30\uad00")
+    if any(marker in normalized for marker in low_quality_markers) and not any(token in normalized for token in strong_fields):
+        return True
+    required_hits = sum(int(token in normalized) for token in strong_fields)
+    return required_hits == 0
+
+
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
     llm = TritonChatModel(model_name=model_name)
 
     ks = state.knowledge_sufficiency
     qa = state.question_analysis
-
-    # ✅ 1) 기본은 "현재 검색 컨텍스트" 사용
     docs_for_ctx = state.context or state.prev_context or []
-    is_detail = False
-
-    # ✅ 2) JOIN이면 detail 우선
-    if (qa and qa.mode == "JOIN") or (qa and qa.action == "detail"):
-        is_detail = True
+    qa_mode = str(getattr(qa, "mode", "") or "").upper()
+    qa_action = str(getattr(qa, "action", "") or "").lower()
+    is_detail = qa_mode == "JOIN" or qa_action == "detail"
 
     context_text = (
         refine_documents_rule_based(
             docs_for_ctx,
             is_detail,
-            org_filters=(qa.filters if qa else None),
-            ids_map=(qa.ids_map if qa else None),
+            org_filters=(getattr(qa, "filters", None) if qa else None),
+            ids_map=(getattr(qa, "ids_map", None) if qa else None),
             relax_limits=True,
         )
         if docs_for_ctx
-        else "없음"
+        else "\uc815\ubcf4 \uc5c6\uc74c"
     )
-    # log_section("context_text - 페이로드 평탄화 후 데이터",
-    #             f"title: {context_text}")
+
+    fallback_context = str(getattr(state, "fallback_context", "") or "").strip()
+    if fallback_context and _is_low_quality_context_text(context_text):
+        context_text = f"{context_text}\n\n[\ucc38\uace0 \ubb38\ub9e5(\uadfc\uac70 \uc544\ub2d8)]\n{fallback_context}"
+
     SYSTEM_PROMPT_PATH = Path("prompts/ntis_chatbot.md")
     system_prompt = await load_system_prompt(SYSTEM_PROMPT_PATH)
 
     human_prompt = (
-        f"[제공된 정보]\n{context_text}\n\n"
-        f"[원본 질문]\n{state.messages[-1].content}"
+        f"[\uac80\uc0c9\ub41c \uc815\ubcf4]\n{context_text}\n\n"
+        f"[\uc0ac\uc6a9\uc790 \uc9c8\ubb38]\n{state.messages[-1].content}"
     )
 
     log_section(
@@ -1414,13 +1429,16 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
     response = await llm.ainvoke(messages, max_tokens_hint=max_tokens_hint)
     final_answer = response.content.replace("<eos>", "").strip()
 
-    log_section(f"GENERATE ANSWER ({model_name})",
-                f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
-                f"ctx_chars={len(context_text)}\n"
-                f"{final_answer[:100]}")
+    log_section(
+        f"GENERATE ANSWER ({model_name})",
+        f"Level: {ks.requires_new_knowledge if ks else 'unknown'}\n"
+        f"ctx_chars={len(context_text)}\n"
+        f"{final_answer[:100]}",
+    )
     return {final_field: final_answer}
 
 
+# --- Node 8: Direct Answer (Rule-based) ---
 # --- Node 8: Direct Answer (Rule-based) ---
 async def node_direct_answer(state: AgentState) -> Dict[str, Any]:
     """규칙 기반 즉시 답변"""
@@ -1702,7 +1720,8 @@ def apply_planner_v2(intent: Any, qa: Optional[QuestionAnalysis]) -> tuple[Any, 
     planner_perf_types = _normalize_hint_terms(filters.get("perf_types") or filters.get("performance_types"))
     planner_title_terms = _normalize_hint_terms(filters.get("title_terms") or filters.get("title") or filters.get("name"))
     planner_keywords = _normalize_hint_terms(filters.get("keywords"))
-    planner_people_terms = _collect_researcher_name_terms(filters)
+    names = _collect_researcher_name_terms(filters)
+    planner_people_terms = names
     planner_org_role = str(filters.get("org_role") or getattr(intent, "org_role", "") or "").strip().lower() or None
     planner_target_cols = _normalize_hint_terms(getattr(qa, "target_cols", None))
 
@@ -2486,29 +2505,47 @@ def _iter_json_candidates(text: str) -> List[str]:
     return ordered
 
 
+def _strip_gpt_oss_sections(text: str) -> str:
+    raw = str(text or "")
+    lowered = raw.lower()
+    if "assistantfinal" in lowered:
+        idx = lowered.rfind("assistantfinal")
+        raw = raw[idx + len("assistantfinal"):]
+    elif "\nassistant" in lowered:
+        idx = lowered.rfind("\nassistant")
+        raw = raw[idx + len("\nassistant"):]
+    elif lowered.startswith("analysis"):
+        raw = raw[len("analysis"):]
+    raw = raw.lstrip(" .\n\r\t")
+    if raw.startswith("assistant") and "{" in raw:
+        raw = raw[raw.find("{"):]
+    return raw
+
+
 def sanitize_llm_json(msg) -> str:
     text = msg.content if hasattr(msg, "content") else str(msg)
-    last_error: Optional[Exception] = None
+    text = _strip_gpt_oss_sections(text)
 
-    for candidate in _iter_json_candidates(text):
+    candidates = []
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
+        block = match.group(1).strip()
+        if block:
+            candidates.append(block)
+
+    if not candidates:
+        brace_match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+        if brace_match:
+            candidates.append(brace_match.group(1).strip())
+
+    for candidate in candidates or [text.strip()]:
         try:
             parsed = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            last_error = exc
+        except Exception:
             continue
-
         if isinstance(parsed, (dict, list)):
-            return candidate
+            return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
-    summary = _summarize_text(text)
-    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "no_candidates"
-    logger.warning(
-        "JSON extraction failed: length=%s, preview=%s, error=%s",
-        len(text),
-        summary,
-        error_detail,
-    )
-    raise LLMJSONExtractionError("유효한 JSON 객체/배열을 추출하지 못했습니다.")
+    raise ValueError("valid JSON not found")
 
 
 def _has_payload_index(client: Any, collection_name: str, field_name: str) -> bool:
