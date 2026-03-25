@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from langchain_core.messages import BaseMessage
 
+from apps.api.streaming.contracts import AnswerArtifact, StreamEvent
+from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.core.openai_compat_llm import EmptyStreamContentError
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ async def run_llm_streaming(
     llm: Any,
     messages: Sequence[BaseMessage],
     *,
+    emitter: Optional[AsyncStreamEmitter] = None,
+    model_key: Optional[str] = None,
     max_tokens_hint: Optional[int] = None,
     request_id: Optional[str] = None,
     deadline_ms: Optional[int] = None,
@@ -44,7 +48,7 @@ async def run_llm_streaming(
     max_chars: Optional[int] = None,
     fallback_policy: Optional[StreamFallbackPolicy] = None,
     astream_kwargs: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, Dict[str, Any]]:
+) -> AnswerArtifact:
     """LLM astream 결과를 읽어 최종 텍스트와 스트리밍 메트릭을 계산한다.
 
     reasoning 토큰은 관측용으로만 세고 사용자 응답에는 content만 합쳐, 계약상 최종 답변과 내부 추론 스트림을 분리한다.
@@ -132,6 +136,16 @@ async def run_llm_streaming(
             content_emitted_chunks += 1
             emitted_chars = content_chars
             emitted_chunks = content_emitted_chunks
+            if emitter is not None and request_id:
+                await emitter.publish(
+                    StreamEvent(
+                        kind="answer.chunk",
+                        request_id=request_id,
+                        model_key=model_key,
+                        content=text,
+                        meta={},
+                    )
+                )
 
             if max_chars and emitted_chars >= max_chars:
                 char_limited = True
@@ -198,4 +212,11 @@ async def run_llm_streaming(
     elif char_limited and is_partial_content_truncation:
         final_text = (final_text + "\n\n(안내: 응답 길이 제한으로 일부만 반환했습니다.)").strip()
 
-    return final_text, metrics
+    answer_kind = "llm_streamed" if content_emitted_chunks > 0 else "llm_collected"
+    return AnswerArtifact(
+        text=final_text,
+        answer_kind=answer_kind,
+        stream_metrics=metrics,
+        user_visible_final_required=True,
+        meta={"model_key": model_key},
+    )

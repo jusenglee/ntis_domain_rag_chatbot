@@ -192,10 +192,59 @@ def build_display_snapshot(
     turn_id: str,
     context_kind: str,
     requested_count: int,
-    documents: List[Dict[str, Any]],
-    canonical_evidence: List[Dict[str, Any]],
+    documents: Optional[List[Dict[str, Any]]] = None,
+    canonical_evidence: Optional[List[Dict[str, Any]]] = None,
+    items: Optional[List[Any]] = None,
     raw_count: int,
 ) -> DisplaySnapshot:
+    if items is not None:
+        normalized_items: List[DisplayItem] = []
+        for index, item in enumerate(items[: max(0, int(requested_count or 0))], start=1):
+            if isinstance(item, DisplayItem):
+                normalized_items.append(item)
+                continue
+            display = getattr(item, "display", None) or {}
+            canonical = getattr(item, "canonical", None) or {}
+            ids = canonical.get("ids") or {}
+            facts = canonical.get("facts") or {}
+            roles = canonical.get("roles") or {}
+            normalized_items.append(
+                DisplayItem(
+                    display_rank=index,
+                    entity_kind=_normalize_kind(str((canonical.get("context_kind") or context_kind or "project")).strip().lower(), default="project"),
+                    doc_type=_first_text(display.get("doc_type"), canonical.get("source_type"), display.get("source_type")),
+                    doc_id=_first_text(display.get("doc_id"), ids.get("doc_id")),
+                    col=_first_text(display.get("source_type"), canonical.get("source_type")),
+                    title_text=_first_text(display.get("title"), display.get("title_text"), facts.get("title")) or "",
+                    pjt_id=_first_text(display.get("pjt_id"), ids.get("pjt_id")),
+                    pjt_no=_first_text(display.get("pjt_no"), ids.get("pjt_no")),
+                    rst_id=_first_text(display.get("rst_id"), ids.get("rst_id")),
+                    person_no=_first_text(display.get("person_no")),
+                    org_id=_first_text(display.get("org_id")),
+                    org_code=_first_text(display.get("org_code")),
+                    biz_no=_first_text(display.get("biz_no")),
+                    doi=_first_text(display.get("doi"), ids.get("doi")),
+                    issn=_first_text(display.get("issn"), ids.get("issn")),
+                    year=_to_int(facts.get("year")),
+                    lead_org=_first_text(*list(roles.get("lead_org_name") or []), display.get("org_nm")),
+                    participant_org=[str(v).strip() for v in (roles.get("participant_org_name") or []) if str(v).strip()],
+                    researchers=[str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()],
+                    score=(float(display.get("score")) if display.get("score") is not None else None),
+                )
+            )
+        return DisplaySnapshot(
+            view_id=f"{conversation_id}:{turn_id}:list",
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            context_kind=str(context_kind or "project").strip().lower() or "project",
+            requested_count=max(0, int(requested_count or 0)),
+            visible_count=len(normalized_items),
+            raw_count=max(len(normalized_items), int(raw_count or 0)),
+            items=normalized_items,
+        )
+
+    documents = documents or []
+    canonical_evidence = canonical_evidence or []
     visible_count = min(max(0, int(requested_count or 0)), max(len(documents), len(canonical_evidence)))
     items: List[DisplayItem] = []
     for index in range(visible_count):

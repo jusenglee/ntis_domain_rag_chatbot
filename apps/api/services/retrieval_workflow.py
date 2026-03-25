@@ -14,9 +14,12 @@ from apps.api.services.detail_contract import (
     make_entity_cache_key,
     render_detail_answer,
 )
+from apps.api.services.result_set import ResultItem, RetrievalBundle
 from apps.api.services.view_state import DetailCacheEntry, FocusEntity, build_display_snapshot, focus_entity_from_detail
-from apps.api.services.rag_retriever import has_active_anchor_seed, repair_query_for_resolved_anchor
-from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, should_short_circuit_followup_clarification
+from apps.api.services.rag_retriever import has_active_anchor_seed
+from apps.api.streaming.contracts import AnswerArtifact
+from apps.core.entity_reference import ClarificationRequest, ResolvedEntityRef
+from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, resolve_entity_ref_from_strategy_meta, should_short_circuit_followup_clarification
 
 
 def _get_normalized_intent(state: Any) -> Any:
@@ -76,6 +79,84 @@ def _extract_explicit_count(question: Any) -> Optional[int]:
 def _classify_docs_kind(docs: list[dict[str, Any]]) -> str:
     if not docs:
         return "item_list"
+    source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
+    source_types.discard("")
+    item_like_types = {"hit", "canonical_item", "item", "document"}
+    if source_types and source_types.issubset(item_like_types):
+        return "item_list"
+    if "aggregation" in source_types:
+        return "collection_wrapper"
+    return "item_list"
+
+
+def _build_retrieval_bundle(
+    *,
+    docs: list[dict[str, Any]],
+    canonical_evidence: list[dict[str, Any]],
+    render_profile: dict[str, Any],
+    raw_count: int,
+    clarification: dict[str, Any] | None = None,
+    no_result_message: str | None = None,
+) -> RetrievalBundle:
+    items: list[ResultItem] = []
+    max_len = max(len(docs or []), len(canonical_evidence or []))
+    for index in range(max_len):
+        display = docs[index] if index < len(docs) and isinstance(docs[index], dict) else {}
+        canonical = canonical_evidence[index] if index < len(canonical_evidence) and isinstance(canonical_evidence[index], dict) else {}
+        items.append(ResultItem(canonical=dict(canonical), display=dict(display), raw_hit=dict(display)))
+    return RetrievalBundle(
+        items=items,
+        render_profile=dict(render_profile or {}),
+        raw_count=int(raw_count or 0),
+        context_kind=str((render_profile or {}).get("context_kind") or "project").strip().lower() or "project",
+        clarification=clarification,
+        no_result_message=no_result_message,
+    )
+
+
+def _build_answer_artifact(*, text: str, answer_kind: str, answer_source: str, clarification: ClarificationRequest | None = None) -> AnswerArtifact:
+    return AnswerArtifact(
+        text=str(text or ""),
+        answer_kind=answer_kind,
+        stream_metrics={"content_chars": len(str(text or "")), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        clarification=clarification,
+        meta={"answer_source": answer_source},
+    )
+
+
+def _resolve_detail_entity_ref(*, strategy_meta: dict[str, Any], latest_focus_entity: Any, ids_map: dict[str, list[str]] | None = None) -> ResolvedEntityRef | ClarificationRequest | None:
+    resolved = resolve_entity_ref_from_strategy_meta(strategy_meta)
+    if resolved is not None:
+        return resolved
+    normalized_ids = dict(ids_map or {})
+    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+        values = normalized_ids.get(key) or []
+        if values:
+            entity_kind = "perf" if key == "rst_id" else ("people" if key == "person_no" else ("org" if key in {"org_id", "org_code", "biz_no"} else "project"))
+            return ResolvedEntityRef(entity_kind=entity_kind, seed_map={key: [str(values[0]).strip()]}, source="explicit_id")
+    anchor_source = str((strategy_meta or {}).get("anchor_source") or "").strip().lower()
+    if anchor_source != "detail_lookup":
+        return None
+    if latest_focus_entity is None:
+        return None
+    seed_map: dict[str, list[str]] = {}
+    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+        value = getattr(latest_focus_entity, key, None)
+        if str(value or "").strip():
+            seed_map[key] = [str(value).strip()]
+            break
+    if not seed_map:
+        return None
+    kind = str(getattr(latest_focus_entity, "kind", "") or "project").strip().lower() or "project"
+    return ResolvedEntityRef(
+        entity_kind=kind if kind in {"project", "perf", "people", "org"} else "project",
+        seed_map=seed_map,
+        source="detail_lookup",
+        display_view_id=getattr(latest_focus_entity, "view_id", None),
+        display_rank=getattr(latest_focus_entity, "display_rank", None),
+        anchor_fields={"title_text": getattr(latest_focus_entity, "title_text", None)},
+    )
     source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
     source_types.discard("")
     item_like_types = {"hit", "canonical_item", "item", "document"}
@@ -533,10 +614,33 @@ async def node_rag_search(
                         org_id=getattr(view_state.latest_focus_entity, "org_id", None),
                         org_code=getattr(view_state.latest_focus_entity, "org_code", None),
                         biz_no=getattr(view_state.latest_focus_entity, "biz_no", None),
-                    )
+                )
             except Exception:
                 pass
         latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
+        ids_map_for_detail = getattr(query_intent, "ids_map", None) or {}
+        if isinstance(query_intent, dict):
+            ids_map_for_detail = query_intent.get("ids_map") or {}
+        resolved_entity_ref = _resolve_detail_entity_ref(strategy_meta=strategy_meta, latest_focus_entity=latest_focus_entity, ids_map=ids_map_for_detail)
+        if isinstance(resolved_entity_ref, ClarificationRequest):
+            clarification_payload = {
+                "clarification_type": resolved_entity_ref.clarification_type,
+                "status": "clarification_required",
+                "candidates": list(resolved_entity_ref.candidates),
+                "resume_token": dict(resolved_entity_ref.resume_token),
+                "message": resolved_entity_ref.message,
+            }
+            return {
+                "clarification": clarification_payload,
+                "no_result_message": resolved_entity_ref.message,
+                "answer_artifact": _build_answer_artifact(
+                    text=resolved_entity_ref.message,
+                    answer_kind="clarification",
+                    answer_source="followup_clarification",
+                    clarification=resolved_entity_ref,
+                ),
+                "view_state": view_state,
+            }
         detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
         if output_type == "detail" and not detail_anchor_active:
             if bool(
@@ -550,9 +654,12 @@ async def node_rag_search(
                     conversation_id=state.conversation_id,
                     reason="detail follow-up signal exists but ids_map has no active anchor seed",
                 )
-        if output_type == "detail" and latest_focus_entity is not None and detail_anchor_active:
+        if output_type == "detail" and isinstance(resolved_entity_ref, ResolvedEntityRef) and view_state is not None:
             requested_fields = extract_requested_fields(state.messages[-1].content)
-            cache_key = make_entity_cache_key(latest_focus_entity)
+            cache_anchor = latest_focus_entity
+            if cache_anchor is None:
+                cache_anchor = FocusEntity(kind=resolved_entity_ref.entity_kind, source=resolved_entity_ref.source, **{k: (v[0] if isinstance(v, list) and v else None) for k, v in resolved_entity_ref.seed_map.items()})
+            cache_key = make_entity_cache_key(cache_anchor)
             cache_entry = (getattr(view_state, "detail_cache", {}) or {}).get(cache_key)
             if cache_entry and coverage_satisfies_fields(cache_entry.coverage, requested_fields):
                 answer_text = render_detail_answer(cache_entry.coverage, requested_fields=requested_fields)
@@ -569,7 +676,14 @@ async def node_rag_search(
                     conversation_id=state.conversation_id,
                     reason="detail_cache_hit",
                 )
-                return {"detail_server_answer": answer_text, "view_state": view_state}
+                return {
+                    "answer_artifact": _build_answer_artifact(
+                        text=answer_text,
+                        answer_kind="detail_cache",
+                        answer_source="detail_cache",
+                    ),
+                    "view_state": view_state,
+                }
             log_event(
                 "DETAIL.CACHE.MISS",
                 request_id=state.request_id,
@@ -578,18 +692,8 @@ async def node_rag_search(
                 requested_fields=sorted(requested_fields),
             )
 
-        exact_detail_lookup = False
-        focus_seed_map: dict[str, list[str]] = {}
-        ids_map = getattr(query_intent, "ids_map", None) or {}
-        if isinstance(query_intent, dict):
-            ids_map = query_intent.get("ids_map") or {}
-        if output_type == "detail" and detail_anchor_active:
-            for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
-                values = ids_map.get(key) or []
-                if values:
-                    focus_seed_map = {key: [str(values[0]).strip()]}
-                    break
-            exact_detail_lookup = bool(focus_seed_map)
+        exact_detail_lookup = bool(output_type == "detail" and isinstance(resolved_entity_ref, ResolvedEntityRef) and resolved_entity_ref.seed_map)
+        focus_seed_map: dict[str, list[str]] = dict(resolved_entity_ref.seed_map) if isinstance(resolved_entity_ref, ResolvedEntityRef) else {}
 
         raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries_fn(
             state=state,
@@ -597,34 +701,15 @@ async def node_rag_search(
             ks=ks,
             min_confidence=0.55,
         )
-        search_query, anchor_query_meta = repair_query_for_resolved_anchor(
-            state=state,
-            query=search_query,
-        )
-        if anchor_query_meta.get("anchor_query_repaired"):
-            log_event(
-                "RAG.RETRIEVAL_QUERY.ANCHOR_REWRITE",
-                request_id=state.request_id,
-                conversation_id=state.conversation_id,
-                planner_query=planner_query,
-                repaired_search_query=search_query,
-                anchor_source=anchor_query_meta.get("anchor_source"),
-                anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
-                reason=anchor_query_meta.get("anchor_repair_reason"),
-            )
+        anchor_query_meta = {
+            "anchor_present": bool(focus_seed_map),
+            "anchor_source": (resolved_entity_ref.source if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
+            "anchor_entity_key": (str(next(iter(focus_seed_map.values()))[0]).strip() if focus_seed_map else None),
+            "anchor_query_repaired": False,
+            "anchor_repair_reason": None,
+        }
         if output_type == "detail" and exact_detail_lookup and focus_seed_map:
             search_query = str(next(iter(focus_seed_map.values()))[0]).strip()
-        if output_type == "detail" and anchor_query_meta.get("anchor_present") and not anchor_query_meta.get("anchor_query_repaired") and not exact_detail_lookup:
-            log_event(
-                "RAG.DETAIL.ANCHOR.NOT_APPLIED",
-                request_id=state.request_id,
-                conversation_id=state.conversation_id,
-                raw_query=raw_query,
-                planner_query=planner_query,
-                selected_search_query=search_query,
-                anchor_source=anchor_query_meta.get("anchor_source"),
-                anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
-            )
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
         search_num = 1 if exact_detail_lookup else _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
         planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
@@ -693,6 +778,14 @@ async def node_rag_search(
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
         clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
         raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
+        retrieval_bundle = _build_retrieval_bundle(
+            docs=docs,
+            canonical_evidence=canonical_evidence,
+            render_profile=render_profile,
+            raw_count=raw_result_count,
+            clarification=clarification,
+            no_result_message=no_result_message,
+        )
 
         context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
         list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
@@ -800,7 +893,7 @@ async def node_rag_search(
                 view_id=snapshot.view_id,
             )
 
-        detail_server_answer = None
+        answer_artifact = None
         if output_type == "detail" and docs and view_state is not None:
             focus_entity = focus_entity_from_detail(
                 context_kind=str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower(),
@@ -834,7 +927,12 @@ async def node_rag_search(
                     hydrated_fields=sorted(set(coverage.available_fields)),
                     source_turn_id=state.request_id,
                 )
-                detail_server_answer = render_detail_answer(coverage, requested_fields=requested_fields)
+                detail_answer = render_detail_answer(coverage, requested_fields=requested_fields)
+                answer_artifact = _build_answer_artifact(
+                    text=detail_answer,
+                    answer_kind=("detail_profile" if coverage.detail_level == "profile_only" else "detail_cache"),
+                    answer_source="detail_lookup",
+                )
                 log_event(
                     "DETAIL.COVERAGE",
                     request_id=state.request_id,
@@ -864,11 +962,12 @@ async def node_rag_search(
         return {
             "context": docs,
             "canonical_evidence": canonical_evidence,
+            "retrieval_bundle": retrieval_bundle,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
             "clarification": clarification,
             "view_state": view_state,
-            "detail_server_answer": detail_server_answer,
+            "answer_artifact": answer_artifact,
         }
     except strategy_violation_cls:
         raise

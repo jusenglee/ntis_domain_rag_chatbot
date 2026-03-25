@@ -12,6 +12,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from apps.api.rag_mapper.schema_types import DataTag
+from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
+from apps.api.streaming.emitter import AsyncStreamEmitter
+from apps.api.streaming.sse_encoder import encode_sse_payload, encode_stream_event
 from apps.core.metrics import MetricSnapshot
 from apps.core.schemas import strategy_spec_to_response
 
@@ -97,8 +100,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     def _stream_data(tag: str, **payload: Any) -> str:
         """SSE ???? `data: ...` ??? ?????."""
-        body = {"tag": tag, **payload}
-        return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+        return encode_sse_payload(tag, **payload)
 
     def _normalize_stream_model_key(model_key: str) -> str:
         normalized = str(model_key or "").strip().lower()
@@ -126,14 +128,27 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             **extra,
         )
 
-    def _should_emit_synthetic_chunk(meta: Dict[str, Any], answer: str, streamed_chunk_count: int) -> bool:
-        return bool(
-            answer
-            and streamed_chunk_count == 0
-            and isinstance(meta, dict)
-            and meta.get("stream_bypassed")
-            and (meta.get("synthetic_chunk_required") or meta.get("ui_emit_required"))
-        )
+    def _emit_legacy_stream_event(event: StreamEvent) -> list[str]:
+        payloads = [encode_stream_event(event)]
+        if event.kind == "answer.chunk":
+            payloads.append(
+                _stream_chunk(
+                    event.model_key or "unknown",
+                    event.content or "",
+                    **dict(event.meta or {}),
+                )
+            )
+        elif event.kind == "answer.final":
+            payloads.append(_stream_data("answer", answer=event.content or "", **dict(event.meta or {})))
+        elif event.kind == "reference.set":
+            payloads.append(_stream_data("reference", reference=list((event.meta or {}).get("references") or [])))
+        elif event.kind == "clarification":
+            payloads.append(_stream_data("clarification", clarification=(event.meta or {}).get("clarification")))
+        elif event.kind == "error":
+            payloads.append(_stream_data("error", **dict(event.meta or {})))
+        elif event.kind == "done":
+            payloads.append(_stream_data("status", status="done", **dict(event.meta or {})))
+        return payloads
 
     def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
         """reference/doc payload?? ??? ?? ?? ?? ???? ???."""
@@ -297,19 +312,15 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 request_overrides=request_overrides or None,
             )
             request_started_at = time.perf_counter()
-
-            documents_used = []
-            done_meta_by_model: Dict[str, Dict[str, Any]] = {}
+            emitter = AsyncStreamEmitter()
+            final_state: Optional[Dict[str, Any]] = None
             question_analysis: Optional[Any] = None
-            clarification_payload: Optional[Dict[str, Any]] = None
-            streamed_chunk_count_by_model: Dict[str, int] = {
-                "solar": 0,
-                "gemma": 0,
-            }
+            route_seq = 0
 
-            def _inc_model_chunk(model_key: str) -> None:
-                normalized = _normalize_stream_model_key(model_key)
-                streamed_chunk_count_by_model[normalized] = streamed_chunk_count_by_model.get(normalized, 0) + 1
+            def _next_route_event(*, kind: str, model_key: Optional[str] = None, content: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> StreamEvent:
+                nonlocal route_seq
+                route_seq += 1
+                return StreamEvent(kind=kind, request_id=request_id, seq=route_seq, model_key=model_key, content=content, meta=dict(meta or {}))
 
             try:
                 set_log_context(request_id=request_id, conversation_id=conversation_id)
@@ -321,86 +332,126 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     "messages": [user_message],
                     "kv_store": _get_kv_store(request),
                     "request_overrides": request_overrides,
+                    "stream_emitter": emitter,
                 }
 
-                async for event in graph.astream_events(inputs, version="v2"):
-                    kind = event["event"]
-                    node = event.get("metadata", {}).get("langgraph_node", "")
-                    data = event.get("data", {})
-                    if kind == "on_chat_model_stream" and node == "generate_answer_solar":
-                        chunk = data.get("chunk")
-                        chunk_text, stream_field = extract_stream_chunk_text_and_field(chunk)
-                        if stream_field == "reasoning":
-                            continue
-                        if chunk_text:
-                            _inc_model_chunk("solar")
-                            yield _stream_chunk("solar", chunk_text)
-
-                    elif kind == "on_chat_model_stream" and node == "generate_answer_gemma":
-                        chunk = data.get("chunk")
-                        chunk_text, stream_field = extract_stream_chunk_text_and_field(chunk)
-                        if stream_field == "reasoning":
-                            continue
-                        if chunk_text:
-                            _inc_model_chunk("gemma")
-                            yield _stream_chunk("gemma", chunk_text)
-
-                    elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
-                        output = data.get("output", {})
-                        model_key = "solar" if node == "generate_answer_solar" else "gemma"
-                        model = "SOLAR" if model_key == "solar" else "GEMMA"
-                        answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
-                        answer_meta_key = f"{answer_key}_meta"
-                        stream_meta = output.get(answer_meta_key) or (output.get("stream_meta") or {}).get(answer_key, {})
-                        done_meta_by_model[model] = stream_meta or {}
-                        answer_text = str(output.get(answer_key) or "").strip()
-                        current_count = streamed_chunk_count_by_model.get(model_key, 0)
-                        if _should_emit_synthetic_chunk(stream_meta, answer_text, current_count):
-                            _inc_model_chunk(model_key)
-                            yield _stream_chunk(
-                                model_key,
-                                answer_text,
-                                synthetic=True,
-                                answer_source=stream_meta.get("answer_source"),
-                                bypass_reason=stream_meta.get("bypass_reason"),
-                            )
-
-                    elif kind == "on_chain_end" and node == "analyze_question":
-                        question_analysis = data.get("output", {})
-
-                    elif kind == "on_chain_end" and node == "direct_answer":
-                        output = data.get("output", {})
-                        if "answer_gemma" in output:
-                            answer = output["answer_gemma"]
-                            _inc_model_chunk("gemma")
-                            yield _stream_chunk("gemma", answer)
-
-                    elif kind == "on_chain_start" and node == "rag_search":
-                        yield _stream_data("status", status="retrieve")
-
-                    elif kind == "on_chain_end" and node in {"rag_search", "merge_answers"}:
-                        output = data.get("output", {})
-                        docs = []
-                        if isinstance(output, dict):
-                            docs = output.get("context") or output.get("documents") or []
+                if not hasattr(graph, "ainvoke") and hasattr(graph, "astream_events"):
+                    final_state = {"context": [], "merge_debug": {}, "selected_answer_meta": {}}
+                    async for event in graph.astream_events(inputs, version="v2"):
+                        kind = event["event"]
+                        node = event.get("metadata", {}).get("langgraph_node", "")
+                        data = event.get("data", {})
+                        if kind == "on_chain_end" and node == "rag_search":
+                            output = data.get("output", {}) or {}
+                            if isinstance(output.get("context"), list):
+                                final_state["context"] = list(output.get("context") or [])
                             if isinstance(output.get("clarification"), dict):
-                                clarification_payload = output.get("clarification")
-                            if node == "merge_answers":
-                                merge_debug = output.get("merge_debug") or {}
-                                merged_answer = str(output.get("answer") or "").strip()
-                                selected_model_key = _normalize_stream_model_key(merge_debug.get("selected_model"))
-                                current_count = streamed_chunk_count_by_model.get(selected_model_key, 0)
-                                if _should_emit_synthetic_chunk(merge_debug, merged_answer, current_count):
-                                    _inc_model_chunk(selected_model_key)
-                                    yield _stream_chunk(
-                                        selected_model_key,
-                                        merged_answer,
-                                        synthetic=True,
-                                        answer_source=merge_debug.get("selected_answer_source"),
-                                        bypass_reason=merge_debug.get("selected_bypass_reason"),
-                                    )
-                        if isinstance(docs, list):
-                            documents_used.extend(docs)
+                                final_state["clarification"] = output.get("clarification")
+                        elif kind == "on_chain_end" and node in {"generate_answer_solar", "generate_answer_gemma"}:
+                            output = data.get("output", {}) or {}
+                            answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
+                            answer_meta_key = f"{answer_key}_meta"
+                            artifact_key = "answer_artifact_solar" if node == "generate_answer_solar" else "answer_artifact_gemma"
+                            answer_text = str(output.get(answer_key) or "").strip()
+                            answer_meta = dict(output.get(answer_meta_key) or {})
+                            final_state[answer_key] = answer_text
+                            final_state[answer_meta_key] = answer_meta
+                            if isinstance(output.get(artifact_key), AnswerArtifact):
+                                final_state[artifact_key] = output.get(artifact_key)
+                        if kind == "on_chain_end" and node == "merge_answers":
+                            output = data.get("output", {}) or {}
+                            final_state.update(output)
+                        elif kind == "on_chain_end" and node == "analyze_question":
+                            question_analysis = data.get("output", {})
+                        elif kind == "on_chain_end" and node == "direct_answer":
+                            output = data.get("output", {}) or {}
+                            answer = str(output.get("answer_gemma") or output.get("answer_solar") or "").strip()
+                            if answer:
+                                for payload_line in _emit_legacy_stream_event(
+                                    _next_route_event(kind="answer.chunk", model_key="gemma", content=answer, meta={})
+                                ):
+                                    yield payload_line
+                                final_state["answer"] = answer
+                        elif kind == "on_chat_model_stream" and node in {"generate_answer_solar", "generate_answer_gemma"}:
+                            chunk = data.get("chunk")
+                            chunk_text, stream_field = extract_stream_chunk_text_and_field(chunk)
+                            if stream_field == "reasoning" or not chunk_text:
+                                continue
+                            model_key = "solar" if node == "generate_answer_solar" else "gemma"
+                            for payload_line in _emit_legacy_stream_event(
+                                _next_route_event(kind="answer.chunk", model_key=model_key, content=chunk_text, meta={})
+                            ):
+                                yield payload_line
+                    final_state = dict(final_state or {})
+                    if "answer" in final_state and "answer_artifact" not in final_state:
+                        final_state["answer_artifact"] = AnswerArtifact(
+                            text=str(final_state.get("answer") or ""),
+                            answer_kind="llm_collected",
+                            stream_metrics={},
+                            user_visible_final_required=True,
+                            meta={"answer_source": (final_state.get("merge_debug", {}) or {}).get("selected_answer_source")},
+                        )
+                else:
+                    graph_task = asyncio.create_task(graph.ainvoke(inputs))
+                    yield _stream_data("status", status="retrieve")
+
+                    while True:
+                        if graph_task.done() and emitter.empty():
+                            break
+                        try:
+                            emitted_event = await asyncio.wait_for(emitter.next_event(), timeout=0.1)
+                        except asyncio.TimeoutError:
+                            continue
+                        if emitted_event is None:
+                            if graph_task.done():
+                                break
+                            continue
+                        route_seq = max(route_seq, int(getattr(emitted_event, "seq", 0) or 0))
+                        for payload_line in _emit_legacy_stream_event(emitted_event):
+                            yield payload_line
+
+                    final_state = await graph_task
+                    question_analysis = final_state.get("question_analysis") if isinstance(final_state, dict) else None
+                documents_used = final_state.get("context", []) if isinstance(final_state, dict) else []
+                clarification_payload = final_state.get("clarification") if isinstance(final_state, dict) else None
+                selected_answer_meta = final_state.get("selected_answer_meta", {}) if isinstance(final_state, dict) else {}
+                merge_debug = final_state.get("merge_debug", {}) if isinstance(final_state, dict) else {}
+                selected_artifact = final_state.get("answer_artifact") if isinstance(final_state, dict) else None
+                if not isinstance(selected_artifact, AnswerArtifact):
+                    answer_text = str(final_state.get("answer") or "") if isinstance(final_state, dict) else ""
+                    selected_artifact = AnswerArtifact(
+                        text=answer_text.strip(),
+                        answer_kind="llm_collected",
+                        stream_metrics=dict(selected_answer_meta or {}),
+                        user_visible_final_required=True,
+                        meta={"answer_source": merge_debug.get("selected_answer_source"), "model_key": merge_debug.get("selected_model")},
+                    )
+
+                if clarification_payload is None and isinstance(selected_artifact, AnswerArtifact) and selected_artifact.clarification is not None:
+                    clarification_payload = {
+                        "clarification_type": selected_artifact.clarification.clarification_type,
+                        "message": selected_artifact.clarification.message,
+                        "candidates": list(selected_artifact.clarification.candidates),
+                        "resume_token": dict(selected_artifact.clarification.resume_token),
+                    }
+
+                if clarification_payload:
+                    clarification_event = _next_route_event(
+                        kind="clarification",
+                        meta={"clarification": clarification_payload},
+                    )
+                    for payload_line in _emit_legacy_stream_event(clarification_event):
+                        yield payload_line
+
+                if selected_artifact.text and selected_artifact.user_visible_final_required:
+                    final_event = _next_route_event(
+                        kind="answer.final",
+                        model_key=_normalize_stream_model_key(str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "")),
+                        content=selected_artifact.text,
+                        meta=selected_artifact.to_meta_dict(),
+                    )
+                    for payload_line in _emit_legacy_stream_event(final_event):
+                        yield payload_line
 
                 ref_docs = []
                 seen_reference_keys = set()
@@ -418,12 +469,16 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     seen_reference_keys.add(dedupe_key)
                     ref_docs.append(normalized)
 
-                yield _stream_data("reference", reference=ref_docs)
-                if clarification_payload:
-                    yield _stream_data("clarification", clarification=clarification_payload)
+                if ref_docs:
+                    ref_event = _next_route_event(
+                        kind="reference.set",
+                        meta={"references": ref_docs},
+                    )
+                    for payload_line in _emit_legacy_stream_event(ref_event):
+                        yield payload_line
 
-                solar_done = done_meta_by_model.get("SOLAR") or {}
-                gemma_done = done_meta_by_model.get("GEMMA") or {}
+                solar_done = final_state.get("answer_solar_meta", {}) if isinstance(final_state, dict) else {}
+                gemma_done = final_state.get("answer_gemma_meta", {}) if isinstance(final_state, dict) else {}
                 log_event(
                     "STREAM.DONE",
                     request_id=request_id,
@@ -440,7 +495,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     gemma_ttft_content_ms=gemma_done.get("ttft_content_ms"),
                     gemma_content_chars=gemma_done.get("content_chars"),
                 )
-                yield _stream_data("status", status="done")
+                done_event = _next_route_event(kind="done", meta={})
+                for payload_line in _emit_legacy_stream_event(done_event):
+                    yield payload_line
 
             except Exception as exc:
                 logger.error("Stream Error: %s", exc, exc_info=True)
@@ -468,12 +525,36 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         reason=reason,
                         question_analysis=question_analysis,
                     )
-                    yield _stream_data("answer", answer=user_message, error_code=error_code, reason=reason, degraded=True)
-                    yield _stream_data("status", status="done", degraded=True)
+                    error_artifact = AnswerArtifact(
+                        text=user_message,
+                        answer_kind="error",
+                        stream_metrics={},
+                        user_visible_final_required=True,
+                        error=ErrorArtifact(error_code=error_code, reason=reason),
+                        meta={"degraded": True, "answer_source": "strategy_violation"},
+                    )
+                    for payload_line in _emit_legacy_stream_event(
+                        _next_route_event(
+                            kind="answer.final",
+                            content=user_message,
+                            meta=error_artifact.to_meta_dict() | {"error_code": error_code, "reason": reason, "degraded": True},
+                        )
+                    ):
+                        yield payload_line
+                    for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"degraded": True})):
+                        yield payload_line
                     return
-                yield _stream_data("error", error=str(exc), error_code=error_code, reason=reason)
-                yield _stream_data("status", status="done", error=True)
+                for payload_line in _emit_legacy_stream_event(
+                    _next_route_event(
+                        kind="error",
+                        meta={"error": str(exc), "error_code": error_code, "reason": reason},
+                    )
+                ):
+                    yield payload_line
+                for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
+                    yield payload_line
             finally:
+                await emitter.close()
                 set_log_context(request_id=None, conversation_id=None)
 
         return StreamingResponse(

@@ -5,6 +5,8 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
+from apps.api.streaming.contracts import AnswerArtifact
+
 from apps.api.services.canonical_context import rehydrate_prev_context_from_canonical_evidence
 
 
@@ -132,9 +134,19 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
     후속 merge node가 특수 처리 없이 같은 입력 shape를 받을 수 있게 하는 workflow 호환 헬퍼다.
     """
     response_text = state.rule_decision.direct_response
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="direct_answer",
+        stream_metrics={"content_chars": len(response_text or ""), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        meta={"answer_source": "direct_answer", "model_key": "direct"},
+    )
     return {
         "answer_gemma": response_text,
         "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
         "messages": [AIMessage(content=response_text)],
     }
 

@@ -8,6 +8,8 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from apps.api.streaming.contracts import AnswerArtifact
+from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.core.schemas import IntentPayloadV3
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.storage import KVStore
@@ -341,7 +343,6 @@ class AgentState(BaseModel):
     canonical_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     render_profile: Dict[str, Any] = Field(default_factory=dict)
     view_state: ConversationViewState = Field(default_factory=ConversationViewState)
-    detail_server_answer: Optional[str] = None
     no_result_message: Optional[str] = None
     rendered_context_used: Annotated[bool, merge_bool_flag] = False
     rendered_context_used_gemma: bool = False
@@ -352,8 +353,12 @@ class AgentState(BaseModel):
     answer_gemma_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_solar_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_solar_raw: Optional[str] = None
+    answer_artifact: Optional[AnswerArtifact] = None
+    answer_artifact_gemma: Optional[AnswerArtifact] = None
+    answer_artifact_solar: Optional[AnswerArtifact] = None
     merge_debug: Dict[str, Any] = Field(default_factory=dict)
     selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
+    stream_emitter: Optional[AsyncStreamEmitter] = None
     conversation_id: str = ""
     request_id: str = ""
     request_started_at: Optional[float] = None

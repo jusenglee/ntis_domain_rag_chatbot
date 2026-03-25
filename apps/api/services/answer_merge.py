@@ -35,6 +35,7 @@ def select_final_answer(
     ttft_content_ms = meta.get("ttft_content_ms")
     content_chars = int(meta.get("content_chars") or 0)
     stream_content_emitted_chunks = int(meta.get("stream_content_emitted_chunks") or 0)
+    answer_kind = str(meta.get("answer_kind") or "").strip().lower()
 
     if deadline_exceeded:
         if stream_content_emitted_chunks == 0:
@@ -55,7 +56,8 @@ def select_final_answer(
     if marker and marker in solar_answer:
         solar_fail_reasons.append("contains_fallback_notice")
 
-    if len(solar_answer) < min_answer_chars and not bool(meta.get("stream_bypassed")):
+    bypass_like_answer = answer_kind in {"detail_cache", "detail_profile", "no_result", "clarification", "direct_answer", "error"}
+    if len(solar_answer) < min_answer_chars and not bypass_like_answer:
         solar_fail_reasons.append(f"too_short<{min_answer_chars}")
 
     solar_failed = bool(solar_fail_reasons)

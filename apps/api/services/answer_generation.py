@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
+from apps.api.streaming.contracts import AnswerArtifact
 from apps.core.canonical_evidence import build_canonical_evidence
 
 
@@ -160,35 +161,30 @@ async def generate_answer(
     스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게
     판단할 수 있도록 만든다.
     """
-    def _build_short_circuit_meta(*, content: str, bypass_reason: str, answer_source: str, flag_key: str) -> dict[str, Any]:
-        return {
-            flag_key: True,
-            "stream_bypassed": True,
-            "bypass_reason": bypass_reason,
-            "answer_source": answer_source,
-            "ui_emit_required": True,
-            "synthetic_chunk_required": True,
-            "content_chars": len(content),
-            "stream_content_emitted_chunks": 1,
-            "emitted_chars": len(content),
-            "ttft_any_ms": 0.0,
-            "ttft_content_ms": 0.0,
-        }
-
-    detail_server_answer = str(getattr(state, "detail_server_answer", "") or "").strip()
-    if detail_server_answer:
-        rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-        short_circuit_meta = _build_short_circuit_meta(
-            content=detail_server_answer,
-            bypass_reason="detail_server_answer",
-            answer_source="detail_server_answer",
-            flag_key="detail_server_answer",
+    def _build_short_circuit_artifact(*, content: str, answer_kind: str, answer_source: str) -> AnswerArtifact:
+        return AnswerArtifact(
+            text=content,
+            answer_kind=answer_kind,
+            stream_metrics={
+                "content_chars": len(content),
+                "stream_content_emitted_chunks": 1,
+                "emitted_chars": len(content),
+                "ttft_any_ms": 0.0,
+                "ttft_content_ms": 0.0,
+            },
+            user_visible_final_required=True,
+            meta={"answer_source": answer_source, "model_key": final_field.replace("answer_", "")},
         )
+
+    answer_artifact = getattr(state, "answer_artifact", None)
+    if isinstance(answer_artifact, AnswerArtifact) and answer_artifact.text:
+        rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
         return {
-            final_field: detail_server_answer,
-            f"{final_field}_meta": short_circuit_meta,
+            final_field: answer_artifact.text,
+            f"{final_field}_meta": answer_artifact.to_meta_dict(),
+            f"answer_artifact_{final_field.replace('answer_', '')}": answer_artifact,
             rendered_context_key: False,
-            "stream_meta": {final_field: short_circuit_meta},
+            "stream_meta": {final_field: answer_artifact.to_meta_dict()},
         }
 
     no_result_message = str(getattr(state, "no_result_message", "") or "").strip()
@@ -207,17 +203,17 @@ async def generate_answer(
             emitted_chars=len(no_result_message),
         )
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-        short_circuit_meta = _build_short_circuit_meta(
+        no_result_artifact = _build_short_circuit_artifact(
             content=no_result_message,
-            bypass_reason="no_result_message",
             answer_source="no_result_message",
-            flag_key="no_result_short_circuit",
+            answer_kind="no_result",
         )
         return {
             final_field: no_result_message,
-            f"{final_field}_meta": short_circuit_meta,
+            f"{final_field}_meta": no_result_artifact.to_meta_dict(),
+            f"answer_artifact_{final_field.replace('answer_', '')}": no_result_artifact,
             rendered_context_key: False,
-            "stream_meta": {final_field: short_circuit_meta},
+            "stream_meta": {final_field: no_result_artifact.to_meta_dict()},
         }
 
     llm = build_llm_fn(model_name=model_name)
@@ -264,9 +260,11 @@ async def generate_answer(
     max_tokens_hint = select_max_tokens_hint_fn(token_hint_source)
     llm_request_overrides = _resolve_llm_request_overrides(state)
     max_tokens_hint = int(llm_request_overrides.get("max_tokens_hint", max_tokens_hint))
-    final_answer, stream_metrics = await run_llm_streaming_fn(
+    final_artifact = await run_llm_streaming_fn(
         llm,
         messages,
+        emitter=getattr(state, "stream_emitter", None),
+        model_key=final_field.replace("answer_", ""),
         max_tokens_hint=max_tokens_hint,
         request_id=getattr(state, "request_id", None),
         ttft_deadline_ms=solar_ttft_deadline_ms if model_name == "solar_vllm_0" else None,
@@ -274,6 +272,17 @@ async def generate_answer(
         max_chars=solar_stream_max_chars if model_name == "solar_vllm_0" else None,
         astream_kwargs={key: value for key, value in llm_request_overrides.items() if key != "max_tokens_hint"},
     )
+    if isinstance(final_artifact, tuple):
+        final_answer, stream_metrics = final_artifact
+        final_artifact = AnswerArtifact(
+            text=str(final_answer or ""),
+            answer_kind="llm_collected",
+            stream_metrics=dict(stream_metrics or {}),
+            user_visible_final_required=True,
+            meta={"model_key": final_field.replace("answer_", "")},
+        )
+    final_answer = final_artifact.text
+    stream_metrics = dict(final_artifact.stream_metrics or {})
 
     ttft_any_ms = stream_metrics.get("ttft_any_ms")
     ttft_content_ms = stream_metrics.get("ttft_content_ms")
@@ -358,6 +367,7 @@ async def generate_answer(
     return {
         final_field: final_answer,
         f"{final_field}_meta": stream_metrics,
+        f"answer_artifact_{final_field.replace('answer_', '')}": final_artifact,
         rendered_context_key: rendered_context_used,
         "stream_meta": {final_field: stream_metrics},
     }
@@ -385,6 +395,8 @@ async def merge_answers(
     answer_solar_raw = getattr(state, "answer_solar", None) or ""
     answer_solar = answer_solar_raw.strip()
     solar_meta = getattr(state, "answer_solar_meta", None) or {}
+    answer_artifact_gemma = getattr(state, "answer_artifact_gemma", None)
+    answer_artifact_solar = getattr(state, "answer_artifact_solar", None)
     selection = select_final_answer_fn(
         answer_solar=answer_solar,
         answer_gemma=answer_gemma,
@@ -404,16 +416,25 @@ async def merge_answers(
         selected_meta = solar_meta
     elif selected_model == "gemma":
         selected_meta = answer_gemma_meta
-    stream_bypassed = bool(selected_meta.get("stream_bypassed"))
-    synthetic_chunk_required = bool(selected_meta.get("synthetic_chunk_required")) and bool(selected_answer)
     selected_answer_source = str(selected_meta.get("answer_source") or selected_model)
-    selected_bypass_reason = str(selected_meta.get("bypass_reason") or "") or None
+    selected_artifact = None
+    if selected_model == "solar" and isinstance(answer_artifact_solar, AnswerArtifact):
+        selected_artifact = answer_artifact_solar
+    elif selected_model == "gemma" and isinstance(answer_artifact_gemma, AnswerArtifact):
+        selected_artifact = answer_artifact_gemma
+    elif selected_answer:
+        selected_artifact = AnswerArtifact(
+            text=selected_answer,
+            answer_kind=("direct_answer" if selected_model == "fallback" else "llm_collected"),
+            stream_metrics=dict(selected_meta or {}),
+            user_visible_final_required=True,
+            meta={"answer_source": selected_answer_source, "model_key": selected_model},
+        )
 
     merge_debug = {
         "policy": dual_model_merge_policy,
         "selected_model": selected_model,
         "selected_answer_source": selected_answer_source,
-        "selected_bypass_reason": selected_bypass_reason,
         "selection_reason": selection["selection_reason"],
         "solar_failed": solar_failed,
         "solar_fail_reasons": solar_fail_reasons,
@@ -422,8 +443,7 @@ async def merge_answers(
         "solar_answer_chars": selection["solar_answer_chars"],
         "gemma_answer_chars": selection["gemma_answer_chars"],
         "min_chars_threshold": solar_min_answer_chars,
-        "stream_bypassed": stream_bypassed,
-        "synthetic_chunk_required": synthetic_chunk_required,
+        "selected_answer_kind": (selected_artifact.answer_kind if isinstance(selected_artifact, AnswerArtifact) else None),
     }
 
     log_event(
@@ -448,8 +468,9 @@ async def merge_answers(
         "messages": [AIMessage(content=selected_answer)],
         "answer": selected_answer,
         "answer_solar_raw": answer_solar_raw,
+        "answer_artifact": selected_artifact,
         "merge_debug": merge_debug,
-        "selected_answer_meta": selected_meta,
+        "selected_answer_meta": (selected_artifact.to_meta_dict() if isinstance(selected_artifact, AnswerArtifact) else selected_meta),
         "rendered_context_used": rendered_context_used,
         "degraded": degraded,
     }

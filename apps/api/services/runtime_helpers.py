@@ -119,8 +119,6 @@ def derive_stream_error_code(meta: Dict[str, Any]) -> Optional[str]:
     """
     if not meta:
         return None
-    if bool(meta.get("stream_bypassed")):
-        return None
     if bool(meta.get("ttft_deadline_exceeded")):
         return "TTFT_DEADLINE_EXCEEDED"
     if bool(meta.get("gen_deadline_exceeded")):

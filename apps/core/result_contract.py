@@ -1,9 +1,8 @@
-from __future__ import annotations
-
 import os
 from typing import Any, Callable, Optional
 
 from apps.core.planner_contract import StrategyViolation
+from apps.core.result_policy import ResultContractOutcome
 
 
 def evaluate_reranked_contract(
@@ -15,10 +14,6 @@ def evaluate_reranked_contract(
         score_topn: int,
         timing_put: Callable[[str, Any], None],
 ) -> Optional[str]:
-    """rerank 결과가 최소 hit 수와 score 기준을 만족하는지 평가한다.
-
-    실패하면 이유 코드만 돌려주고, 예외를 던질지 fallback으로 넘길지는 호출자가 결정하게 둔다.
-    """
     if not reranked:
         return "no_reranked"
     if min_reranked and len(reranked) < min_reranked:
@@ -47,7 +42,7 @@ def evaluate_reranked_contract(
     return None
 
 
-def enforce_reranked_contract(
+def resolve_reranked_outcome(
         *,
         reranked: list[Any],
         min_reranked: int,
@@ -56,12 +51,7 @@ def enforce_reranked_contract(
         score_topn: int,
         timing_put: Callable[[str, Any], None],
         mode: str | None = None,
-) -> Optional[str]:
-    """rerank 결과 계약을 강제한다.
-
-    `search`는 0건을 strict 예외로 유지하고, `lookup`/`join`의 `no_reranked`는
-    deterministic no-result outcome으로 내려 observability 필드만 남긴다.
-    """
+) -> ResultContractOutcome:
     normalized_mode = str(mode or "").strip().lower() or None
     empty_result_policy = "strict_search"
     timing_put("info.reranked_count", int(len(reranked or [])))
@@ -76,13 +66,14 @@ def enforce_reranked_contract(
     )
     if not contract_fail_reason:
         timing_put("info.empty_result_policy", empty_result_policy)
-        return None
+        return ResultContractOutcome(status="ok", empty_result_policy=empty_result_policy)
 
-    if normalized_mode in {"lookup", "join"} and contract_fail_reason == "no_reranked":
+    if normalized_mode in {"lookup", "join"} and contract_fail_reason in {"no_reranked", "insufficient_hits", "low_score"}:
         empty_result_policy = "normal_no_result"
         timing_put("info.empty_result_policy", empty_result_policy)
         timing_put("info.contract_fail_reason", contract_fail_reason)
-        return contract_fail_reason
+        status = "normal_no_result" if contract_fail_reason == "no_reranked" else contract_fail_reason
+        return ResultContractOutcome(status=status, empty_result_policy=empty_result_policy, reason=contract_fail_reason)
 
     timing_put("info.empty_result_policy", empty_result_policy)
     timing_put("info.contract_fail_reason", contract_fail_reason)
@@ -93,12 +84,39 @@ def enforce_reranked_contract(
         "y",
     )
     if force_fallback_chat:
-        return contract_fail_reason
+        return ResultContractOutcome(status="normal_no_result", empty_result_policy=empty_result_policy, reason=contract_fail_reason)
+
+    return ResultContractOutcome(status="contract_violation", empty_result_policy=empty_result_policy, reason=contract_fail_reason)
+
+
+def enforce_reranked_contract(
+        *,
+        reranked: list[Any],
+        min_reranked: int,
+        min_final_avg: float,
+        min_final_max: float,
+        score_topn: int,
+        timing_put: Callable[[str, Any], None],
+        mode: str | None = None,
+) -> Optional[str]:
+    outcome = resolve_reranked_outcome(
+        reranked=reranked,
+        min_reranked=min_reranked,
+        min_final_avg=min_final_avg,
+        min_final_max=min_final_max,
+        score_topn=score_topn,
+        timing_put=timing_put,
+        mode=mode,
+    )
+    if outcome.status == "ok":
+        return None
+    if outcome.status in {"normal_no_result", "insufficient_hits", "low_score"}:
+        return outcome.reason or outcome.status
 
     raise StrategyViolation(
         error_code="RAG_EMPTY_RESULT_CONTRACT",
         reason=(
-            f"reranked result violated contract(reason={contract_fail_reason}, "
-            f"reranked={len(reranked)}, min_reranked={min_reranked}, empty_result_policy={empty_result_policy})"
+            f"reranked result violated contract(reason={outcome.reason}, "
+            f"reranked={len(reranked)}, min_reranked={min_reranked}, empty_result_policy={outcome.empty_result_policy})"
         ),
     )

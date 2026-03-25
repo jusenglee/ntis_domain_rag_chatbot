@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional
 
+from apps.core.entity_reference import ClarificationRequest, ResolvedEntityRef
 
 _ORDINAL_WORD_TO_INDEX = {
     "\uccab": 0,
@@ -324,3 +325,46 @@ def should_short_circuit_followup_clarification(strategy_meta: Dict[str, Any]) -
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     explicit_followup = bool((strategy_meta or {}).get("explicit_followup"))
     return explicit_followup and status in {"missing_context", "out_of_range", "unresolved"}
+
+
+def resolve_entity_ref_from_strategy_meta(strategy_meta: Dict[str, Any]) -> ResolvedEntityRef | ClarificationRequest | None:
+    status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
+    if status in {"missing_context", "out_of_range", "unresolved"}:
+        message = build_followup_clarification_message(strategy_meta)
+        payload = build_followup_clarification_payload(strategy_meta) or {}
+        return ClarificationRequest(
+            clarification_type=str(payload.get("clarification_type") or "followup_reference"),
+            message=str(message or ""),
+            candidates=list(payload.get("candidates") or []),
+            resume_token=dict(payload.get("resume_token") or {}),
+        )
+    if status != "resolved":
+        return None
+    seed_map = dict((strategy_meta or {}).get("seed_map") or {})
+    if not seed_map:
+        return None
+    selected_prev_item = dict((strategy_meta or {}).get("selected_prev_item") or {})
+    focus_entity = dict((strategy_meta or {}).get("focus_entity") or {})
+    entity_kind = _normalize_text(
+        selected_prev_item.get("context_kind")
+        or focus_entity.get("kind")
+        or (strategy_meta or {}).get("selected_prev_context_kind")
+        or "project"
+    ).lower()
+    source = _normalize_text((strategy_meta or {}).get("seed_source") or "display_snapshot").lower()
+    allowed_sources = {
+        "display_snapshot",
+        "detail_lookup",
+        "reference_context_ordinal",
+        "reference_context_deictic",
+        "explicit_id",
+    }
+    resolved_source = source if source in allowed_sources else "display_snapshot"
+    return ResolvedEntityRef(
+        entity_kind=entity_kind if entity_kind in {"project", "perf", "people", "org"} else "project",
+        seed_map={str(key): [str(v).strip() for v in (values or []) if str(v).strip()] for key, values in seed_map.items()},
+        source=resolved_source,  # type: ignore[arg-type]
+        display_view_id=_normalize_text((strategy_meta or {}).get("display_view_id")),
+        display_rank=((selected_prev_item.get("index") or focus_entity.get("display_rank")) if isinstance(selected_prev_item, dict) else None),
+        anchor_fields=selected_prev_item or focus_entity,
+    )
