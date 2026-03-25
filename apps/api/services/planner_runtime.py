@@ -44,6 +44,18 @@ _STAGE2_ALLOWED_OUTPUT_FIELDS = {
     "confidence",
 }
 
+_PREV_CONTEXT_SEED_ID_KEYS = (
+    "pjt_id",
+    "pjt_no",
+    "rst_id",
+    "person_no",
+    "org_id",
+    "org_code",
+    "biz_no",
+    "doi",
+    "issn",
+)
+
 
 def _normalize_stage2_slots_payload(
     raw_payload: Any,
@@ -139,21 +151,18 @@ def _extract_prev_context_seed(
         if seed_map:
             return seed_map
     if canonical_evidence:
-        pjt_ids, pjt_nos = set(), set()
+        unique_ids: dict[str, set[str]] = {key: set() for key in _PREV_CONTEXT_SEED_ID_KEYS}
         for item in canonical_evidence:
             if not isinstance(item, dict):
                 continue
             ids = item.get("ids") or {}
-            pjt_id = str(ids.get("pjt_id") or "").strip()
-            pjt_no = str(ids.get("pjt_no") or "").strip()
-            if pjt_id:
-                pjt_ids.add(pjt_id)
-            if pjt_no:
-                pjt_nos.add(pjt_no)
-        if len(pjt_ids) == 1:
-            return {"pjt_id": [next(iter(pjt_ids))]}
-        if len(pjt_nos) == 1:
-            return {"pjt_no": [next(iter(pjt_nos))]}
+            for key in _PREV_CONTEXT_SEED_ID_KEYS:
+                value = str(ids.get(key) or "").strip()
+                if value:
+                    unique_ids[key].add(value)
+        for key in _PREV_CONTEXT_SEED_ID_KEYS:
+            if len(unique_ids[key]) == 1:
+                return {key: [next(iter(unique_ids[key]))]}
     seed = extract_single_project_seed(prev_context)
     if seed:
         return seed

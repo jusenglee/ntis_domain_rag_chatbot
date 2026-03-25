@@ -6,7 +6,7 @@ from apps.api.services.rag_retriever import detect_retrieval_query_drift, repair
 from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.detail_contract import compute_detail_coverage
 from apps.api.services.view_state import FocusEntity
-from apps.api.services.planner_service import apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
+from apps.api.services.planner_service import apply_planner_strategy, apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
 from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
 from apps.api.services.request_facade import build_intent_payload
 from apps.api.services.view_state import build_display_snapshot
@@ -593,6 +593,147 @@ def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
     assert hinted_intent.people_terms == ['Kim']
     assert any(event == 'PLANNER.FILTER.ORDINAL_STRIPPED' for event, _ in log_calls)
 
+
+
+
+def test_apply_planner_strategy_restores_perf_context_owner_lock():
+    log_calls = []
+
+    class DummyStrategyViolation(Exception):
+        def __init__(self, *, error_code=None, reason=None):
+            super().__init__(reason)
+            self.error_code = error_code
+            self.reason = reason
+
+    def build_changed_fields(before_snapshot, after_snapshot, tracked_fields, *, changed_by):
+        changed = {}
+        for field in tracked_fields:
+            if before_snapshot.get(field) != after_snapshot.get(field):
+                changed[field] = {
+                    'before': before_snapshot.get(field),
+                    'after': after_snapshot.get(field),
+                    'changed_by': changed_by,
+                }
+        return changed
+
+    intent = NormalizedIntent(
+        action='detail',
+        base_route='perf',
+        relation=None,
+        is_id_query=False,
+        mode='lookup',
+        target_cols=['ntis_perf_v1'],
+        ids_map={'rst_id': ['REP-1'], 'pjt_id': ['PJT-1']},
+        context_owner_lock='perf',
+        context_owner_lock_reason='followup_context_perf',
+    )
+    qa = SimpleNamespace(
+        confidence=0.9,
+        head='project',
+        action='detail',
+        mode='lookup',
+        relation=None,
+        join_key_mode=None,
+        target_cols=['ntis_project_v1'],
+        ids_map={},
+        candidate_keys={},
+        project_key_policy=None,
+        join_resolution_policy=None,
+        output_type='detail',
+        planner_source='stagewise',
+    )
+
+    patched, applied = apply_planner_strategy(
+        intent,
+        qa,
+        request_id='rid',
+        conversation_id='cid',
+        normalize_hint_terms=normalize_hint_terms,
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        build_changed_fields=build_changed_fields,
+        changed_by_planner_merge='planner_merge',
+        strategy_violation_cls=DummyStrategyViolation,
+    )
+
+    assert applied is True
+    assert patched.base_route == 'perf'
+    assert patched.target_cols == ['ntis_perf_v1']
+    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
+    assert restore_event['reason'] == 'followup_context_perf'
+    assert restore_event['before_base_route'] == 'project'
+    assert restore_event['after_base_route'] == 'perf'
+    assert restore_event['before_target_cols'] == ['ntis_project_v1']
+    assert restore_event['after_target_cols'] == ['ntis_perf_v1']
+
+
+def test_apply_planner_strategy_restores_project_context_owner_lock():
+    log_calls = []
+
+    class DummyStrategyViolation(Exception):
+        def __init__(self, *, error_code=None, reason=None):
+            super().__init__(reason)
+            self.error_code = error_code
+            self.reason = reason
+
+    def build_changed_fields(before_snapshot, after_snapshot, tracked_fields, *, changed_by):
+        changed = {}
+        for field in tracked_fields:
+            if before_snapshot.get(field) != after_snapshot.get(field):
+                changed[field] = {
+                    'before': before_snapshot.get(field),
+                    'after': after_snapshot.get(field),
+                    'changed_by': changed_by,
+                }
+        return changed
+
+    intent = NormalizedIntent(
+        action='detail',
+        base_route='project',
+        relation=None,
+        is_id_query=False,
+        mode='lookup',
+        target_cols=['ntis_project_v1'],
+        ids_map={'pjt_id': ['PJT-1']},
+        context_owner_lock='project',
+        context_owner_lock_reason='followup_context_project',
+    )
+    qa = SimpleNamespace(
+        confidence=0.9,
+        head='perf',
+        action='detail',
+        mode='lookup',
+        relation=None,
+        join_key_mode=None,
+        target_cols=['ntis_perf_v1'],
+        ids_map={},
+        candidate_keys={},
+        project_key_policy=None,
+        join_resolution_policy=None,
+        output_type='detail',
+        planner_source='stagewise',
+    )
+
+    patched, applied = apply_planner_strategy(
+        intent,
+        qa,
+        request_id='rid',
+        conversation_id='cid',
+        normalize_hint_terms=normalize_hint_terms,
+        log_event=lambda event, **fields: log_calls.append((event, fields)),
+        build_changed_fields=build_changed_fields,
+        changed_by_planner_merge='planner_merge',
+        strategy_violation_cls=DummyStrategyViolation,
+    )
+
+    assert applied is True
+    assert patched.base_route == 'project'
+    assert patched.target_cols == ['ntis_project_v1']
+    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
+    assert restore_event['reason'] == 'followup_context_project'
+    assert restore_event['before_base_route'] == 'perf'
+    assert restore_event['after_base_route'] == 'project'
+    assert restore_event['before_target_cols'] == ['ntis_perf_v1']
+    assert restore_event['after_target_cols'] == ['ntis_project_v1']
 
 def test_resolve_retrieval_budget_uses_question_analysis_limit_as_source_of_truth():
     qa = SimpleNamespace(limit=7, display_limit=3)

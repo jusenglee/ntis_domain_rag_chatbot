@@ -157,6 +157,8 @@ class NormalizedIntent:
     lookup_filter_policy: Optional[str] = None
     lookup_filter_policy_hint: Optional[str] = None
     target_cols: List[str] = field(default_factory=list)
+    context_owner_lock: Optional[str] = None
+    context_owner_lock_reason: Optional[str] = None
     wants_rank: bool = False
     min_metric_count: Optional[int] = None
     stats_metric: str = "project_participation_count"
@@ -340,6 +342,8 @@ def normalize_intent(
         lookup_filter_policy=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         lookup_filter_policy_hint=str(getattr(intent, "lookup_filter_policy", "") or "").strip().lower() or None,
         target_cols=_normalize_terms(getattr(intent, "target_cols", None) or []),
+        context_owner_lock=(str(getattr(intent, "context_owner_lock", "") or "").strip().lower() or None),
+        context_owner_lock_reason=(str(getattr(intent, "context_owner_lock_reason", "") or "").strip().lower() or None),
         wants_rank=wants_rank,
         reverse_trace_followup=bool(getattr(intent, "reverse_trace_followup", False)),
         followup_relation_hint=(str(getattr(intent, "followup_relation_hint", "") or "").strip().lower() or None),

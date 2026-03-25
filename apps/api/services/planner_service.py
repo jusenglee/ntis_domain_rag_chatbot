@@ -12,6 +12,11 @@ from typing import Any, Optional
 
 from apps.core.followup_resolution import strip_ordinal_reference_terms
 
+_CONTEXT_OWNER_TARGETS = {
+    "project": ["ntis_project_v1"],
+    "perf": ["ntis_perf_v1"],
+}
+
 
 def _planner_truthy_flag(value: Any) -> bool:
     """Normalize planner-emitted truthy flags without re-parsing the user query."""
@@ -208,6 +213,14 @@ def apply_planner_strategy(
     if qa is None:
         return intent, False
 
+    def _resolve_context_owner_lock(intent_obj: Any) -> tuple[Optional[str], Optional[str], list[str]]:
+        owner = str(getattr(intent_obj, "context_owner_lock", "") or "").strip().lower() or None
+        reason = str(getattr(intent_obj, "context_owner_lock_reason", "") or "").strip().lower() or None
+        targets = list(_CONTEXT_OWNER_TARGETS.get(owner, []))
+        if not owner or not targets:
+            return None, None, []
+        return owner, reason, targets
+
     action_mode_map = {
         "topic": "search",
         "list": "lookup",
@@ -283,6 +296,20 @@ def apply_planner_strategy(
     planner_head = str(getattr(qa, "head", getattr(intent, "base_route", "project")) or getattr(intent, "base_route", "project")).strip().lower()
     if planner_mode == "join" and relation:
         planner_head = str(relation[1]).strip().lower()
+    locked_base_route, context_lock_reason, locked_target_cols = _resolve_context_owner_lock(intent)
+    effective_planner_head = planner_head
+    effective_target_cols = planner_target_cols or list(getattr(intent, "target_cols", []) or [])
+    route_locked = False
+    target_cols_locked = False
+    if locked_base_route:
+        if effective_planner_head != locked_base_route:
+            route_locked = True
+            effective_planner_head = locked_base_route
+        normalized_effective_targets = normalize_hint_terms(effective_target_cols)
+        normalized_locked_targets = normalize_hint_terms(locked_target_cols)
+        if normalized_locked_targets and normalized_effective_targets != normalized_locked_targets:
+            target_cols_locked = True
+            effective_target_cols = list(locked_target_cols)
     planner_output_type = str(getattr(qa, "output_type", "") or "").strip().lower() or None
     if planner_output_type not in {"summary", "list", "detail", "stats", "relation", "comparison", "series"}:
         qa_action = str(getattr(qa, "action", "") or "").strip().lower()
@@ -377,7 +404,7 @@ def apply_planner_strategy(
 
     patched = replace(
         intent,
-        base_route=planner_head,
+        base_route=effective_planner_head,
         action=str(getattr(qa, "action", getattr(intent, "action", "topic")) or getattr(intent, "action", "topic")).strip().lower(),
         mode=planner_mode,
         relation=relation,
@@ -385,10 +412,24 @@ def apply_planner_strategy(
         candidate_keys=merged_candidate_keys,
         project_key_policy=planner_project_key_policy,
         join_resolution_policy=planner_join_resolution_policy,
-        target_cols=planner_target_cols or list(getattr(intent, "target_cols", []) or []),
+        target_cols=effective_target_cols,
         ids_map=merged_ids_map,
         output_type=planner_output_type,
     )
+
+    if log_event is not None and (route_locked or target_cols_locked):
+        log_event(
+            "FOLLOWUP.CONTEXT.RESTORED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            reason=context_lock_reason,
+            before_base_route=planner_head,
+            after_base_route=effective_planner_head,
+            before_target_cols=list(planner_target_cols or []),
+            after_target_cols=list(effective_target_cols or []),
+            locked_base_route=locked_base_route,
+            locked_target_cols=list(locked_target_cols or []),
+        )
 
     after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
     changed_strategy_fields = build_changed_fields(before_snapshot, after_snapshot, strategy_fields, changed_by=changed_by_planner_merge)

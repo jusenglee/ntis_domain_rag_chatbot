@@ -5,6 +5,28 @@ from typing import Any
 from apps.core.canonical_evidence import build_canonical_evidence, build_canonical_evidence_bundle
 
 
+def _rehydrate_participant_members(roles: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild participant members while preserving affiliation-org semantics."""
+    researcher_names = [
+        str(value).strip()
+        for value in (roles.get("participant_researcher_name") or [])
+        if str(value).strip()
+    ]
+    affiliation_orgs = [
+        str(value).strip()
+        for value in (roles.get("people_affiliation_org_name") or [])
+        if str(value).strip()
+    ]
+
+    members: list[dict[str, Any]] = []
+    for index, name in enumerate(researcher_names):
+        member: dict[str, Any] = {"hm_nm": name}
+        if index < len(affiliation_orgs):
+            member["blng_org_nm"] = affiliation_orgs[index]
+        members.append(member)
+    return members
+
+
 def render_canonical_evidence_text(
     canonical_evidence: list[dict[str, Any]],
     render_profile: dict[str, Any],
@@ -113,17 +135,19 @@ def rehydrate_prev_context_from_canonical_evidence(
                 "pjt_id": ids.get("pjt_id"),
                 "pjt_no": ids.get("pjt_no"),
                 "rst_id": ids.get("rst_id"),
+                "person_no": ids.get("person_no"),
+                "org_id": ids.get("org_id"),
+                "org_code": ids.get("org_code"),
+                "biz_no": ids.get("biz_no"),
+                "doi": ids.get("doi"),
+                "issn": ids.get("issn"),
                 "title_text": facts.get("title"),
                 "summary": facts.get("summary"),
                 "stan_yr": facts.get("year"),
                 "tag": facts.get("tag"),
                 "org_nm": ((roles.get("lead_org_name") or [None])[0]),
                 "prtcp_org": [{"org_nm": value} for value in (roles.get("participant_org_name") or []) if str(value).strip()],
-                "prtcp_mp": [
-                    {"hm_nm": name}
-                    for name in (roles.get("participant_researcher_name") or [])
-                    if str(name).strip()
-                ],
+                "prtcp_mp": _rehydrate_participant_members(roles),
             }
         )
     return prev_context

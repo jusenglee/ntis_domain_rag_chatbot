@@ -47,7 +47,7 @@ def _resolve_followup_locked_route(followup_resolution: dict[str, Any]) -> tuple
 
 
 def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: dict[str, Any]) -> Any:
-    locked_base_route, locked_target_cols, _ = _resolve_followup_locked_route(followup_resolution)
+    locked_base_route, locked_target_cols, lock_reason = _resolve_followup_locked_route(followup_resolution)
     if not locked_base_route or not locked_target_cols:
         return normalized_intent
 
@@ -55,6 +55,8 @@ def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: di
         patched = dict(normalized_intent)
         patched["base_route"] = locked_base_route
         patched["target_cols"] = list(locked_target_cols)
+        patched["context_owner_lock"] = locked_base_route
+        patched["context_owner_lock_reason"] = lock_reason
         return patched
 
     if is_dataclass(normalized_intent):
@@ -63,6 +65,10 @@ def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: di
             updates["base_route"] = locked_base_route
         if hasattr(normalized_intent, "target_cols"):
             updates["target_cols"] = list(locked_target_cols)
+        if hasattr(normalized_intent, "context_owner_lock"):
+            updates["context_owner_lock"] = locked_base_route
+        if hasattr(normalized_intent, "context_owner_lock_reason"):
+            updates["context_owner_lock_reason"] = lock_reason
         return replace(normalized_intent, **updates) if updates else normalized_intent
 
     if hasattr(normalized_intent, "base_route") or hasattr(normalized_intent, "target_cols"):
@@ -71,6 +77,10 @@ def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: di
                 setattr(normalized_intent, "base_route", locked_base_route)
             if hasattr(normalized_intent, "target_cols"):
                 setattr(normalized_intent, "target_cols", list(locked_target_cols))
+            if hasattr(normalized_intent, "context_owner_lock"):
+                setattr(normalized_intent, "context_owner_lock", locked_base_route)
+            if hasattr(normalized_intent, "context_owner_lock_reason"):
+                setattr(normalized_intent, "context_owner_lock_reason", lock_reason)
         except Exception:
             pass
     return normalized_intent
@@ -655,34 +665,10 @@ class RequestUnderstandingFacade:
             request_id=request_id,
             conversation_id=conversation_id,
         )
-        before_base_route = normalized_intent.get("base_route") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "base_route", None)
-        before_target_cols = normalized_intent.get("target_cols") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "target_cols", None)
         normalized_intent = _apply_anchor_lock(
             normalized_intent,
             followup_resolution.get("seed_map") or {},
         )
-        normalized_intent = _apply_followup_context_lock(
-            normalized_intent,
-            followup_resolution,
-        )
-        after_base_route = normalized_intent.get("base_route") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "base_route", None)
-        after_target_cols = normalized_intent.get("target_cols") if isinstance(normalized_intent, dict) else getattr(normalized_intent, "target_cols", None)
-        if self.log_event is not None and (
-            before_base_route != after_base_route or list(before_target_cols or []) != list(after_target_cols or [])
-        ):
-            locked_base_route, locked_target_cols, lock_reason = _resolve_followup_locked_route(followup_resolution)
-            self.log_event(
-                "FOLLOWUP.CONTEXT.RESTORED",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                reason=lock_reason,
-                before_base_route=before_base_route,
-                after_base_route=after_base_route,
-                before_target_cols=list(before_target_cols or []),
-                after_target_cols=list(after_target_cols or []),
-                locked_base_route=locked_base_route,
-                locked_target_cols=list(locked_target_cols or []),
-            )
         normalized_intent, question_analysis = _coerce_project_anchor_role_followup(
             normalized_intent,
             question_analysis,
