@@ -658,9 +658,21 @@ class CustomRAGRetriever(BaseModel):
         series = getattr(res_m, "series", None) or {}
         canonical_evidence = getattr(res_m, "canonical_evidence", None) or []
         render_profile = getattr(res_m, "render_profile", None) or {}
+        answer_context_text = str(getattr(res_m, "context", "") or "")
         timings = getattr(res_m, "timings", None) or {}
         normalized_intent = getattr(self.intent_payload, "normalized_intent", None)
         no_result_message = None
+
+        def _result(documents: list[dict[str, Any]]) -> Dict[str, Any]:
+            return {
+                "documents": documents,
+                "canonical_evidence": canonical_evidence,
+                "render_profile": render_profile,
+                "answer_context_text": answer_context_text,
+                "no_result_message": no_result_message,
+                "clarification": clarification,
+            }
+
         if not hits and str(timings.get("info.contract_fail_reason") or "").strip().lower() == "no_reranked":
             mode = str(getattr(normalized_intent, "mode", "") or "").strip().upper()
             action = str(getattr(normalized_intent, "action", "") or "").strip().lower()
@@ -691,7 +703,7 @@ class CustomRAGRetriever(BaseModel):
                     "year_buckets": list(series.get("year_buckets") or []),
                     "candidate_docs": int(series.get("candidate_docs") or 0),
                 })
-            return {"documents": documents, "canonical_evidence": canonical_evidence, "render_profile": render_profile, "no_result_message": no_result_message, "clarification": clarification}
+            return _result(documents)
         if isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"} and (list(multi_hop_bundle.get("projects") or []) or list(multi_hop_bundle.get("bundles") or [])):
             documents = []
             for idx, project in enumerate(list(multi_hop_bundle.get("projects") or [])[: self.top_k] or [None], start=1):
@@ -710,13 +722,7 @@ class CustomRAGRetriever(BaseModel):
                         "guidance_message": multi_hop_bundle.get("guidance_message"),
                     }
                 )
-            return {
-                "documents": documents,
-                "canonical_evidence": canonical_evidence,
-                "render_profile": render_profile,
-                "no_result_message": no_result_message,
-                "clarification": clarification,
-            }
+            return _result(documents)
 
         if isinstance(pattern_analysis, dict) and str(pattern_analysis.get("status") or "").strip().lower() in {"ok", "partial"} and list(pattern_analysis.get("items") or []):
             documents = []
@@ -741,13 +747,7 @@ class CustomRAGRetriever(BaseModel):
                         "support_doc_count": int(pattern_analysis.get("support_doc_count") or 0),
                     }
                 )
-            return {
-                "documents": documents,
-                "canonical_evidence": canonical_evidence,
-                "render_profile": render_profile,
-                "no_result_message": no_result_message,
-                "clarification": clarification,
-            }
+            return _result(documents)
 
         reverse_trace = getattr(res_m, "reverse_trace", None) or {}
         if isinstance(reverse_trace, dict) and (reverse_trace.get("origin_projects") or reverse_trace.get("followup_perf") or reverse_trace.get("origin_perf")):
@@ -776,13 +776,7 @@ class CustomRAGRetriever(BaseModel):
                         "followup_perf": list(reverse_trace.get("followup_perf") or []),
                     }
                 )
-            return {
-                "documents": documents,
-                "canonical_evidence": canonical_evidence,
-                "render_profile": render_profile,
-                "no_result_message": no_result_message,
-                "clarification": clarification,
-            }
+            return _result(documents)
 
         rank_items = aggregation.get("rank_items") if isinstance(aggregation, dict) else None
         if isinstance(rank_items, list) and rank_items:
@@ -808,22 +802,10 @@ class CustomRAGRetriever(BaseModel):
                         "rank_item": dict(item),
                     }
                 )
-            return {
-                "documents": documents,
-                "canonical_evidence": canonical_evidence,
-                "render_profile": render_profile,
-                "no_result_message": no_result_message,
-                "clarification": clarification,
-            }
+            return _result(documents)
 
         if not hits:
-            return {
-                "documents": [],
-                "canonical_evidence": canonical_evidence,
-                "render_profile": render_profile,
-                "no_result_message": no_result_message,
-                "clarification": clarification,
-            }
+            return _result([])
 
         documents = []
         for idx, hit in enumerate(hits[: self.top_k], start=1):
@@ -854,13 +836,7 @@ class CustomRAGRetriever(BaseModel):
             if inferred_tag is not None or self._has_minimum_document_fields(hit_data):
                 documents.append(rag_data)
 
-        return {
-            "documents": documents,
-            "canonical_evidence": canonical_evidence,
-            "render_profile": render_profile,
-            "no_result_message": no_result_message,
-            "clarification": clarification,
-        }
+        return _result(documents)
 
 
 def is_hit_source(doc: Dict[str, Any]) -> bool:

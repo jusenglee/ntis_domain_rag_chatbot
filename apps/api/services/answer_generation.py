@@ -61,6 +61,7 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
 
 def build_answer_context(
     *,
+    answer_context_text: Optional[str] = None,
     docs_for_ctx: list[Any],
     canonical_evidence: Optional[list[dict[str, Any]]] = None,
     render_profile: Optional[dict[str, Any]] = None,
@@ -95,6 +96,22 @@ def build_answer_context(
                 or _pick_attr(qa, key="head")
                 or "project"
             ).strip().lower() or "project",
+        }
+
+    pipeline_context = str(answer_context_text or "").strip()
+    if pipeline_context:
+        context_text = pipeline_context
+        if is_solar and solar_max_context_chars > 0:
+            context_text = context_text[:solar_max_context_chars]
+        context_sentences = len(split_sentences_fn(context_text)) if context_text and context_text != "NONE" else 0
+        context_tokens_est = len(context_text.split()) if context_text and context_text != "NONE" else 0
+        return {
+            "context_text": context_text,
+            "rendered_context_used": context_text != "NONE",
+            "context_sentences": context_sentences,
+            "context_tokens_est": context_tokens_est,
+            "is_solar": is_solar,
+            "context_source": "pipeline_context",
         }
 
     effective_canonical = list(canonical_evidence or [])
@@ -223,11 +240,18 @@ async def generate_answer(
     intent_payload = getattr(state, "intent_payload", None)
     normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload else None
     strategy = getattr(state, "strategy", None)
+    retrieval_bundle = getattr(state, "retrieval_bundle", None)
+    answer_context_text = str(
+        getattr(state, "answer_context_text", None)
+        or getattr(retrieval_bundle, "answer_context_text", None)
+        or ""
+    ).strip()
     docs_for_ctx = getattr(state, "context", None) or getattr(state, "prev_context", None) or []
     canonical_evidence = getattr(state, "canonical_evidence", None) or []
     render_profile = getattr(state, "render_profile", None) or {}
 
     context_info = build_answer_context_fn(
+        answer_context_text=answer_context_text,
         docs_for_ctx=docs_for_ctx,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,
@@ -246,9 +270,16 @@ async def generate_answer(
 
     messages_state = getattr(state, "messages", None) or []
     last_message = messages_state[-1] if messages_state else HumanMessage(content="")
+    question_summary = str(
+        _pick_attr(normalized_intent, qa, key="retrieval_query")
+        or _pick_attr(qa, key="question_summary")
+        or getattr(last_message, "content", "")
+        or ""
+    ).strip()
     human_prompt = (
-        f"[Reference Context]\n{context_text}\n\n"
-        f"[User Question]\n{getattr(last_message, 'content', '')}"
+        f"[질문 요약]\n{question_summary or '없음'}\n\n"
+        f"[원본 질문]\n{getattr(last_message, 'content', '')}\n\n"
+        f"[제공된 정보]\n{context_text}"
     )
     log_section_fn("Reference Context", context_text)
 

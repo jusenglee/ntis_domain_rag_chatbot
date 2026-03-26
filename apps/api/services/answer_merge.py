@@ -5,6 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
+def _looks_like_context_refusal(text: str) -> bool:
+    normalized = " ".join(str(text or "").split()).lower()
+    if not normalized:
+        return False
+    return (
+        ("제공된 정보" in normalized and ("찾을 수 없" in normalized or "확인할 수 없" in normalized or "안내가 어렵" in normalized))
+        or "주어진 정보만으로" in normalized
+    )
+
+
 def select_final_answer(
     *,
     answer_solar: str,
@@ -57,6 +67,12 @@ def select_final_answer(
         solar_fail_reasons.append("contains_fallback_notice")
 
     bypass_like_answer = answer_kind in {"detail_cache", "detail_profile", "no_result", "clarification", "direct_answer", "error"}
+    refusal_like_answer = (
+        answer_kind in {"llm_streamed", "llm_collected"}
+        and _looks_like_context_refusal(solar_answer)
+    )
+    if refusal_like_answer:
+        solar_fail_reasons.append("refusal_like_answer")
     if len(solar_answer) < min_answer_chars and not bypass_like_answer:
         solar_fail_reasons.append(f"too_short<{min_answer_chars}")
 
@@ -67,9 +83,19 @@ def select_final_answer(
         selected_answer = gemma_answer
         selection_reason = "policy_gemma_first"
     else:
-        selected_model = "gemma" if solar_failed else "solar"
-        selected_answer = gemma_answer if solar_failed else solar_answer
-        selection_reason = "solar_timeout_or_empty_use_gemma" if solar_failed else "solar_ok"
+        if solar_failed:
+            if gemma_answer:
+                selected_model = "gemma"
+                selected_answer = gemma_answer
+                selection_reason = "solar_failed_use_gemma"
+            else:
+                selected_model = "fallback"
+                selected_answer = fallback_message
+                selection_reason = "solar_failed_no_gemma"
+        else:
+            selected_model = "solar"
+            selected_answer = solar_answer
+            selection_reason = "solar_ok"
 
     if not selected_answer:
         if gemma_answer:

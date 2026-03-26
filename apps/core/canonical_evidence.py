@@ -43,6 +43,15 @@ def _normalize_nested_list(items: Any) -> List[Dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _pick_nested_value(items: Any, *keys: str) -> str:
+    for item in _normalize_nested_list(items):
+        for key in keys:
+            value = _clean_text(item.get(key))
+            if value:
+                return value
+    return ""
+
+
 def _collect_ids(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, str]:
     """payload와 meta에서 의미 있는 식별자를 canonical id map으로 수집한다.
     `pjt_id`, `pjt_no`, `rst_id`, `doc_id`가 서로 다른 의미를 가진 채 보존되도록 필드를 섞지 않고 정리한다.
@@ -52,6 +61,34 @@ def _collect_ids(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, str
         "pjt_no": _first_non_empty(payload.get("pjt_no"), meta.get("pjt_no"), meta.get("project_no")),
         "rst_id": _first_non_empty(payload.get("rst_id"), meta.get("rst_id"), payload.get("perf_id")),
         "doc_id": _first_non_empty(payload.get("doc_id"), payload.get("id"), meta.get("doc_id")),
+        "person_no": _first_non_empty(
+            payload.get("person_no"),
+            payload.get("hm_id"),
+            meta.get("person_no"),
+            meta.get("hm_id"),
+            _pick_nested_value(payload.get("prtcp_mp"), "person_no", "hm_id"),
+        ),
+        "org_id": _first_non_empty(
+            payload.get("org_id"),
+            meta.get("org_id"),
+            _pick_nested_value(payload.get("prtcp_org"), "org_id"),
+        ),
+        "org_code": _first_non_empty(
+            payload.get("org_code"),
+            payload.get("org_cd"),
+            meta.get("org_code"),
+            meta.get("org_cd"),
+            _pick_nested_value(payload.get("prtcp_org"), "org_code", "org_cd"),
+        ),
+        "biz_no": _first_non_empty(
+            payload.get("biz_no"),
+            payload.get("org_no"),
+            meta.get("biz_no"),
+            meta.get("org_no"),
+            _pick_nested_value(payload.get("prtcp_org"), "biz_no", "org_no"),
+        ),
+        "doi": _first_non_empty(payload.get("doi"), meta.get("doi")),
+        "issn": _first_non_empty(payload.get("issn"), meta.get("issn")),
     }
     return {key: value for key, value in ids.items() if value}
 
@@ -158,8 +195,12 @@ def build_canonical_evidence(
     identity = _first_non_empty(
         ids.get("doc_id"),
         ids.get("rst_id"),
+        ids.get("doi"),
+        ids.get("issn"),
         ids.get("pjt_id"),
         ids.get("pjt_no"),
+        ids.get("person_no"),
+        ids.get("org_id"),
         facts.get("title"),
         f"{source_type}:{rank}",
     )

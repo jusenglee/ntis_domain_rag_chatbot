@@ -97,6 +97,8 @@ def _build_retrieval_bundle(
     raw_count: int,
     clarification: dict[str, Any] | None = None,
     no_result_message: str | None = None,
+    answer_context_text: str = "",
+    context_source: str = "pipeline_context",
 ) -> RetrievalBundle:
     items: list[ResultItem] = []
     max_len = max(len(docs or []), len(canonical_evidence or []))
@@ -111,6 +113,8 @@ def _build_retrieval_bundle(
         context_kind=str((render_profile or {}).get("context_kind") or "project").strip().lower() or "project",
         clarification=clarification,
         no_result_message=no_result_message,
+        answer_context_text=str(answer_context_text or ""),
+        context_source=str(context_source or "pipeline_context"),
     )
 
 
@@ -839,6 +843,7 @@ async def node_rag_search(
         render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
         clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
+        answer_context_text = str(retrieve_result.get("answer_context_text") or "") if isinstance(retrieve_result, dict) else ""
         raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
         retrieval_bundle = _build_retrieval_bundle(
             docs=docs,
@@ -847,6 +852,8 @@ async def node_rag_search(
             raw_count=raw_result_count,
             clarification=clarification,
             no_result_message=no_result_message,
+            answer_context_text=answer_context_text,
+            context_source=("pipeline_context" if answer_context_text else "derived_canonical_evidence"),
         )
 
         context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
@@ -1024,6 +1031,7 @@ async def node_rag_search(
             "context": docs,
             "canonical_evidence": canonical_evidence,
             "retrieval_bundle": retrieval_bundle,
+            "answer_context_text": answer_context_text,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
             "clarification": clarification,

@@ -19,3 +19,5 @@ class RetrievalBundle:
     context_kind: str = "project"
     no_result_message: str | None = None
     clarification: dict[str, Any] | None = None
+    answer_context_text: str = ""
+    context_source: str = "pipeline_context"
