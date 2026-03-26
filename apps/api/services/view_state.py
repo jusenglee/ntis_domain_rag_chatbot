@@ -396,7 +396,7 @@ def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_cha
         if item.lead_org:
             parts.append(f"LEAD_ORG={item.lead_org}")
         lines.append(" | ".join(parts))
-        joined = "`n".join(lines)
+        joined = "\n".join(lines)
         if max_chars > 0 and len(joined) >= max_chars:
             return joined[:max_chars]
-    return "`n".join(lines)
+    return "\n".join(lines)

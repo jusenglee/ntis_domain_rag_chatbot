@@ -17,7 +17,7 @@ Do not output these locked fields:
 
 <contract>
 Return exactly one JSON object with only these fields:
-- ids_map: object<string, string[]>
+- ids_map: object(string, string[])
 - candidate_keys: object
 - project_key_policy: string | null
 - join_resolution_policy: string | null
@@ -147,7 +147,7 @@ Important:
 {"ids_map":{"pjt_id":["1711015550"]},"candidate_keys":{},"project_key_policy":"resolved_pjt_id","join_resolution_policy":null,"filters":{},"retrieval_query":"1711015550 과제 상세","limit":1,"display_limit":1,"confidence":0.98}
 {"ids_map":{},"candidate_keys":{"project_key":[{"value":"a4412354543","candidate_types":["pjt_id","pjt_no"],"source":"label:과제번호","confidence":0.35}]},"project_key_policy":"ambiguous_or","join_resolution_policy":null,"filters":{},"retrieval_query":"과제번호 a4412354543","limit":1,"display_limit":1,"confidence":0.88}
 {"ids_map":{"pjt_id":["AI2024X001"]},"candidate_keys":{},"project_key_policy":"resolved_pjt_id","join_resolution_policy":null,"filters":{},"retrieval_query":"과제고유번호 AI2024X001 상세","limit":1,"display_limit":1,"confidence":0.96}
-{"ids_map":{},"candidate_keys":{"project_key":[{"value":"AI_SEMICONDUCTOR_2023","candidate_types":["pjt_id","pjt_no"],"source":"label:과제번호","confidence":0.35}]},"project_key_policy":"ambiguous_or","join_resolution_policy":"auto_resolve","filters":{},"retrieval_query":"과제번호 AI_SEMICONDUCTOR_2023 성과","limit":10,"display_limit":10,"confidence":0.90}
+{"ids_map":{},"candidate_keys":{"project_key":[{"value":"AI_SEMICONDUCTOR_2023","candidate_types":["pjt_id","pjt_no"],"source":"label: 과제번호","confidence":0.35}]},"project_key_policy":"ambiguous_or","join_resolution_policy":"auto_resolve","filters":{},"retrieval_query":"과제번호 AI_SEMICONDUCTOR_2023 성과","limit":10,"display_limit":10,"confidence":0.90}
 </examples>
 
 <final_check>

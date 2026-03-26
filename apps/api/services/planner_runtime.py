@@ -15,8 +15,10 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from apps.api.services.canonical_context import render_canonical_evidence_text
+from apps.api.services.planner_context_cards import build_planner_domain_cards
 from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.view_state import DisplaySnapshot, FocusEntity, render_display_snapshot_text
+from apps.core.planner_stage15_types import PlannerEntityRolePlan
 from apps.core.planner_staged import (
     DeterministicGateStrategy,
     collect_regate_seed_map,
@@ -25,6 +27,8 @@ from apps.core.planner_staged import (
     merge_locked_strategy_slots,
     regate_locked_strategy,
 )
+from apps.core.planner_surface_signals import SurfaceSignals, collect_surface_signals
+from apps.core.planner_validation import Stage2ValidationResult, validate_stage2_slots
 from apps.core.query_intent import (
     has_ambiguous_project_key_label,
     has_explicit_project_id_label,
@@ -93,6 +97,66 @@ def intent_snapshot(normalized_intent: Any) -> dict[str, Any]:
         "perf_types": list(getattr(normalized_intent, "perf_types", []) or []),
         "years": list(getattr(normalized_intent, "years", []) or []),
     }
+
+
+def _render_prompt_template(template: str, **values: Any) -> str:
+    rendered = str(template or "")
+    for key, value in values.items():
+        replacement = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        rendered = rendered.replace("{" + str(key) + "}", str(replacement))
+    return rendered
+
+
+def _signals_payload(signals: SurfaceSignals) -> dict[str, Any]:
+    return {
+        "explicit_count": signals.explicit_count,
+        "ordinal_ref": signals.ordinal_ref,
+        "years": list(signals.years),
+        "id_like_terms": list(signals.id_like_terms),
+        "people_terms": list(signals.people_terms),
+        "org_terms": list(signals.org_terms),
+        "perf_types": list(signals.perf_types),
+        "followup_cues": list(signals.followup_cues),
+        "high_salience_terms": list(signals.high_salience_terms),
+    }
+
+
+def _entity_role_payload(plan: PlannerEntityRolePlan) -> dict[str, Any]:
+    return plan.model_dump()
+
+
+def _validation_hints_payload(result: Stage2ValidationResult) -> dict[str, Any]:
+    return {
+        "errors": list(result.errors),
+        "missing_people_terms": list(result.missing_people_terms),
+        "missing_org_terms": list(result.missing_org_terms),
+        "missing_years": list(result.missing_years),
+        "missing_perf_types": list(result.missing_perf_types),
+    }
+
+
+def _has_explicit_perf_seed(ids_map: dict[str, list[str]]) -> bool:
+    return any(ids_map.get(key) for key in ("rst_id", "doi", "issn", "perf_id", "paper_id", "patent_reg_no", "patent_app_no"))
+
+
+def _enforce_runtime_legality(
+    *,
+    normalized_intent: Any,
+    locked_strategy: DeterministicGateStrategy,
+    stage2: Any,
+) -> None:
+    ids_map = dict(getattr(stage2, "ids_map", None) or {})
+    people_terms = list(getattr(normalized_intent, "people_terms", None) or [])
+    org_terms = list(getattr(normalized_intent, "org_terms", None) or [])
+    broad_people_org_query = bool(people_terms or org_terms)
+    has_anchor_seed = bool(dict(locked_strategy.prev_context_seed or {}) or dict(locked_strategy.gate_seed_map or {}))
+
+    if locked_strategy.head == "perf" and locked_strategy.action == "detail" and not _has_explicit_perf_seed(ids_map):
+        raise ValueError("planner legality violation: perf detail requires explicit perf id")
+    if broad_people_org_query and str(locked_strategy.mode or "").strip().lower() == "join":
+        raise ValueError("planner legality violation: broad people/org query cannot use JOIN")
+    if locked_strategy.relation in {"project_perf", "perf_project"} and not has_anchor_seed:
+        raise ValueError("planner legality violation: relation query requires explicit anchor")
 
 
 def _planner_prev_context_text(
@@ -185,6 +249,7 @@ async def run_planner_stage1(
     sanitize_llm_json: Any,
     log_event: Any,
     planner_stage1_prompt_version: str,
+    cards: dict[str, str],
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
@@ -197,7 +262,10 @@ async def run_planner_stage1(
         normalized_intent=normalized_intent,
         display_snapshot=display_snapshot,
     )
-    system_prompt = await load_prompt_file(Path(f"prompts/planner_stage1_{planner_stage1_prompt_version}.md"))
+    system_prompt = _render_prompt_template(
+        await load_prompt_file(Path(f"prompts/planner_stage1_{planner_stage1_prompt_version}.md")),
+        **cards,
+    )
     prompt = ChatPromptTemplate.from_messages(
         [
             SystemMessage(content=system_prompt),
@@ -238,6 +306,68 @@ async def run_planner_stage1(
         prev_context_source="display_snapshot" if display_snapshot and display_snapshot.items else "canonical_evidence" if canonical_evidence else "prev_context_snapshot",
     )
     return stage1
+
+
+async def run_planner_stage15(
+    *,
+    question: str,
+    conversation_id: str,
+    request_id: Optional[str],
+    locked_strategy: DeterministicGateStrategy,
+    signals: SurfaceSignals,
+    cards: dict[str, str],
+    build_llm: Any,
+    planner_stage15_plan_cls: Any,
+    load_prompt_file: Any,
+    sanitize_llm_json: Any,
+    log_event: Any,
+    planner_stage15_prompt_version: str,
+    planner_disable_thinking: bool,
+    planner_temperature: float,
+) -> PlannerEntityRolePlan:
+    llm = build_llm("solar_vllm_0")
+    parser = PydanticOutputParser(pydantic_object=planner_stage15_plan_cls)
+    system_prompt = _render_prompt_template(
+        await load_prompt_file(Path(f"prompts/planner_stage15_{planner_stage15_prompt_version}.md")),
+        **cards,
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=system_prompt),
+            (
+                "human",
+                "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<surface_signals>{surface_signals}</surface_signals>\n<user_query>{question}</user_query>",
+            ),
+        ]
+    )
+    planner_llm = llm.bind(
+        reasoning_effort="low",
+        include_reasoning=False,
+        disable_thinking=planner_disable_thinking,
+        temperature=planner_temperature,
+        top_p=1.0,
+        max_tokens=250,
+    )
+    chain = prompt | planner_llm | sanitize_llm_json | parser
+    stage15 = await chain.ainvoke(
+        {
+            "format_instructions": parser.get_format_instructions(),
+            "question": question,
+            "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
+            "surface_signals": json.dumps(_signals_payload(signals), ensure_ascii=False),
+        }
+    )
+    log_event(
+        "PLANNER.STAGE15",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        confidence=round(stage15.confidence, 3),
+        org_role_hint=stage15.org_role_hint,
+        anchor_required=int(stage15.anchor_required),
+        must_keep_terms=stage15.must_keep_terms,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
+    )
+    return stage15
 
 
 def determine_locked_strategy(
@@ -307,16 +437,27 @@ async def run_planner_stage2(
     sanitize_llm_json: Any,
     log_event: Any,
     planner_stage2_prompt_version: str,
+    signals: SurfaceSignals,
+    entity_role_plan: PlannerEntityRolePlan,
+    cards: dict[str, str],
+    validation_hints: dict[str, Any] | None = None,
+    previous_output: dict[str, Any] | None = None,
     planner_disable_thinking: bool,
     planner_temperature: float,
 ) -> Any:
     llm = build_llm("solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=planner_stage2_slots_cls)
-    system_prompt = await load_prompt_file(Path(f"prompts/planner_stage2_{planner_stage2_prompt_version}.md"))
+    system_prompt = _render_prompt_template(
+        await load_prompt_file(Path(f"prompts/planner_stage2_{planner_stage2_prompt_version}.md")),
+        **cards,
+    )
     prompt = ChatPromptTemplate.from_messages(
         [
             SystemMessage(content=system_prompt),
-            ("human", "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<user_query>{question}</user_query>"),
+            (
+                "human",
+                "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<surface_signals>{surface_signals}</surface_signals>\n<entity_role_plan>{entity_role_plan}</entity_role_plan>\n<validation_hints>{validation_hints}</validation_hints>\n<previous_output>{previous_output}</previous_output>\n<user_query>{question}</user_query>",
+            ),
         ]
     )
     planner_llm = llm.bind(
@@ -333,6 +474,10 @@ async def run_planner_stage2(
             "format_instructions": parser.get_format_instructions(),
             "question": question,
             "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
+            "surface_signals": json.dumps(_signals_payload(signals), ensure_ascii=False),
+            "entity_role_plan": json.dumps(_entity_role_payload(entity_role_plan), ensure_ascii=False),
+            "validation_hints": json.dumps(validation_hints or {}, ensure_ascii=False),
+            "previous_output": json.dumps(previous_output or {}, ensure_ascii=False),
         }
     )
     normalized_slots = _normalize_stage2_slots_payload(
@@ -367,6 +512,7 @@ def assemble_question_analysis(
     max_top_k_size: int,
     planner_stagewise_enabled: bool,
     planner_stage1_prompt_version: str,
+    planner_stage15_prompt_version: str,
     planner_stage2_prompt_version: str,
 ) -> Any:
     ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
@@ -477,6 +623,7 @@ def assemble_question_analysis(
         project_key_ambiguity=int(project_key_ambiguity),
         planner_stagewise_enabled=int(planner_stagewise_enabled),
         planner_stage1_prompt_version=planner_stage1_prompt_version,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
     )
     return qa
@@ -494,6 +641,7 @@ async def run_stagewise_question_analysis(
     view_state: Any = None,
     build_llm: Any,
     planner_stage1_decision_cls: Any,
+    planner_stage15_plan_cls: Any,
     planner_stage2_slots_cls: Any,
     question_analysis_cls: Any,
     load_prompt_file: Any,
@@ -501,6 +649,7 @@ async def run_stagewise_question_analysis(
     sanitize_ids_map_semantics: Any,
     log_event: Any,
     planner_stage1_prompt_version: str,
+    planner_stage15_prompt_version: str,
     planner_stage2_prompt_version: str,
     planner_disable_thinking: bool,
     planner_temperature: float,
@@ -511,6 +660,14 @@ async def run_stagewise_question_analysis(
 ) -> Any:
     display_snapshot = getattr(view_state, "latest_display_snapshot", None)
     focus_entity = getattr(view_state, "latest_focus_entity", None)
+    cards = await build_planner_domain_cards(load_prompt_file=load_prompt_file)
+    signals = collect_surface_signals(question, normalized_intent)
+    log_event(
+        "PLANNER.SIGNALS",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        **_signals_payload(signals),
+    )
     stage1 = await run_planner_stage1(
         question=question,
         conversation_id=conversation_id,
@@ -526,6 +683,7 @@ async def run_stagewise_question_analysis(
         sanitize_llm_json=sanitize_llm_json,
         log_event=log_event,
         planner_stage1_prompt_version=planner_stage1_prompt_version,
+        cards=cards,
         planner_disable_thinking=planner_disable_thinking,
         planner_temperature=planner_temperature,
     )
@@ -540,11 +698,30 @@ async def run_stagewise_question_analysis(
         planner_stage2_regate_seed_allowed_keys=planner_stage2_regate_seed_allowed_keys,
         log_event=log_event,
     )
+    stage15 = await run_planner_stage15(
+        question=question,
+        conversation_id=conversation_id,
+        request_id=request_id,
+        locked_strategy=locked_strategy,
+        signals=signals,
+        cards=cards,
+        build_llm=build_llm,
+        planner_stage15_plan_cls=planner_stage15_plan_cls,
+        load_prompt_file=load_prompt_file,
+        sanitize_llm_json=sanitize_llm_json,
+        log_event=log_event,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
+        planner_disable_thinking=planner_disable_thinking,
+        planner_temperature=planner_temperature,
+    )
     stage2 = await run_planner_stage2(
         question=question,
         conversation_id=conversation_id,
         request_id=request_id,
         locked_strategy=locked_strategy,
+        signals=signals,
+        entity_role_plan=stage15,
+        cards=cards,
         build_llm=build_llm,
         planner_stage2_slots_cls=planner_stage2_slots_cls,
         load_prompt_file=load_prompt_file,
@@ -553,6 +730,71 @@ async def run_stagewise_question_analysis(
         planner_stage2_prompt_version=planner_stage2_prompt_version,
         planner_disable_thinking=planner_disable_thinking,
         planner_temperature=planner_temperature,
+    )
+    validation = validate_stage2_slots(
+        question=question,
+        signals=signals,
+        entity_role_plan=stage15,
+        locked_strategy=locked_strategy,
+        stage2_slots=stage2,
+    )
+    if not validation.ok:
+        log_event(
+            "PLANNER.STAGE2.VALIDATION_FAILED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            errors=validation.errors,
+            missing_people_terms=validation.missing_people_terms,
+            missing_org_terms=validation.missing_org_terms,
+            missing_years=validation.missing_years,
+            missing_perf_types=validation.missing_perf_types,
+        )
+        previous_output = stage2.model_dump() if hasattr(stage2, "model_dump") else {}
+        stage2 = await run_planner_stage2(
+            question=question,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            locked_strategy=locked_strategy,
+            signals=signals,
+            entity_role_plan=stage15,
+            cards=cards,
+            validation_hints=_validation_hints_payload(validation),
+            previous_output=previous_output,
+            build_llm=build_llm,
+            planner_stage2_slots_cls=planner_stage2_slots_cls,
+            load_prompt_file=load_prompt_file,
+            sanitize_llm_json=sanitize_llm_json,
+            log_event=log_event,
+            planner_stage2_prompt_version=planner_stage2_prompt_version,
+            planner_disable_thinking=planner_disable_thinking,
+            planner_temperature=planner_temperature,
+        )
+        validation = validate_stage2_slots(
+            question=question,
+            signals=signals,
+            entity_role_plan=stage15,
+            locked_strategy=locked_strategy,
+            stage2_slots=stage2,
+        )
+        if not validation.ok:
+            log_event(
+                "PLANNER.STAGE2.RETRY_FAILED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                errors=validation.errors,
+            )
+            explicit_count = signals.explicit_count or 20
+            fallback_limit = max(1, min(int(explicit_count), max_top_k_size))
+            fallback_payload = stage2.model_dump() if hasattr(stage2, "model_dump") else {}
+            fallback_payload["retrieval_query"] = question
+            fallback_payload["limit"] = max(1, min(int(fallback_payload.get("limit") or fallback_limit), max_top_k_size))
+            fallback_payload["display_limit"] = max(1, min(int(fallback_payload.get("display_limit") or fallback_payload["limit"]), fallback_payload["limit"]))
+            fallback_payload["confidence"] = float(fallback_payload.get("confidence") or 0.0)
+            stage2 = planner_stage2_slots_cls.model_validate(fallback_payload)
+    _enforce_runtime_legality(
+        normalized_intent=normalized_intent,
+        locked_strategy=locked_strategy,
+        stage2=stage2,
     )
     locked_strategy = regate_locked_strategy(
         request_id=request_id,
@@ -577,6 +819,7 @@ async def run_stagewise_question_analysis(
         max_top_k_size=max_top_k_size,
         planner_stagewise_enabled=planner_stagewise_enabled,
         planner_stage1_prompt_version=planner_stage1_prompt_version,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
     )
 

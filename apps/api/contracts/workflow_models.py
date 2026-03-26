@@ -362,6 +362,8 @@ class AgentState(BaseModel):
     selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
     clarification: Optional[Dict[str, Any]] = None
     retrieval_bundle: Optional[Any] = None
+    answer_context_text: str = ""
+    resolved_retrieval_query: Optional[str] = None
     strategy: Optional[Any] = None
     stream_emitter: Optional[AsyncStreamEmitter] = None
     conversation_id: str = ""

@@ -86,6 +86,7 @@ from apps.core.metrics import (
 from apps.api.rag_mapper.rag_mapper import RagMapper
 from apps.core.log_keys import CHANGED_BY_PLANNER_MERGE
 from apps.core.pipeline_steps import build_changed_fields, normalize_intent
+from apps.core.planner_stage15_types import PlannerEntityRolePlan
 from apps.core.planner_contract import StrategyViolation
 from apps.core.query_intent import (
     _cheap_precheck,
@@ -144,8 +145,9 @@ PRIORITY_CONTEXT_FIELDS = tuple(
     if field.strip()
 )
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
-PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v1").strip()
-PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v1").strip()
+PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v2").strip()
+PLANNER_STAGE15_PROMPT_VERSION = os.getenv("PLANNER_STAGE15_PROMPT_VERSION", "v1").strip()
+PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v2").strip()
 DEFAULT_SYSTEM_PROMPT_PATH = Path(os.getenv("DEFAULT_SYSTEM_PROMPT_PATH", "prompts/ntis_chatbot.md").strip() or "prompts/ntis_chatbot.md")
 _GEMMA_SYSTEM_PROMPT_PATH_RAW = os.getenv("GEMMA_SYSTEM_PROMPT_PATH", "").strip()
 GEMMA_SYSTEM_PROMPT_PATH = Path(_GEMMA_SYSTEM_PROMPT_PATH_RAW) if _GEMMA_SYSTEM_PROMPT_PATH_RAW else None
@@ -310,6 +312,7 @@ APP_RUNTIME_CONFIG = AppRuntimeConfig(
     redis_url=REDIS_URL,
     planner_stagewise_enabled=True,
     planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+    planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
     planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
     ensure_payload_index_on_boot=RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT,
     sparse_warmup_on_boot=os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT", "true").strip().lower() in {"1", "true", "yes", "on"},
@@ -355,6 +358,7 @@ async def _run_question_analysis(
         run_stagewise_question_analysis=run_stagewise_question_analysis,
         build_llm=lambda model_name: build_llm(model_name=model_name, solar_vllm_config=SOLAR_VLLM_CONFIG),
         planner_stage1_decision_cls=PlannerStage1Decision,
+        planner_stage15_plan_cls=PlannerEntityRolePlan,
         planner_stage2_slots_cls=PlannerStage2Slots,
         question_analysis_cls=QuestionAnalysis,
         load_prompt_file=load_system_prompt,
@@ -362,6 +366,7 @@ async def _run_question_analysis(
         sanitize_ids_map_semantics=sanitize_ids_map_semantics,
         log_event=_log_event,
         planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         planner_disable_thinking=PLANNER_DISABLE_THINKING,
         planner_temperature=PLANNER_TEMPERATURE,
@@ -506,6 +511,7 @@ def build_advanced_workflow() -> Any:
             intent_payload_cls=IntentPayloadV3,
             planner_stagewise_enabled=True,
             planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+            planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
             planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         ),
     )

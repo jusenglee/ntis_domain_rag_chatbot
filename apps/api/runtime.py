@@ -22,6 +22,7 @@ class AppRuntimeConfig:
     redis_url: str
     planner_stagewise_enabled: bool
     planner_stage1_prompt_version: str
+    planner_stage15_prompt_version: str
     planner_stage2_prompt_version: str
     ensure_payload_index_on_boot: bool
     sparse_warmup_on_boot: bool
@@ -96,6 +97,7 @@ async def initialize_app_runtime(
         stage="startup",
         planner_stagewise_enabled=int(config.planner_stagewise_enabled),
         planner_stage1_prompt_version=config.planner_stage1_prompt_version,
+        planner_stage15_prompt_version=config.planner_stage15_prompt_version,
         planner_stage2_prompt_version=config.planner_stage2_prompt_version,
     )
 

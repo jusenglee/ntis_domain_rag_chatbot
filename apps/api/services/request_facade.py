@@ -535,6 +535,7 @@ class RequestUnderstandingFacade:
     intent_payload_cls: Any
     planner_stagewise_enabled: bool
     planner_stage1_prompt_version: str
+    planner_stage15_prompt_version: str
     planner_stage2_prompt_version: str
 
     def _build_explicit_only_hint(self, question: str) -> Dict[str, Any]:
@@ -690,6 +691,7 @@ class RequestUnderstandingFacade:
             planner_failed=int(planner_failed),
             planner_stagewise_enabled=int(self.planner_stagewise_enabled),
             planner_stage1_prompt_version=self.planner_stage1_prompt_version,
+            planner_stage15_prompt_version=self.planner_stage15_prompt_version,
             planner_stage2_prompt_version=self.planner_stage2_prompt_version,
             schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
         )
@@ -718,7 +720,8 @@ async def build_intent_payload(
     intent_payload_cls: Any,
     planner_stagewise_enabled: bool,
     planner_stage1_prompt_version: str,
-    planner_stage2_prompt_version: str,
+    planner_stage15_prompt_version: str = "v1",
+    planner_stage2_prompt_version: str = "v1",
 ) -> tuple[Any, Any]:
     facade = RequestUnderstandingFacade(
         cheap_precheck=cheap_precheck,
@@ -734,6 +737,7 @@ async def build_intent_payload(
         intent_payload_cls=intent_payload_cls,
         planner_stagewise_enabled=planner_stagewise_enabled,
         planner_stage1_prompt_version=planner_stage1_prompt_version,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
     )
     return await facade.build_intent_payload(

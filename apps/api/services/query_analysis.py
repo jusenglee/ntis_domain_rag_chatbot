@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from apps.core.planner_stage15_types import PlannerEntityRolePlan
+
 
 async def run_question_analysis(
     *,
@@ -18,6 +20,7 @@ async def run_question_analysis(
     run_stagewise_question_analysis: Any,
     build_llm: Any,
     planner_stage1_decision_cls: Any,
+    planner_stage15_plan_cls: Any = None,
     planner_stage2_slots_cls: Any,
     question_analysis_cls: Any,
     load_prompt_file: Any,
@@ -25,6 +28,7 @@ async def run_question_analysis(
     sanitize_ids_map_semantics: Any,
     log_event: Any,
     planner_stage1_prompt_version: str,
+    planner_stage15_prompt_version: str = "v1",
     planner_stage2_prompt_version: str,
     planner_disable_thinking: bool,
     planner_temperature: float,
@@ -52,6 +56,7 @@ async def run_question_analysis(
         normalized_intent=normalized_intent,
         build_llm=build_llm,
         planner_stage1_decision_cls=planner_stage1_decision_cls,
+        planner_stage15_plan_cls=planner_stage15_plan_cls or PlannerEntityRolePlan,
         planner_stage2_slots_cls=planner_stage2_slots_cls,
         question_analysis_cls=question_analysis_cls,
         load_prompt_file=load_prompt_file,
@@ -59,6 +64,7 @@ async def run_question_analysis(
         sanitize_ids_map_semantics=sanitize_ids_map_semantics,
         log_event=log_event,
         planner_stage1_prompt_version=planner_stage1_prompt_version,
+        planner_stage15_prompt_version=planner_stage15_prompt_version,
         planner_stage2_prompt_version=planner_stage2_prompt_version,
         planner_disable_thinking=planner_disable_thinking,
         planner_temperature=planner_temperature,

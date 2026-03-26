@@ -767,6 +767,7 @@ async def node_rag_search(
             ks=ks,
             min_confidence=0.55,
         )
+        resolved_retrieval_query = str(search_query or "").strip()
         anchor_query_meta = {
             "anchor_present": bool(focus_seed_map),
             "anchor_source": (resolved_entity_ref.source if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
@@ -775,7 +776,7 @@ async def node_rag_search(
             "anchor_repair_reason": None,
         }
         if output_type == "detail" and exact_detail_lookup and focus_seed_map:
-            search_query = str(next(iter(focus_seed_map.values()))[0]).strip()
+            resolved_retrieval_query = str(next(iter(focus_seed_map.values()))[0]).strip()
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
         search_num = 1 if exact_detail_lookup else _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
         planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
@@ -786,7 +787,7 @@ async def node_rag_search(
             conversation_id=state.conversation_id,
             raw_query=raw_query,
             planner_query=planner_query,
-            selected_search_query=search_query,
+            selected_search_query=resolved_retrieval_query,
             confidence=query_confidence,
             drift_detected=drift_detected,
             drift_reasons=drift_reasons,
@@ -805,7 +806,7 @@ async def node_rag_search(
             planner_limit=planner_limit,
             planner_display_limit=planner_display_limit,
             runtime_top_k=search_num,
-            retrieval_query=search_query,
+            retrieval_query=resolved_retrieval_query,
             raw_query=raw_query,
             planner_query=planner_query,
             drift_detected=drift_detected,
@@ -823,7 +824,7 @@ async def node_rag_search(
                 request_id=state.request_id,
                 conversation_id=state.conversation_id,
                 anchor_seed_map=focus_seed_map,
-                selected_search_query=search_query,
+                selected_search_query=resolved_retrieval_query,
             )
         retriever = custom_rag_retriever_cls(
             top_k=search_num,
@@ -837,7 +838,23 @@ async def node_rag_search(
             func=retriever.retrieve,
         )
 
-        retrieve_result = await asyncio.to_thread(rag_tool.func, search_query)
+        retrieve_result = await asyncio.to_thread(rag_tool.func, resolved_retrieval_query)
+        actual_retrieval_query = str(resolved_retrieval_query or "")
+        log_event(
+            "RAG.RETRIEVAL_QUERY.ACTUAL",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            resolved_retrieval_query=resolved_retrieval_query,
+            actual_retrieval_query=actual_retrieval_query,
+        )
+        if actual_retrieval_query != resolved_retrieval_query:
+            log_event(
+                "RAG.RETRIEVAL_QUERY.MISMATCH",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                resolved_retrieval_query=resolved_retrieval_query,
+                actual_retrieval_query=actual_retrieval_query,
+            )
         docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
         canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
         render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
@@ -903,7 +920,7 @@ async def node_rag_search(
                 "context_kind": context_kind or "project",
                 "raw_query": raw_query,
                 "planner_query": planner_query,
-                "selected_search_query": search_query,
+                "selected_search_query": resolved_retrieval_query,
             }
             view_state.refinement_history.append({
                 "turn_id": state.request_id,
@@ -941,7 +958,7 @@ async def node_rag_search(
                 runtime_top_k=search_num,
                 raw_query=raw_query,
                 planner_query=planner_query,
-                selected_search_query=search_query,
+                selected_search_query=resolved_retrieval_query,
                 drift_detected=drift_detected,
                 fallback_applied=fallback_applied,
                 requested_count=display_limit,
@@ -1023,7 +1040,7 @@ async def node_rag_search(
             conversation_id=state.conversation_id,
             stage="rag_search",
             docs_found=len(docs),
-            query_len=len(str(search_query or "")),
+            query_len=len(str(resolved_retrieval_query or "")),
             canonical_evidence_found=len(canonical_evidence),
         )
 
@@ -1032,6 +1049,7 @@ async def node_rag_search(
             "canonical_evidence": canonical_evidence,
             "retrieval_bundle": retrieval_bundle,
             "answer_context_text": answer_context_text,
+            "resolved_retrieval_query": resolved_retrieval_query,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
             "clarification": clarification,
