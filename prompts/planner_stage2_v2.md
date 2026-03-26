@@ -26,13 +26,6 @@
 - validation_hints를 맞추기 위해 사용자 질문에 없는 의미를 발명하지 않는다.
   </contract>
 
-<input>
-<locked_strategy>{locked_strategy}</locked_strategy>
-<surface_signals>{surface_signals}</surface_signals>
-<entity_role_plan>{entity_role_plan}</entity_role_plan>
-<validation_hints>{validation_hints}</validation_hints>
-<previous_output>{previous_output}</previous_output>
-
 <domain_cards>
 <collections_card>{collections_card}</collections_card>
 <relationship_semantics_card>{relationship_semantics_card}</relationship_semantics_card>
@@ -42,7 +35,15 @@
 <field_reliability_card>{field_reliability_card}</field_reliability_card>
 <semantic_disambiguation_card>{semantic_disambiguation_card}</semantic_disambiguation_card>
 </domain_cards>
-</input>
+
+<runtime_inputs>
+- locked_strategy
+- surface_signals
+- entity_role_plan
+- validation_hints
+- previous_output
+- user_query
+</runtime_inputs>
 
 <output_schema>
 {
