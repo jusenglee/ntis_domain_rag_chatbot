@@ -125,15 +125,35 @@ def _build_answer_artifact(*, text: str, answer_kind: str, answer_source: str, c
     )
 
 
-def _resolve_detail_entity_ref(*, strategy_meta: dict[str, Any], latest_focus_entity: Any, ids_map: dict[str, list[str]] | None = None) -> ResolvedEntityRef | ClarificationRequest | None:
+def _resolve_detail_entity_ref(
+    *,
+    strategy_meta: dict[str, Any],
+    latest_focus_entity: Any,
+    ids_map: dict[str, list[str]] | None = None,
+    preferred_entity_kind: str | None = None,
+) -> ResolvedEntityRef | ClarificationRequest | None:
     resolved = resolve_entity_ref_from_strategy_meta(strategy_meta)
     if resolved is not None:
         return resolved
     normalized_ids = dict(ids_map or {})
-    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+    normalized_preferred_kind = str(preferred_entity_kind or "").strip().lower()
+    if normalized_preferred_kind == "perf":
+        preferred_keys = ("rst_id", "doi", "issn", "pjt_id", "pjt_no", "person_no", "org_id", "org_code", "biz_no")
+    elif normalized_preferred_kind == "project":
+        preferred_keys = ("pjt_id", "pjt_no", "rst_id", "doi", "issn", "person_no", "org_id", "org_code", "biz_no")
+    elif normalized_preferred_kind == "people":
+        preferred_keys = ("person_no", "pjt_id", "pjt_no", "rst_id", "org_id", "org_code", "biz_no", "doi", "issn")
+    elif normalized_preferred_kind == "org":
+        preferred_keys = ("org_id", "org_code", "biz_no", "pjt_id", "pjt_no", "rst_id", "person_no", "doi", "issn")
+    else:
+        preferred_keys = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+    for key in preferred_keys:
         values = normalized_ids.get(key) or []
         if values:
-            entity_kind = "perf" if key == "rst_id" else ("people" if key == "person_no" else ("org" if key in {"org_id", "org_code", "biz_no"} else "project"))
+            entity_kind = (
+                "perf" if key in {"rst_id", "doi", "issn"}
+                else ("people" if key == "person_no" else ("org" if key in {"org_id", "org_code", "biz_no"} else "project"))
+            )
             return ResolvedEntityRef(entity_kind=entity_kind, seed_map={key: [str(values[0]).strip()]}, source="explicit_id")
     anchor_source = str((strategy_meta or {}).get("anchor_source") or "").strip().lower()
     if anchor_source != "detail_lookup":
@@ -621,7 +641,18 @@ async def node_rag_search(
         ids_map_for_detail = getattr(query_intent, "ids_map", None) or {}
         if isinstance(query_intent, dict):
             ids_map_for_detail = query_intent.get("ids_map") or {}
-        resolved_entity_ref = _resolve_detail_entity_ref(strategy_meta=strategy_meta, latest_focus_entity=latest_focus_entity, ids_map=ids_map_for_detail)
+        preferred_entity_kind = str(
+            getattr(query_intent, "context_owner_lock", None)
+            or getattr(query_intent, "base_route", None)
+            or getattr(qa, "base_route", None)
+            or ""
+        ).strip().lower() or None
+        resolved_entity_ref = _resolve_detail_entity_ref(
+            strategy_meta=strategy_meta,
+            latest_focus_entity=latest_focus_entity,
+            ids_map=ids_map_for_detail,
+            preferred_entity_kind=preferred_entity_kind,
+        )
         if isinstance(resolved_entity_ref, ClarificationRequest):
             clarification_payload = {
                 "clarification_type": resolved_entity_ref.clarification_type,

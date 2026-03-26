@@ -665,6 +665,8 @@ class RequestUnderstandingFacade:
             request_id=request_id,
             conversation_id=conversation_id,
         )
+        # Planner merge is the only final writer of route truth.
+        # Post-merge facade code may preserve anchor ids, but must not relock base_route/target_cols.
         normalized_intent = _apply_anchor_lock(
             normalized_intent,
             followup_resolution.get("seed_map") or {},

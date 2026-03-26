@@ -422,13 +422,13 @@ def apply_planner_strategy(
             "FOLLOWUP.CONTEXT.RESTORED",
             request_id=request_id,
             conversation_id=conversation_id,
-            reason=context_lock_reason,
-            before_base_route=planner_head,
-            after_base_route=effective_planner_head,
-            before_target_cols=list(planner_target_cols or []),
-            after_target_cols=list(effective_target_cols or []),
-            locked_base_route=locked_base_route,
-            locked_target_cols=list(locked_target_cols or []),
+            attempted_base_route=planner_head,
+            attempted_target_cols=list(planner_target_cols or []),
+            context_owner_lock=locked_base_route,
+            context_owner_lock_reason=context_lock_reason,
+            final_base_route=effective_planner_head,
+            final_target_cols=list(effective_target_cols or []),
+            enforced_by="planner_service.apply_planner_strategy",
         )
 
     after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}

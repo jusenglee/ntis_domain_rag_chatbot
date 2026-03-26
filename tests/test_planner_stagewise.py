@@ -659,11 +659,13 @@ def test_apply_planner_strategy_restores_perf_context_owner_lock():
     assert patched.base_route == 'perf'
     assert patched.target_cols == ['ntis_perf_v1']
     restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
-    assert restore_event['reason'] == 'followup_context_perf'
-    assert restore_event['before_base_route'] == 'project'
-    assert restore_event['after_base_route'] == 'perf'
-    assert restore_event['before_target_cols'] == ['ntis_project_v1']
-    assert restore_event['after_target_cols'] == ['ntis_perf_v1']
+    assert restore_event['attempted_base_route'] == 'project'
+    assert restore_event['attempted_target_cols'] == ['ntis_project_v1']
+    assert restore_event['context_owner_lock'] == 'perf'
+    assert restore_event['context_owner_lock_reason'] == 'followup_context_perf'
+    assert restore_event['final_base_route'] == 'perf'
+    assert restore_event['final_target_cols'] == ['ntis_perf_v1']
+    assert restore_event['enforced_by'] == 'planner_service.apply_planner_strategy'
 
 
 def test_apply_planner_strategy_restores_project_context_owner_lock():
@@ -729,11 +731,13 @@ def test_apply_planner_strategy_restores_project_context_owner_lock():
     assert patched.base_route == 'project'
     assert patched.target_cols == ['ntis_project_v1']
     restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
-    assert restore_event['reason'] == 'followup_context_project'
-    assert restore_event['before_base_route'] == 'perf'
-    assert restore_event['after_base_route'] == 'project'
-    assert restore_event['before_target_cols'] == ['ntis_perf_v1']
-    assert restore_event['after_target_cols'] == ['ntis_project_v1']
+    assert restore_event['attempted_base_route'] == 'perf'
+    assert restore_event['attempted_target_cols'] == ['ntis_perf_v1']
+    assert restore_event['context_owner_lock'] == 'project'
+    assert restore_event['context_owner_lock_reason'] == 'followup_context_project'
+    assert restore_event['final_base_route'] == 'project'
+    assert restore_event['final_target_cols'] == ['ntis_project_v1']
+    assert restore_event['enforced_by'] == 'planner_service.apply_planner_strategy'
 
 def test_resolve_retrieval_budget_uses_question_analysis_limit_as_source_of_truth():
     qa = SimpleNamespace(limit=7, display_limit=3)
