@@ -17,6 +17,15 @@
 </contract>
 
 <domain_cards>
+<collections_card>
+{collections_card}
+</collections_card>
+<relationship_semantics_card>
+{relationship_semantics_card}
+</relationship_semantics_card>
+<id_semantics_card>
+{id_semantics_card}
+</id_semantics_card>
 <filter_semantics_card>
 {filter_semantics_card}
 </filter_semantics_card>
@@ -39,6 +48,8 @@
 "perf_type_hints": [],
 "must_keep_terms": [],
 "anchor_required": false,
+"semantic_kind": "broad_history | explicit_perf | explicit_relation | generic_lookup | null",
+"perf_type_policy": "explicit_only | allow_when_explicit",
 "notes": [],
 "confidence": 0.0
 }
@@ -60,6 +71,9 @@
 - stage2에서 절대 잃으면 안 되는 축은 must_keep_terms에 넣는다.
 - broad history query에서는 "활동이력" 자체를 must_keep_terms에 둘 수 있다.
 </rules>
+
+- Set semantic_kind explicitly for broad_history, explicit_perf, explicit_relation, or generic_lookup.
+- Use perf_type_policy=explicit_only for broad history queries unless the user explicitly asked for a performance type.
 
 <conflict_resolution>
 1) explicit person/org mention
@@ -88,6 +102,8 @@
   "perf_type_hints":[],
   "must_keep_terms":["신동구","한국과학기술정보연구원","활동이력"],
   "anchor_required":false,
+  "semantic_kind":"broad_history",
+  "perf_type_policy":"explicit_only",
   "notes":["broad_people_history","do_not_force_perf_type"],
   "confidence":0.97
 }
@@ -101,6 +117,8 @@
 "perf_type_hints":["논문"],
 "must_keep_terms":["신동구","논문"],
 "anchor_required":false,
+"semantic_kind":"explicit_perf",
+"perf_type_policy":"allow_when_explicit",
 "notes":["researcher_to_perf"],
 "confidence":0.95
 }
@@ -114,6 +132,8 @@
 "perf_type_hints":[],
 "must_keep_terms":["ETRI","수행"],
 "anchor_required":false,
+"semantic_kind":"generic_lookup",
+"perf_type_policy":"explicit_only",
 "notes":["org_role_explicit"],
 "confidence":0.96
 }

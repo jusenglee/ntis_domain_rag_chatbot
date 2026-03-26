@@ -35,6 +35,7 @@
 
 <domain_cards>
 <collections_card>{collections_card}</collections_card>
+<relationship_semantics_card>{relationship_semantics_card}</relationship_semantics_card>
 <id_semantics_card>{id_semantics_card}</id_semantics_card>
 <filter_semantics_card>{filter_semantics_card}</filter_semantics_card>
 <perf_tag_card>{perf_tag_card}</perf_tag_card>
@@ -89,6 +90,7 @@
 
 validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의미를 우선한다.
 즉 missing_perf_types만 맞추기 위해 broad history query를 perf query로 바꾸지 않는다.
+- If entity_role_plan.semantic_kind is broad_history and perf_type_policy is explicit_only, preserve the people/org/history axis and do not invent perf detail slots.
 </conflict_resolution>
 
 <preservation_rules>

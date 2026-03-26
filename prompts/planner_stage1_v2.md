@@ -42,6 +42,9 @@
 <collections_card>
 {collections_card}
 </collections_card>
+<relationship_semantics_card>
+{relationship_semantics_card}
+</relationship_semantics_card>
 <id_semantics_card>
 {id_semantics_card}
 </id_semantics_card>

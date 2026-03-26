@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,14 @@ def _locked_field(value: Any, field: str) -> Any:
     return getattr(value, field, None)
 
 
+def _contains_term(haystack: str, term: str) -> bool:
+    needle = str(term or "").strip()
+    if not needle:
+        return True
+    pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)", re.IGNORECASE)
+    return bool(pattern.search(haystack))
+
+
 def validate_stage2_slots(
     *,
     question: str,
@@ -66,12 +75,17 @@ def validate_stage2_slots(
     stage2_slots: Any,
 ) -> Stage2ValidationResult:
     haystack = _string_pool_from_stage2(stage2_slots)
+    semantic_kind = getattr(entity_role_plan, "semantic_kind", None)
+    perf_type_policy = getattr(entity_role_plan, "perf_type_policy", "explicit_only")
 
-    missing_people = [value for value in getattr(entity_role_plan, "people_terms_to_keep", []) if value and value not in haystack]
-    missing_orgs = [value for value in getattr(entity_role_plan, "org_terms_to_keep", []) if value and value not in haystack]
-    missing_years = [value for value in getattr(signals, "years", []) if value and value not in haystack]
-    missing_perf = [value for value in getattr(entity_role_plan, "perf_type_hints", []) if value and value not in haystack]
-    missing_must_keep = [value for value in getattr(entity_role_plan, "must_keep_terms", []) if value and value not in haystack]
+    missing_people = [value for value in getattr(entity_role_plan, "people_terms_to_keep", []) if value and not _contains_term(haystack, value)]
+    missing_orgs = [value for value in getattr(entity_role_plan, "org_terms_to_keep", []) if value and not _contains_term(haystack, value)]
+    missing_years = [value for value in getattr(signals, "years", []) if value and not _contains_term(haystack, value)]
+    missing_perf = [value for value in getattr(entity_role_plan, "perf_type_hints", []) if value and not _contains_term(haystack, value)]
+    missing_must_keep = [value for value in getattr(entity_role_plan, "must_keep_terms", []) if value and not _contains_term(haystack, value)]
+
+    if semantic_kind == "broad_history" and perf_type_policy == "explicit_only":
+        missing_perf = []
 
     errors: list[str] = []
     if missing_must_keep:
@@ -99,7 +113,11 @@ def validate_stage2_slots(
 
     people_terms = list(getattr(signals, "people_terms", []) or [])
     org_terms = list(getattr(signals, "org_terms", []) or [])
-    broad_people_org_query = bool(people_terms or org_terms) and not _has_explicit_perf_seed(stage2_slots) and not getattr(entity_role_plan, "anchor_required", False)
+    broad_people_org_query = False
+    if semantic_kind == "broad_history":
+        broad_people_org_query = True
+    elif semantic_kind is None:
+        broad_people_org_query = bool(people_terms or org_terms) and not _has_explicit_perf_seed(stage2_slots) and not getattr(entity_role_plan, "anchor_required", False)
     if broad_people_org_query and locked_head == "perf" and locked_action == "detail":
         errors.append("broad_query_collapsed_to_perf_detail")
     if locked_head == "perf" and locked_action == "detail" and not _has_explicit_perf_seed(stage2_slots):

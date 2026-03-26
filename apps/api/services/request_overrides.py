@@ -79,12 +79,11 @@ class OracleRequestDefaultsLoader:
     dsn: str
     logger: Any
     query: str = ORACLE_REQUEST_PARAM_QUERY
-
     @classmethod
     def from_env(cls, *, logger: Any) -> Optional["OracleRequestDefaultsLoader"]:
-        user = str(os.getenv("ORACLE_PARAM_USER", "")).strip()
-        password = str(os.getenv("ORACLE_PARAM_PASSWORD", "")).strip()
-        dsn = str(os.getenv("ORACLE_PARAM_DSN", "")).strip()
+        user = str(os.getenv("ORACLE_PARAM_USER", "ird")).strip()
+        password = str(os.getenv("ORACLE_PARAM_PASSWORD", "ird_12#$")).strip()
+        dsn = str(os.getenv("ORACLE_PARAM_DSN", "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=172.31.234.203)(PORT=1253)))(CONNECT_DATA=(SERVICE_NAME=KNTIS)))")).strip()
         if not user or not password or not dsn:
             return None
         return cls(user=user, password=password, dsn=dsn, logger=logger)

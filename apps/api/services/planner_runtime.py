@@ -7,6 +7,7 @@ module can stay focused on composition-root concerns.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -101,10 +102,16 @@ def intent_snapshot(normalized_intent: Any) -> dict[str, Any]:
 
 
 def _render_prompt_template(template: str, **values: Any) -> str:
-    rendered = str(template or "")
-    for key, value in values.items():
+    template_text = str(template or "")
+    placeholder_names = sorted(set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template_text)))
+    missing = [name for name in placeholder_names if name not in values]
+    if missing:
+        raise RuntimeError(f"planner prompt placeholder missing: {missing}")
+    rendered = template_text
+    for key in placeholder_names:
+        value = values[key]
         replacement = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        rendered = rendered.replace("{" + str(key) + "}", str(replacement))
+        rendered = rendered.replace("{" + key + "}", str(replacement))
     return rendered
 
 
@@ -374,6 +381,8 @@ async def run_planner_stage15(
         confidence=round(stage15.confidence, 3),
         org_role_hint=stage15.org_role_hint,
         anchor_required=int(stage15.anchor_required),
+        semantic_kind=stage15.semantic_kind,
+        perf_type_policy=stage15.perf_type_policy,
         must_keep_terms=stage15.must_keep_terms,
         planner_stage15_prompt_version=planner_stage15_prompt_version,
     )
@@ -671,7 +680,12 @@ async def run_stagewise_question_analysis(
 ) -> Any:
     display_snapshot = getattr(view_state, "latest_display_snapshot", None)
     focus_entity = getattr(view_state, "latest_focus_entity", None)
-    cards = await build_planner_domain_cards(load_prompt_file=load_prompt_file)
+    stage1_prompt_name = f"planner_stage1_{planner_stage1_prompt_version}"
+    stage15_prompt_name = f"planner_stage15_{planner_stage15_prompt_version}"
+    stage2_prompt_name = f"planner_stage2_{planner_stage2_prompt_version}"
+    stage1_cards = await build_planner_domain_cards(load_prompt_file=load_prompt_file, prompt_name=stage1_prompt_name)
+    stage15_cards = await build_planner_domain_cards(load_prompt_file=load_prompt_file, prompt_name=stage15_prompt_name)
+    stage2_cards = await build_planner_domain_cards(load_prompt_file=load_prompt_file, prompt_name=stage2_prompt_name)
     signals = collect_surface_signals(question, normalized_intent)
     log_event(
         "PLANNER.SIGNALS",
@@ -694,7 +708,7 @@ async def run_stagewise_question_analysis(
         sanitize_llm_json=sanitize_llm_json,
         log_event=log_event,
         planner_stage1_prompt_version=planner_stage1_prompt_version,
-        cards=cards,
+        cards=stage1_cards,
         planner_disable_thinking=planner_disable_thinking,
         planner_temperature=planner_temperature,
     )
@@ -715,7 +729,7 @@ async def run_stagewise_question_analysis(
         request_id=request_id,
         locked_strategy=locked_strategy,
         signals=signals,
-        cards=cards,
+        cards=stage15_cards,
         build_llm=build_llm,
         planner_stage15_plan_cls=planner_stage15_plan_cls,
         load_prompt_file=load_prompt_file,
@@ -732,7 +746,7 @@ async def run_stagewise_question_analysis(
         locked_strategy=locked_strategy,
         signals=signals,
         entity_role_plan=stage15,
-        cards=cards,
+        cards=stage2_cards,
         build_llm=build_llm,
         planner_stage2_slots_cls=planner_stage2_slots_cls,
         load_prompt_file=load_prompt_file,
@@ -768,7 +782,7 @@ async def run_stagewise_question_analysis(
             locked_strategy=locked_strategy,
             signals=signals,
             entity_role_plan=stage15,
-            cards=cards,
+            cards=stage2_cards,
             validation_hints=_validation_hints_payload(validation),
             previous_output=previous_output,
             build_llm=build_llm,
