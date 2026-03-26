@@ -1,4 +1,4 @@
-﻿"""NTIS RAG 서버의 HTTP 라우트 계층.\n\n이 모듈은 FastAPI 요청/응답 계약만 맡는다.\n무거운 도메인 로직은 graph와 service helper에 두어 `apps/api/main.py`가 조립 진입점으로 남게 한다.\n"""
+"""NTIS RAG 서버의 HTTP 라우트 계층.\n\n이 모듈은 FastAPI 요청/응답 계약만 맡는다.\n무거운 도메인 로직은 graph와 service helper에 두어 `apps/api/main.py`가 조립 진입점으로 남게 한다.\n"""
 
 import asyncio
 import json
@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from apps.api.rag_mapper.schema_types import DataTag
+from apps.api.services.request_overrides import merge_request_overrides
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.api.streaming.sse_encoder import encode_sse_payload, encode_stream_event
@@ -59,6 +60,7 @@ class RouteDeps:
     rag_mapper: Any
     human_message: Any
     strategy_violation: Any
+    request_defaults_loader: Any = None
 
 
 def register_routes(app: FastAPI, deps: RouteDeps) -> None:
@@ -80,6 +82,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
     rag_mapper = deps.rag_mapper
     human_message = deps.human_message
     strategy_violation = deps.strategy_violation
+    request_defaults_loader = deps.request_defaults_loader
 
     def _get_graph(request: Request) -> Any:
         """`app.state`에서 컴파일된 workflow graph를 꺼낸다."""
@@ -311,8 +314,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         if top_k is not None and int(top_k) < 1:
             raise HTTPException(status_code=422, detail="Top-K must be >= 1")
 
-    def _build_request_overrides(payload: QueryRequest) -> dict[str, Any]:
-        """요청 payload에서 LLM/RAG override만 추출해 검증 후 반환한다."""
+    def _extract_request_override_values(payload: QueryRequest) -> dict[str, Any]:
+        """요청 payload에서 명시적으로 들어온 override 값만 추출한다."""
         overrides: dict[str, Any] = {}
 
         if payload.temperature is not None:
@@ -332,9 +335,25 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             overrides["RAG_W_LEX"] = float(payload.rag_w_lex)
         if payload.rag_topk_lex_cand is not None:
             overrides["RAG_TOPK_LEX_CAND"] = int(payload.rag_topk_lex_cand)
-
-        _validate_request_override_ranges(overrides)
         return overrides
+
+    async def _build_request_overrides(payload: QueryRequest) -> tuple[dict[str, Any], dict[str, str]]:
+        """요청 payload와 Oracle 기본값을 병합해 최종 override와 source를 반환한다."""
+        request_values = _extract_request_override_values(payload)
+        oracle_defaults: dict[str, Any] = {}
+        supported_override_count = 8
+        if request_defaults_loader is not None and len(request_values) < supported_override_count:
+            load_defaults = getattr(request_defaults_loader, "load_defaults", None)
+            if callable(load_defaults):
+                loaded = await load_defaults()
+                if isinstance(loaded, dict):
+                    oracle_defaults = dict(loaded)
+        merged, sources = merge_request_overrides(
+            request_values=request_values,
+            oracle_defaults=oracle_defaults,
+        )
+        _validate_request_override_ranges(merged)
+        return merged, sources
 
 
     async def _runtime_status(request: Request) -> dict[str, Any]:
@@ -374,7 +393,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
 
-        request_overrides = _build_request_overrides(payload)
+        request_overrides, request_override_sources = await _build_request_overrides(payload)
         graph = _get_graph(request)
 
         async def event_generator():
@@ -392,6 +411,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 q_len=len(question),
                 q_preview=mask_query_for_log(question) if is_debug_logging_enabled() else None,
                 request_overrides=request_overrides or None,
+                request_override_sources=request_override_sources or None,
             )
             request_started_at = time.perf_counter()
             emitter = AsyncStreamEmitter()
@@ -674,7 +694,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
-        request_overrides = _build_request_overrides(payload)
+        request_overrides, request_override_sources = await _build_request_overrides(payload)
         graph = _get_graph(request)
 
         if graph is None:
@@ -696,6 +716,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 stage=stage,
                 q_len=len(question),
                 request_overrides=request_overrides or None,
+                request_override_sources=request_override_sources or None,
             )
             user_message = human_message(content=question)
 

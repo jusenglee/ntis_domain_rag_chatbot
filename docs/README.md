@@ -18,6 +18,7 @@
 - `SEARCH`, `LOOKUP`, `JOIN` 의미를 아래 단계에서 다른 뜻으로 바꾸지 않는다.
 - raw payload, canonical evidence, prompt view는 서로 역할이 다르므로 같은 것으로 취급하지 않는다.
 - `pjt_id`와 `pjt_no`는 절대 같은 의미로 취급하지 않는다.
+- 요청별 LLM/RAG 파라미터는 `request payload > Oracle IRD_PARAM > ENV/code default` 우선순위로 해석한다.
 
 ## 기준 진실원(Source of Truth)
 

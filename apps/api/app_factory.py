@@ -52,6 +52,7 @@ from apps.api.services.planner_service import (
 )
 from apps.api.services.query_analysis import run_question_analysis
 from apps.api.services.rag_retriever import CustomRAGRetriever, is_hit_source, resolve_rag_queries
+from apps.api.services.request_overrides import OracleRequestDefaultsLoader
 from apps.api.services.request_facade import build_intent_payload as build_intent_payload_impl
 from apps.api.services.retrieval_workflow import node_knowledge_sufficiency, node_rag_search
 from apps.api.services.runtime_helpers import (
@@ -115,6 +116,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 
 logger = setup_file_logging(logger_name="Chatbot_Server")
 measure_latency = partial(measure_latency_impl, logger_obj=logger)
+REQUEST_DEFAULTS_LOADER = OracleRequestDefaultsLoader.from_env(logger=logger)
 
 TEMPLATE_INDEX_PATH = Path("templates/index.html")
 MAX_HISTORY_TURNS = 10
@@ -619,6 +621,7 @@ def create_app() -> FastAPI:
             rag_mapper=RagMapper,
             human_message=HumanMessage,
             strategy_violation=StrategyViolation,
+            request_defaults_loader=REQUEST_DEFAULTS_LOADER,
         ),
     )
     return app
