@@ -205,6 +205,7 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
     intent_payload = getattr(state, "intent_payload", None)
+    normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload is not None else None
     strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {}) if intent_payload is not None else {}
     context = getattr(state, "context", None) or []
     merge_debug = getattr(state, "merge_debug", None) or {}
@@ -212,11 +213,17 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     target_cols = getattr(strategy, "target_collections", None)
     if target_cols is None:
         target_cols = getattr(question_analysis, "target_cols", None)
+    base_route = getattr(normalized_intent, "base_route", None)
+    if base_route is None and isinstance(normalized_intent, dict):
+        base_route = normalized_intent.get("base_route")
+    planner_base_route = getattr(question_analysis, "head", None) or getattr(question_analysis, "base_route", None)
     return {
         "request_id": getattr(state, "request_id", None),
         "conversation_id": getattr(state, "conversation_id", None),
         "stage": "summary",
         "strategy_source": "execution_strategy" if strategy is not None else "assembled_question_analysis_only",
+        "base_route": base_route,
+        "planner_base_route": planner_base_route,
         "mode": getattr(strategy, "mode", None) or getattr(question_analysis, "mode", None),
         "relation": getattr(strategy, "relation", None) or getattr(question_analysis, "relation", None),
         "target_cols": list(target_cols) if isinstance(target_cols, (list, tuple)) else target_cols,
