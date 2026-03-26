@@ -10,6 +10,7 @@ _CARD_FILES = {
     "filter_semantics_card": Path("prompts/cards/filter_semantics_card.md"),
     "perf_tag_card": Path("prompts/cards/perf_tag_card.md"),
     "field_reliability_card": Path("prompts/cards/field_reliability_card.md"),
+    "semantic_disambiguation_card": Path("prompts/cards/semantic_disambiguation_card.md"),
 }
 
 

@@ -13,6 +13,7 @@
 - filters
 - retrieval_query
 - limit
+- display_limit
 - strategy_version
 </instructions>
 
