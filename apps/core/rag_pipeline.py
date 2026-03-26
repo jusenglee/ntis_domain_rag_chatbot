@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Main RAG execution pipeline for SEARCH, LOOKUP, and JOIN.\n\nThis module remains large, but `apps/core/*` is the source of truth. Runtime behavior should be described from this module outward.\n"""
+"""SEARCH, LOOKUP, JOIN을 실행하는 주 RAG 파이프라인.\n\n모듈 크기는 크지만 `apps/core/*`가 여전히 기준 진실원이며,\nruntime 동작 설명도 이 모듈에서 바깥 계층으로 퍼져 나가야 한다.\n"""
 from __future__ import annotations
 from collections.abc import Mapping
 import os
@@ -90,7 +90,7 @@ from apps.api.services.rag_postprocess_policy import (
 )
 
 # -------------------------
-# core/runtime imports
+# core/runtime 관련 import
 # -------------------------
 from apps.core.rag_constants import (
     COL_SUPPORT,
@@ -127,7 +127,7 @@ from apps.core.planner_contract import (
 
 
 def _extract_intent_payload_version(intent_payload: Any) -> Optional[str]:
-    """Return the declared transport payload version, if present."""
+    """transport payload에 선언된 버전이 있으면 정규화해 반환한다."""
     if intent_payload is None:
         return None
     if isinstance(intent_payload, Mapping):
@@ -138,7 +138,7 @@ def _extract_intent_payload_version(intent_payload: Any) -> Optional[str]:
 
 
 def _validate_intent_payload_version(intent_payload: Any) -> None:
-    """Accept only the v3 transport wrapper when an intent payload is supplied."""
+    """intent payload가 들어온 경우 `v3` transport wrapper만 허용한다."""
     if intent_payload is None:
         return
     version = _extract_intent_payload_version(intent_payload)
@@ -196,7 +196,7 @@ except Exception:
     qmodels = None
 
 
-"""Main runtime helpers for the RAG dispatcher."""
+"""RAG dispatcher가 공유하는 주 runtime 헬퍼 초기화 구간."""
 
 _observability = build_runtime_observability(
     get_meta_fn=lambda payload: _get_meta(payload),
@@ -240,10 +240,10 @@ _dense_score_weight = dense_runtime_support.dense_score_weight_fn
 
 
 # -------------------------
-# Plan
+# 계획 조립
 # -------------------------
 def _has_any_ids(it: NormalizedIntent) -> bool:
-    """???? intent? ?? ???? ??? ??? ????? ??."""
+    """intent 안에 식별자 성격의 단서가 하나라도 있는지 검사한다."""
     ids_map = getattr(it, "ids_map", None)
     if isinstance(ids_map, dict) and any(v for v in ids_map.values() if v):
         return True
@@ -252,14 +252,14 @@ def _has_any_ids(it: NormalizedIntent) -> bool:
         return True
     if bool(getattr(it, "is_exact_key_query", False)):
         return True
-    # backward compat
+    # 하위 호환 입력도 계속 허용한다.
     legacy = getattr(it, "ids", None)
     if isinstance(legacy, dict) and any(v for v in legacy.values() if v):
         return True
     return False
 
 def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
-    """???? ??? ??? ??? ???? ????."""
+    """query가 명시적 식별자 조회인지 판단할 단서를 모아 본다."""
     if bool(getattr(it, "is_id_query", False)):
         return True
     if getattr(it, "action", None) in ("id_exact", "id_fuzzy"):
@@ -279,7 +279,7 @@ def _has_explicit_identifiers(it: NormalizedIntent) -> bool:
     return False
 
 def _has_relation_join_ids(it: NormalizedIntent) -> bool:
-    """JOIN ?? followup seed? ??? ???? ??? ????."""
+    """JOIN 실행에 바로 쓸 수 있는 프로젝트/성과 seed가 있는지 본다."""
     ids_map = getattr(it, "ids_map", None) or {}
     if not isinstance(ids_map, dict):
         return False
@@ -300,7 +300,7 @@ def _has_relation_join_ids(it: NormalizedIntent) -> bool:
 
 
 def _select_mode_policy(it: NormalizedIntent) -> Tuple[str, str]:
-    """mode ?? ??? ?? ??? schema ??? ????."""
+    """정책 모듈이 결정한 mode 선택 결과를 그대로 위임 반환한다."""
     return _select_mode_policy_policy(it)
 
 
@@ -310,7 +310,7 @@ def _build_plan(
         preferred_mode: Optional[str] = None,
         preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
-    """???? intent? ??? mode? ???? ?? ??? ???."""
+    """intent와 선호 mode를 바탕으로 실행용 `QueryPlan`을 만든다."""
     return _build_query_plan_policy(
         it,
         preferred_mode=preferred_mode,
@@ -319,12 +319,12 @@ def _build_plan(
 
 
 def _default_target_collections() -> List[str]:
-    """planner? ???? ??? ??? ?? ?? ?? ??? ????."""
+    """planner가 컬렉션을 주지 않았을 때 쓸 기본 조회 대상을 반환한다."""
     return list(_default_target_collections_policy())
 
 
 def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str], source: str) -> None:
-    """planner? ?? target_cols? ??? allowlist? ????? ????."""
+    """planner 또는 runtime이 선택한 target_cols가 allowlist를 넘지 않게 강제한다."""
     normalized_targets = normalize_strategy_target_cols(target_cols)
     normalized_allow = normalize_strategy_target_cols(allow_cols)
     if not normalized_allow:
@@ -356,17 +356,19 @@ def _diff_filter_spec(
         executed_filter_spec: Dict[str, Any],
         list_match_mode: str = "exact",
 ) -> Dict[str, Any]:
-    """planner filter? executor filter ?? ??? ??? ??? diff? ???.
-    
-    executor? planner ??? ????? ?? ??? ???? ???? ?? ????."""
+    """planner filter와 executor filter의 의미 차이를 계산한다.
+
+    실행 단계가 planner가 선언한 제약을 어떻게 보존했는지 로그로 남기기 위한 diff이며,
+    subset 비교가 허용된 경우에는 planner 요구사항이 executor 결과에 포함되는지만 본다.
+    """
 
     list_mode = str(list_match_mode or "exact").strip().lower()
     if list_mode not in {"exact", "subset"}:
         list_mode = "exact"
 
     def _semantic_subset_equal(planner_val: Any, exec_val: Any) -> bool:
-        """Check whether the planner value is a semantic subset of the executor value."""
-        # Planner values may describe only a required subtree when subset matching is enabled.
+        """planner 값이 executor 값의 의미상 부분집합인지 검사한다."""
+        # subset 비교가 허용된 경우 planner는 필수 서브트리만 기술할 수 있다.
         if isinstance(planner_val, Mapping):
             if not isinstance(exec_val, Mapping):
                 return False
@@ -415,17 +417,17 @@ def _diff_filter_spec(
     }
 
 # -------------------------
-# 2-hop JOIN helpers
+# 2-hop JOIN 헬퍼
 # -------------------------
 def _extract_quoted_terms(q: str) -> List[str]:
-    """??? ??? ?? ??? ?? ???? ?? ??? ????."""
+    """질의에서 따옴표로 감싼 구를 추출해 exact-title 힌트로 쓴다."""
     if not q:
         return []
     out = re.findall(r'"([^"]+)"', q) + re.findall(r"'([^']+)'", q)
     return [t.strip() for t in out if t.strip()]
 
 # -------------------------
-# Main
+# 본 실행 경로
 # -------------------------
 def _run_rag_with_vectors(
         *,
@@ -444,11 +446,12 @@ def _run_rag_with_vectors(
         sparse_weight: Optional[float] = None,
         domain_hint: Optional[str] = None,
 ) -> RagResult:
-    """RAG ??? ?? ?????.
-    
-    runtime prelude? ??? ????, JOIN?? 2-hop orchestration??,
-    ??? base orchestration?? ???. raw retrieval ??? ?? prompt? ?? ??,
-    context builder? ?? output_type? prompt view? ????."""
+    """SEARCH, LOOKUP, JOIN 공통 RAG 실행 경로를 수행한다.
+
+    runtime prelude로 실행 계약을 확정한 뒤, JOIN이면 2-hop orchestration을,
+    그 외에는 base orchestration을 수행한다. raw retrieval payload를 그대로 prompt에 넘기지 않고,
+    이후 context builder가 `output_type`에 맞는 prompt view를 만들 수 있는 중간 산출물을 조립한다.
+    """
     t_all0 = time.time()
     timings: Dict[str, Any] = _init_timings()
 
@@ -461,7 +464,7 @@ def _run_rag_with_vectors(
             timings=timings,
         )
 
-    # shared objects
+    # 공통 runtime 객체를 준비한다.
     t0 = time.time()
     resources = build_rag_objects()
     qdr = resources.qdrant_client
@@ -584,7 +587,7 @@ def _run_rag_with_vectors(
     normalized_pjt_nos = [str(x).strip() for x in (normalized_ids_map.get("pjt_no") or []) if str(x).strip()]
 
     def _with_org_must_gate(base_filter: Any, *, col: str, mode_override: Optional[str] = None) -> Any:
-        """Apply an organization must-gate only to collections that require server-side enforcement."""
+        """서버 측 강제가 필요한 컬렉션에만 기관 must-gate를 적용한다."""
         return _with_org_must_gate_base(
             base_filter,
             col=col,
@@ -682,7 +685,7 @@ def _run_rag_with_vectors(
     pre_vecs = _get_pre_vecs(q)
 
     def _maybe_followup_perf_hop_from_project() -> List[str]:
-        """When strict JOIN is not active, derive perf followup seeds from project results."""
+        """strict JOIN이 아닐 때는 project 결과에서 perf follow-up seed를 유도한다."""
         target_cols = list(target_collections or _default_target_collections())
         return dispatch_runtime.resolve_perf_followup_join_ids_fn(
             request=PerfFollowupRequest(
@@ -709,7 +712,7 @@ def _run_rag_with_vectors(
         )
 
     # -------------------------
-    # JOIN mode (2-hop)
+    # JOIN 모드 2-hop 실행
     # -------------------------
     if mode == "join" and relation:
         join_outcome = execute_join_orchestration(
@@ -786,9 +789,9 @@ def _run_rag_with_vectors(
         return join_outcome.result
 
     # -------------------------
-    # Base (SEARCH / LOOKUP) federated
+    # SEARCH / LOOKUP 기본 연합 검색 실행
     # -------------------------
-    # collection list
+    # 조회할 컬렉션 목록을 확정한다.
     target_cols = list(target_collections or _default_target_collections())
     perf_followup_join_ids = _maybe_followup_perf_hop_from_project()
     perf_followup_filter = (
@@ -887,7 +890,7 @@ def _run_rag_with_vectors(
     return base_outcome.result
 
 # -------------------------
-# Public entry
+# 공개 진입점
 # -------------------------
 def run_rag_once(
         query: str,
@@ -897,7 +900,7 @@ def run_rag_once(
         request_overrides: Optional[Dict[str, Any]] = None,
 
 ) -> RagResult:
-    """?? vector ???? ?? RAG ??? ???? ?? ???????."""
+    """기본 vector 설정으로 단일 RAG 실행을 수행하는 공개 진입점이다."""
     _validate_intent_payload_version(intent_payload)
     domain_hint: Optional[str] = None
     vector_names_env = os.getenv("RAG_VECTOR_NAMES", "e5i_qa,e5_qa")
@@ -930,7 +933,7 @@ def run_rag_ab_compare(
         request_overrides: Optional[Dict[str, Any]] = None,
 
 ) -> Dict[str, RagResult]:
-    """??? ?? ?? ??? ?? ??? ?? ???????."""
+    """호환용 AB 비교 인터페이스를 유지하되 현재는 단일 결과만 반환한다."""
     res_m = run_rag_once(query=query, model_name=model_name, intent_payload=intent_payload, request_overrides=request_overrides)
     return {"M": res_m}
 

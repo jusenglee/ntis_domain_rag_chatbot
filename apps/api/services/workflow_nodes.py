@@ -147,6 +147,14 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
         "answer_artifact_gemma": artifact,
         "answer_artifact_solar": artifact,
         "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "merge_debug": {
+            "selected_model": "direct",
+            "selected_answer_source": "direct_answer",
+            "selected_answer_kind": artifact.answer_kind,
+        },
         "messages": [AIMessage(content=response_text)],
     }
 

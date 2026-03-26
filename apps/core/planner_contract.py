@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-"""Planner와 executor 사이의 계약을 검증하는 모듈.\n\n문서 계약을 코드에서 마지막으로 강제하는 계층이며,\n규칙 변경 시 `docs/02_?????_????.md`, `docs/03_???_??.md`, `docs/04_?????_??.md`와 함께 갱신해야 한다.\n"""
+"""Planner와 executor 사이의 계약을 검증하는 모듈.
+
+문서에 정의한 실행 계약을 코드에서 마지막으로 강제하는 계층이다.
+규칙이 바뀌면 계약 문서, 운영 문서, 회귀 기준 문서를 함께 검토해야 한다.
+"""
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any

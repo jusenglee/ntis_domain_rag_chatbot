@@ -1,4 +1,4 @@
-"""FastAPI app factory and workflow assembly for the NTIS RAG application."""
+"""NTIS RAG 애플리케이션용 FastAPI 앱 팩터리와 workflow 조립 모듈."""
 
 from __future__ import annotations
 
@@ -167,8 +167,10 @@ RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT",
 
 
 def log_section(title: str, content: str) -> None:
-    """??? ??? ??? ?? ?? ?? ??? ?? ?? ??? ????.
-    ?? ??? trace ??? ??? ??? planner, retrieval, merge ??? ???? ?? ??.
+    """디버그 모드에서만 큰 구간 로그를 읽기 좋게 출력한다.
+
+    planner, retrieval, merge 같은 장문의 trace를 구간별로 감싸
+    운영 로그에서 사람 눈으로 따라가기 쉽게 만드는 보조 함수다.
     """
     if not is_debug_logging_enabled():
         return
@@ -185,8 +187,10 @@ _CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
 
 
 def _log_event(name: str, **fields: Any) -> None:
-    """?? ??? ??? code fingerprint? ?? ??? ??? ???.
-    policy mode, request/conversation id, stage meta?? ?? ?? ?? ??? ???? ??.
+    """운영 이벤트에 공통 fingerprint와 기본 메타데이터를 붙여 기록한다.
+
+    policy mode, request/conversation id, 단계별 필드를 한 형식으로 맞춰
+    런타임 로그와 사후 분석이 같은 이벤트 스키마를 사용하게 한다.
     """
     payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
     if fields.get("policy_mode") is None:
@@ -199,8 +203,10 @@ def _log_event(name: str, **fields: Any) -> None:
 
 
 def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:
-    """workflow state?? ?? ??? ??? ?? ??? ????.
-    planner truth? execution strategy truth? ?? ???, ?? ?? ??? ?? ???? ?? ?? ??.
+    """workflow state에서 운영 요약 로그에 넣을 필드를 추출한다.
+
+    planner가 본 값과 실제 execution strategy를 분리해 담아
+    요약 로그만으로도 strategy drift나 fail-close 원인을 추적할 수 있게 한다.
     """
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
@@ -328,8 +334,10 @@ async def _run_question_analysis(
     request_id: Optional[str] = None,
     normalized_intent_base: Any = None,
 ) -> QuestionAnalysis:
-    """request facade, stagewise planner, planner merge? ?? ?? question analysis? ???.
-    cheap precheck ??, stage 1/2 planner ??, merge ??? ? ??? ?? ?? ?? ??? ????.
+    """질문 분석 파이프라인 전체를 묶어 실행한다.
+
+    request facade, cheap precheck, stagewise planner, planner merge를 순서대로 호출해
+    최종 `QuestionAnalysis`를 만들고 이후 retrieval 전략 조립의 기반으로 넘긴다.
     """
     return await run_question_analysis(
         question=question,
@@ -363,23 +371,29 @@ async def _run_question_analysis(
 
 @measure_latency("generate_answer_gemma")
 async def node_generate_answer_gemma(state: AgentState) -> Dict[str, Any]:
-    """Gemma ??? ??? ???? node? ????.
-    dual-model workflow?? Gemma ??? ???? ?? answer generation ??? ?????.
+    """Gemma 답변 생성을 담당하는 workflow 노드다.
+
+    dual-model 구성에서 Gemma 경로 전용 시스템 프롬프트와 스트리밍 설정을 적용해
+    최종 병합 전 후보 답변을 만든다.
     """
     return await _generate_answer(state, "gemma_triton_0", "answer_gemma")
 
 
 @measure_latency("generate_answer_solar")
 async def node_generate_answer_solar(state: AgentState) -> Dict[str, Any]:
-    """Solar ??? ??? ???? node? ????.
-    merge policy?? Solar ??? ??? fallback ??? ??? ??? ?? ???.
+    """Solar 답변 생성을 담당하는 workflow 노드다.
+
+    merge policy에서 우선 선택될 수 있는 Solar 후보 답변을 만들며,
+    provider별 override 계약과 스트리밍 제한도 함께 적용한다.
     """
     return await _generate_answer(state, "solar_vllm_0", "answer_solar")
 
 
 async def _generate_answer(state: AgentState, model_name: str, final_field: str) -> Dict[str, Any]:
-    """?? state? context, strategy, deadline? ??? answer generation? ????.
-    rendered context ?? ??, max token hint, stream timeout, LLM fallback ??? ?? ????.
+    """선택된 모델로 answer generation 공통 경로를 실행한다.
+
+    state 안의 context, strategy, deadline 정보를 읽어 렌더링된 컨텍스트를 만들고,
+    max token hint, stream timeout, 시스템 프롬프트를 적용해 모델별 답변을 생성한다.
     """
     return await generate_answer(
         state,
@@ -424,8 +438,10 @@ async def _generate_answer(state: AgentState, model_name: str, final_field: str)
 
 @measure_latency("merge_answers")
 async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
-    """dual-model ??? merge policy? ??? ?? ??? ????.
-    ?? ??, ?? ??, ?? ??? ?? ??? visible answer ??? ?? ???? ??.
+    """Gemma와 Solar 결과를 merge policy에 따라 하나의 답변으로 합친다.
+
+    빈 답변, 짧은 답변, provider 실패 같은 조건을 반영해
+    사용자에게 노출할 최종 answer artifact와 메타데이터를 결정한다.
     """
     return await merge_answers(
         state,
@@ -439,8 +455,10 @@ async def node_merge_answers(state: AgentState) -> Dict[str, Any]:
 
 
 def build_advanced_workflow() -> Any:
-    """memory, planner, retrieval, answer merge? ?? LangGraph workflow? ????.
-    node ??? branch ??? ????? ?? app ?? ?? ??? ???? ????.
+    """앱이 사용할 LangGraph workflow를 조립한다.
+
+    메모리 로드, planner 분석, retrieval, 답변 생성, 병합, 저장 노드를 wiring하고
+    각 노드에 프로젝트 전용 의존성과 정책 함수를 주입한다.
     """
     load_memory_node = partial(
         node_load_memory,
@@ -551,13 +569,17 @@ def build_advanced_workflow() -> Any:
 
 
 def create_app() -> FastAPI:
-    """runtime ??? route, workflow? ?? FastAPI app? ????.
-    RAG object, redis, LLM, route dependency, workflow node wiring? ? ???? ????.
+    """NTIS RAG 서버용 FastAPI 앱을 생성한다.
+
+    runtime 초기화, route 등록, workflow wiring, lifespan cleanup을 한곳에 모아
+    `apps/api/main.py`가 단순한 composition root로 남도록 한다.
     """
     @asynccontextmanager
     async def runtime_lifespan(app: FastAPI):
-        """app lifespan ?? runtime ???? ?? ??? ????.
-        warmup, payload index ??, sparse encoder ??? shutdown cleanup?? ?? ????? ????.
+        """앱 시작과 종료 시 필요한 runtime 자원을 관리한다.
+
+        부팅 시 RAG 객체, 인덱스, sparse encoder, workflow를 준비하고
+        종료 시 캐시와 런타임 리소스를 정리한다.
         """
         try:
             await initialize_app_runtime(

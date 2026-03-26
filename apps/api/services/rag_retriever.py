@@ -1,4 +1,4 @@
-﻿"""RAG retrieval helpers for execution-layer query dispatch and shaping."""
+﻿"""실행 계층의 질의 분기와 결과 shaping을 돕는 RAG retrieval 헬퍼 모음."""
 
 from __future__ import annotations
 
@@ -47,16 +47,19 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
 
 
 def _get_strategy_meta(state: Any) -> Dict[str, Any]:
+    """state에서 strategy 메타데이터를 안전하게 꺼내 dict로 반환한다."""
     payload = getattr(state, "intent_payload", None)
     strategy_meta = getattr(payload, "strategy_meta", None) if payload else None
     return dict(strategy_meta or {})
 
 
 def _get_view_state(state: Any) -> Any:
+    """state가 들고 있는 view_state를 읽는 얇은 헬퍼다."""
     return getattr(state, "view_state", None)
 
 
 def _normalize_id_values(values: Any) -> list[str]:
+    """단일 값 또는 시퀀스 형태의 식별자 후보를 중복 없는 문자열 리스트로 정리한다."""
     if values is None:
         return []
     if isinstance(values, str):
@@ -75,6 +78,7 @@ def _normalize_id_values(values: Any) -> list[str]:
 
 
 def _first_non_empty_text(*values: Any) -> Optional[str]:
+    """여러 후보 중 첫 번째 유효한 문자열을 반환한다."""
     for value in values:
         text = str(value or "").strip()
         if text:
@@ -83,6 +87,10 @@ def _first_non_empty_text(*values: Any) -> Optional[str]:
 
 
 def _build_anchor_requested_terms(question: Any) -> list[str]:
+    """질문에서 anchor 유지에 필요한 요청 축 용어를 추출한다.
+
+    follow-up detail 질문에서 원래 앵커를 보존한 검색 질의를 재구성할 때 사용한다.
+    """
     question_text = str(question or "").strip()
     requested_fields = extract_requested_fields(question_text)
     preferred_fields = [
@@ -108,6 +116,7 @@ def _build_anchor_requested_terms(question: Any) -> list[str]:
 
 
 def _has_anchor_seed_ids(ids_map: Any) -> bool:
+    """ids_map 안에 실제 anchor seed로 쓸 식별자가 존재하는지 검사한다."""
     if not isinstance(ids_map, dict):
         return False
     for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
@@ -117,18 +126,22 @@ def _has_anchor_seed_ids(ids_map: Any) -> bool:
 
 
 def has_active_anchor_seed(state: Any) -> bool:
+    """현재 execution truth에 활성 anchor seed가 있는지 판별한다."""
     normalized_intent = _get_normalized_intent(state)
 
     ids_map = getattr(normalized_intent, "ids_map", None) or {}
     if isinstance(normalized_intent, dict):
         ids_map = normalized_intent.get("ids_map") or {}
 
-    # execution truth? ids_map ???.
-    # strategy_meta / latest_focus_entity ? ?? ?? ???? active execution seed? ???.
     return _has_anchor_seed_ids(ids_map)
 
 
 def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dict[str, Any]:
+    """follow-up 해석에 필요한 anchor 문맥을 하나의 dict로 조립한다.
+
+    active execution seed만 볼지, view_state와 strategy_meta의 보조 정보까지 함께 볼지
+    `active_only` 플래그로 제어한다.
+    """
     normalized_intent = _get_normalized_intent(state)
     ids_map = getattr(normalized_intent, "ids_map", None) or {}
     if isinstance(normalized_intent, dict):
@@ -216,10 +229,12 @@ def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dic
 
 
 def _resolve_followup_anchor_context(state: Any) -> Dict[str, Any]:
+    """보조 호환용 wrapper로, 전체 anchor 문맥을 반환한다."""
     return get_followup_anchor_context(state, active_only=False)
 
 
 def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
+    """현재 질의가 anchor 식별자나 제목 단서를 이미 포함하는지 검사한다."""
     normalized_query = _normalize_query_text(query)
     if not normalized_query:
         return False
@@ -242,6 +257,7 @@ def _query_mentions_anchor(query: Any, anchor_context: Dict[str, Any]) -> bool:
 
 
 def _build_anchor_preserving_query_from_context(*, state: Any, query: Any, anchor_context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """anchor를 잃지 않도록 질의를 다시 구성하고 보조 메타데이터를 남긴다."""
     metadata = {
         "anchor_present": anchor_context.get("present", False),
         "anchor_source": anchor_context.get("anchor_source"),
@@ -278,6 +294,7 @@ def _build_anchor_preserving_query_from_context(*, state: Any, query: Any, ancho
 
 
 def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Dict[str, Any]]:
+    """resolved detail follow-up에서 anchor가 빠진 질의를 복구한다."""
     normalized_intent = _get_normalized_intent(state)
     output_type = str(_pick_attr(normalized_intent, key="output_type", default="") or "").strip().lower()
     action = str(_pick_attr(normalized_intent, key="action", default="") or "").strip().lower()
@@ -327,11 +344,13 @@ _PEOPLE_TOKEN_RE = re.compile(r'([\uac00-\ud7a3]{2,8}|[A-Z][a-z]+(?:\s+[A-Z][a-z
 
 
 def _extract_org_role_terms(text: Any) -> set[str]:
+    """질문에서 기관 역할 용어를 추출한다."""
     normalized = _normalize_query_text(text)
     return {term for term in _ORG_ROLE_TERMS if term in normalized}
 
 
 def _extract_org_terms(text: Any) -> set[str]:
+    """질문에서 기관명 후보를 추출해 소문자 집합으로 반환한다."""
     normalized = str(text or "").strip()
     if not normalized:
         return set()
@@ -347,6 +366,7 @@ def _extract_org_terms(text: Any) -> set[str]:
 
 
 def _extract_people_terms(text: Any) -> set[str]:
+    """질문에서 연구자명 후보를 추출한다."""
     normalized = str(text or "").strip()
     if not normalized or not any(marker in normalized for marker in ("\uc5f0\uad6c\uc790", "\uc5f0\uad6c\uc6d0", "\uad50\uc218", "\ucc45\uc784\uc790")):
         return set()
@@ -359,21 +379,25 @@ def _extract_people_terms(text: Any) -> set[str]:
 
 
 def _extract_title_terms(text: Any) -> set[str]:
+    """따옴표로 감싼 제목성 표현을 추출한다."""
     normalized = str(text or "")
     return {str(match.group(1) or "").strip().lower() for match in _QUOTED_TERM_RE.finditer(normalized) if str(match.group(1) or "").strip()}
 
 
 
 def _normalize_query_text(text: Any) -> str:
+    """질의를 비교용 소문자 문자열로 정규화한다."""
     return str(text or "").strip().lower()
 
 
 def _is_korean_char(ch: str) -> bool:
+    """문자가 한글 완성형 음절 범위에 속하는지 판별한다."""
     code = ord(ch)
     return 0xAC00 <= code <= 0xD7A3
 
 
 def _extract_query_tokens(text: Any) -> list[str]:
+    """질의를 한글/영숫자 토큰 단위로 잘라 drift 검출에 쓰기 쉽게 만든다."""
     normalized = _normalize_query_text(text)
     tokens: list[str] = []
     current: list[str] = []
@@ -403,6 +427,7 @@ def _extract_query_tokens(text: Any) -> list[str]:
 
 
 def _extract_identifier_like_tokens(text: Any) -> set[str]:
+    """연도나 영숫자 조합처럼 식별자에 가까운 토큰을 뽑는다."""
     protected: set[str] = set()
     for token in _extract_query_tokens(text):
         if re.fullmatch(r"\d{4,}", token):
@@ -413,6 +438,7 @@ def _extract_identifier_like_tokens(text: Any) -> set[str]:
 
 
 def _extract_topic_terms(text: Any) -> set[str]:
+    """일반적인 불용성 표현을 제외한 주제 토큰만 추린다."""
     return {
         token
         for token in _extract_query_tokens(text)
@@ -421,10 +447,16 @@ def _extract_topic_terms(text: Any) -> set[str]:
 
 
 def _contains_any_term(terms: set[str], candidates: set[str]) -> bool:
+    """두 용어 집합이 교집합을 가지는지 반환한다."""
     return bool(terms.intersection(candidates))
 
 
 def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bool, list[str]]:
+    """planner hint query가 원 질문의 축을 잃었는지 검사한다.
+
+    식별자, 기관/연구자 용어, 제목, 프로젝트/성과 축 변화 등을 비교해
+    raw query fallback이 필요한지 판단할 근거를 만든다.
+    """
     raw = _normalize_query_text(raw_query)
     hint = _normalize_query_text(hint_query)
     if not raw or not hint or raw == hint:
@@ -484,6 +516,7 @@ def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bo
 
 
 def _ensure_run_rag_ab_compare_supports_request_overrides() -> None:
+    """현재 로딩된 runtime이 `request_overrides` 계약을 지원하는지 확인한다."""
     params = signature(run_rag_ab_compare).parameters
     if "request_overrides" in params:
         return
@@ -494,10 +527,10 @@ def _ensure_run_rag_ab_compare_supports_request_overrides() -> None:
 
 
 class CustomRAGRetriever(BaseModel):
-    """LangChain/서비스 계층에서 쓰기 쉬운 RAG 조회 래퍼 retriever 모델이다.
+    """서비스 계층에서 쓰기 쉬운 RAG 조회 래퍼 모델이다.
 
-    AB 비교 결과에서 히트, aggregation, canonical evidence, render profile을 꺼내
-    상위 서비스 계층이 쓰기 쉬운 shape로 바꾼다.
+    AB 비교 결과에서 히트, 집계 결과, canonical evidence, render profile을 꺼내
+    상위 서비스 계층이 바로 쓸 수 있는 형태로 바꾼다.
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -562,7 +595,7 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
-        """`IntentPayloadV3`에서 RAG runtime이 직접 쓸 payload 뷰만 추출한다.
+        """`IntentPayloadV3`에서 RAG 런타임이 직접 쓸 payload 뷰만 추출한다.
 
         normalized intent가 올바른 타입일 때만 넘기며, retriever가 planner/runtime contract 바깥 shape를
         직접 끌어오지 않게 한다.
@@ -579,7 +612,7 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _format_aggregation_title(item: Dict[str, Any], metric: str, index: int) -> str:
-        """Build a human-readable title for aggregation rows."""
+        """집계 결과 한 행을 사람이 읽기 쉬운 제목으로 만든다."""
         if metric == "project_participation_count":
             return f"{index}. {item.get('hm_nm') or item.get('hm_id') or item.get('person_key')}"
         project_title = str(item.get("project_title") or item.get("group_key") or "project").strip()
@@ -589,15 +622,15 @@ class CustomRAGRetriever(BaseModel):
 
     @staticmethod
     def _format_series_title(item: Dict[str, Any], index: int) -> str:
-        """Build a human-readable title for series rows."""
+        """시계열 결과 한 행을 사람이 읽기 쉬운 제목으로 만든다."""
         project_title = str(item.get("project_title") or item.get("pjt_id") or item.get("pjt_no") or "project").strip()
         year = str(item.get("year") or "").strip()
         return f"{index}. {project_title}" + (f" ({year})" if year else "")
 
     def retrieve(self, query: str) -> Dict[str, Any]:
-        """AB 비교 RAG 실행 결과에서 상위 계층이 바로 쓰는 documents/canonical_evidence/render_profile 구조를 만든다.
+        """AB 비교 RAG 실행 결과에서 상위 계층이 바로 쓰는 `documents/canonical_evidence/render_profile` 구조를 만든다.
 
-        aggregation rank_items와 일반 hit 경로를 구분해 서비스 뷰에 맞는 단일 dict 형태로 반환한다.
+        aggregation rank_items와 일반 hit 경로를 구분해 서비스 계층이 바로 소비할 단일 dict 형태로 반환한다.
         """
         strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
         clarification = build_followup_clarification_payload(dict(strategy_meta))
@@ -840,9 +873,10 @@ def is_hit_source(doc: Dict[str, Any]) -> bool:
 
 
 def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) -> tuple[str, str, str, float, bool, list[str], bool]:
-    """Resolve the raw query, planner hint query, selected search query, and drift metadata.
-    Planner hints remain the default source, but the runtime guard falls back to the raw query
-    when semantic-axis drift or confidence failure is detected.
+    """raw query, planner hint query, 최종 search query를 함께 결정한다.
+
+    기본값은 planner hint를 따르되, semantic-axis drift가 감지되거나 confidence가 낮으면
+    raw query로 되돌린다. detail follow-up에서는 anchor가 빠진 경우 anchor 보존 질의를 다시 만든다.
     """
     raw_query = state.question
     normalized_intent = _get_normalized_intent(state)

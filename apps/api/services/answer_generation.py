@@ -466,9 +466,9 @@ async def merge_answers(
 
     return {
         "messages": [AIMessage(content=selected_answer)],
-        "answer": selected_answer,
+        "final_answer_text": selected_answer,
+        "final_answer_artifact": selected_artifact,
         "answer_solar_raw": answer_solar_raw,
-        "answer_artifact": selected_artifact,
         "merge_debug": merge_debug,
         "selected_answer_meta": (selected_artifact.to_meta_dict() if isinstance(selected_artifact, AnswerArtifact) else selected_meta),
         "rendered_context_used": rendered_context_used,

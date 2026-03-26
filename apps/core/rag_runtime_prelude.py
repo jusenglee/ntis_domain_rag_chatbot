@@ -44,8 +44,10 @@ except Exception:
 
 @dataclass(frozen=True)
 class RuntimePreludeRequest:
-    """runtime prelude? ?? ?? ?? ?? ??? ?? ????.
-    query, normalized intent payload, allowlist, lexical/dense hint, ?? ???? ??? ?? prelude ??? ?? ???? ?? ? ?? ??.
+    """runtime prelude가 전략을 조립할 때 필요한 입력 묶음이다.
+
+    사용자 질의, planner가 만든 normalized intent, 컬렉션 allowlist,
+    dense/lexical 검색 힌트를 한 구조체에 모아 이후 단계가 동일한 입력 진실원을 보게 한다.
     """
     query: str
     model_name: str
@@ -65,8 +67,10 @@ class RuntimePreludeRequest:
 
 @dataclass(frozen=True)
 class RuntimePreludeRuntime:
-    """runtime prelude ? ??, ??, ?? callback? ???.
-    strategy guard, diff logging, id flattening, join-seed check? ???? prelude? ?? ??? ?? ??? ??? ????.
+    """runtime prelude가 외부에 의존하는 콜백과 유틸리티 묶음이다.
+
+    로그 기록, 타이밍 축적, planner/executor diff 계산, join seed 점검 같은
+    실행 시점 의존성을 명시적으로 전달해 prelude 자체는 순수한 조립 로직에 집중하게 한다.
     """
     logger: Any
     log_kv_fn: Callable[..., None]
@@ -79,8 +83,10 @@ class RuntimePreludeRuntime:
 
 @dataclass(frozen=True)
 class RuntimePreludeResult:
-    """runtime prelude? ??? ?? truth ??? ???? ?? ????.
-    plan, strategy, target collections, search/rerank preset, filter objects, people/org/title signal?? ?? ?? retrieval, join, render? ?? truth? ?? ??.
+    """runtime prelude가 확정한 실행 진실원이다.
+
+    plan, strategy, target collections, 검색/리랭크 preset, 각종 filter object를
+    한 번에 묶어 retrieval, join, render 단계가 같은 실행 계약을 공유하게 한다.
     """
     query_text: str
     keywords: List[str]
@@ -151,15 +157,19 @@ class RuntimePreludeResult:
 
 
 def build_runtime_prelude_result(**kwargs: Any) -> RuntimePreludeResult:
-    """keyword ??? ?? prelude ???? `RuntimePreludeResult`? ??? ????.
-    prelude ?? ??? ? ?? ??? ???? ? ???? ???? ??? ??? ??.
+    """사전 계산된 값을 `RuntimePreludeResult`로 감싸 반환한다.
+
+    테스트나 보조 조립 코드가 dataclass 생성 규칙을 그대로 따르면서도
+    호출부 표현을 간단하게 유지할 수 있도록 둔 얇은 팩토리다.
     """
     return RuntimePreludeResult(**kwargs)
 
 
 def _normalize_hint_terms(values: Any) -> List[str]:
-    """hint? ??? ?? ??? ?? ?? ??? ???? ????.
-    title/org/people ??? ?? ??? ???? ?? filter builder? ?? shape? ?? ??.
+    """planner 힌트 값을 중복 없는 문자열 리스트로 정규화한다.
+
+    title, 기관명, 연구자명처럼 filter builder에 바로 넘길 값들이
+    입력 형태 차이 때문에 흔들리지 않도록 초기에 shape를 고정한다.
     """
     if values is None:
         return []
@@ -179,8 +189,10 @@ def _normalize_hint_terms(values: Any) -> List[str]:
 
 
 def _normalize_ids_map(ids_map: Any) -> Dict[str, List[str]]:
-    """planner ?? hint?? ??? ids_map? ?????.
-    scalar/list/set ??? ???? ? ?? ??? contract validation? join seed ??? canonical ids_map? ???.
+    """planner가 준 ids_map을 canonical 문자열 리스트 맵으로 정리한다.
+
+    scalar, list, tuple, set 입력을 모두 흡수해 contract validation과
+    join seed 판정이 항상 같은 ids_map 형태를 보도록 맞춘다.
     """
     if not isinstance(ids_map, dict):
         return {}
@@ -210,8 +222,10 @@ def _coerce_override_float(overrides: Mapping[str, Any], key: str) -> Optional[f
 
 
 def _normalize_target_collections(raw: Any) -> List[str]:
-    """target collection ??? ??? ?? ?? ????.
-    enum value? ???, ??? ?? ??? ??? strategy truth? target collection ??? ????.
+    """target collection 후보를 중복 없는 문자열 리스트로 정규화한다.
+
+    enum 값과 문자열, 단일 값과 시퀀스 입력을 모두 받아
+    strategy truth에 실릴 컬렉션 이름만 안정적으로 추출한다.
     """
     if raw is None:
         return []
@@ -232,8 +246,10 @@ def _normalize_target_collections(raw: Any) -> List[str]:
 
 
 def _extract_payload_normalized_intent(payload: Any) -> Any:
-    """intent payload ???? `normalized_intent` ??? ???.
-    mapping/object wrapper ??? ???? prelude? payload shape? ???? ?? ??.
+    """intent payload wrapper에서 `normalized_intent`만 꺼낸다.
+
+    payload가 dict이든 객체이든 동일한 접근 경로를 제공해
+    prelude가 transport wrapper 차이에 의존하지 않게 한다.
     """
     if payload is None:
         return None
@@ -243,8 +259,10 @@ def _extract_payload_normalized_intent(payload: Any) -> Any:
 
 
 def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
-    """payload ? normalized intent? `NormalizedIntent` ???? ????.
-    mapping/object?? ??? ?? ?? relation, categories ?? ?? ??? ???? runtime contract? ???.
+    """payload 안의 intent 표현을 `NormalizedIntent`로 강제 변환한다.
+
+    relation, categories, ids_map, target_cols 같은 핵심 필드를 정규화해
+    runtime contract가 planner transport shape와 분리되도록 만든다.
     """
     if isinstance(raw, NormalizedIntent):
         return raw
@@ -277,8 +295,10 @@ def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
 
 
 def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str]) -> None:
-    """?? target collection? ??? allowlist ?? ??? fail-close? ????.
-    planner? hint? route ? collection? ???? ??? ?? retrieval-first ??? ??? ????.
+    """target collection이 allowlist 밖으로 벗어나면 fail-close 한다.
+
+    planner 힌트가 있더라도 허용되지 않은 컬렉션으로 새 전략을 발명하지 못하게 막는
+    retrieval-first 안전장치다.
     """
     normalized_targets = normalize_strategy_target_cols(target_cols)
     normalized_allow = normalize_strategy_target_cols(allow_cols)
@@ -287,8 +307,10 @@ def _assert_allowlist_only(*, target_cols: List[str], allow_cols: List[str]) -> 
 
 
 def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePreludeRuntime, timings: Dict[str, Any]) -> RuntimePreludeResult:
-    """normalized intent, planner compile result, filter policy? ?? runtime prelude truth? ????.
-    plan, strategy, search preset, rerank spec, filter object, allowlist check? ??? ???? retrieval ??? ?? ????.
+    """planner 결과를 runtime이 바로 실행할 prelude 진실원으로 조립한다.
+
+    normalized intent를 검증하고, plan/strategy를 확정하고, 검색 preset과 filter object를 만들며,
+    allowlist와 join seed 계약까지 점검한 뒤 retrieval 단계가 그대로 소비할 결과를 돌려준다.
     """
     q = request.query
     hinted_limit = int(request.hinted_limit or 0)

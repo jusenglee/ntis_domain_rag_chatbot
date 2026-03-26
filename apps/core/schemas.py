@@ -1,11 +1,11 @@
 ﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""Core planner and runtime schema definitions.
+"""planner와 runtime이 공유하는 핵심 스키마 정의.
 
-- `IntentPayloadV3`: app entry payload handed to `rag_pipeline`.
-- `PlannerStage1Decision` / `PlannerStage2Slots`: staged planner outputs.
-- `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor-facing runtime contracts.
+- `IntentPayloadV3`: `rag_pipeline`으로 전달되는 앱 진입 payload
+- `PlannerStage1Decision` / `PlannerStage2Slots`: 단계별 planner 산출물
+- `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor가 소비하는 runtime 계약
 """
 
 from dataclasses import dataclass, field
@@ -22,7 +22,7 @@ from apps.core.settings import RAG_COLLECTION_ALLOWLIST
 
 @dataclass(frozen=True)
 class IntentPayloadV3:
-    """Transport payload shared across planner, retrieval, and runtime."""
+    """planner, retrieval, runtime이 공유하는 transport payload다."""
 
     normalized_intent: NormalizedIntent
     intent_payload_version: Literal["v3"] = "v3"
@@ -34,8 +34,10 @@ Stage1Relation = Literal["project_perf", "perf_project"]
 
 
 class PlannerStage1Decision(BaseModel):
-    """stage 1 planner? ???? ? ?? ?? ?? ????.
-    stage 1? action, head, relation_candidate? ???? ids/filter ??? ?? ??? ???.
+    """Stage 1 planner가 내는 경량 분류 결과다.
+
+    action, head, relation candidate처럼 큰 방향만 정하고,
+    ids/filter 같은 세부 슬롯은 다음 단계가 채우도록 역할을 분리한다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -48,8 +50,10 @@ class PlannerStage1Decision(BaseModel):
 
 
 class PlannerStage2Slots(BaseModel):
-    """stage 2 planner? ?? ?? ??? ??? ???.
-    locked strategy? ??? mode? routing? ???? ??, ids_map, filters, retrieval_query, limit? ???? ???? ??.
+    """Stage 2 planner가 채우는 세부 슬롯 묶음이다.
+
+    잠긴 strategy가 정한 mode와 routing을 바꾸지 않은 상태에서
+    ids_map, filters, retrieval_query, limit 같은 실행 보조 필드를 채운다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -67,15 +71,16 @@ class PlannerStage2Slots(BaseModel):
 
 @dataclass(frozen=True)
 class StrategySpec:
-    """Executor-facing strategy contract composed from planner truth and runtime policy.
-    Join metadata, filter policy, target collections, and query-graph summaries stay together so
-    response metadata and operational logs can report the same execution truth.
+    """planner truth와 runtime policy를 합쳐 만든 executor용 strategy 계약이다.
+
+    join 메타데이터, filter 정책, target collections, query graph 요약을 함께 묶어
+    응답 메타데이터와 운영 로그가 같은 execution truth를 보고하도록 한다.
     """
 
     mode: str
     action: str
     relation: Optional[Tuple[str, str]]
-    # Planner output crosses service boundaries, so optional string fields stay normalized.
+    # planner 출력은 서비스 경계를 넘나드므로 optional 문자열 필드는 항상 정규화된 상태를 유지한다.
     join_key_mode: Optional[str] = None
     project_key_policy: Optional[str] = None
     join_resolution_policy: Optional[str] = None
@@ -116,10 +121,10 @@ class StrategySpec:
 
 @dataclass(frozen=True)
 class ResolvedAnchorSet:
-    """Resolved identifier and name anchors that can seed traversal planning.
+    """탐색 계획의 seed가 될 수 있는 식별자와 이름 anchor 집합이다.
 
-    This structure stays intentionally deterministic: it summarizes anchors already present in
-    `NormalizedIntent` without inventing new identifiers or silently changing role semantics.
+    이 구조는 의도적으로 결정적이다. `NormalizedIntent`에 이미 존재하는 anchor만 요약하며,
+    새 식별자를 발명하거나 역할 의미를 조용히 바꾸지 않는다.
     """
 
     researcher_names: Tuple[str, ...] = field(default_factory=tuple)
@@ -133,7 +138,7 @@ class ResolvedAnchorSet:
 
 @dataclass(frozen=True)
 class AggregationPlan:
-    """Aggregation intent that retrieval runtime can execute after retrieval completes."""
+    """retrieval 이후 runtime이 실행할 수 있는 집계 의도를 표현한다."""
 
     metric: str
     group_by: str
@@ -144,7 +149,7 @@ class AggregationPlan:
 
 @dataclass(frozen=True)
 class TemporalConstraint:
-    """Normalized time constraint that can be reused across runtime stages."""
+    """여러 runtime 단계에서 재사용할 수 있는 정규화된 시간 제약이다."""
 
     year_from: Optional[str] = None
     year_to: Optional[str] = None
@@ -153,7 +158,7 @@ class TemporalConstraint:
 
 @dataclass(frozen=True)
 class ProjectSeriesPlan:
-    """Minimal series metadata for project-group or yearly flow questions."""
+    """과제 그룹/연도 흐름 질문에 필요한 최소 시계열 메타데이터다."""
 
     series_key_kind: str
     relation_hint: Optional[str] = None
@@ -161,14 +166,14 @@ class ProjectSeriesPlan:
 
 @dataclass(frozen=True)
 class PatternAnalysisPlan:
-    """Pattern-analysis metadata that runtime can execute after retrieval."""
+    """retrieval 이후 runtime이 실행할 패턴 분석 메타데이터다."""
 
     kind: str
 
 
 @dataclass(frozen=True)
 class MultiHopBundlePlan:
-    """Planner-first metadata for bundling multiple downstream targets from a project set."""
+    """과제 집합에서 여러 downstream 대상을 묶기 위한 planner 우선 메타데이터다."""
 
     kind: str
     targets: Tuple[str, ...] = field(default_factory=tuple)
@@ -178,7 +183,7 @@ class MultiHopBundlePlan:
 
 @dataclass(frozen=True)
 class PlanStep:
-    """Single step inside a retrieval graph plan."""
+    """retrieval graph plan 안의 단일 단계다."""
 
     kind: str
     head: str
@@ -187,7 +192,7 @@ class PlanStep:
 
 @dataclass(frozen=True)
 class QueryGraphPlan:
-    """High-level retrieval graph summary that is more specific than mode alone."""
+    """mode보다 더 구체적인 고수준 retrieval graph 요약이다."""
 
     kind: str
     steps: Tuple[PlanStep, ...] = field(default_factory=tuple)
@@ -195,9 +200,10 @@ class QueryGraphPlan:
 
 @dataclass(frozen=True)
 class QueryPlan:
-    """Concrete execution plan consumed by retrieval and rerank runtime.
-    Query-graph, aggregation, and series metadata travel with the usual mode/output_type/filter
-    fields so planner and runtime observability can share the same plan vocabulary.
+    """retrieval와 rerank runtime이 소비하는 구체 실행 계획이다.
+
+    query graph, aggregation, series 메타데이터를 일반 mode/output_type/filter 필드와 함께 싣고 다녀
+    planner와 runtime observability가 같은 계획 어휘를 쓰게 한다.
     """
 
     mode: str
@@ -231,8 +237,10 @@ class QueryPlan:
 
 @dataclass
 class ExecutionContext:
-    """??? runtime? ???? ?? ???? ?? ?????.
-    normalized intent?? ?? ?? ?? ????? plan, strategy, target collections ?? runtime ???? ???.
+    """runtime이 직접 소비하는 실행 문맥 객체다.
+
+    normalized intent를 기반으로 plan, strategy, target collections, filter 힌트를 함께 들고 다니며
+    retrieval와 후속 조립 단계가 같은 실행 문맥을 보도록 만든다.
     """
 
     intent: Any
@@ -288,9 +296,10 @@ class ExecutionContext:
     target_collections: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """stats 관련 필드를 canonical 정책값으로 정규화한다.
 
-        """stats ?? ???? ???? ExecutionContext ??? ????.
-        planner? route?? ??? ?? ?? ??? canonical stats policy? ?? ?? ?? plan ??? ???.
+        planner가 일부 값을 비우거나 비정상값을 넣어도
+        runtime 내부에서는 일관된 stats policy를 사용하게 한다.
         """
         policy = normalize_stats_policy_value(
             stats_metric=self.stats_metric,
@@ -307,9 +316,10 @@ class ExecutionContext:
 
     @classmethod
     def from_intent(cls, intent: Any) -> "ExecutionContext":
+        """`NormalizedIntent` 유사 객체를 `ExecutionContext`로 변환한다.
 
-        """normalized intent? ExecutionContext? ??? runtime?? ?? ?? ??? ???.
-        list, dict ??? ???? ?? ??? intent ??? ???? ?? ????.
+        planner가 만든 intent의 필드를 런타임 전용 컨텍스트로 복사해
+        이후 단계가 원본 intent를 직접 수정하지 않고도 필요한 값을 읽게 한다.
         """
         return cls(
             intent=intent,
@@ -363,8 +373,10 @@ class ExecutionContext:
         )
 
     def intent_view(self) -> Any:
-        """?? ExecutionContext ??? intent ??? ?? ????.
-        runtime?? ??? mode, relation, target signal? intent ?? ?? ?? ??? ?? ??? ?? ??.
+        """현재 `ExecutionContext`를 반영한 intent view를 되돌린다.
+
+        runtime이 보정한 mode, relation, target signal을 intent 형태로 다시 투영해
+        하위 호환 호출부나 진단 코드가 같은 의미의 뷰를 재사용할 수 있게 한다.
         """
         from dataclasses import replace
 
@@ -421,11 +433,11 @@ class ExecutionContext:
 
 
 def derive_resolved_anchor_set(intent: NormalizedIntent) -> ResolvedAnchorSet:
-    """Build deterministic anchor metadata from `NormalizedIntent`.
+    """`NormalizedIntent`에서 결정적인 anchor 메타데이터를 만든다.
 
-    The resolver only normalizes anchors that already survived planner and contract handling.
-    It preserves `pjt_id` versus `pjt_no`, keeps organization roles separate, and records common
-    ambiguity states so logs can distinguish weak name-only anchors from fully resolved seeds.
+    planner와 contract 단계를 통과해 남은 anchor만 정규화한다.
+    `pjt_id`와 `pjt_no`를 구분해 보존하고, 기관 역할을 섞지 않으며,
+    이름만 있는 약한 anchor와 실제 seed가 해석된 상태를 로그에서 구별할 수 있게 ambiguity를 기록한다.
     """
     ids_map = getattr(intent, "ids_map", {}) or {}
     perf_ids: list[str] = []
@@ -487,7 +499,7 @@ def derive_resolved_anchor_set(intent: NormalizedIntent) -> ResolvedAnchorSet:
 
 
 def summarize_anchor_set(anchor_set: ResolvedAnchorSet) -> Dict[str, Any]:
-    """Create a compact anchor summary for logs and strategy responses."""
+    """로그와 strategy 응답에 넣을 간단한 anchor 요약을 만든다."""
     all_org_terms = {term for values in anchor_set.org_terms_by_role.values() for term in values}
     return {
         "researcher_count": len(anchor_set.researcher_names),
@@ -505,7 +517,7 @@ def summarize_anchor_set(anchor_set: ResolvedAnchorSet) -> Dict[str, Any]:
 
 
 def derive_temporal_constraint(intent: NormalizedIntent) -> Optional[TemporalConstraint]:
-    """Summarize explicit year ranges or relative windows as temporal metadata."""
+    """명시된 연도 범위나 상대 기간 힌트를 시간 메타데이터로 요약한다."""
     year_from = str(getattr(intent, "year_from", "") or "").strip() or None
     year_to = str(getattr(intent, "year_to", "") or "").strip() or None
     years = [str(value).strip() for value in (getattr(intent, "years", []) or []) if str(value).strip()]
@@ -520,7 +532,7 @@ def derive_temporal_constraint(intent: NormalizedIntent) -> Optional[TemporalCon
 
 
 def derive_aggregation_plan(intent: NormalizedIntent, output_type: Optional[str]) -> Optional[AggregationPlan]:
-    """Detect whether the current intent already implies aggregation or comparison."""
+    """현재 intent가 집계나 비교를 이미 요구하는지 판별해 계획으로 바꾼다."""
     output_type_norm = str(output_type or "").strip().lower() or None
     action = str(getattr(intent, "action", "") or "").strip().lower()
     wants_rank = bool(getattr(intent, "wants_rank", False))
@@ -538,7 +550,7 @@ def derive_aggregation_plan(intent: NormalizedIntent, output_type: Optional[str]
 
 
 def derive_project_series_plan(intent: NormalizedIntent, output_type: Optional[str]) -> Optional[ProjectSeriesPlan]:
-    """Create minimal project-series metadata when the query implies yearly or group flow."""
+    """질의가 연도 흐름이나 과제 그룹 흐름을 뜻할 때 최소 시계열 메타데이터를 만든다."""
     output_type_norm = str(output_type or "").strip().lower() or None
     ids_map = getattr(intent, "ids_map", {}) or {}
     if output_type_norm != "series" and not ids_map.get("pjt_no"):
@@ -550,7 +562,7 @@ def derive_project_series_plan(intent: NormalizedIntent, output_type: Optional[s
 
 
 def derive_pattern_analysis_plan(intent: NormalizedIntent) -> Optional[PatternAnalysisPlan]:
-    """Return planner-first pattern-analysis metadata when stage2 fixed a pattern kind."""
+    """stage2가 pattern kind를 고정한 경우 planner 우선 패턴 분석 메타데이터를 만든다."""
     pattern_kind = str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None
     if not pattern_kind:
         return None
@@ -558,7 +570,7 @@ def derive_pattern_analysis_plan(intent: NormalizedIntent) -> Optional[PatternAn
 
 
 def derive_multi_hop_bundle_plan(intent: NormalizedIntent) -> Optional[MultiHopBundlePlan]:
-    """Return planner-first bundle metadata for project-output bundle questions."""
+    """과제-성과 번들 질문에 필요한 planner 우선 bundle 메타데이터를 만든다."""
     bundle_targets = tuple(str(value).strip().lower() for value in (getattr(intent, "bundle_targets", None) or []) if str(value).strip())
     if not bundle_targets:
         return None
@@ -582,7 +594,7 @@ def derive_query_graph_plan(
     pattern_analysis_plan: Optional[PatternAnalysisPlan],
     multi_hop_bundle_plan: Optional[MultiHopBundlePlan],
 ) -> QueryGraphPlan:
-    """Derive a retrieval-graph skeleton without changing existing mode/relation policy."""
+    """기존 mode/relation 정책을 바꾸지 않고 retrieval graph 뼈대를 유도한다."""
     base_route = str(getattr(intent, "base_route", "") or "").strip().lower() or "project"
     output_type_norm = str(output_type or "").strip().lower() or "summary"
     if multi_hop_bundle_plan is not None:
@@ -651,9 +663,10 @@ def derive_query_graph_plan(
 
 
 def to_strategy_spec(raw: Any) -> StrategySpec:
+    """raw strategy 표현을 executor 기준의 `StrategySpec`으로 정규화한다.
 
-    """ExecutionContext?? executor? ? StrategySpec? ????.
-    lookup/search/join ??, target collection, title/rerank filter ??, join runtime meta? ?? context truth? ???? ???.
+    lookup/search/join 공통 필드, target collection, title/rerank policy, join runtime 메타데이터를
+    한 번에 canonical shape로 맞춰 응답과 로그가 같은 execution truth를 공유하게 한다.
     """
     if isinstance(raw, StrategySpec):
         return raw
@@ -751,8 +764,10 @@ def to_strategy_spec(raw: Any) -> StrategySpec:
 
 
 def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any]:
-    """StrategySpec? API ??? debug ??? ?? ?? dict? ????.
-    tuple? optional ??? ??? ????? ?? execution truth? ??? ????.
+    """`StrategySpec`을 API/debug 응답용 dict로 직렬화한다.
+
+    tuple과 optional 필드를 JSON 친화적인 형태로 바꾸되,
+    execution truth의 의미는 그대로 유지한다.
     """
     if strategy is None:
         return {}
@@ -801,8 +816,10 @@ def strategy_spec_to_response(strategy: Optional[StrategySpec]) -> Dict[str, Any
 
 
 def default_target_collections() -> list[str]:
-    """base route? relation? ?? ?? collection ??? ???.
-    JOIN?? hop ??? ?? project/perf ??? ????, ??? base route? ?? allowlist? ????.
+    """전역 allowlist를 기준으로 기본 target collections를 반환한다.
+
+    별도 route 힌트가 없을 때의 기본값이며, allowlist가 비어 있으면
+    보수적으로 project 컬렉션을 기본 대상으로 둔다.
     """
     allow_list = list(RAG_COLLECTION_ALLOWLIST)
     if allow_list:
@@ -811,15 +828,17 @@ def default_target_collections() -> list[str]:
 
 
 def default_target_collections_for_route(base_route: str, intent: Optional[NormalizedIntent] = None) -> list[str]:
-    """route ???? ??? ?? target collection ??? ????.
-    route-level ???? ???? planner, runtime, route code? ?? allowlist? ???? ??.
+    """base route에 맞는 기본 target collections를 계산한다.
+
+    route 수준의 기본값을 먼저 고르고, 이후 allowlist로 다시 걸러
+    planner, runtime, route 코드가 같은 컬렉션 기본 규칙을 사용하게 한다.
     """
     base_route_norm = str(base_route or "").strip().lower()
     route_defaults = {
         "project": [COL_PROJECT],
         "perf": [COL_PERF],
         "support": [COL_SUPPORT],
-        # people/org ??? project? perf ??? ??? ?? ? ?? ?? ??? ??.
+        # people/org 조회는 project와 perf 양쪽 근거가 모두 필요할 수 있다.
         "people": [COL_PROJECT, COL_PERF],
         "org": [COL_PROJECT, COL_PERF],
     }
@@ -837,8 +856,10 @@ def default_target_collections_for_route(base_route: str, intent: Optional[Norma
 
 
 def select_mode_policy(intent: NormalizedIntent) -> Tuple[str, str]:
-    """??? ??? ?? ??? ???? SEARCH/LOOKUP/JOIN ??? ????.
-    strict JOIN seed? ???, name lookup? ????, topic search? ??? ????? ???? ?? ????.
+    """intent 신호를 기반으로 SEARCH/LOOKUP/JOIN 기본 mode를 고른다.
+
+    strict JOIN seed 여부, 사람/기관 이름 lookup 신호, 주제 검색 신호를 순서대로 살펴
+    실행 계층이 새 전략을 발명하지 않도록 정책적 기본값만 결정한다.
     """
     action = intent.action
     relation = intent.relation
@@ -881,8 +902,10 @@ def build_query_plan(
     preferred_mode: Optional[str] = None,
     preferred_mode_source: Optional[str] = None,
 ) -> Tuple[QueryPlan, str]:
-    """ExecutionContext?? ??? ?? ??? QueryPlan ??? ????.
-    stats policy, filters, target collections, tie-break ?? retrieval?aggregation ??? ?? ???? ??? ?? ???.
+    """intent에서 retrieval 실행용 `QueryPlan`을 만든다.
+
+    stats policy, target collections, aggregation/series/pattern metadata, tie-break 규칙을
+    함께 조립해 retrieval와 aggregation 계층이 같은 계획 객체를 쓰게 한다.
     """
     action = intent.action
     base_route = intent.base_route
@@ -952,8 +975,10 @@ def build_query_plan(
 
 
 def _has_relation_join_ids(intent: NormalizedIntent) -> bool:
-    """relation? ?? JOIN seed id? ??? ??? ????.
-    project_perf? perf_project? ?? ?? seed ??? ????? relation? ?? ??? ?? ??? ????.
+    """relation 실행에 바로 투입 가능한 JOIN seed 식별자가 있는지 본다.
+
+    `project_perf`, `perf_project` 같은 relation에서 seed가 비어 있으면
+    JOIN 강행 대신 다른 정책으로 내려가야 하므로 이를 먼저 판별한다.
     """
     ids_map = getattr(intent, "ids_map", {}) or {}
     relation_keys = ("pjt_id", "pjt_no", "doi", "patent_no", "rst_id", "paper_id")
@@ -968,8 +993,9 @@ def _has_relation_join_ids(intent: NormalizedIntent) -> bool:
 
 
 def _has_any_ids(intent: NormalizedIntent) -> bool:
-    """ids_map ?? ??? ??? ?? ???? ?? ??? ????.
-    LOOKUP/JOIN ?? ???? ???? ?? ?? ??? ?? ??? gate?.
+    """ids_map 안에 하나라도 유효한 식별자가 있는지 검사한다.
+
+    LOOKUP/JOIN 우선 판단과 exact-id gate에서 공통으로 쓰는 기본 검사다.
     """
     ids_map = getattr(intent, "ids_map", {}) or {}
     for values in ids_map.values():

@@ -356,8 +356,13 @@ class AgentState(BaseModel):
     answer_artifact: Optional[AnswerArtifact] = None
     answer_artifact_gemma: Optional[AnswerArtifact] = None
     answer_artifact_solar: Optional[AnswerArtifact] = None
+    final_answer_text: Optional[str] = None
+    final_answer_artifact: Optional[AnswerArtifact] = None
     merge_debug: Dict[str, Any] = Field(default_factory=dict)
     selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
+    clarification: Optional[Dict[str, Any]] = None
+    retrieval_bundle: Optional[Any] = None
+    strategy: Optional[Any] = None
     stream_emitter: Optional[AsyncStreamEmitter] = None
     conversation_id: str = ""
     request_id: str = ""
