@@ -212,6 +212,10 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     timings = getattr(state, "timings", None) or {}
     target_cols = getattr(strategy, "target_collections", None)
     if target_cols is None:
+        target_cols = getattr(normalized_intent, "target_cols", None) if normalized_intent is not None and not isinstance(normalized_intent, dict) else None
+    if target_cols is None and isinstance(normalized_intent, dict):
+        target_cols = normalized_intent.get("target_cols")
+    if target_cols is None:
         target_cols = getattr(question_analysis, "target_cols", None)
     base_route = getattr(normalized_intent, "base_route", None)
     if base_route is None and isinstance(normalized_intent, dict):

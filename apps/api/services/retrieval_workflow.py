@@ -125,6 +125,27 @@ def _build_answer_artifact(*, text: str, answer_kind: str, answer_source: str, c
     )
 
 
+def _pick_primary_seed_map(seed_map: dict[str, list[str]], preferred_entity_kind: str | None) -> dict[str, list[str]]:
+    kind = str(preferred_entity_kind or "").strip().lower()
+    if kind == "perf":
+        order = ("rst_id", "doi", "issn", "pjt_id", "pjt_no", "person_no", "org_id", "org_code", "biz_no")
+    elif kind == "project":
+        order = ("pjt_id", "pjt_no", "rst_id", "doi", "issn", "person_no", "org_id", "org_code", "biz_no")
+    elif kind == "people":
+        order = ("person_no", "pjt_id", "pjt_no", "rst_id", "org_id", "org_code", "biz_no", "doi", "issn")
+    elif kind == "org":
+        order = ("org_id", "org_code", "biz_no", "pjt_id", "pjt_no", "rst_id", "person_no", "doi", "issn")
+    else:
+        order = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+
+    for key in order:
+        values = seed_map.get(key) or []
+        normalized = [str(v).strip() for v in values if str(v).strip()]
+        if normalized:
+            return {key: [normalized[0]]}
+    return {}
+
+
 def _resolve_detail_entity_ref(
     *,
     strategy_meta: dict[str, Any],
@@ -133,28 +154,33 @@ def _resolve_detail_entity_ref(
     preferred_entity_kind: str | None = None,
 ) -> ResolvedEntityRef | ClarificationRequest | None:
     resolved = resolve_entity_ref_from_strategy_meta(strategy_meta)
-    if resolved is not None:
+    if isinstance(resolved, ClarificationRequest):
         return resolved
     normalized_ids = dict(ids_map or {})
-    normalized_preferred_kind = str(preferred_entity_kind or "").strip().lower()
-    if normalized_preferred_kind == "perf":
-        preferred_keys = ("rst_id", "doi", "issn", "pjt_id", "pjt_no", "person_no", "org_id", "org_code", "biz_no")
-    elif normalized_preferred_kind == "project":
-        preferred_keys = ("pjt_id", "pjt_no", "rst_id", "doi", "issn", "person_no", "org_id", "org_code", "biz_no")
-    elif normalized_preferred_kind == "people":
-        preferred_keys = ("person_no", "pjt_id", "pjt_no", "rst_id", "org_id", "org_code", "biz_no", "doi", "issn")
-    elif normalized_preferred_kind == "org":
-        preferred_keys = ("org_id", "org_code", "biz_no", "pjt_id", "pjt_no", "rst_id", "person_no", "doi", "issn")
-    else:
-        preferred_keys = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
-    for key in preferred_keys:
-        values = normalized_ids.get(key) or []
-        if values:
+    primary_ids = _pick_primary_seed_map(normalized_ids, preferred_entity_kind)
+    if primary_ids:
+        key = next(iter(primary_ids.keys()))
+        entity_kind = (
+            "perf" if key in {"rst_id", "doi", "issn"}
+            else ("people" if key == "person_no" else ("org" if key in {"org_id", "org_code", "biz_no"} else "project"))
+        )
+        return ResolvedEntityRef(entity_kind=entity_kind, seed_map=primary_ids, source="explicit_id")
+    if isinstance(resolved, ResolvedEntityRef):
+        primary_seed = _pick_primary_seed_map(dict(resolved.seed_map or {}), preferred_entity_kind)
+        if primary_seed:
+            key = next(iter(primary_seed.keys()))
             entity_kind = (
                 "perf" if key in {"rst_id", "doi", "issn"}
                 else ("people" if key == "person_no" else ("org" if key in {"org_id", "org_code", "biz_no"} else "project"))
             )
-            return ResolvedEntityRef(entity_kind=entity_kind, seed_map={key: [str(values[0]).strip()]}, source="explicit_id")
+            return ResolvedEntityRef(
+                entity_kind=entity_kind,
+                seed_map=primary_seed,
+                source=resolved.source,
+                display_view_id=resolved.display_view_id,
+                display_rank=resolved.display_rank,
+                anchor_fields=dict(resolved.anchor_fields or {}),
+            )
     anchor_source = str((strategy_meta or {}).get("anchor_source") or "").strip().lower()
     if anchor_source != "detail_lookup":
         return None
@@ -685,7 +711,7 @@ async def node_rag_search(
                     conversation_id=state.conversation_id,
                     reason="detail follow-up signal exists but ids_map has no active anchor seed",
                 )
-        if output_type == "detail" and isinstance(resolved_entity_ref, ResolvedEntityRef) and view_state is not None:
+        if output_type == "detail" and detail_anchor_active and isinstance(resolved_entity_ref, ResolvedEntityRef) and view_state is not None:
             requested_fields = extract_requested_fields(state.messages[-1].content)
             cache_anchor = latest_focus_entity
             if cache_anchor is None:
@@ -723,7 +749,12 @@ async def node_rag_search(
                 requested_fields=sorted(requested_fields),
             )
 
-        exact_detail_lookup = bool(output_type == "detail" and isinstance(resolved_entity_ref, ResolvedEntityRef) and resolved_entity_ref.seed_map)
+        exact_detail_lookup = bool(
+            output_type == "detail"
+            and detail_anchor_active
+            and isinstance(resolved_entity_ref, ResolvedEntityRef)
+            and resolved_entity_ref.seed_map
+        )
         focus_seed_map: dict[str, list[str]] = dict(resolved_entity_ref.seed_map) if isinstance(resolved_entity_ref, ResolvedEntityRef) else {}
 
         raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries_fn(
@@ -852,8 +883,7 @@ async def node_rag_search(
                 turn_id=state.request_id,
                 context_kind=context_kind or "project",
                 requested_count=display_limit,
-                documents=display_bundle.snapshot_documents,
-                canonical_evidence=display_bundle.snapshot_canonical_evidence,
+                items=retrieval_bundle.items,
                 raw_count=raw_result_count,
             )
             view_state.latest_display_snapshot = snapshot
