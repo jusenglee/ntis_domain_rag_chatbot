@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 """프로메테우스 지표를 수집하고 요약 스냅샷으로 노출하는 독립 모듈입니다."""
 
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://203.250.234.159/:8004").rstrip("/")
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://203.250.234.159:8004").rstrip("/")
 PROMETHEUS_TIMEOUT = float(os.getenv("PROMETHEUS_TIMEOUT", "5"))
 STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 SSE_INITIAL_PADDING_BYTES = int(os.getenv("SSE_INITIAL_PADDING_BYTES", "2048"))
