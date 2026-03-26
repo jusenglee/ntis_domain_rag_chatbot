@@ -669,6 +669,7 @@ class CustomRAGRetriever(BaseModel):
                 "canonical_evidence": canonical_evidence,
                 "render_profile": render_profile,
                 "answer_context_text": answer_context_text,
+                "actual_retrieval_query": str(query or "").strip(),
                 "no_result_message": no_result_message,
                 "clarification": clarification,
             }

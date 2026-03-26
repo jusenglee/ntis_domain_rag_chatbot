@@ -18,6 +18,7 @@ from apps.api.services.canonical_context import render_canonical_evidence_text
 from apps.api.services.planner_context_cards import build_planner_domain_cards
 from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.view_state import DisplaySnapshot, FocusEntity, render_display_snapshot_text
+from apps.core.planner_contract import StrategyViolation
 from apps.core.planner_stage15_types import PlannerEntityRolePlan
 from apps.core.planner_staged import (
     DeterministicGateStrategy,
@@ -144,7 +145,16 @@ def _enforce_runtime_legality(
     normalized_intent: Any,
     locked_strategy: DeterministicGateStrategy,
     stage2: Any,
+    strategy_violation_cls: type[Exception],
 ) -> None:
+    def _raise(error_code: str, reason: str) -> None:
+        try:
+            raise strategy_violation_cls(error_code=error_code, reason=reason)  # type: ignore[misc]
+        except TypeError:
+            if strategy_violation_cls is StrategyViolation:
+                raise StrategyViolation(error_code=error_code, reason=reason)
+            raise strategy_violation_cls(f"{error_code}: {reason}")
+
     ids_map = dict(getattr(stage2, "ids_map", None) or {})
     people_terms = list(getattr(normalized_intent, "people_terms", None) or [])
     org_terms = list(getattr(normalized_intent, "org_terms", None) or [])
@@ -152,11 +162,11 @@ def _enforce_runtime_legality(
     has_anchor_seed = bool(dict(locked_strategy.prev_context_seed or {}) or dict(locked_strategy.gate_seed_map or {}))
 
     if locked_strategy.head == "perf" and locked_strategy.action == "detail" and not _has_explicit_perf_seed(ids_map):
-        raise ValueError("planner legality violation: perf detail requires explicit perf id")
+        _raise("PLANNER_PERF_DETAIL_EXPLICIT_ID_REQUIRED", "perf detail requires explicit perf id")
     if broad_people_org_query and str(locked_strategy.mode or "").strip().lower() == "join":
-        raise ValueError("planner legality violation: broad people/org query cannot use JOIN")
+        _raise("PLANNER_BROAD_PEOPLE_ORG_JOIN_FORBIDDEN", "broad people/org query cannot use JOIN")
     if locked_strategy.relation in {"project_perf", "perf_project"} and not has_anchor_seed:
-        raise ValueError("planner legality violation: relation query requires explicit anchor")
+        _raise("PLANNER_RELATION_EXPLICIT_ANCHOR_REQUIRED", "relation query requires explicit anchor")
 
 
 def _planner_prev_context_text(
@@ -657,6 +667,7 @@ async def run_stagewise_question_analysis(
     planner_stagewise_enabled: bool,
     planner_stage2_regate_seed_allowed_keys: set[str],
     max_top_k_size: int,
+    strategy_violation_cls: type[Exception] = StrategyViolation,
 ) -> Any:
     display_snapshot = getattr(view_state, "latest_display_snapshot", None)
     focus_entity = getattr(view_state, "latest_focus_entity", None)
@@ -795,6 +806,7 @@ async def run_stagewise_question_analysis(
         normalized_intent=normalized_intent,
         locked_strategy=locked_strategy,
         stage2=stage2,
+        strategy_violation_cls=strategy_violation_cls,
     )
     locked_strategy = regate_locked_strategy(
         request_id=request_id,

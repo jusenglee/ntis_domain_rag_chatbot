@@ -207,10 +207,6 @@ def _resolve_detail_entity_ref(
         display_rank=getattr(latest_focus_entity, "display_rank", None),
         anchor_fields={"title_text": getattr(latest_focus_entity, "title_text", None)},
     )
-    source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
-    source_types.discard("")
-    item_like_types = {"hit", "canonical_item", "item", "document"}
-    return "item_list" if not source_types or source_types <= item_like_types else "collection_wrapper"
 
 
 def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -839,7 +835,7 @@ async def node_rag_search(
         )
 
         retrieve_result = await asyncio.to_thread(rag_tool.func, resolved_retrieval_query)
-        actual_retrieval_query = str(resolved_retrieval_query or "")
+        actual_retrieval_query = str((retrieve_result or {}).get("actual_retrieval_query") or resolved_retrieval_query or "")
         log_event(
             "RAG.RETRIEVAL_QUERY.ACTUAL",
             request_id=state.request_id,
