@@ -40,7 +40,6 @@ git rev-parse HEAD
 
 실행 결과가 아래와 다르면 반드시 보고만 하고 멈춘다.
 - expected branch: `고도화`
-- expected head at bootstrap time: `b232eb29c8d4a203f3f24fb897b1a24adc9d1ed9`
 
 ## Role permissions
 ### Watcher
@@ -88,8 +87,3 @@ git rev-parse HEAD
 
 검증 명령을 실제 repo 기준으로 찾으면 docs/SESSION_HANDOFF.md에 갱신한다.
 
-## First backlog hints
-- 스트리밍 파서 / emitted_chunks=0 / TTFT deadline 관련 이슈 우선 확인
-- answer stage의 strategy drift 여부 확인
-- SEARCH에서 사람 이름 must가 들어가는 경로 확인
-- JOIN group/instance 분기 회귀 테스트 추가
