@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from apps.api.services.detail_contract import build_detail_answer_context, compute_detail_coverage, make_entity_cache_key, render_detail_answer
-from apps.api.services.view_state import FocusEntity
+from apps.api.services.view_state import FocusEntity, build_display_snapshot, focus_entity_from_detail
 
 
 def test_render_detail_answer_uses_korean_labels_for_project_profile():
@@ -169,3 +169,110 @@ def test_build_detail_answer_context_renders_structured_evidence():
     assert "pjt_id: PJT-123" in context
     assert "researchers: ???" in context
     assert "budget: 100??" in context
+
+
+def test_build_display_snapshot_prefers_canonical_project_title_over_hit_title():
+    snapshot = build_display_snapshot(
+        conversation_id="cid",
+        turn_id="tid",
+        context_kind="project",
+        requested_count=1,
+        documents=[
+            {
+                "title": "1. 김봉준",
+                "source_type": "hit",
+                "pjt_id": "1711135956",
+                "pjt_no": "2021R1F1A1057134",
+            }
+        ],
+        canonical_evidence=[
+            {
+                "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발"},
+            }
+        ],
+        raw_count=1,
+    )
+
+    assert snapshot.items[0].title_text == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
+def test_build_display_snapshot_items_path_prefers_canonical_project_title():
+    snapshot = build_display_snapshot(
+        conversation_id="cid",
+        turn_id="tid",
+        context_kind="project",
+        requested_count=1,
+        items=[
+            SimpleNamespace(
+                display={
+                    "title": "1. 김봉준",
+                    "source_type": "hit",
+                    "pjt_id": "1711135956",
+                    "pjt_no": "2021R1F1A1057134",
+                },
+                canonical={
+                    "context_kind": "project",
+                    "source_type": "hit",
+                    "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                    "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발"},
+                    "roles": {},
+                },
+            )
+        ],
+        raw_count=1,
+    )
+
+    assert snapshot.items[0].title_text == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
+def test_focus_entity_from_detail_prefers_canonical_project_title_before_anchor_coverage():
+    focus = focus_entity_from_detail(
+        context_kind="project",
+        document={
+            "title": "1. 김봉준",
+            "source_type": "hit",
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+            "org_nm": "숙명여자대학",
+            "prtcp_mp": [{"hm_nm": "김봉준"}],
+        },
+        canonical_item={
+            "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+            "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발", "year": 2021},
+            "roles": {"lead_org_name": ["숙명여자대학"], "participant_researcher_name": ["김봉준"]},
+        },
+        source="detail_lookup",
+    )
+
+    assert focus is not None
+    assert focus.title_text == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+    coverage = compute_detail_coverage({"pjt_id": "1711135956"}, anchor=focus)
+
+    assert coverage.core_profile["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
+def test_build_display_snapshot_keeps_wrapper_title_for_synthetic_rows():
+    snapshot = build_display_snapshot(
+        conversation_id="cid",
+        turn_id="tid",
+        context_kind="project",
+        requested_count=1,
+        documents=[
+            {
+                "title": "1. project wrapper",
+                "source_type": "aggregation",
+                "pjt_id": "1711135956",
+            }
+        ],
+        canonical_evidence=[
+            {
+                "ids": {"pjt_id": "1711135956"},
+                "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발"},
+            }
+        ],
+        raw_count=1,
+    )
+
+    assert snapshot.items[0].title_text == "1. project wrapper"

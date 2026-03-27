@@ -5,6 +5,14 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 DETAIL_CACHE_SCHEMA_VERSION = 2
+_SYNTHETIC_TITLE_PRIMARY_TYPES = {
+    "aggregation",
+    "series",
+    "pattern_analysis",
+    "reverse_trace",
+    "multi_hop_bundle",
+}
+_META_TITLE_KEYS = ("kor_pjt_nm", "eng_pjt_nm", "title", "paper_nm")
 
 
 class DisplayItem(BaseModel):
@@ -191,6 +199,132 @@ def _extract_rank_item(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _meta_title_candidates(*sources: Any) -> List[str]:
+    values: List[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for meta_key in ("meta_basic", "meta_detail"):
+            meta = source.get(meta_key)
+            if not isinstance(meta, dict):
+                continue
+            for title_key in _META_TITLE_KEYS:
+                value = _first_text(meta.get(title_key))
+                if value:
+                    values.append(value)
+    return values
+
+
+def _has_canonical_identity(ids: Dict[str, Any], *sources: Any) -> bool:
+    if _first_text(
+        ids.get("pjt_id"),
+        ids.get("pjt_no"),
+        ids.get("rst_id"),
+        ids.get("person_no"),
+        ids.get("org_id"),
+        ids.get("org_code"),
+        ids.get("biz_no"),
+        ids.get("doi"),
+        ids.get("issn"),
+        ids.get("doc_id"),
+    ):
+        return True
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if _first_text(
+            source.get("pjt_id"),
+            source.get("pjt_no"),
+            source.get("rst_id"),
+            source.get("person_no"),
+            source.get("hm_id"),
+            source.get("org_id"),
+            source.get("org_code"),
+            source.get("biz_no"),
+            source.get("doi"),
+            source.get("issn"),
+            source.get("doc_id"),
+            source.get("group_key"),
+        ):
+            return True
+    return False
+
+
+def _uses_synthetic_display_title(*sources: Any) -> bool:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_type = _normalize_kind(source.get("source_type") or source.get("doc_type"), default="")
+        if source_type in _SYNTHETIC_TITLE_PRIMARY_TYPES:
+            return True
+    return False
+
+
+def _resolve_title_text(
+    *,
+    doc: Dict[str, Any],
+    facts: Dict[str, Any],
+    ids: Dict[str, Any],
+    rank_item: Dict[str, Any],
+    extra_sources: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    sources: List[Dict[str, Any]] = [doc]
+    for source in extra_sources or []:
+        if isinstance(source, dict):
+            sources.append(source)
+    meta_titles = _meta_title_candidates(*sources)
+    if _uses_synthetic_display_title(doc, *sources[1:]):
+        synthetic_titles: List[Any] = []
+        for source in sources:
+            synthetic_titles.extend((source.get("title"), source.get("title_text")))
+        return _first_text(
+            *synthetic_titles,
+            facts.get("title"),
+            rank_item.get("project_title"),
+            rank_item.get("org_name"),
+            rank_item.get("hm_nm"),
+            *meta_titles,
+        )
+
+    prefer_canonical = bool(
+        _has_canonical_identity(ids, doc, rank_item, *sources[1:])
+        or _first_text(
+            facts.get("title"),
+            rank_item.get("project_title"),
+            rank_item.get("org_name"),
+            rank_item.get("hm_nm"),
+            *meta_titles,
+        )
+    )
+    if prefer_canonical:
+        preferred_titles: List[Any] = []
+        fallback_titles: List[Any] = []
+        for source in sources:
+            preferred_titles.append(source.get("title_text"))
+            fallback_titles.append(source.get("title"))
+        return _first_text(
+            *preferred_titles,
+            facts.get("title"),
+            rank_item.get("project_title"),
+            rank_item.get("org_name"),
+            rank_item.get("hm_nm"),
+            *meta_titles,
+            *fallback_titles,
+        )
+
+    generic_titles: List[Any] = []
+    for source in sources:
+        generic_titles.extend((source.get("title_text"), source.get("title")))
+    return _first_text(
+        *generic_titles,
+        facts.get("title"),
+        rank_item.get("project_title"),
+        rank_item.get("org_name"),
+        rank_item.get("hm_nm"),
+        *meta_titles,
+    )
+
+
 def build_display_snapshot(
     *,
     conversation_id: str,
@@ -220,7 +354,13 @@ def build_display_snapshot(
                     doc_type=_first_text(display.get("doc_type"), canonical.get("source_type"), display.get("source_type")),
                     doc_id=_first_text(display.get("doc_id"), ids.get("doc_id")),
                     col=_first_text(display.get("source_type"), canonical.get("source_type")),
-                    title_text=_first_text(display.get("title"), display.get("title_text"), facts.get("title")) or "",
+                    title_text=_resolve_title_text(
+                        doc=display,
+                        facts=facts,
+                        ids=ids,
+                        rank_item={},
+                        extra_sources=[canonical],
+                    ) or "",
                     pjt_id=_first_text(display.get("pjt_id"), ids.get("pjt_id")),
                     pjt_no=_first_text(display.get("pjt_no"), ids.get("pjt_no")),
                     rst_id=_first_text(display.get("rst_id"), ids.get("rst_id")),
@@ -267,7 +407,13 @@ def build_display_snapshot(
                 doc_type=_first_text(doc.get("doc_type"), evidence.get("source_type"), doc.get("source_type")),
                 doc_id=_first_text(doc.get("doc_id"), ids.get("doc_id"), rank_item.get("doc_id")),
                 col=_first_text(doc.get("source_type"), evidence.get("source_type")),
-                title_text=_first_text(doc.get("title"), doc.get("title_text"), facts.get("title"), rank_item.get("project_title"), rank_item.get("org_name"), rank_item.get("hm_nm")) or "",
+                title_text=_resolve_title_text(
+                    doc=doc,
+                    facts=facts,
+                    ids=ids,
+                    rank_item=rank_item,
+                    extra_sources=[evidence],
+                ) or "",
                 pjt_id=_first_text(doc.get("pjt_id"), ids.get("pjt_id"), rank_item.get("pjt_id")),
                 pjt_no=_first_text(doc.get("pjt_no"), ids.get("pjt_no"), rank_item.get("pjt_no"), rank_item.get("group_key")),
                 rst_id=_first_text(doc.get("rst_id"), ids.get("rst_id"), rank_item.get("rst_id")),
@@ -334,7 +480,13 @@ def focus_entity_from_detail(
     facts = evidence.get("facts") or {}
     rank_item = _extract_rank_item(doc)
     entity_kind = _infer_entity_kind(context_kind=context_kind, doc=doc, evidence=evidence, ids=ids, rank_item=rank_item)
-    title_text = _first_text(doc.get("title"), doc.get("title_text"), facts.get("title"), rank_item.get("project_title"), rank_item.get("org_name"), rank_item.get("hm_nm"))
+    title_text = _resolve_title_text(
+        doc=doc,
+        facts=facts,
+        ids=ids,
+        rank_item=rank_item,
+        extra_sources=[evidence],
+    )
     focus = FocusEntity(
         kind=entity_kind,
         source=source,

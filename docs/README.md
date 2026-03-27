@@ -23,6 +23,11 @@
 | `04_회귀기준과_점검.md` | 깨지면 안 되는 회귀 목록 |
 | `05_유지보수와_확장.md` | debt, 확장 원칙 |
 
+## ADR 참고
+
+- 현재 구조 변경 결정과 staged migration 메모는 `docs/ADR/` 아래에서 관리한다.
+- 2026-03-27 기준 post-retrieval boundary 개선 타깃은 `ADR-0004-execution-artifact-projection-boundary.md`다.
+
 ## 현재 기준선
 
 - 시스템은 먼저 찾고(retrieval) 그다음 답을 만드는 구조를 따른다.

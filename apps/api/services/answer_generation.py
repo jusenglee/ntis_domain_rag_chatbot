@@ -432,6 +432,7 @@ async def merge_answers(
         answer_solar=answer_solar,
         answer_gemma=answer_gemma,
         solar_meta=solar_meta,
+        gemma_meta=answer_gemma_meta,
         policy=dual_model_merge_policy,
         fallback_message=dual_model_fallback_message,
         min_answer_chars=solar_min_answer_chars,
@@ -439,6 +440,9 @@ async def merge_answers(
     solar_fail_reasons = list(selection["solar_fail_reasons"])
     solar_warning_reasons = list(selection["solar_warning_reasons"])
     solar_failed = bool(selection["solar_failed"])
+    gemma_fail_reasons = list(selection.get("gemma_fail_reasons", []))
+    gemma_warning_reasons = list(selection.get("gemma_warning_reasons", []))
+    gemma_failed = bool(selection.get("gemma_failed", False))
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
     degraded = bool(getattr(state, "degraded", False)) or (selected_answer == dual_model_fallback_message)
@@ -471,6 +475,10 @@ async def merge_answers(
         "solar_fail_reasons": solar_fail_reasons,
         "solar_warning_reasons": solar_warning_reasons,
         "solar_meta": selection["solar_meta"],
+        "gemma_failed": gemma_failed,
+        "gemma_fail_reasons": gemma_fail_reasons,
+        "gemma_warning_reasons": gemma_warning_reasons,
+        "gemma_meta": selection.get("gemma_meta", {}),
         "solar_answer_chars": selection["solar_answer_chars"],
         "gemma_answer_chars": selection["gemma_answer_chars"],
         "min_chars_threshold": solar_min_answer_chars,
@@ -485,6 +493,8 @@ async def merge_answers(
         selected_model=selected_model,
         solar_failed=int(solar_failed),
         solar_fail_reasons=solar_fail_reasons,
+        gemma_failed=int(gemma_failed),
+        gemma_fail_reasons=gemma_fail_reasons,
         gemma_answer_chars=len(answer_gemma),
         solar_answer_chars=len(answer_solar),
     )

@@ -62,3 +62,32 @@ def test_select_final_answer_degrades_included_info_refusal_phrase():
 
     assert result["selected_model"] == "gemma"
     assert "refusal_like_answer" in result["solar_fail_reasons"]
+
+
+def test_select_final_answer_degrades_internal_detail_context_leak_and_prefers_gemma():
+    result = select_final_answer(
+        answer_solar="[detail_evidence]\nentity_kind: project\npjt_id: 1711135956\ntitle: 단일 반도체물질 기반 3진 논리 게이트 개발",
+        answer_gemma="과제명은 단일 반도체물질 기반 3진 논리 게이트 개발입니다.",
+        solar_meta={"answer_kind": "llm_streamed", "answer_source": "solar"},
+        policy="solar_first",
+        fallback_message="fallback",
+        min_answer_chars=20,
+    )
+
+    assert result["selected_model"] == "gemma"
+    assert "internal_context_leak" in result["solar_fail_reasons"]
+
+
+def test_select_final_answer_falls_back_when_both_models_are_invalid():
+    result = select_final_answer(
+        answer_solar="제공된 정보에 포함되어 있지 않아 안내가 어렵습니다.",
+        answer_gemma="질문을 입력해주세요.\n[detail_evidence]\nentity_kind: project",
+        solar_meta={"answer_kind": "llm_streamed", "answer_source": "solar"},
+        policy="solar_first",
+        fallback_message="fallback",
+        min_answer_chars=20,
+    )
+
+    assert result["selected_model"] == "fallback"
+    assert result["selected_answer"] == "fallback"
+    assert "internal_context_leak" in result["gemma_fail_reasons"]

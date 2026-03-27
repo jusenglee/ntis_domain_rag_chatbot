@@ -43,6 +43,8 @@ async def load_prompt_file(path: Path) -> str:
         return cached
     async with aiofiles.open(path, encoding="utf-8") as f:
         content = await f.read()
+    if content.startswith("\ufeff"):
+        content = content.lstrip("\ufeff")
     _PROMPT_CACHE.clear()
     _PROMPT_CACHE[cache_key] = content
     return content
