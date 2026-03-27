@@ -33,6 +33,17 @@ def serialize_filter_for_log(filter_obj: Any) -> Any:
     if isinstance(filter_obj, (list, tuple, set)):
         return [serialize_filter_for_log(v) for v in filter_obj]
 
+    structural_attrs = ("must", "should", "must_not", "min_should", "nested", "key", "filter", "match", "range")
+    if any(hasattr(filter_obj, attr) for attr in structural_attrs):
+        dumped_struct: Dict[str, Any] = {}
+        for attr in structural_attrs:
+            value = getattr(filter_obj, attr, None)
+            if value in (None, [], {}, ()):
+                continue
+            dumped_struct[attr] = serialize_filter_for_log(value)
+        if dumped_struct:
+            return dumped_struct
+
     for method_name in ("model_dump", "dict"):
         method = getattr(filter_obj, method_name, None)
         if callable(method):

@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from apps.api.services.rag_result_assembly import finalize_rag_result
+from apps.api.services.rag_result_assembly import apply_structured_result_constraint, finalize_rag_result
 from apps.core.rag_filter_policy import CollectionFilterPolicyContext, resolve_collection_server_filter
 from apps.core.rag_types import RagResult
 
@@ -147,6 +147,59 @@ class BaseOrchestrationOutcome:
     followup_join_ids_count: int
 
 
+def _should_enable_retrieval_backfill(request: BaseOrchestrationRequest) -> bool:
+    output_type = str(request.output_type or "").strip().lower()
+    if request.mode != "lookup":
+        return False
+    if output_type not in {"list", "relation", "comparison", "series", "stats"}:
+        return False
+    if int(request.hinted_limit or 0) <= 0:
+        return False
+    return bool(request.people_terms or request.people_ids or request.org_terms or request.people_org_terms)
+
+
+def _expand_retrieval_candidate_budget(*, topk_dense: int, topk_lex_cand: int, topk_lex: int, sparse_topk_eff: int) -> tuple[int, int, int, int]:
+    multiplier = max(2, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MULTIPLIER", os.getenv("RAG_COUNT_BACKFILL_MULTIPLIER", "2"))))
+    max_dense = max(16, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MAX_DENSE", os.getenv("RAG_COUNT_BACKFILL_MAX_DENSE", "128"))))
+    max_lex_cand = max(240, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MAX_LEX_CAND", os.getenv("RAG_COUNT_BACKFILL_MAX_LEX_CAND", "4800"))))
+    max_lex = max(120, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MAX_LEX", os.getenv("RAG_COUNT_BACKFILL_MAX_LEX", "960"))))
+    max_sparse = max(180, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MAX_SPARSE", os.getenv("RAG_COUNT_BACKFILL_MAX_SPARSE", "720"))))
+    return (
+        min(max_dense, max(1, int(topk_dense or 0)) * multiplier),
+        min(max_lex_cand, max(1, int(topk_lex_cand or 0)) * multiplier),
+        min(max_lex, max(1, int(topk_lex or 0)) * multiplier),
+        min(max_sparse, max(1, int(sparse_topk_eff or 0)) * multiplier),
+    )
+
+
+def _preview_structured_result_count(
+    merged_rrf: List[Any],
+    *,
+    runtime: BaseOrchestrationRuntime,
+    request: BaseOrchestrationRequest,
+) -> int:
+    preview_limit = min(
+        len(merged_rrf),
+        max(
+            int(request.hinted_limit or 0) * 4,
+            int(os.getenv("RAG_RETRIEVAL_BACKFILL_PREVIEW_MIN", os.getenv("RAG_COUNT_BACKFILL_PREVIEW_MIN", "40"))),
+        ),
+    )
+    if preview_limit <= 0:
+        return 0
+    preview_points = list(merged_rrf[:preview_limit])
+    runtime.hydrate_points_payload_fn(preview_points)
+    filtered, _ = apply_structured_result_constraint(
+        preview_points,
+        people_terms=list(request.people_terms or []),
+        people_ids=list(request.people_ids or []),
+        org_terms=list(request.org_terms or []),
+        people_org_terms=list(request.people_org_terms or []),
+        org_role=request.org_role,
+    )
+    return len(filtered)
+
+
 def execute_base_orchestration(*, request: BaseOrchestrationRequest, runtime: BaseOrchestrationRuntime, filter_inputs: BaseFilterPolicyInputs, search_policy: BaseSearchPolicyInputs) -> BaseOrchestrationOutcome:
     """JOIN이 아닌 기본 검색 경로의 retrieval, merge, rerank, result assembly를 실행한다.
 
@@ -207,69 +260,149 @@ def execute_base_orchestration(*, request: BaseOrchestrationRequest, runtime: Ba
             log_project_key_filter_fn=lambda **kwargs: runtime.log_kv_fn("RAG.LOOKUP.PROJECT_KEY_FILTER", tier="debug", **kwargs),
         )
 
-    t0 = time.time()
-    sr_by_col, per_col_stats = runtime.retrieve_collections_fn(
-        target_cols=request.target_cols,
-        qdr=runtime.qdr,
-        vector_names=request.vector_names,
-        pre_vecs=request.pre_vecs,
-        fallback_emb=request.fallback_emb,
-        named_vectors_in_collection_fn=runtime.named_vectors_in_collection_fn,
-        logger=runtime.logger,
-        server_filter_for_col_fn=_server_filter_for_col,
-        mode=request.mode,
-        plan_mode=request.plan_mode,
-        q=request.query_text,
-        kws=request.keywords,
-        preset=request.preset,
-        sparse_vector_name_eff=request.sparse_vector_name_eff,
-        sparse_topk_eff=request.sparse_topk_eff,
-        sparse_weight_eff=request.sparse_weight_eff,
-        topk_dense=request.topk_dense,
-        topk_lex_cand=request.topk_lex_cand,
-        topk_lex=request.topk_lex,
-        call_dense_retrieve_hybrid_multi_fn=runtime.call_dense_retrieve_hybrid_multi_fn,
-        validate_lookup_join_hybrid_metrics_fn=runtime.validate_lookup_join_hybrid_metrics_fn,
-        apply_dense_threshold_fn=runtime.apply_dense_threshold_fn,
-        ensure_collection_mark_fn=runtime.ensure_collection_mark_fn,
-        log_kv_fn=runtime.log_kv_fn,
-        log_section_fn=runtime.log_section_fn,
-        log_top_points_fn=runtime.log_top_points_fn,
-        serialize_filter_for_log_fn=runtime.serialize_filter_for_log_fn,
-        resolve_sparse_hits_metric_fn=runtime.resolve_sparse_hits_metric_fn,
-        record_col_timings_fn=runtime.record_col_timings_fn,
-        action=request.action,
-        base_route=request.base_route,
-        relation=request.relation,
-        search_filter_enabled=search_policy.search_filter_enabled,
-        search_filter_signal=search_policy.search_filter_signal,
-        search_filter_conf_ok=search_policy.search_filter_conf_ok,
-        title_filter_server_applied=search_policy.title_filter_server_applied,
-        lex_w_eff=request.lex_w_eff,
-        col_project=filter_inputs.col_project,
-        col_perf=filter_inputs.col_perf,
-        timings=request.timings,
-    )
-    runtime.timing_put_fn(request.timings, "phase.dense_search", time.time() - t0)
-
+    topk_dense = int(request.topk_dense)
+    topk_lex_cand = int(request.topk_lex_cand)
+    topk_lex = int(request.topk_lex)
+    sparse_topk_eff = int(request.sparse_topk_eff)
+    should_backfill = _should_enable_retrieval_backfill(request)
+    max_backfill_iters = max(0, int(os.getenv("RAG_RETRIEVAL_BACKFILL_MAX_ITERS", os.getenv("RAG_COUNT_BACKFILL_MAX_ITERS", "2"))))
+    backfill_iteration = 0
+    current_filtered_count = 0
+    exhausted_backfill = False
     sources: List[Any] = []
-    for col, sr in sr_by_col.items():
-        hybrid_points = sr.get("hybrid") or []
-        if hybrid_points:
-            sources.append(runtime.rank_source_factory(name=f"{col}:hybrid", weight=1.0, points=hybrid_points))
-            continue
-        for vname, lst in (sr.get("dense") or {}).items():
-            base_weight = float(request.w_dense_map.get(vname, 1.0))
-            score_weight = runtime.dense_score_weight_fn(lst or []) if runtime.use_dense_score_weight_fn() else 1.0
-            sources.append(runtime.rank_source_factory(name=f"{col}:{vname}", weight=base_weight * score_weight, points=lst or []))
-        sources.append(runtime.rank_source_factory(name=f"{col}:lex", weight=float(request.sparse_weight_eff), points=sr.get("lexical") or []))
+    merged_rrf: List[Any] = []
+    per_col_stats: Dict[str, Dict[str, float]] = {}
 
-    runtime.log_section_fn("RAG.RETRIEVE", per_col_stats, tier=request.per_col_stats_log_tier)
-    t0 = time.time()
-    merged_rrf = runtime.rrf_merge_fn(sources, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=int(os.getenv("RAG_MERGED_KEEP", "1200")))
-    merged_rrf = runtime.dedup_by_doc_id_fn(merged_rrf)
-    runtime.timing_put_fn(request.timings, "phase.rrf_merge", time.time() - t0)
-    runtime.log_top_points_fn("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")), tier="debug")
+    if should_backfill:
+        runtime.log_kv_fn(
+            "RAG.RETRIEVAL_BACKFILL.START",
+            tier="debug",
+            requested_count=int(request.hinted_limit or 0),
+            topk_dense=topk_dense,
+            topk_lex_cand=topk_lex_cand,
+            topk_lex=topk_lex,
+            sparse_topk=sparse_topk_eff,
+            people_terms=list(request.people_terms or []),
+            people_org_terms=list(request.people_org_terms or []),
+            org_role=request.org_role,
+        )
+
+    while True:
+        t0 = time.time()
+        sr_by_col, per_col_stats = runtime.retrieve_collections_fn(
+            target_cols=request.target_cols,
+            qdr=runtime.qdr,
+            vector_names=request.vector_names,
+            pre_vecs=request.pre_vecs,
+            fallback_emb=request.fallback_emb,
+            named_vectors_in_collection_fn=runtime.named_vectors_in_collection_fn,
+            logger=runtime.logger,
+            server_filter_for_col_fn=_server_filter_for_col,
+            mode=request.mode,
+            plan_mode=request.plan_mode,
+            q=request.query_text,
+            kws=request.keywords,
+            preset=request.preset,
+            sparse_vector_name_eff=request.sparse_vector_name_eff,
+            sparse_topk_eff=sparse_topk_eff,
+            sparse_weight_eff=request.sparse_weight_eff,
+            topk_dense=topk_dense,
+            topk_lex_cand=topk_lex_cand,
+            topk_lex=topk_lex,
+            call_dense_retrieve_hybrid_multi_fn=runtime.call_dense_retrieve_hybrid_multi_fn,
+            validate_lookup_join_hybrid_metrics_fn=runtime.validate_lookup_join_hybrid_metrics_fn,
+            apply_dense_threshold_fn=runtime.apply_dense_threshold_fn,
+            ensure_collection_mark_fn=runtime.ensure_collection_mark_fn,
+            log_kv_fn=runtime.log_kv_fn,
+            log_section_fn=runtime.log_section_fn,
+            log_top_points_fn=runtime.log_top_points_fn,
+            serialize_filter_for_log_fn=runtime.serialize_filter_for_log_fn,
+            resolve_sparse_hits_metric_fn=runtime.resolve_sparse_hits_metric_fn,
+            record_col_timings_fn=runtime.record_col_timings_fn,
+            action=request.action,
+            base_route=request.base_route,
+            relation=request.relation,
+            search_filter_enabled=search_policy.search_filter_enabled,
+            search_filter_signal=search_policy.search_filter_signal,
+            search_filter_conf_ok=search_policy.search_filter_conf_ok,
+            title_filter_server_applied=search_policy.title_filter_server_applied,
+            lex_w_eff=request.lex_w_eff,
+            col_project=filter_inputs.col_project,
+            col_perf=filter_inputs.col_perf,
+            timings=request.timings,
+        )
+        runtime.timing_put_fn(request.timings, "phase.dense_search", time.time() - t0)
+
+        sources = []
+        for col, sr in sr_by_col.items():
+            hybrid_points = sr.get("hybrid") or []
+            if hybrid_points:
+                sources.append(runtime.rank_source_factory(name=f"{col}:hybrid", weight=1.0, points=hybrid_points))
+                continue
+            for vname, lst in (sr.get("dense") or {}).items():
+                base_weight = float(request.w_dense_map.get(vname, 1.0))
+                score_weight = runtime.dense_score_weight_fn(lst or []) if runtime.use_dense_score_weight_fn() else 1.0
+                sources.append(runtime.rank_source_factory(name=f"{col}:{vname}", weight=base_weight * score_weight, points=lst or []))
+            sources.append(runtime.rank_source_factory(name=f"{col}:lex", weight=float(request.sparse_weight_eff), points=sr.get("lexical") or []))
+
+        runtime.log_section_fn("RAG.RETRIEVE", per_col_stats, tier=request.per_col_stats_log_tier)
+        t0 = time.time()
+        merged_rrf = runtime.rrf_merge_fn(sources, rrf_k=int(os.getenv("RAG_RRF_K", "60")), keep=int(os.getenv("RAG_MERGED_KEEP", "1200")))
+        merged_rrf = runtime.dedup_by_doc_id_fn(merged_rrf)
+        runtime.timing_put_fn(request.timings, "phase.rrf_merge", time.time() - t0)
+        runtime.log_top_points_fn("RAG.MERGED_RRF.TOP", merged_rrf, topn=int(os.getenv("RAG_LOG_TOPN_MERGED", "10")), tier="debug")
+
+        if not should_backfill:
+            break
+
+        current_filtered_count = _preview_structured_result_count(
+            merged_rrf,
+            runtime=runtime,
+            request=request,
+        )
+        runtime.log_kv_fn(
+            "RAG.RETRIEVAL_BACKFILL.ITERATION",
+            tier="debug",
+            iteration=backfill_iteration,
+            requested_count=int(request.hinted_limit or 0),
+            merged_count=len(merged_rrf or []),
+            filtered_count=int(current_filtered_count),
+            topk_dense=topk_dense,
+            topk_lex_cand=topk_lex_cand,
+            topk_lex=topk_lex,
+            sparse_topk=sparse_topk_eff,
+        )
+        if current_filtered_count >= int(request.hinted_limit or 0):
+            break
+        if backfill_iteration >= max_backfill_iters:
+            exhausted_backfill = True
+            break
+        expanded = _expand_retrieval_candidate_budget(
+            topk_dense=topk_dense,
+            topk_lex_cand=topk_lex_cand,
+            topk_lex=topk_lex,
+            sparse_topk_eff=sparse_topk_eff,
+        )
+        if expanded == (topk_dense, topk_lex_cand, topk_lex, sparse_topk_eff):
+            exhausted_backfill = True
+            break
+        topk_dense, topk_lex_cand, topk_lex, sparse_topk_eff = expanded
+        backfill_iteration += 1
+
+    if should_backfill:
+        runtime.log_kv_fn(
+            "RAG.RETRIEVAL_BACKFILL.END",
+            tier="debug",
+            requested_count=int(request.hinted_limit or 0),
+            filtered_count=int(current_filtered_count),
+            merged_count=len(merged_rrf or []),
+            iterations=int(backfill_iteration),
+            exhausted=int(exhausted_backfill),
+            final_topk_dense=topk_dense,
+            final_topk_lex_cand=topk_lex_cand,
+            final_topk_lex=topk_lex,
+            final_sparse_topk=sparse_topk_eff,
+        )
 
     result = runtime.finalize_rag_result_fn(
         merged_rrf=merged_rrf,

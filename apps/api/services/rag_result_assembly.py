@@ -1078,6 +1078,7 @@ def assemble_join_rag_result(
         query_text=query_text,
         people_terms=people_terms,
         person_ids=person_ids,
+        people_org_terms=people_org_terms,
         org_terms=org_terms,
         org_role=org_role,
     )

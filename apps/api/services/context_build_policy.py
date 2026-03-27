@@ -86,11 +86,19 @@ def _normalize_terms(values: Optional[List[str]]) -> List[str]:
     return normalized
 
 
+def _match_any_term(value: Any, terms: Optional[List[str]]) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(str(term or "").strip().lower() in text for term in (terms or []) if str(term or "").strip())
+
+
 def _pick_matching_prtcp_mp(
     payload: Dict[str, Any],
     *,
     people_terms: Optional[List[str]] = None,
     person_ids: Optional[List[str]] = None,
+    affiliation_org_terms: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """참여인력 list에서 사람명과 person id 힌트에 가장 맞는 member를 고른다."""
     members = payload.get("prtcp_mp")
@@ -99,13 +107,28 @@ def _pick_matching_prtcp_mp(
 
     norm_terms = _normalize_terms(people_terms)
     norm_ids = set(_normalize_terms(person_ids))
+    norm_affiliations = _normalize_terms(affiliation_org_terms)
     if not norm_terms and not norm_ids:
         for member in members:
-            if isinstance(member, dict):
+            if isinstance(member, dict) and (
+                not norm_affiliations or _match_any_term(member.get("blng_org_nm"), norm_affiliations)
+            ):
                 return member
         return {}
 
     id_fields = ("hm_id", "person_no", "prtcp_mp_id", "mp_id", "id")
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        hm_nm = str(member.get("hm_nm") or "").strip()
+        affiliation_ok = not norm_affiliations or _match_any_term(member.get("blng_org_nm"), norm_affiliations)
+        if hm_nm and any(term in hm_nm for term in norm_terms) and affiliation_ok:
+            return member
+        for key in id_fields:
+            sid = str(member.get(key) or "").strip()
+            if sid and sid in norm_ids and affiliation_ok:
+                return member
+
     for member in members:
         if not isinstance(member, dict):
             continue
@@ -142,6 +165,7 @@ def build_context_list_light(
     query_text: str = "",
     people_terms: Optional[List[str]] = None,
     person_ids: Optional[List[str]] = None,
+    people_org_terms: Optional[List[str]] = None,
     org_role: Optional[str] = None,
     token_budget: Optional[int] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
@@ -199,7 +223,12 @@ def build_context_list_light(
             continue
 
         if kind == "people":
-            member = _pick_matching_prtcp_mp(payload, people_terms=people_terms, person_ids=person_ids)
+            member = _pick_matching_prtcp_mp(
+                payload,
+                people_terms=people_terms,
+                person_ids=person_ids,
+                affiliation_org_terms=people_org_terms,
+            )
             name = _pick_first(member.get("hm_nm")) if member else _pick_nested_first(payload, "prtcp_mp", "hm_nm")
             role = _pick_first(member.get("role_slct_nm")) if member else _pick_nested_first(payload, "prtcp_mp", "role_slct_nm")
             org = _pick_first(member.get("blng_org_nm")) if member else _pick_nested_first(payload, "prtcp_mp", "blng_org_nm")
@@ -231,7 +260,12 @@ def build_context_list_light(
                 role = _pick_nested_first(payload, "prtcp_org", "org_slct_nm")
             elif org_role_norm == "affiliation":
                 org = _pick_first(
-                    _pick_matching_prtcp_mp(payload, people_terms=people_terms, person_ids=person_ids).get("blng_org_nm"),
+                    _pick_matching_prtcp_mp(
+                        payload,
+                        people_terms=people_terms,
+                        person_ids=person_ids,
+                        affiliation_org_terms=people_org_terms,
+                    ).get("blng_org_nm"),
                     _pick_nested_first(payload, "prtcp_mp", "blng_org_nm"),
                     payload.get("org_nm"),
                     _pick_nested_first(payload, "prtcp_org", "org_nm"),
@@ -319,6 +353,7 @@ def build_context_with_output_type(
     query_text: str,
     people_terms: Optional[List[str]] = None,
     person_ids: Optional[List[str]] = None,
+    people_org_terms: Optional[List[str]] = None,
     org_terms: Optional[List[str]] = None,
     org_role: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]], Tuple[str, ...]]:
@@ -345,6 +380,7 @@ def build_context_with_output_type(
             query_text=query_text,
             people_terms=people_terms,
             person_ids=person_ids,
+            people_org_terms=people_org_terms,
             org_role=org_role,
         )
         return context, refs, fieldset
@@ -375,6 +411,7 @@ def build_context_bundle(
     query_text: str,
     people_terms: Optional[List[str]] = None,
     person_ids: Optional[List[str]] = None,
+    people_org_terms: Optional[List[str]] = None,
     org_terms: Optional[List[str]] = None,
     org_role: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -399,6 +436,7 @@ def build_context_bundle(
             query_text=query_text,
             people_terms=people_terms,
             person_ids=person_ids,
+            people_org_terms=people_org_terms,
             org_terms=org_terms,
             org_role=org_role,
         )
