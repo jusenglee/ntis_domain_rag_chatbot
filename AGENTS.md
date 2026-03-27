@@ -3,7 +3,6 @@
 ## Repository identity
 - repo: `ntis_domain_rag_chatbot`
 - branch: `고도화`
-- expected_head: `b232eb29c8d4a203f3f24fb897b1a24adc9d1ed9`
 
 ## Mission
 이 저장소는 NTIS 도메인 RAG / 챗봇 프로젝트다.

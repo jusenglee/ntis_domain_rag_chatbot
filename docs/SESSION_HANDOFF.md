@@ -3,7 +3,6 @@
 ## Bootstrap checkpoint
 - repo: `ntis_domain_rag_chatbot`
 - working branch expected: `고도화`
-- bootstrap head: `b232eb29c8d4a203f3f24fb897b1a24adc9d1ed9`
 - created_for: Codex Watcher / Improver / Architect
 
 ## What is confirmed
