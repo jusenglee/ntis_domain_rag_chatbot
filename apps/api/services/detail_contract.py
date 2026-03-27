@@ -156,7 +156,19 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
     entity_kind = _infer_entity_kind(anchor, doc, ids)
     core_profile = {
         "entity_kind": entity_kind,
-        "title": _text(getattr(anchor, "title_text", None) or doc.get("title") or doc.get("title_text") or facts.get("title") or meta_basic.get("kor_pjt_nm") or meta_basic.get("title")),
+        "title": _text(
+            getattr(anchor, "title_text", None)
+            or doc.get("title1")
+            or doc.get("title_text")
+            or facts.get("title")
+            or meta_basic.get("kor_pjt_nm")
+            or meta_detail.get("kor_pjt_nm")
+            or doc.get("title2")
+            or meta_basic.get("eng_pjt_nm")
+            or meta_detail.get("eng_pjt_nm")
+            or doc.get("title")
+            or meta_basic.get("title")
+        ),
         "pjt_id": _text(getattr(anchor, "pjt_id", None) or doc.get("pjt_id") or ids.get("pjt_id") or meta_detail.get("pjt_id") or meta_basic.get("pjt_id")),
         "pjt_no": _text(getattr(anchor, "pjt_no", None) or doc.get("pjt_no") or ids.get("pjt_no") or meta_detail.get("pjt_no") or meta_basic.get("pjt_no")),
         "rst_id": _text(getattr(anchor, "rst_id", None) or doc.get("rst_id") or ids.get("rst_id") or meta_detail.get("rst_id") or meta_basic.get("rst_id")),

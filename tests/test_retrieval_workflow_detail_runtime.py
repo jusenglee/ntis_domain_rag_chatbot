@@ -47,6 +47,67 @@ class Payload:
         self.strategy_meta = strategy_meta or {}
 
 
+def test_build_detail_coverage_input_prefers_canonical_project_title_over_polluted_hit_title():
+    merged = retrieval_workflow._build_detail_coverage_input(
+        {
+            "title": "1. 김봉준",
+            "title_text": "1. 김봉준",
+            "source_type": "hit",
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+        },
+        {
+            "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+            "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발"},
+        },
+        anchor_title="1. 김봉준",
+    )
+
+    assert merged["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+    assert merged["title_text"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
+def test_build_detail_coverage_input_keeps_wrapper_title_for_synthetic_rows():
+    merged = retrieval_workflow._build_detail_coverage_input(
+        {
+            "title": "1. project wrapper",
+            "title_text": "1. project wrapper",
+            "source_type": "aggregation",
+            "pjt_id": "1711135956",
+        },
+        {
+            "ids": {"pjt_id": "1711135956"},
+            "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발"},
+        },
+        anchor_title="단일 반도체물질 기반 3진 논리 게이트 개발",
+    )
+
+    assert merged["title"] == "1. project wrapper"
+    assert merged["title_text"] == "1. project wrapper"
+
+
+def test_build_detail_coverage_input_prefers_raw_title1_over_bilingual_title_text():
+    merged = retrieval_workflow._build_detail_coverage_input(
+        {
+            "title": "1. 김봉준",
+            "title_text": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material",
+            "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+            "title2": "Development of ternary logic gates using a single semiconducting material",
+            "source_type": "hit",
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+        },
+        {
+            "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+            "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material"},
+        },
+        anchor_title="단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material",
+    )
+
+    assert merged["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+    assert merged["title_text"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
 def test_node_rag_search_uses_anchor_locked_exact_lookup_for_detail_followup(monkeypatch):
     DummyRetriever.calls = []
     events = []

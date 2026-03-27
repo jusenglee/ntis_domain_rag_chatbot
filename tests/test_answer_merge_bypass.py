@@ -91,3 +91,17 @@ def test_select_final_answer_falls_back_when_both_models_are_invalid():
     assert result["selected_model"] == "fallback"
     assert result["selected_answer"] == "fallback"
     assert "internal_context_leak" in result["gemma_fail_reasons"]
+
+
+def test_select_final_answer_degrades_inline_detail_evidence_suffix():
+    result = select_final_answer(
+        answer_solar="연구 책임자: 김봉준 [detail_evidence]\n연구 책임자 소속: 숙명여자대학 [detail_evidence]",
+        answer_gemma="연구 책임자는 김봉준이며 소속은 숙명여자대학입니다.",
+        solar_meta={"answer_kind": "llm_streamed", "answer_source": "solar"},
+        policy="solar_first",
+        fallback_message="fallback",
+        min_answer_chars=20,
+    )
+
+    assert result["selected_model"] == "gemma"
+    assert "internal_context_leak" in result["solar_fail_reasons"]

@@ -204,6 +204,10 @@ def _meta_title_candidates(*sources: Any) -> List[str]:
     for source in sources:
         if not isinstance(source, dict):
             continue
+        for title_key in _META_TITLE_KEYS:
+            value = _first_text(source.get(title_key))
+            if value:
+                values.append(value)
         for meta_key in ("meta_basic", "meta_detail"):
             meta = source.get(meta_key)
             if not isinstance(meta, dict):
@@ -212,6 +216,18 @@ def _meta_title_candidates(*sources: Any) -> List[str]:
                 value = _first_text(meta.get(title_key))
                 if value:
                     values.append(value)
+    return values
+
+
+def _source_title_candidates(source: Any, *, synthetic: bool = False) -> List[str]:
+    if not isinstance(source, dict):
+        return []
+    ordered_keys = ("title", "title_text", "title1", "title2") if synthetic else ("title1", "title_text", "title2", "title")
+    values: List[str] = []
+    for key in ordered_keys:
+        value = _first_text(source.get(key))
+        if value:
+            values.append(value)
     return values
 
 
@@ -276,7 +292,7 @@ def _resolve_title_text(
     if _uses_synthetic_display_title(doc, *sources[1:]):
         synthetic_titles: List[Any] = []
         for source in sources:
-            synthetic_titles.extend((source.get("title"), source.get("title_text")))
+            synthetic_titles.extend(_source_title_candidates(source, synthetic=True))
         return _first_text(
             *synthetic_titles,
             facts.get("title"),
@@ -297,24 +313,28 @@ def _resolve_title_text(
         )
     )
     if prefer_canonical:
-        preferred_titles: List[Any] = []
+        primary_source_titles: List[Any] = []
+        secondary_source_titles: List[Any] = []
         fallback_titles: List[Any] = []
         for source in sources:
-            preferred_titles.append(source.get("title_text"))
+            primary_source_titles.append(source.get("title1"))
+            secondary_source_titles.extend((source.get("title_text"), source.get("title2")))
             fallback_titles.append(source.get("title"))
         return _first_text(
-            *preferred_titles,
+            *primary_source_titles,
+            *[source.get("kor_pjt_nm") for source in sources if isinstance(source, dict)],
             facts.get("title"),
             rank_item.get("project_title"),
             rank_item.get("org_name"),
             rank_item.get("hm_nm"),
             *meta_titles,
+            *secondary_source_titles,
             *fallback_titles,
         )
 
     generic_titles: List[Any] = []
     for source in sources:
-        generic_titles.extend((source.get("title_text"), source.get("title")))
+        generic_titles.extend(_source_title_candidates(source))
     return _first_text(
         *generic_titles,
         facts.get("title"),

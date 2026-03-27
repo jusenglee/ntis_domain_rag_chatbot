@@ -54,6 +54,13 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
 
 
 _DISPLAY_LIMIT_SENTINEL = 10**9
+_DETAIL_SYNTHETIC_TITLE_PRIMARY_TYPES = {
+    "aggregation",
+    "series",
+    "pattern_analysis",
+    "reverse_trace",
+    "multi_hop_bundle",
+}
 
 
 def _coerce_positive_int(value: Any) -> Optional[int]:
@@ -62,6 +69,54 @@ def _coerce_positive_int(value: Any) -> Optional[int]:
     except Exception:
         return None
     return number if number >= 1 else None
+
+
+def _first_text_value(*values: Any) -> Optional[str]:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _detail_uses_synthetic_title(*sources: Any) -> bool:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_type = str(source.get("source_type") or source.get("doc_type") or "").strip().lower()
+        if source_type in _DETAIL_SYNTHETIC_TITLE_PRIMARY_TYPES:
+            return True
+    return False
+
+
+def _resolve_detail_coverage_title(
+    document: Optional[dict[str, Any]],
+    canonical_item: Optional[dict[str, Any]],
+    *,
+    anchor_title: Optional[str] = None,
+) -> Optional[str]:
+    doc = document if isinstance(document, dict) else {}
+    canonical = canonical_item if isinstance(canonical_item, dict) else {}
+    if _detail_uses_synthetic_title(doc, canonical):
+        return None
+
+    facts = canonical.get("facts") or {}
+    meta_basic = doc.get("meta_basic") or {}
+    meta_detail = doc.get("meta_detail") or {}
+    return _first_text_value(
+        doc.get("title1"),
+        doc.get("kor_pjt_nm"),
+        meta_basic.get("kor_pjt_nm"),
+        meta_detail.get("kor_pjt_nm"),
+        facts.get("title"),
+        anchor_title,
+        doc.get("title_text"),
+        doc.get("title2"),
+        doc.get("eng_pjt_nm"),
+        meta_basic.get("eng_pjt_nm"),
+        meta_detail.get("eng_pjt_nm"),
+        doc.get("title"),
+    )
 
 
 def _resolve_retrieval_budget(question_analysis: Any, *, max_top_k_size: int) -> int:
@@ -265,7 +320,12 @@ def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
 
 
 
-def _build_detail_coverage_input(document: Optional[dict[str, Any]], canonical_item: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _build_detail_coverage_input(
+    document: Optional[dict[str, Any]],
+    canonical_item: Optional[dict[str, Any]],
+    *,
+    anchor_title: Optional[str] = None,
+) -> dict[str, Any]:
     merged = dict(document or {}) if isinstance(document, dict) else {}
     if not isinstance(canonical_item, dict):
         return merged
@@ -289,7 +349,11 @@ def _build_detail_coverage_input(document: Optional[dict[str, Any]], canonical_i
     elif roles:
         merged["roles"] = {**roles, **dict(merged.get("roles") or {})}
 
-    if facts.get("title") and not str(merged.get("title") or merged.get("title_text") or "").strip():
+    resolved_title = _resolve_detail_coverage_title(merged, canonical_item, anchor_title=anchor_title)
+    if resolved_title:
+        merged["title"] = resolved_title
+        merged["title_text"] = resolved_title
+    elif facts.get("title") and not str(merged.get("title") or merged.get("title_text") or "").strip():
         merged["title"] = facts.get("title")
         merged["title_text"] = facts.get("title")
     if facts.get("year") and not str(merged.get("stan_yr") or "").strip():
@@ -1045,7 +1109,11 @@ async def node_rag_search(
                     org_code=getattr(focus_entity, "org_code", None),
                     biz_no=getattr(focus_entity, "biz_no", None),
                 )
-                coverage_input = _build_detail_coverage_input(docs[0], canonical_evidence[0] if canonical_evidence else None)
+                coverage_input = _build_detail_coverage_input(
+                    docs[0],
+                    canonical_evidence[0] if canonical_evidence else None,
+                    anchor_title=getattr(focus_entity, "title_text", None),
+                )
                 coverage = compute_detail_coverage(coverage_input, anchor=focus_entity)
                 cache_key = make_entity_cache_key(focus_entity)
                 requested_fields = extract_requested_fields(state.messages[-1].content)

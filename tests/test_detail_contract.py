@@ -253,6 +253,30 @@ def test_focus_entity_from_detail_prefers_canonical_project_title_before_anchor_
     assert coverage.core_profile["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
 
 
+def test_focus_entity_from_detail_prefers_raw_title1_over_bilingual_title_text():
+    focus = focus_entity_from_detail(
+        context_kind="project",
+        document={
+            "title": "1. 김봉준",
+            "title_text": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material",
+            "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+            "title2": "Development of ternary logic gates using a single semiconducting material",
+            "source_type": "hit",
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+        },
+        canonical_item={
+            "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+            "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material"},
+            "roles": {},
+        },
+        source="detail_lookup",
+    )
+
+    assert focus is not None
+    assert focus.title_text == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
 def test_build_display_snapshot_keeps_wrapper_title_for_synthetic_rows():
     snapshot = build_display_snapshot(
         conversation_id="cid",
@@ -276,3 +300,32 @@ def test_build_display_snapshot_keeps_wrapper_title_for_synthetic_rows():
     )
 
     assert snapshot.items[0].title_text == "1. project wrapper"
+
+
+def test_build_display_snapshot_prefers_raw_title1_over_bilingual_title_text():
+    snapshot = build_display_snapshot(
+        conversation_id="cid",
+        turn_id="tid",
+        context_kind="project",
+        requested_count=1,
+        documents=[
+            {
+                "title": "1. 김봉준",
+                "title_text": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material",
+                "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+                "title2": "Development of ternary logic gates using a single semiconducting material",
+                "source_type": "hit",
+                "pjt_id": "1711135956",
+                "pjt_no": "2021R1F1A1057134",
+            }
+        ],
+        canonical_evidence=[
+            {
+                "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material"},
+            }
+        ],
+        raw_count=1,
+    )
+
+    assert snapshot.items[0].title_text == "단일 반도체물질 기반 3진 논리 게이트 개발"

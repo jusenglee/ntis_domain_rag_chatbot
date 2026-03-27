@@ -71,6 +71,8 @@ def _looks_like_internal_context_leak(text: str) -> bool:
         return False
     normalized_text = "\n".join(normalized_lines)
     normalized_lower = normalized_text.lower()
+    if re.search(r"\[\s*detail[\s_-]*evidence\s*\]", normalized_lower):
+        return True
     if any(marker in normalized_lower for marker in _INTERNAL_CONTEXT_MARKERS):
         return True
 
