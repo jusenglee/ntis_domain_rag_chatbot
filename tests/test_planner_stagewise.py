@@ -1,18 +1,19 @@
 import asyncio
 from types import SimpleNamespace
 
+import apps.api.services.planner_runtime as planner_runtime_module
 import apps.api.services.rag_retriever as rag_retriever_module
 from apps.api.services.rag_retriever import detect_retrieval_query_drift, repair_query_for_resolved_anchor, resolve_rag_queries
 from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.detail_contract import compute_detail_coverage
 from apps.api.services.view_state import FocusEntity
 from apps.api.services.planner_service import apply_planner_strategy, apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
-from apps.api.services.planner_runtime import _normalize_stage2_slots_payload, _planner_prev_context_text, _sanitize_stage2_structured_filters
+from apps.api.services.planner_runtime import _apply_deterministic_stage2_repair, _normalize_stage2_slots_payload, _planner_prev_context_text, _sanitize_stage2_structured_filters
 from apps.api.services.request_facade import build_intent_payload
 from apps.api.services.view_state import build_display_snapshot, render_display_snapshot_text
 from apps.core.planner_stage15_types import PlannerEntityRolePlan
 from apps.core.planner_surface_signals import collect_surface_signals
-from apps.core.planner_validation import validate_stage2_slots
+from apps.core.planner_validation import Stage2ValidationResult, validate_stage2_slots
 from apps.api.services.retrieval_workflow import (
     _extract_explicit_count,
     _normalize_display_payloads,
@@ -828,6 +829,17 @@ def test_detect_retrieval_query_drift_rejects_perf_axis_change():
     assert 'perf_axis_added' in drift_reasons
 
 
+def test_detect_retrieval_query_drift_flags_parenthesized_people_org_loss():
+    drift_detected, drift_reasons = detect_retrieval_query_drift(
+        raw_query='신동구(한국과학기술정보연구원) 연구자의 활동이력',
+        hint_query='연구자 활동이력',
+    )
+
+    assert drift_detected is True
+    assert 'people_terms_lost' in drift_reasons
+    assert 'org_terms_lost' in drift_reasons
+
+
 
 def test_resolve_rag_queries_falls_back_to_raw_query_on_drift():
     state = SimpleNamespace(question='반도체 분야 과제 3건을 알려줘', intent_payload=None)
@@ -878,6 +890,26 @@ def test_resolve_rag_queries_keeps_identifier_and_year_terms():
     assert confidence == 0.95
     assert drift_detected is True
     assert 'missing_identifier_or_year' in drift_reasons
+    assert fallback_applied is True
+
+
+def test_resolve_rag_queries_falls_back_when_quoted_title_is_lost():
+    state = SimpleNamespace(question="'단일 반도체물질 기반 3진 논리 게이트 개발' 과제 상세정보", intent_payload=None)
+    qa = SimpleNamespace(retrieval_query='과제 상세정보', confidence=0.95)
+    ks = SimpleNamespace(retrieval_query='과제 상세정보', confidence=0.95)
+
+    raw_query, planner_query, search_query, confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries(
+        state=state,
+        qa=qa,
+        ks=ks,
+        min_confidence=0.55,
+    )
+
+    assert planner_query == '과제 상세정보'
+    assert search_query == raw_query
+    assert confidence == 0.95
+    assert drift_detected is True
+    assert 'title_terms_lost' in drift_reasons
     assert fallback_applied is True
 
 
@@ -1496,6 +1528,269 @@ def test_sanitize_stage2_structured_filters_keeps_affiliation_org_filter_when_ro
     )
 
     assert sanitized.filters == {"people_affiliation_org_name": ["KISTI"]}
+
+
+def test_sanitize_stage2_structured_filters_drops_id_like_org_gate_for_project_detail_query():
+    events = []
+
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    sanitized = _sanitize_stage2_structured_filters(
+        slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={"org_name": ["B555000149"]},
+            retrieval_query="B555000149 과제의 상세정보",
+            limit=1,
+            display_limit=1,
+            confidence=0.97,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=[],
+            org_terms_to_keep=["B555000149"],
+            org_role_hint="unspecified",
+            perf_type_hints=[],
+            must_keep_terms=["B555000149"],
+            confidence=0.97,
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda name, **fields: events.append((name, fields)),
+    )
+
+    assert sanitized.filters == {}
+    assert "B555000149" in sanitized.retrieval_query
+    assert any(name == "PLANNER.STAGE2.FILTERS.SANITIZED" for name, _ in events)
+
+
+def test_apply_deterministic_stage2_repair_restores_missing_people_org_year_and_query_terms():
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    validation = Stage2ValidationResult(
+        ok=False,
+        errors=["missing_must_keep_terms", "missing_people_terms", "missing_org_terms", "missing_years"],
+        missing_must_keep_terms=["활동이력"],
+        missing_people_terms=["신동구"],
+        missing_org_terms=["한국과학기술정보연구원"],
+        missing_years=["2024"],
+        missing_perf_types=[],
+    )
+    repaired, meta = _apply_deterministic_stage2_repair(
+        stage2_slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={},
+            retrieval_query="연구자 활동",
+            limit=5,
+            display_limit=5,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        validation=validation,
+        locked_strategy=SimpleNamespace(mode="LOOKUP"),
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=["신동구"],
+            org_terms_to_keep=["한국과학기술정보연구원"],
+            org_role_hint="affiliation_org",
+            perf_type_hints=[],
+            must_keep_terms=["신동구", "한국과학기술정보연구원", "활동이력"],
+            semantic_kind="broad_history",
+            perf_type_policy="explicit_only",
+            confidence=0.95,
+        ),
+        question="2024 신동구(한국과학기술정보연구원) 연구자의 활동이력",
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda *args, **kwargs: None,
+    )
+
+    assert repaired.filters == {
+        "participant_researcher_name": ["신동구"],
+        "people_affiliation_org_name": ["한국과학기술정보연구원"],
+        "years": ["2024"],
+    }
+    assert "활동이력" in repaired.retrieval_query
+    assert "2024" in repaired.retrieval_query
+    assert meta["applied"] is True
+    assert meta["filter_repairs_allowed"] is True
+
+
+def test_apply_deterministic_stage2_repair_keeps_search_mode_query_only():
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    validation = Stage2ValidationResult(
+        ok=False,
+        errors=["missing_must_keep_terms", "missing_years"],
+        missing_must_keep_terms=["반도체"],
+        missing_people_terms=[],
+        missing_org_terms=[],
+        missing_years=["2024"],
+        missing_perf_types=[],
+    )
+    repaired, meta = _apply_deterministic_stage2_repair(
+        stage2_slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={},
+            retrieval_query="과제",
+            limit=5,
+            display_limit=5,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        validation=validation,
+        locked_strategy=SimpleNamespace(mode="SEARCH"),
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=[],
+            org_terms_to_keep=[],
+            org_role_hint="unspecified",
+            perf_type_hints=[],
+            must_keep_terms=["반도체"],
+            semantic_kind="generic_lookup",
+            perf_type_policy="explicit_only",
+            confidence=0.95,
+        ),
+        question="2024 반도체 과제를 알려줘",
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda *args, **kwargs: None,
+    )
+
+    assert repaired.filters == {}
+    assert repaired.retrieval_query == "과제 반도체 2024"
+    assert meta["filter_repairs_allowed"] is False
+
+
+def test_run_stagewise_question_analysis_uses_deterministic_repair_before_raw_fallback(monkeypatch):
+    events = []
+
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    async def fake_build_planner_domain_cards(**kwargs):
+        return {}
+
+    async def fake_run_planner_stage1(**kwargs):
+        return SimpleNamespace(action="list", head="people", relation_candidate=None, confidence=0.95)
+
+    async def fake_run_planner_stage15(**kwargs):
+        return PlannerEntityRolePlan(
+            people_terms_to_keep=["신동구"],
+            org_terms_to_keep=["한국과학기술정보연구원"],
+            org_role_hint="affiliation_org",
+            perf_type_hints=[],
+            must_keep_terms=["신동구", "한국과학기술정보연구원", "활동이력"],
+            semantic_kind="broad_history",
+            perf_type_policy="explicit_only",
+            confidence=0.98,
+        )
+
+    async def fake_run_planner_stage2(**kwargs):
+        return FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={},
+            retrieval_query="연구자 활동",
+            limit=5,
+            display_limit=5,
+            confidence=0.92,
+        )
+
+    monkeypatch.setattr(planner_runtime_module, "build_planner_domain_cards", fake_build_planner_domain_cards)
+    monkeypatch.setattr(planner_runtime_module, "run_planner_stage1", fake_run_planner_stage1)
+    monkeypatch.setattr(planner_runtime_module, "run_planner_stage15", fake_run_planner_stage15)
+    monkeypatch.setattr(planner_runtime_module, "run_planner_stage2", fake_run_planner_stage2)
+    monkeypatch.setattr(
+        planner_runtime_module,
+        "determine_locked_strategy",
+        lambda **kwargs: SimpleNamespace(mode="LOOKUP", head="people", action="list", relation=None, join_key_mode=None, target_cols=["ntis_project_v1", "ntis_perf_v1"], prev_context_seed={}),
+    )
+    monkeypatch.setattr(planner_runtime_module, "regate_locked_strategy", lambda **kwargs: kwargs["locked_strategy"])
+    monkeypatch.setattr(planner_runtime_module, "assemble_question_analysis", lambda **kwargs: kwargs["stage2"])
+
+    result = asyncio.run(
+        planner_runtime_module.run_stagewise_question_analysis(
+            question="2024 신동구(한국과학기술정보연구원) 연구자의 활동이력",
+            conversation_id="cid",
+            request_id="rid",
+            chat_history=[],
+            prev_context=[],
+            canonical_evidence=[],
+            normalized_intent=SimpleNamespace(people_terms=[], org_terms=[], perf_types=[], years=[]),
+            view_state=None,
+            build_llm=lambda *args, **kwargs: None,
+            planner_stage1_decision_cls=object,
+            planner_stage15_plan_cls=object,
+            planner_stage2_slots_cls=FakeStage2Slots,
+            question_analysis_cls=object,
+            load_prompt_file=lambda *args, **kwargs: "",
+            sanitize_llm_json=lambda value: value,
+            sanitize_ids_map_semantics=lambda ids_map, **kwargs: (ids_map, {}, []),
+            log_event=lambda name, **fields: events.append((name, fields)),
+            planner_stage1_prompt_version="v2",
+            planner_stage15_prompt_version="v1",
+            planner_stage2_prompt_version="v2",
+            planner_disable_thinking=True,
+            planner_temperature=0.0,
+            planner_schema_version="v3",
+            planner_stagewise_enabled=True,
+            planner_stage2_regate_seed_allowed_keys={"pjt_id", "pjt_no"},
+            max_top_k_size=20,
+        )
+    )
+
+    assert result.filters == {
+        "participant_researcher_name": ["신동구"],
+        "people_affiliation_org_name": ["한국과학기술정보연구원"],
+        "years": ["2024"],
+    }
+    assert "활동이력" in result.retrieval_query
+    assert any(name == "PLANNER.STAGE2.DETERMINISTIC_REPAIR" for name, _ in events)
+    assert not any(name == "PLANNER.STAGE2.RAW_QUERY_FALLBACK" for name, _ in events)
 
 
 def test_anchor_to_seed_map_supports_perf_people_org_ids():

@@ -198,6 +198,61 @@ def test_custom_rag_retriever_forwards_request_overrides(monkeypatch):
     assert captured["request_overrides"] == {"RAG_TOPK_DENSE": 77, "RAG_W_LEX": 0.42}
 
 
+def test_custom_rag_retriever_unwraps_nested_payload_and_preserves_detail_fields(monkeypatch):
+    def fake_run_rag_ab_compare(*, query, model_name, intent_payload=None, request_overrides=None):
+        return {
+            "M": SimpleNamespace(
+                reranked_hits=[
+                    {
+                        "payload": {
+                            "payload": {
+                                "doc_id": "1711135956",
+                                "pjt_id": "1711135956",
+                                "pjt_no": "2021R1F1A1057134",
+                                "org_nm": "숙명여자대학",
+                                "title_text": "단일 반도체물질 기반 3진 논리 게이트 개발 Development of ternary logic gates using a single semiconducting material",
+                                "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+                                "title2": "Development of ternary logic gates using a single semiconducting material",
+                                "meta_basic": {
+                                    "kor_pjt_nm": "단일 반도체물질 기반 3진 논리 게이트 개발",
+                                    "rsch_abstract": "요약 본문",
+                                    "rsch_goal_abstract": "목표 본문",
+                                    "tot_rsch_start_dt": "2021-06-01",
+                                    "tot_rsch_end_dt": "2022-05-31",
+                                    "rndco_tot_amt": "48400000",
+                                },
+                                "content1": "목표 본문",
+                                "content2": "요약 본문",
+                                "content_text": "전체 본문",
+                            }
+                        }
+                    }
+                ],
+                aggregation={},
+                series={},
+                canonical_evidence=[],
+                render_profile={},
+                timings={},
+            )
+        }
+
+    monkeypatch.setattr("apps.api.services.rag_retriever.run_rag_ab_compare", fake_run_rag_ab_compare)
+
+    retriever = CustomRAGRetriever(top_k=1)
+    result = retriever.retrieve("test")
+
+    assert len(result["documents"]) == 1
+    doc = result["documents"][0]
+    assert doc["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+    assert doc["pjt_id"] == "1711135956"
+    assert doc["pjt_no"] == "2021R1F1A1057134"
+    assert doc["org_nm"] == "숙명여자대학"
+    assert doc["content1"] == "목표 본문"
+    assert doc["content2"] == "요약 본문"
+    assert doc["content_text"] == "전체 본문"
+    assert doc["meta_basic"]["rndco_tot_amt"] == "48400000"
+
+
 def test_query_debug_includes_request_overrides_in_graph_inputs():
     graph = CaptureDebugGraph()
     client = _build_client(graph)

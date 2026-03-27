@@ -17,6 +17,7 @@
 2. 제품 품질 게이트
    - `eval/sample_queries.jsonl` 또는 후속 골든 질의 세트가 존재
    - 도메인별 검색 질의가 최소한 `project / perf / people / org / follow-up / id` 축을 포함
+   - planner 품질 baseline에는 추가로 `broad_history / quoted_title / source_ref / ordinal` 축이 포함
    - fixture schema 테스트가 통과
 3. 운영 게이트
    - baseline 스크립트가 수집, 핵심 회귀, eval fixture 존재 여부를 함께 확인

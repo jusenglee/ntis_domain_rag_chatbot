@@ -18,6 +18,36 @@ from apps.api.services.detail_contract import FIELD_ALIASES, extract_requested_f
 from apps.api.contracts.runtime_contracts import friendly_strategy_violation_message
 
 
+_DETAIL_RAW_PASSTHROUGH_FIELDS = (
+    "pjt_id",
+    "pjt_no",
+    "rst_id",
+    "person_no",
+    "hm_id",
+    "org_id",
+    "org_code",
+    "org_cd",
+    "biz_no",
+    "org_no",
+    "doi",
+    "issn",
+    "stan_yr",
+    "org_nm",
+    "summary",
+    "content",
+    "content1",
+    "content2",
+    "content_text",
+    "start_dt",
+    "end_dt",
+    "dt1",
+    "dt2",
+    "rndco_tot_amt",
+    "kor_pjt_nm",
+    "eng_pjt_nm",
+)
+
+
 def _load_run_rag_ab_compare() -> Any:
     """실제 runtime 구현을 지연 import한다."""
     from apps.core.rag_pipeline import run_rag_ab_compare as runtime_run_rag_ab_compare
@@ -616,6 +646,27 @@ class CustomRAGRetriever(BaseModel):
         return False
 
     @staticmethod
+    def _coerce_hit_data(hit: Any) -> Dict[str, Any]:
+        """Flatten payload-wrapped reranked hits into a payload-first document view."""
+        if isinstance(hit, dict):
+            wrapper = dict(hit)
+        else:
+            wrapper = dict(getattr(hit, "__dict__", {}) or {})
+
+        payload = getattr(hit, "payload", None)
+        if not isinstance(payload, dict):
+            payload = wrapper.get("payload")
+
+        payload_dict = dict(payload or {}) if isinstance(payload, dict) else {}
+        nested_payload = payload_dict.get("payload")
+        if isinstance(nested_payload, dict):
+            payload_dict = {**{key: value for key, value in payload_dict.items() if key != "payload"}, **nested_payload}
+
+        merged = {key: value for key, value in wrapper.items() if key != "payload"}
+        merged.update(payload_dict)
+        return merged
+
+    @staticmethod
     def _build_rag_intent_payload(intent_payload: Optional[IntentPayloadV3]) -> Optional[Dict[str, Any]]:
         """`IntentPayloadV3`에서 RAG 런타임이 직접 쓸 payload 뷰만 추출한다.
 
@@ -832,12 +883,7 @@ class CustomRAGRetriever(BaseModel):
 
         documents = []
         for idx, hit in enumerate(hits[: self.top_k], start=1):
-            if hasattr(hit, "payload"):
-                hit_data = hit.payload
-            elif isinstance(hit, dict):
-                hit_data = hit
-            else:
-                hit_data = getattr(hit, "__dict__", {})
+            hit_data = self._coerce_hit_data(hit)
 
             inferred_tag = self._infer_tag_from_hit_data(hit_data, self.intent_payload)
             rag_data = {
@@ -855,6 +901,10 @@ class CustomRAGRetriever(BaseModel):
                 "title1": hit_data.get("title1"),
                 "title2": hit_data.get("title2"),
             }
+            for field in _DETAIL_RAW_PASSTHROUGH_FIELDS:
+                value = hit_data.get(field)
+                if value not in (None, "", [], {}):
+                    rag_data[field] = value
 
             if inferred_tag is not None or self._has_minimum_document_fields(hit_data):
                 documents.append(rag_data)

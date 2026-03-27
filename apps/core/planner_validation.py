@@ -24,6 +24,7 @@ _BROAD_HISTORY_GENERIC_TERMS = {
 class Stage2ValidationResult:
     ok: bool
     errors: list[str]
+    missing_must_keep_terms: list[str]
     missing_people_terms: list[str]
     missing_org_terms: list[str]
     missing_years: list[str]
@@ -163,6 +164,7 @@ def validate_stage2_slots(
     return Stage2ValidationResult(
         ok=not errors,
         errors=errors,
+        missing_must_keep_terms=missing_must_keep,
         missing_people_terms=missing_people,
         missing_org_terms=missing_orgs,
         missing_years=missing_years,

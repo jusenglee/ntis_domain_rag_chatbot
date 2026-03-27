@@ -4,3 +4,7 @@
 {"id":"people_relation","question":"김철수 연구자가 참여한 과제를 보여줘","axis":["people","relation"],"must_keep":["김철수"],"expected_output_type":"relation"}
 {"id":"org_project_list","question":"ETRI가 수행한 과제를 보여줘","axis":["org","project","list"],"must_keep":["ETRI"],"expected_output_type":"list"}
 {"id":"project_perf_relation","question":"PJT-2020-1234-5678 관련 성과를 보여줘","axis":["project","perf","join"],"must_keep":["PJT-2020-1234-5678"],"expected_output_type":"relation"}
+{"id":"people_broad_history_parenthesized","question":"신동구(한국과학기술정보연구원) 연구자의 활동이력 5건만 보여줘","axis":["people","org","broad_history"],"must_keep":["신동구","한국과학기술정보연구원","활동이력"],"expected_output_type":"list"}
+{"id":"quoted_project_title_detail","question":"'단일 반도체물질 기반 3진 논리 게이트 개발' 과제 상세정보를 보여줘","axis":["project","detail","quoted_title"],"must_keep":["단일 반도체물질 기반 3진 논리 게이트 개발"],"expected_output_type":"detail"}
+{"id":"ordinal_project_detail_followup","question":"2번 과제의 상세정보를 보여줘","axis":["project","detail","followup","ordinal"],"must_keep":["followup_anchor"],"expected_output_type":"detail"}
+{"id":"source_reference_followup","question":"출처 2의 연구자 정보를 보여줘","axis":["people","followup","source_ref"],"must_keep":["source_reference"],"expected_output_type":"detail"}

@@ -86,6 +86,14 @@ def _pick_nested(items: Any, key: str) -> list[str]:
     return out
 
 
+def _format_period(start: Any, end: Any) -> str:
+    start_text = _text(start)
+    end_text = _text(end)
+    if start_text and end_text:
+        return f"{start_text} ~ {end_text}"
+    return start_text or end_text
+
+
 def _infer_entity_kind(anchor: Optional[FocusEntity], doc: Dict[str, Any], ids: Dict[str, Any]) -> str:
     if anchor is not None and getattr(anchor, "kind", None):
         return str(anchor.kind).strip().lower() or "project"
@@ -157,15 +165,17 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
     core_profile = {
         "entity_kind": entity_kind,
         "title": _text(
-            getattr(anchor, "title_text", None)
-            or doc.get("title1")
-            or doc.get("title_text")
-            or facts.get("title")
+            doc.get("title1")
+            or doc.get("kor_pjt_nm")
             or meta_basic.get("kor_pjt_nm")
             or meta_detail.get("kor_pjt_nm")
+            or doc.get("title_text")
+            or facts.get("title")
             or doc.get("title2")
+            or doc.get("eng_pjt_nm")
             or meta_basic.get("eng_pjt_nm")
             or meta_detail.get("eng_pjt_nm")
+            or getattr(anchor, "title_text", None)
             or doc.get("title")
             or meta_basic.get("title")
         ),
@@ -184,10 +194,39 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
         "researchers": _pick_nested(doc.get("prtcp_mp"), "hm_nm") or [str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()] or [str(v).strip() for v in (getattr(anchor, "researchers", None) or []) if str(v).strip()],
     }
     rich_detail = {
-        "summary": _text(doc.get("summary") or facts.get("summary") or meta_detail.get("smry") or meta_basic.get("summary")),
-        "goal": _text(meta_detail.get("goal") or meta_detail.get("obj") or meta_detail.get("research_goal")),
-        "period": _text(meta_detail.get("period") or meta_detail.get("research_period") or meta_detail.get("date_range")),
-        "budget": _text(meta_detail.get("budget") or meta_detail.get("research_expense") or meta_detail.get("total_budget")),
+        "summary": _text(
+            doc.get("summary")
+            or facts.get("summary")
+            or meta_detail.get("smry")
+            or meta_basic.get("summary")
+            or meta_basic.get("rsch_abstract")
+            or doc.get("content2")
+            or doc.get("content_text")
+            or doc.get("content")
+        ),
+        "goal": _text(
+            meta_detail.get("goal")
+            or meta_detail.get("obj")
+            or meta_detail.get("research_goal")
+            or meta_basic.get("rsch_goal_abstract")
+            or doc.get("content1")
+        ),
+        "period": _text(
+            meta_detail.get("period")
+            or meta_detail.get("research_period")
+            or meta_detail.get("date_range")
+            or _format_period(
+                meta_basic.get("tot_rsch_start_dt") or doc.get("start_dt") or doc.get("dt1"),
+                meta_basic.get("tot_rsch_end_dt") or doc.get("end_dt") or doc.get("dt2"),
+            )
+        ),
+        "budget": _text(
+            meta_detail.get("budget")
+            or meta_detail.get("research_expense")
+            or meta_detail.get("total_budget")
+            or meta_basic.get("rndco_tot_amt")
+            or doc.get("rndco_tot_amt")
+        ),
         "outputs": _pick_nested(meta_detail.get("outputs"), "name") or _pick_nested(doc.get("outputs"), "name") or ([_text(meta_detail.get("outputs"))] if _text(meta_detail.get("outputs")) else []),
         "perf_type": _text(meta_detail.get("perf_type") or facts.get("tag") or doc.get("tag")),
         "affiliation": _text(meta_detail.get("affiliation") or meta_detail.get("blng_org_nm") or meta_basic.get("affiliation") or ((roles.get("people_affiliation_org_name") or [None])[0]) or getattr(anchor, "lead_org", None)),

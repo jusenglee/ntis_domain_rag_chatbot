@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+from apps.api.services.context_helpers import resolve_title_from_payload
 from apps.api.services.detail_contract import build_detail_answer_context, compute_detail_coverage, make_entity_cache_key, render_detail_answer
 from apps.api.services.view_state import FocusEntity, build_display_snapshot, focus_entity_from_detail
+from apps.core.canonical_evidence import build_canonical_evidence
 
 
 def test_render_detail_answer_uses_korean_labels_for_project_profile():
@@ -300,6 +302,74 @@ def test_build_display_snapshot_keeps_wrapper_title_for_synthetic_rows():
     )
 
     assert snapshot.items[0].title_text == "1. project wrapper"
+
+
+def test_compute_detail_coverage_prefers_hydrated_project_title_over_polluted_anchor_label():
+    coverage = compute_detail_coverage(
+        {
+            "title": "1. Kim",
+            "title_text": "1. Kim",
+            "title1": "Canonical Project Title",
+            "pjt_id": "PJT-123",
+        },
+        anchor=FocusEntity(
+            kind="project",
+            source="detail_lookup",
+            pjt_id="PJT-123",
+            title_text="1. Kim",
+        ),
+    )
+
+    assert coverage.core_profile["title"] == "Canonical Project Title"
+
+
+def test_compute_detail_coverage_hydrates_ntis_project_fields_from_meta_basic():
+    coverage = compute_detail_coverage(
+        {
+            "title1": "Canonical Project Title",
+            "pjt_id": "PJT-123",
+            "meta_basic": {
+                "rsch_goal_abstract": "Build a stable ternary inverter.",
+                "rsch_abstract": "This project summarizes the selective doping approach.",
+                "tot_rsch_start_dt": "2021-06-01",
+                "tot_rsch_end_dt": "2022-05-31",
+                "rndco_tot_amt": "48400000",
+            },
+        },
+        anchor=FocusEntity(kind="project", source="detail_lookup", pjt_id="PJT-123", title_text="1. Kim"),
+    )
+
+    assert coverage.core_profile["title"] == "Canonical Project Title"
+    assert coverage.rich_detail["summary"] == "This project summarizes the selective doping approach."
+    assert coverage.rich_detail["goal"] == "Build a stable ternary inverter."
+    assert coverage.rich_detail["period"] == "2021-06-01 ~ 2022-05-31"
+    assert coverage.rich_detail["budget"] == "48400000"
+
+
+def test_resolve_title_from_payload_prefers_title1_over_title_text():
+    assert resolve_title_from_payload(
+        {
+            "title_text": "1. Kim",
+            "title1": "Canonical Project Title",
+            "title2": "Canonical English Title",
+        }
+    ) == "Canonical Project Title"
+
+
+def test_build_canonical_evidence_prefers_title1_over_polluted_title_text():
+    evidence = build_canonical_evidence(
+        {
+            "title_text": "1. Kim",
+            "title1": "Canonical Project Title",
+            "title2": "Canonical English Title",
+            "pjt_id": "PJT-123",
+        },
+        rank=1,
+        base_route="project",
+        output_type="detail",
+    ).to_dict()
+
+    assert evidence["facts"]["title"] == "Canonical Project Title"
 
 
 def test_build_display_snapshot_prefers_raw_title1_over_bilingual_title_text():

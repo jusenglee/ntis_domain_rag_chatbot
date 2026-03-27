@@ -131,8 +131,8 @@ def _collect_facts(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, A
     prompt view가 보게 될 정보와 lookup/filter 보조에 쓸 정보를 raw payload 키 의존 없이 읽을 수 있게 맞춘다.
     """
     title = _first_non_empty(
-        payload.get("title_text"),
         payload.get("title1"),
+        payload.get("title_text"),
         payload.get("title2"),
         meta.get("kor_pjt_nm"),
         meta.get("eng_pjt_nm"),

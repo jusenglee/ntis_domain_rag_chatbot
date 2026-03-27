@@ -32,6 +32,7 @@ from apps.core.planner_staged import (
 from apps.core.planner_surface_signals import SurfaceSignals, collect_surface_signals
 from apps.core.planner_validation import Stage2ValidationResult, validate_stage2_slots
 from apps.core.query_intent import (
+    ORG_CUES,
     has_ambiguous_project_key_label,
     has_explicit_project_id_label,
     has_explicit_project_no_label,
@@ -77,6 +78,16 @@ _ROLE_SCOPED_ORG_FILTER_KEYS = (
     "performing_org_name",
     "participant_org_name",
     "people_affiliation_org_name",
+)
+_ID_LIKE_FILTER_TERM_RE = re.compile(r"^(?:\d{8,12}|(?=.*\d)[A-Za-z0-9][A-Za-z0-9_-]{3,63})$")
+_PROJECT_AXIS_CUES = ("과제", "project", "pjt")
+_EXPLICIT_ORG_QUERY_CUES = tuple(str(cue or "").strip().lower() for cue in ORG_CUES) + (
+    "소속",
+    "affiliation",
+    "organization",
+    "institution",
+    "company",
+    "org",
 )
 
 
@@ -153,6 +164,7 @@ def _entity_role_payload(plan: PlannerEntityRolePlan) -> dict[str, Any]:
 def _validation_hints_payload(result: Stage2ValidationResult) -> dict[str, Any]:
     return {
         "errors": list(result.errors),
+        "missing_must_keep_terms": list(result.missing_must_keep_terms),
         "missing_people_terms": list(result.missing_people_terms),
         "missing_org_terms": list(result.missing_org_terms),
         "missing_years": list(result.missing_years),
@@ -189,6 +201,128 @@ def _append_terms_to_query(query: str, terms: list[str]) -> str:
             continue
         merged.append(text)
     return " ".join(merged).strip()
+
+
+def _looks_identifier_like_filter_term(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or re.fullmatch(r"(?:19|20)\d{2}", text):
+        return False
+    return bool(_ID_LIKE_FILTER_TERM_RE.fullmatch(text))
+
+
+def _query_mentions_project_axis(query: str) -> bool:
+    lowered = str(query or "").strip().lower()
+    if not lowered:
+        return False
+    return any(cue in lowered for cue in _PROJECT_AXIS_CUES)
+
+
+def _query_has_explicit_org_cue(query: str) -> bool:
+    lowered = str(query or "").strip().lower()
+    if not lowered:
+        return False
+    return any(cue and cue in lowered for cue in _EXPLICIT_ORG_QUERY_CUES)
+
+
+def _merge_filter_terms(filters: dict[str, Any], key: str, values: list[str]) -> list[str]:
+    merged = _normalize_terms([*_normalize_terms(filters.get(key)), *values])
+    if merged:
+        filters[key] = merged
+    return merged
+
+
+def _resolve_org_filter_key(entity_role_plan: PlannerEntityRolePlan) -> str:
+    org_role_hint = str(getattr(entity_role_plan, "org_role_hint", "") or "").strip().lower()
+    if org_role_hint == "lead_org":
+        return "lead_org_name"
+    if org_role_hint == "participant_org":
+        return "participant_org_name"
+    if org_role_hint == "affiliation_org":
+        return "people_affiliation_org_name"
+    return "org_name"
+
+
+def _apply_deterministic_stage2_repair(
+    *,
+    stage2_slots: Any,
+    planner_stage2_slots_cls: Any,
+    validation: Stage2ValidationResult,
+    locked_strategy: DeterministicGateStrategy,
+    entity_role_plan: PlannerEntityRolePlan,
+    question: str,
+    request_id: Optional[str],
+    conversation_id: str,
+    log_event: Any,
+) -> tuple[Any, dict[str, Any]]:
+    payload = stage2_slots.model_dump() if hasattr(stage2_slots, "model_dump") else dict(stage2_slots or {})
+    filters = dict(payload.get("filters") or {})
+    locked_mode = str(getattr(locked_strategy, "mode", "") or "").strip().lower()
+    retrieval_query_before = str(payload.get("retrieval_query") or "").strip()
+    injected_filters: dict[str, list[str]] = {}
+    filter_repairs_allowed = locked_mode != "search"
+
+    if filter_repairs_allowed and validation.missing_people_terms:
+        merged = _merge_filter_terms(filters, "participant_researcher_name", list(validation.missing_people_terms))
+        if merged:
+            injected_filters["participant_researcher_name"] = merged
+
+    if filter_repairs_allowed and validation.missing_org_terms:
+        org_filter_key = _resolve_org_filter_key(entity_role_plan)
+        merged = _merge_filter_terms(filters, org_filter_key, list(validation.missing_org_terms))
+        if merged:
+            injected_filters[org_filter_key] = merged
+
+    if filter_repairs_allowed and validation.missing_years:
+        merged = _merge_filter_terms(filters, "years", list(validation.missing_years))
+        if merged:
+            injected_filters["years"] = merged
+
+    repair_terms = _normalize_terms(
+        [
+            *list(validation.missing_must_keep_terms),
+            *list(validation.missing_people_terms),
+            *list(validation.missing_org_terms),
+            *list(validation.missing_years),
+        ]
+    )
+    retrieval_query_after = _append_terms_to_query(retrieval_query_before or question, repair_terms)
+
+    payload["filters"] = filters
+    payload["retrieval_query"] = retrieval_query_after or question
+    repaired_slots = planner_stage2_slots_cls.model_validate(payload)
+    repaired_slots = _sanitize_stage2_structured_filters(
+        slots=repaired_slots,
+        planner_stage2_slots_cls=planner_stage2_slots_cls,
+        entity_role_plan=entity_role_plan,
+        request_id=request_id,
+        conversation_id=conversation_id,
+        log_event=log_event,
+    )
+    repaired_payload = repaired_slots.model_dump() if hasattr(repaired_slots, "model_dump") else dict(repaired_slots or {})
+    changed = repaired_payload != (stage2_slots.model_dump() if hasattr(stage2_slots, "model_dump") else dict(stage2_slots or {}))
+    metadata = {
+        "applied": changed,
+        "prompt_miss_terms": list(validation.missing_must_keep_terms),
+        "injected_filters": injected_filters,
+        "query_terms": repair_terms,
+        "retrieval_query_before": retrieval_query_before,
+        "retrieval_query_after": str(repaired_payload.get("retrieval_query") or "").strip(),
+        "filter_repairs_allowed": filter_repairs_allowed,
+    }
+    if changed:
+        log_event(
+            "PLANNER.STAGE2.DETERMINISTIC_REPAIR",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            reason_code="deterministic_repair_applied",
+            prompt_miss_terms=metadata["prompt_miss_terms"],
+            injected_filter_keys=sorted(injected_filters.keys()),
+            query_terms=repair_terms,
+            filter_repairs_allowed=int(filter_repairs_allowed),
+            retrieval_query_before=retrieval_query_before,
+            retrieval_query_after=metadata["retrieval_query_after"],
+        )
+    return repaired_slots, metadata
 
 
 def _sanitize_stage2_structured_filters(
@@ -240,6 +374,15 @@ def _sanitize_stage2_structured_filters(
             values = _normalize_terms(filters.pop(key, None))
             if values:
                 dropped[key] = values
+
+    if _query_mentions_project_axis(retrieval_query) and not _query_has_explicit_org_cue(retrieval_query):
+        for key in (*_GENERIC_ORG_FILTER_KEYS, *_ROLE_SCOPED_ORG_FILTER_KEYS):
+            values = _normalize_terms(filters.get(key))
+            if not values or not all(_looks_identifier_like_filter_term(value) for value in values):
+                continue
+            removed = _normalize_terms(filters.pop(key, None))
+            if removed:
+                dropped[key] = list(dict.fromkeys([*dropped.get(key, []), *removed]))
 
     salvaged_terms = [term for values in dropped.values() for term in values]
     if salvaged_terms:
@@ -893,7 +1036,9 @@ async def run_stagewise_question_analysis(
             "PLANNER.STAGE2.VALIDATION_FAILED",
             request_id=request_id,
             conversation_id=conversation_id,
+            reason_code="prompt_miss",
             errors=validation.errors,
+            missing_must_keep_terms=validation.missing_must_keep_terms,
             missing_people_terms=validation.missing_people_terms,
             missing_org_terms=validation.missing_org_terms,
             missing_years=validation.missing_years,
@@ -931,16 +1076,55 @@ async def run_stagewise_question_analysis(
                 "PLANNER.STAGE2.RETRY_FAILED",
                 request_id=request_id,
                 conversation_id=conversation_id,
+                reason_code="prompt_miss",
                 errors=validation.errors,
+                missing_must_keep_terms=validation.missing_must_keep_terms,
+                missing_people_terms=validation.missing_people_terms,
+                missing_org_terms=validation.missing_org_terms,
+                missing_years=validation.missing_years,
+                missing_perf_types=validation.missing_perf_types,
             )
-            explicit_count = signals.explicit_count or 20
-            fallback_limit = max(1, min(int(explicit_count), max_top_k_size))
-            fallback_payload = stage2.model_dump() if hasattr(stage2, "model_dump") else {}
-            fallback_payload["retrieval_query"] = question
-            fallback_payload["limit"] = max(1, min(int(fallback_payload.get("limit") or fallback_limit), max_top_k_size))
-            fallback_payload["display_limit"] = max(1, min(int(fallback_payload.get("display_limit") or fallback_payload["limit"]), fallback_payload["limit"]))
-            fallback_payload["confidence"] = float(fallback_payload.get("confidence") or 0.0)
-            stage2 = planner_stage2_slots_cls.model_validate(fallback_payload)
+            repaired_stage2, repair_meta = _apply_deterministic_stage2_repair(
+                stage2_slots=stage2,
+                planner_stage2_slots_cls=planner_stage2_slots_cls,
+                validation=validation,
+                locked_strategy=locked_strategy,
+                entity_role_plan=stage15,
+                question=question,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                log_event=log_event,
+            )
+            repaired_validation = validate_stage2_slots(
+                question=question,
+                signals=signals,
+                entity_role_plan=stage15,
+                locked_strategy=locked_strategy,
+                stage2_slots=repaired_stage2,
+            )
+            if repaired_validation.ok:
+                stage2 = repaired_stage2
+            else:
+                explicit_count = signals.explicit_count or 20
+                fallback_limit = max(1, min(int(explicit_count), max_top_k_size))
+                fallback_payload = repaired_stage2.model_dump() if hasattr(repaired_stage2, "model_dump") else {}
+                retrieval_query_before_fallback = str(fallback_payload.get("retrieval_query") or "").strip()
+                fallback_payload["retrieval_query"] = question
+                fallback_payload["limit"] = max(1, min(int(fallback_payload.get("limit") or fallback_limit), max_top_k_size))
+                fallback_payload["display_limit"] = max(1, min(int(fallback_payload.get("display_limit") or fallback_payload["limit"]), fallback_payload["limit"]))
+                fallback_payload["confidence"] = float(fallback_payload.get("confidence") or 0.0)
+                log_event(
+                    "PLANNER.STAGE2.RAW_QUERY_FALLBACK",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    reason_code="raw_query_fallback_applied",
+                    errors=repaired_validation.errors,
+                    missing_must_keep_terms=repaired_validation.missing_must_keep_terms,
+                    injected_filter_keys=sorted((repair_meta.get("injected_filters") or {}).keys()),
+                    retrieval_query_before=retrieval_query_before_fallback,
+                    retrieval_query_after=question,
+                )
+                stage2 = planner_stage2_slots_cls.model_validate(fallback_payload)
     _enforce_runtime_legality(
         normalized_intent=normalized_intent,
         locked_strategy=locked_strategy,

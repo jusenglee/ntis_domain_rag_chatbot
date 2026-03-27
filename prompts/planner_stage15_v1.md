@@ -60,6 +60,7 @@
 - upstream surface_signals.perf_types를 그대로 복사하지 않는다.
 - "활동", "활동이력", "활동내역", "이력", "업적", "참여이력", "프로필", "소속", "현황"은 perf_type_hints가 아니다.
 - 사람명/기관명은 broad history query일수록 반드시 must_keep_terms에 유지한다.
+- 따옴표나 인용부호로 감싼 제목성 표현은 must_keep_terms에 그대로 유지한다.
 - follow-up deictic/ordinal 또는 explicit relation 문맥이 아니면 anchor_required를 false로 둔다.
   </hard_guards>
 
@@ -70,6 +71,7 @@
 - 기관 역할이 불명확하면 지정하지 말고 unspecified 또는 null로 둔다.
 - stage2에서 절대 잃으면 안 되는 축은 must_keep_terms에 넣는다.
 - broad history query에서는 "활동이력" 자체를 must_keep_terms에 둘 수 있다.
+- 따옴표로 감싼 제목 기반 질의에서는 제목 구절 자체를 must_keep_terms에 둔다.
 </rules>
 
 - Set semantic_kind explicitly for broad_history, explicit_perf, explicit_relation, or generic_lookup.
@@ -89,6 +91,7 @@
 <anti_patterns>
 - 기관 role을 근거 없이 확정하지 말 것
 - 사람명/기관명을 must_keep_terms에서 누락하지 말 것
+- 따옴표로 강조된 제목 구절을 must_keep_terms에서 누락하지 말 것
 - broad history 질의를 perf type 질의로 변환하지 말 것
 - stage1의 뼈대를 바꾸려는 메모를 넣지 말 것
   </anti_patterns>
@@ -137,5 +140,20 @@
 "perf_type_policy":"explicit_only",
 "notes":["org_role_explicit"],
 "confidence":0.96
+}
+
+질문: '단일 반도체물질 기반 3진 논리 게이트 개발' 과제 상세정보
+출력:
+{
+"people_terms_to_keep":[],
+"org_terms_to_keep":[],
+"org_role_hint":null,
+"perf_type_hints":[],
+"must_keep_terms":["단일 반도체물질 기반 3진 논리 게이트 개발","과제","상세정보"],
+"anchor_required":false,
+"semantic_kind":"generic_lookup",
+"perf_type_policy":"explicit_only",
+"notes":["quoted_title_preserved"],
+"confidence":0.94
 }
 </examples>

@@ -870,6 +870,7 @@ async def node_rag_search(
             min_confidence=0.55,
         )
         resolved_retrieval_query = str(search_query or "").strip()
+        query_resolution_reason = "raw_query_fallback_applied" if fallback_applied else "planner_query_retained"
         anchor_query_meta = {
             "anchor_present": bool(focus_seed_map),
             "anchor_source": (resolved_entity_ref.source if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
@@ -898,6 +899,7 @@ async def node_rag_search(
             drift_detected=drift_detected,
             drift_reasons=drift_reasons,
             fallback_applied=fallback_applied,
+            query_resolution_reason=query_resolution_reason,
             anchor_present=anchor_query_meta.get("anchor_present"),
             anchor_source=anchor_query_meta.get("anchor_source"),
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
@@ -917,6 +919,7 @@ async def node_rag_search(
             planner_query=planner_query,
             drift_detected=drift_detected,
             fallback_applied=fallback_applied,
+            query_resolution_reason=query_resolution_reason,
             anchor_present=anchor_query_meta.get("anchor_present"),
             anchor_source=anchor_query_meta.get("anchor_source"),
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),

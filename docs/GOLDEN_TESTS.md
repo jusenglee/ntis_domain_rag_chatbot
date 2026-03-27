@@ -45,38 +45,59 @@
 - expected mode: `LOOKUP`
 - expected action: `stats`
 
+### 8. Parenthesized broad history keeps people/org axis
+- query: `신동구(한국과학기술정보연구원) 연구자의 활동이력 5건`
+- expected mode: `LOOKUP`
+- expected filter: `participant_researcher_name + people_affiliation_org_name`
+- expected ban: perf detail 축 추가 금지
+
+### 9. Quoted title detail keeps title axis
+- query: `'단일 반도체물질 기반 3진 논리 게이트 개발' 과제 상세정보`
+- expected mode: `LOOKUP`
+- expected output: `detail`
+- expected keep: quoted title phrase preserved in retrieval query
+
+### 10. Ordinal follow-up keeps anchor
+- query: `2번 과제의 상세정보`
+- expected mode: `LOOKUP`
+- expected keep: follow-up anchor preserved
+
+### 11. Source reference follow-up keeps reference axis
+- query: `출처 2의 연구자 정보`
+- expected mode: follow-up resolution dependent
+- expected keep: source reference axis preserved
 ## Safety / contract bans
-### 8. No fallback chat
+### 12. No fallback chat
 - when retrieval is weak, system must not silently switch to fallback chat mode.
 
-### 9. No strategy rewrite downstream
+### 13. No strategy rewrite downstream
 - executor / answer stage must not rewrite planner mode/relation/target_cols.
 
-### 10. No BM25-only shortcut in LOOKUP/JOIN
+### 14. No BM25-only shortcut in LOOKUP/JOIN
 - LOOKUP/JOIN path must keep hybrid retrieval.
 
-### 11. No mixed join keys
+### 15. No mixed join keys
 - `pjt_id` and `pjt_no` must not be mixed in one JOIN plan.
 
-### 12. No people-name must in SEARCH
+### 16. No people-name must in SEARCH
 - person/org token in SEARCH can be bonus only, not hard must.
 
 ## Answer quality tests
-### 13. Weak evidence => conservative answer
+### 17. Weak evidence => conservative answer
 - answer must separate confirmed facts / unknowns / what more is needed.
 
-### 14. No unsupported IDs or dates
+### 18. No unsupported IDs or dates
 - answer must not invent pjt_id, perf_id, year, org, count.
 
-### 15. No detail answer for broad people/org query
+### 19. No detail answer for broad people/org query
 - broad people/org query must not collapse into a fake single-detail answer.
 
 ## Streaming reliability watchlist
-### 16. async close handled correctly
+### 20. async close handled correctly
 - no `AsyncStream.close was never awaited`
 
-### 17. emitted chunks recognized
+### 21. emitted chunks recognized
 - chunks arriving should not end with emitted_chunks=0 unless truly empty.
 
-### 18. TTFT deadline not tripped by parser bug
+### 22. TTFT deadline not tripped by parser bug
 - if text chunks arrive, ttft should be set.

@@ -47,11 +47,22 @@ class FakeRagMapper:
 
 
 class FakeRequestDefaultsLoader:
-    def __init__(self, defaults=None):
+    def __init__(self, defaults=None, meta=None):
         self.defaults = dict(defaults or {})
+        self.meta = dict(meta or {})
 
     async def load_defaults(self):
         return dict(self.defaults)
+
+    async def load_defaults_with_meta(self):
+        meta = {
+            "oracle_lookup_status": ("loaded" if self.defaults else "empty"),
+            "oracle_lookup_attempted": True,
+            "oracle_loaded_key_count": len(self.defaults),
+            "oracle_loaded_keys": sorted(self.defaults.keys()),
+            **self.meta,
+        }
+        return dict(self.defaults), meta
 
 
 class CaptureLogger:
@@ -216,16 +227,20 @@ def test_merge_request_overrides_preserves_request_precedence():
 
 
 
-def test_oracle_request_defaults_loader_from_env_returns_none_when_incomplete(monkeypatch):
+def test_oracle_request_defaults_loader_from_env_uses_builtin_defaults(monkeypatch):
     monkeypatch.delenv("ORACLE_PARAM_USER", raising=False)
     monkeypatch.delenv("ORACLE_PARAM_PASSWORD", raising=False)
     monkeypatch.delenv("ORACLE_PARAM_DSN", raising=False)
 
     loader = OracleRequestDefaultsLoader.from_env(
-        logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
     )
 
-    assert loader is None
+    assert loader is not None
+    assert loader.user == "ird"
+    assert loader.password == "ird_12#$"
+    assert "HOST=172.31.234.203" in loader.dsn
+    assert "SERVICE_NAME=KNTIS" in loader.dsn
 
 
 
@@ -243,6 +258,63 @@ def test_req_start_logs_request_override_sources():
     assert response.status_code == 200
     req_start = next(fields for name, fields in capture.events if name == "REQ.START")
     assert req_start["request_override_sources"] == {"temperature": "request", "top_p": "oracle"}
+
+
+def test_req_oracle_defaults_logs_lookup_status_for_query_stream():
+    graph = CaptureGraph()
+    capture = CaptureLogger()
+    client = _build_client(
+        graph,
+        request_defaults_loader=FakeRequestDefaultsLoader(
+            {"temperature": 0.4, "top_p": 0.75},
+            meta={
+                "oracle_connector_host": "172.31.234.203",
+                "oracle_connector_service_name": "KNTIS",
+            },
+        ),
+        log_event=capture,
+    )
+
+    response = client.post("/query/stream", json={"question": "test", "Temperature": 0.9})
+
+    assert response.status_code == 200
+    oracle_event = next(fields for name, fields in capture.events if name == "REQ.ORACLE.DEFAULTS")
+    assert oracle_event["route"] == "/query/stream"
+    assert oracle_event["oracle_lookup_status"] == "loaded"
+    assert oracle_event["oracle_lookup_attempted"] is True
+    assert oracle_event["oracle_loaded_key_count"] == 2
+    assert oracle_event["request_override_source_counts"] == {"oracle": 1, "request": 1}
+    assert oracle_event["oracle_connector_host"] == "172.31.234.203"
+    assert oracle_event["oracle_connector_service_name"] == "KNTIS"
+
+
+def test_req_oracle_defaults_logs_skip_when_all_request_values_present():
+    graph = CaptureGraph()
+    capture = CaptureLogger()
+    loader = CountingRequestDefaultsLoader({"temperature": 0.4})
+    client = _build_client(graph, request_defaults_loader=loader, log_event=capture)
+
+    response = client.post(
+        "/query/stream",
+        json={
+            "question": "test",
+            "Temperature": 0.7,
+            "Top-P": 0.9,
+            "Max-Token": 321,
+            "Top-K": 17,
+            "RAG_MIN_DENSE_SCORE": 0.61,
+            "RAG_TOPK_DENSE": 44,
+            "RAG_W_LEX": 0.33,
+            "RAG_TOPK_LEX_CAND": 555,
+        },
+    )
+
+    assert response.status_code == 200
+    assert loader.calls == 0
+    oracle_event = next(fields for name, fields in capture.events if name == "REQ.ORACLE.DEFAULTS")
+    assert oracle_event["route"] == "/query/stream"
+    assert oracle_event["oracle_lookup_status"] == "skipped_all_request_values_present"
+    assert oracle_event["oracle_lookup_attempted"] is False
 
 class CountingRequestDefaultsLoader(FakeRequestDefaultsLoader):
     def __init__(self, defaults=None):

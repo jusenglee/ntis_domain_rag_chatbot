@@ -65,6 +65,8 @@
 - broad people/org history query + explicit perf id 없음 => perf detail용 ids_map을 만들지 않는다.
 - broad history query에서는 perf type을 억지로 filters에 넣지 않는다.
 - retrieval_query는 must_keep_terms를 가능한 한 원문 축으로 보존한다.
+- 따옴표로 감싼 제목 표현은 retrieval_query에서 제거하지 않는다.
+- ordinal/detail follow-up에서는 anchor와 요청 field 축을 함께 보존한다.
   </hard_guards>
 
 <rules>
@@ -77,6 +79,8 @@
   participant_researcher_name + people_affiliation_org_name 조합을 우선한다.
 - ambiguous project key는 ids_map으로 확정하지 말고 candidate_keys.project_key에 둔다.
 - explicit_count가 있으면 limit/display_limit에 반영한다.
+- `validation_hints.missing_must_keep_terms`가 있으면 그 exact term을 retrieval_query에 다시 살린다.
+- `출처 2`, `2번 항목`, `2번째 과제` 같은 reference follow-up에서는 anchor를 일반 topic query로 바꾸지 않는다.
 </rules>
 
 <conflict_resolution>
@@ -108,6 +112,8 @@ validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의
 - 명시 식별자 없는 ids_map을 임의 생성하지 말 것
 - ambiguous project key를 pjt_id/pjt_no로 억지 확정하지 말 것
 - validation_hints를 맞추기 위해 질문 의미를 왜곡하지 말 것
+- 따옴표 제목 질의를 generic detail 안내문으로 축소하지 말 것
+- ordinal/detail follow-up에서 anchor를 잃은 일반 검색문으로 바꾸지 말 것
   </anti_patterns>
 
 <examples>
@@ -157,3 +163,32 @@ validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의
 "display_limit":1,
 "confidence":0.99
 }
+
+질문: '단일 반도체물질 기반 3진 논리 게이트 개발' 과제 상세정보
+출력:
+{
+"ids_map":{},
+"candidate_keys":{},
+"project_key_policy":null,
+"join_resolution_policy":null,
+"filters":{},
+"retrieval_query":"단일 반도체물질 기반 3진 논리 게이트 개발 과제 상세정보",
+"limit":1,
+"display_limit":1,
+"confidence":0.94
+}
+
+질문: 2번 과제의 연구자는?
+출력:
+{
+"ids_map":{},
+"candidate_keys":{},
+"project_key_policy":"anchor_locked_pjt_id",
+"join_resolution_policy":null,
+"filters":{},
+"retrieval_query":"2번 과제 연구자",
+"limit":1,
+"display_limit":1,
+"confidence":0.92
+}
+</examples>

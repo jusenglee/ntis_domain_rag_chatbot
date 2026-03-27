@@ -342,20 +342,66 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             overrides["RAG_TOPK_LEX_CAND"] = int(payload.rag_topk_lex_cand)
         return overrides
 
-    async def _build_request_overrides(payload: QueryRequest) -> tuple[dict[str, Any], dict[str, str]]:
+    async def _build_request_overrides(
+        payload: QueryRequest,
+        *,
+        request_id: str,
+        conversation_id: str,
+        route_name: str,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """요청 payload와 Oracle 기본값을 병합해 최종 override와 source를 반환한다."""
         request_values = _extract_request_override_values(payload)
         oracle_defaults: dict[str, Any] = {}
         supported_override_count = 8
+        oracle_lookup_meta: dict[str, Any] = {
+            "oracle_lookup_status": "disabled" if request_defaults_loader is None else "not_needed",
+            "oracle_lookup_attempted": False,
+            "oracle_loaded_key_count": 0,
+            "oracle_loaded_keys": [],
+        }
         if request_defaults_loader is not None and len(request_values) < supported_override_count:
+            load_defaults_with_meta = getattr(request_defaults_loader, "load_defaults_with_meta", None)
             load_defaults = getattr(request_defaults_loader, "load_defaults", None)
-            if callable(load_defaults):
+            if callable(load_defaults_with_meta):
+                loaded, lookup_meta = await load_defaults_with_meta()
+                if isinstance(loaded, dict):
+                    oracle_defaults = dict(loaded)
+                if isinstance(lookup_meta, dict):
+                    oracle_lookup_meta.update(dict(lookup_meta))
+            elif callable(load_defaults):
                 loaded = await load_defaults()
                 if isinstance(loaded, dict):
                     oracle_defaults = dict(loaded)
+                oracle_lookup_meta.update(
+                    {
+                        "oracle_lookup_status": "loaded" if oracle_defaults else "empty",
+                        "oracle_lookup_attempted": True,
+                        "oracle_loaded_key_count": len(oracle_defaults),
+                        "oracle_loaded_keys": sorted(oracle_defaults.keys()),
+                        "oracle_lookup_loader": "legacy",
+                    }
+                )
+        elif request_defaults_loader is not None:
+            oracle_lookup_meta.update({"oracle_lookup_status": "skipped_all_request_values_present"})
         merged, sources = merge_request_overrides(
             request_values=request_values,
             oracle_defaults=oracle_defaults,
+        )
+        source_counts = {
+            source_name: sum(1 for current_source in sources.values() if current_source == source_name)
+            for source_name in sorted(set(sources.values()))
+        }
+        log_event(
+            "REQ.ORACLE.DEFAULTS",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            stage="request_oracle_defaults",
+            route=route_name,
+            request_value_count=len(request_values),
+            oracle_key_count=len(oracle_defaults),
+            merged_key_count=len(merged),
+            request_override_source_counts=source_counts or None,
+            **oracle_lookup_meta,
         )
         _validate_request_override_ranges(merged)
         return merged, sources
@@ -398,7 +444,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
 
-        request_overrides, request_override_sources = await _build_request_overrides(payload)
+        request_overrides, request_override_sources = await _build_request_overrides(
+            payload,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            route_name="/query/stream",
+        )
         graph = _get_graph(request)
 
         async def event_generator():
@@ -703,7 +754,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
-        request_overrides, request_override_sources = await _build_request_overrides(payload)
+        request_overrides, request_override_sources = await _build_request_overrides(
+            payload,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            route_name="/query/debug",
+        )
         graph = _get_graph(request)
 
         if graph is None:

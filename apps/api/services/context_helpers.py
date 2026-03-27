@@ -7,7 +7,7 @@ from typing import Any
 
 def resolve_title_from_payload(payload: dict[str, Any]) -> str:
     """payload 안에서 우선순위가 높은 제목 필드를 찾아 문자열로 돌려준다."""
-    for key in ("title_text", "title1", "title2"):
+    for key in ("title1", "title_text", "title2"):
         value = payload.get(key)
         if value is None:
             continue
