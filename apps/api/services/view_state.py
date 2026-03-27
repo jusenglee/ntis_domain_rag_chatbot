@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+DETAIL_CACHE_SCHEMA_VERSION = 2
+
 
 class DisplayItem(BaseModel):
     display_rank: int
@@ -77,6 +79,7 @@ class DetailCacheEntry(BaseModel):
     coverage: DetailCoverage
     hydrated_fields: List[str] = Field(default_factory=list)
     source_turn_id: str
+    schema_version: int = DETAIL_CACHE_SCHEMA_VERSION
 
 
 class ConversationViewState(BaseModel):
@@ -161,12 +164,14 @@ def _infer_entity_kind(*, context_kind: str, doc: Dict[str, Any], evidence: Dict
     if explicit_kind:
         return _normalize_kind(explicit_kind, default="project")
 
+    if _first_text(ids.get("pjt_id"), ids.get("pjt_no"), doc.get("pjt_id"), doc.get("pjt_no"), rank_item.get("pjt_id"), rank_item.get("pjt_no"), rank_item.get("group_key")):
+        return "project"
+    if _first_text(ids.get("rst_id"), ids.get("doi"), ids.get("issn"), doc.get("rst_id"), doc.get("doi"), doc.get("issn"), rank_item.get("rst_id"), rank_item.get("doi"), rank_item.get("issn")):
+        return "perf"
     if _first_text(ids.get("person_no"), doc.get("person_no"), rank_item.get("person_no"), rank_item.get("hm_id"), doc.get("hm_id")):
         return "people"
     if _first_text(ids.get("org_id"), ids.get("org_code"), ids.get("biz_no"), doc.get("org_id"), doc.get("org_code"), doc.get("biz_no"), rank_item.get("org_id"), rank_item.get("org_code"), rank_item.get("biz_no")):
         return "org"
-    if _first_text(ids.get("rst_id"), ids.get("doi"), ids.get("issn"), doc.get("rst_id"), doc.get("doi"), doc.get("issn"), rank_item.get("rst_id"), rank_item.get("doi"), rank_item.get("issn")):
-        return "perf"
 
     source_type = _normalize_kind(doc.get("source_type") or evidence.get("source_type"), default=context_kind)
     if "perf" in source_type or source_type in {"paper", "patent", "report", "software", "standard", "compound", "equipment"}:

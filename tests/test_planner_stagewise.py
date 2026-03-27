@@ -7,20 +7,24 @@ from apps.api.services.followup_anchor import anchor_to_seed_map
 from apps.api.services.detail_contract import compute_detail_coverage
 from apps.api.services.view_state import FocusEntity
 from apps.api.services.planner_service import apply_planner_strategy, apply_question_analysis_v3, collect_researcher_name_terms, merge_planner_hints, normalize_hint_terms
-from apps.api.services.planner_runtime import _normalize_stage2_slots_payload
+from apps.api.services.planner_runtime import _normalize_stage2_slots_payload, _planner_prev_context_text, _sanitize_stage2_structured_filters
 from apps.api.services.request_facade import build_intent_payload
-from apps.api.services.view_state import build_display_snapshot
+from apps.api.services.view_state import build_display_snapshot, render_display_snapshot_text
+from apps.core.planner_stage15_types import PlannerEntityRolePlan
+from apps.core.planner_surface_signals import collect_surface_signals
+from apps.core.planner_validation import validate_stage2_slots
 from apps.api.services.retrieval_workflow import (
     _extract_explicit_count,
     _normalize_display_payloads,
     _resolve_display_request,
     _resolve_retrieval_budget,
+    _resolve_runtime_top_k,
 )
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.pipeline_steps import NormalizedIntent, normalize_intent
 from apps.core.planner_contract import validate_planner_contract
-from apps.core.planner_staged import compose_locked_strategy
+from apps.core.planner_staged import compose_locked_strategy, regate_locked_strategy
 from apps.core.query_intent import QueryIntent, classify_query
 from apps.core.rag_pipeline import _validate_intent_payload_version
 
@@ -73,6 +77,45 @@ def test_compose_locked_strategy_uses_shared_people_target_collections():
     )
 
     assert locked.target_cols == ["ntis_project_v1", "ntis_perf_v1"]
+
+
+def test_compose_locked_strategy_keeps_broad_list_as_search_without_seed():
+    locked = compose_locked_strategy(
+        stage1={"action": "list", "head": "project", "relation_candidate": None},
+        ids_map={},
+        has_prev_anchor=False,
+        prev_context_seed={},
+        gate_seed_map={},
+    )
+
+    assert locked.mode == "SEARCH"
+    assert locked.relation is None
+    assert locked.join_key_mode is None
+
+
+def test_regate_locked_strategy_upgrades_search_to_lookup_when_stage2_has_structured_filters():
+    events = []
+    locked = compose_locked_strategy(
+        stage1={"action": "list", "head": "project", "relation_candidate": None},
+        ids_map={},
+        has_prev_anchor=False,
+        prev_context_seed={},
+        gate_seed_map={},
+    )
+
+    updated = regate_locked_strategy(
+        request_id="rid",
+        conversation_id="cid",
+        stage1=SimpleNamespace(action="list", head="project", relation_candidate=None),
+        stage2=SimpleNamespace(ids_map={}, filters={"participant_org_name": ["ETRI"]}),
+        locked_strategy=locked,
+        allowed_keys={"pjt_id", "pjt_no", "rst_id", "doi", "issn", "paper_id"},
+        log_event=lambda name, **fields: events.append((name, fields)),
+    )
+
+    assert updated.mode == "LOOKUP"
+    assert updated.target_cols == ["ntis_project_v1"]
+    assert any(name == "PLANNER.REGATE" and fields["after_mode"] == "LOOKUP" for name, fields in events)
 
 
 def test_build_intent_payload_runs_planner_when_precheck_has_no_signal():
@@ -596,7 +639,7 @@ def test_apply_question_analysis_v3_logs_ordinal_filter_strip():
 
 
 
-def test_apply_planner_strategy_restores_perf_context_owner_lock():
+def test_apply_planner_strategy_preserves_perf_context_owner_lock_without_relocking_route():
     log_calls = []
 
     class DummyStrategyViolation(Exception):
@@ -656,19 +699,20 @@ def test_apply_planner_strategy_restores_perf_context_owner_lock():
     )
 
     assert applied is True
-    assert patched.base_route == 'perf'
-    assert patched.target_cols == ['ntis_perf_v1']
-    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
+    assert patched.base_route == 'project'
+    assert patched.target_cols == ['ntis_project_v1']
+    assert patched.context_owner_lock == 'perf'
+    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.OWNER_LOCKED')
     assert restore_event['attempted_base_route'] == 'project'
     assert restore_event['attempted_target_cols'] == ['ntis_project_v1']
     assert restore_event['context_owner_lock'] == 'perf'
     assert restore_event['context_owner_lock_reason'] == 'followup_context_perf'
-    assert restore_event['final_base_route'] == 'perf'
-    assert restore_event['final_target_cols'] == ['ntis_perf_v1']
+    assert restore_event['final_base_route'] == 'project'
+    assert restore_event['final_target_cols'] == ['ntis_project_v1']
     assert restore_event['enforced_by'] == 'planner_service.apply_planner_strategy'
 
 
-def test_apply_planner_strategy_restores_project_context_owner_lock():
+def test_apply_planner_strategy_preserves_project_context_owner_lock_without_relocking_route():
     log_calls = []
 
     class DummyStrategyViolation(Exception):
@@ -728,15 +772,16 @@ def test_apply_planner_strategy_restores_project_context_owner_lock():
     )
 
     assert applied is True
-    assert patched.base_route == 'project'
-    assert patched.target_cols == ['ntis_project_v1']
-    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.RESTORED')
+    assert patched.base_route == 'perf'
+    assert patched.target_cols == ['ntis_perf_v1']
+    assert patched.context_owner_lock == 'project'
+    restore_event = next(fields for event, fields in log_calls if event == 'FOLLOWUP.CONTEXT.OWNER_LOCKED')
     assert restore_event['attempted_base_route'] == 'perf'
     assert restore_event['attempted_target_cols'] == ['ntis_perf_v1']
     assert restore_event['context_owner_lock'] == 'project'
     assert restore_event['context_owner_lock_reason'] == 'followup_context_project'
-    assert restore_event['final_base_route'] == 'project'
-    assert restore_event['final_target_cols'] == ['ntis_project_v1']
+    assert restore_event['final_base_route'] == 'perf'
+    assert restore_event['final_target_cols'] == ['ntis_perf_v1']
     assert restore_event['enforced_by'] == 'planner_service.apply_planner_strategy'
 
 def test_resolve_retrieval_budget_uses_question_analysis_limit_as_source_of_truth():
@@ -1276,6 +1321,183 @@ def test_normalize_stage2_slots_payload_keeps_clean_payload_without_logging():
     assert events == []
 
 
+def test_sanitize_stage2_structured_filters_drops_researcher_filter_without_people_terms():
+    events = []
+
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    sanitized = _sanitize_stage2_structured_filters(
+        slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={"participant_researcher_name": ["???"]},
+            retrieval_query="??? ??",
+            limit=5,
+            display_limit=5,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=[],
+            org_terms_to_keep=[],
+            org_role_hint="unspecified",
+            perf_type_hints=[],
+            must_keep_terms=["???"],
+            confidence=0.9,
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda name, **fields: events.append((name, fields)),
+    )
+
+    assert sanitized.filters == {}
+    assert "???" in sanitized.retrieval_query
+    assert any(name == "PLANNER.STAGE2.FILTERS.SANITIZED" for name, _ in events)
+
+
+def test_sanitize_stage2_structured_filters_drops_role_scoped_org_filter_without_org_role():
+    events = []
+
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    sanitized = _sanitize_stage2_structured_filters(
+        slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={"participant_org_name": ["???"], "org_name": ["???"]},
+            retrieval_query="??? ?? ????",
+            limit=3,
+            display_limit=3,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=[],
+            org_terms_to_keep=["???"],
+            org_role_hint="unspecified",
+            perf_type_hints=[],
+            must_keep_terms=["???"],
+            confidence=0.9,
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda name, **fields: events.append((name, fields)),
+    )
+
+    assert sanitized.filters == {"org_name": ["???"]}
+    assert any(name == "PLANNER.STAGE2.FILTERS.SANITIZED" for name, _ in events)
+
+
+def test_resolve_runtime_top_k_overfetches_for_visible_count():
+    qa = SimpleNamespace(limit=20, display_limit=20)
+
+    assert _resolve_runtime_top_k(qa, max_top_k_size=100, exact_detail_lookup=False) == 60
+
+
+def test_sanitize_stage2_structured_filters_keeps_lead_org_filter_when_role_is_resolved():
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    sanitized = _sanitize_stage2_structured_filters(
+        slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={"lead_org_name": ["ETRI"], "participant_org_name": ["ETRI"]},
+            retrieval_query="ETRI ?? ??",
+            limit=5,
+            display_limit=5,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=[],
+            org_terms_to_keep=["ETRI"],
+            org_role_hint="lead_org",
+            perf_type_hints=[],
+            must_keep_terms=["ETRI"],
+            confidence=0.9,
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda *args, **kwargs: None,
+    )
+
+    assert sanitized.filters == {"lead_org_name": ["ETRI"]}
+
+
+def test_sanitize_stage2_structured_filters_keeps_affiliation_org_filter_when_role_is_resolved():
+    class FakeStage2Slots:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        @classmethod
+        def model_validate(cls, payload):
+            return cls(**payload)
+
+    sanitized = _sanitize_stage2_structured_filters(
+        slots=FakeStage2Slots(
+            ids_map={},
+            candidate_keys={},
+            project_key_policy=None,
+            join_resolution_policy=None,
+            filters={"people_affiliation_org_name": ["KISTI"], "lead_org_name": ["KISTI"]},
+            retrieval_query="KISTI ?? ??? ??",
+            limit=5,
+            display_limit=5,
+            confidence=0.9,
+        ),
+        planner_stage2_slots_cls=FakeStage2Slots,
+        entity_role_plan=PlannerEntityRolePlan(
+            people_terms_to_keep=["???"],
+            org_terms_to_keep=["KISTI"],
+            org_role_hint="affiliation_org",
+            perf_type_hints=[],
+            must_keep_terms=["KISTI"],
+            confidence=0.9,
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        log_event=lambda *args, **kwargs: None,
+    )
+
+    assert sanitized.filters == {"people_affiliation_org_name": ["KISTI"]}
+
+
 def test_anchor_to_seed_map_supports_perf_people_org_ids():
     perf_anchor = FocusEntity(kind='perf', source='test', rst_id='RST-1', doi='10.1234/example')
     people_anchor = FocusEntity(kind='people', source='test', person_no='P-1')
@@ -1364,6 +1586,49 @@ def test_compute_detail_coverage_supports_perf_entity_fields():
     assert coverage.rich_detail['perf_type'] == 'paper'
 
 
+def test_apply_planner_strategy_preserves_anchor_locked_project_key_policy():
+    intent = NormalizedIntent(
+        action="detail",
+        base_route="project",
+        relation=None,
+        is_id_query=False,
+        output_type="detail",
+        ids_map={"pjt_id": ["PJT-1"]},
+        target_cols=["ntis_project_v1"],
+        project_key_policy="anchor_locked_pjt_id",
+    )
+    qa = SimpleNamespace(
+        confidence=0.9,
+        action="detail",
+        mode="LOOKUP",
+        relation=None,
+        join_key_mode=None,
+        target_cols=["ntis_project_v1"],
+        ids_map={"pjt_id": ["PJT-1"]},
+        candidate_keys={},
+        project_key_policy=None,
+        join_resolution_policy=None,
+        output_type="detail",
+        head="project",
+        planner_source="stagewise",
+    )
+
+    patched, changed = apply_planner_strategy(
+        intent,
+        qa,
+        request_id="rid",
+        conversation_id="cid",
+        normalize_hint_terms=normalize_hint_terms,
+        log_event=lambda *args, **kwargs: None,
+        build_changed_fields=lambda before, after, fields, changed_by=None: {field: {"before": before.get(field), "after": after.get(field)} for field in fields if before.get(field) != after.get(field)},
+        changed_by_planner_merge="planner_merge",
+        strategy_violation_cls=RuntimeError,
+    )
+
+    assert changed is True
+    assert patched.project_key_policy == "anchor_locked_pjt_id"
+
+
 def test_validate_planner_contract_accepts_anchor_locked_project_key_policies():
     for project_key_policy in ("anchor_locked_pjt_id", "anchor_locked_pjt_no"):
         violations = validate_planner_contract(
@@ -1395,3 +1660,169 @@ def test_validate_planner_contract_rejects_unknown_project_key_policy():
     )
 
     assert any(v.error_code == "PLANNER_PROJECT_KEY_POLICY_INVALID" for v in violations)
+
+
+
+def test_build_display_snapshot_prefers_project_kind_when_project_ids_exist():
+    snapshot = build_display_snapshot(
+        conversation_id="cid",
+        turn_id="rid",
+        context_kind="project",
+        requested_count=1,
+        documents=[
+            {"title": "Project", "source_type": "hit", "pjt_id": "PJT-1", "hm_id": "PERSON-1"},
+        ],
+        canonical_evidence=[
+            {"ids": {"pjt_id": "PJT-1", "person_no": "PERSON-1"}, "facts": {"title": "Project"}, "roles": {}},
+        ],
+        raw_count=1,
+    )
+
+    assert snapshot.items[0].entity_kind == "project"
+
+
+def test_render_display_snapshot_text_uses_real_newlines():
+    snapshot = build_display_snapshot(
+        conversation_id='cid',
+        turn_id='rid',
+        context_kind='project',
+        requested_count=2,
+        documents=[
+            {'title': 'first project', 'source_type': 'hit', 'pjt_id': 'PJT-1', 'pjt_no': 'NO-1'},
+            {'title': 'second project', 'source_type': 'hit', 'pjt_id': 'PJT-2', 'pjt_no': 'NO-2'},
+        ],
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+        ],
+        raw_count=2,
+    )
+
+    text = render_display_snapshot_text(snapshot, max_chars=0)
+
+    assert '`n' not in text
+    assert chr(10) in text
+    assert '1. first project' in text
+    assert '2. second project' in text
+
+
+def test_planner_prev_context_text_uses_display_snapshot_newlines():
+    snapshot = build_display_snapshot(
+        conversation_id='cid',
+        turn_id='rid',
+        context_kind='project',
+        requested_count=2,
+        documents=[
+            {'title': 'first project', 'source_type': 'hit', 'pjt_id': 'PJT-1', 'pjt_no': 'NO-1'},
+            {'title': 'second project', 'source_type': 'hit', 'pjt_id': 'PJT-2', 'pjt_no': 'NO-2'},
+        ],
+        canonical_evidence=[
+            _project_canonical_item(pjt_id='PJT-1', pjt_no='NO-1', title='first project'),
+            _project_canonical_item(pjt_id='PJT-2', pjt_no='NO-2', title='second project'),
+        ],
+        raw_count=2,
+    )
+
+    text = _planner_prev_context_text(
+        prev_context=[],
+        canonical_evidence=[],
+        normalized_intent=SimpleNamespace(output_type='list', base_route='project'),
+        display_snapshot=snapshot,
+    )
+
+    assert '`n' not in text
+    assert chr(10) in text
+    assert text.count(chr(10)) >= 2
+
+
+def test_collect_surface_signals_extracts_minimal_literal_signals():
+    normalized_intent = SimpleNamespace(
+        years=["2023"],
+        ids_map={"pjt_id": ["PJT-1"]},
+        people_terms=["Kim"],
+        org_terms=["ETRI"],
+        perf_types=["paper"],
+    )
+
+    signals = collect_surface_signals("Kim paper 3\uac74 2024\ub144 DOI question", normalized_intent)
+
+    assert signals.explicit_count == 3
+    assert signals.years == ["2023", "2024"]
+    assert "DOI" in signals.id_like_terms
+    assert signals.people_terms == ["Kim"]
+    assert signals.org_terms == ["ETRI"]
+    assert signals.perf_types == ["paper"]
+
+
+def test_validate_stage2_slots_detects_axis_loss():
+    signals = SimpleNamespace(years=["2024"], people_terms=["Kim"], org_terms=["ETRI"])
+    entity_role_plan = PlannerEntityRolePlan(
+        people_terms_to_keep=["Kim"],
+        org_terms_to_keep=["ETRI"],
+        perf_type_hints=["paper"],
+        must_keep_terms=["Kim", "ETRI", "paper"],
+        confidence=0.9,
+    )
+    stage2_slots = SimpleNamespace(
+        ids_map={},
+        candidate_keys={},
+        filters={},
+        retrieval_query="semiconductor project",
+    )
+    locked_strategy = SimpleNamespace(
+        mode="LOOKUP",
+        head="project",
+        action="list",
+        relation=None,
+        join_key_mode=None,
+        prev_context_seed={},
+    )
+
+    result = validate_stage2_slots(
+        question="Kim ETRI paper 2024",
+        signals=signals,
+        entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        stage2_slots=stage2_slots,
+    )
+
+    assert result.ok is False
+    assert "missing_people_terms" in result.errors
+    assert "missing_org_terms" in result.errors
+    assert "missing_years" in result.errors
+    assert "missing_perf_types" in result.errors
+
+
+def test_validate_stage2_slots_rejects_perf_detail_without_explicit_perf_id():
+    signals = SimpleNamespace(years=[], people_terms=["Kim"], org_terms=[])
+    entity_role_plan = PlannerEntityRolePlan(
+        people_terms_to_keep=["Kim"],
+        must_keep_terms=["Kim"],
+        confidence=0.9,
+    )
+    stage2_slots = SimpleNamespace(
+        ids_map={},
+        candidate_keys={},
+        filters={"participant_researcher_name": ["Kim"]},
+        retrieval_query="Kim researcher performance detail",
+    )
+    locked_strategy = SimpleNamespace(
+        mode="LOOKUP",
+        head="perf",
+        action="detail",
+        relation=None,
+        join_key_mode=None,
+        prev_context_seed={},
+    )
+
+    result = validate_stage2_slots(
+        question="Kim researcher performance detail",
+        signals=signals,
+        entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        stage2_slots=stage2_slots,
+    )
+
+    assert result.ok is False
+    assert "perf_detail_without_explicit_perf_id" in result.errors
+    assert "broad_query_collapsed_to_perf_detail" in result.errors

@@ -8,14 +8,20 @@ from apps.api.services.canonical_context import build_prev_context_canonical_tex
 from apps.core.canonical_evidence import build_canonical_evidence
 from apps.api.services.followup_anchor import parse_display_limit
 from apps.api.services.detail_contract import (
+    build_detail_answer_context,
     compute_detail_coverage,
     coverage_satisfies_fields,
     extract_requested_fields,
     make_entity_cache_key,
-    render_detail_answer,
 )
 from apps.api.services.result_set import ResultItem, RetrievalBundle
-from apps.api.services.view_state import DetailCacheEntry, FocusEntity, build_display_snapshot, focus_entity_from_detail
+from apps.api.services.view_state import (
+    DETAIL_CACHE_SCHEMA_VERSION,
+    DetailCacheEntry,
+    FocusEntity,
+    build_display_snapshot,
+    focus_entity_from_detail,
+)
 from apps.api.services.rag_retriever import has_active_anchor_seed
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.core.entity_reference import ClarificationRequest, ResolvedEntityRef
@@ -62,6 +68,15 @@ def _resolve_retrieval_budget(question_analysis: Any, *, max_top_k_size: int) ->
     """Use the assembled question-analysis limit as the retrieval budget source of truth."""
     planner_limit = _coerce_positive_int(getattr(question_analysis, "limit", None))
     return min(planner_limit or max_top_k_size, max_top_k_size)
+
+
+def _resolve_runtime_top_k(question_analysis: Any, *, max_top_k_size: int, exact_detail_lookup: bool) -> int:
+    if exact_detail_lookup:
+        return 1
+    retrieval_budget = _resolve_retrieval_budget(question_analysis, max_top_k_size=max_top_k_size)
+    visible_limit = _resolve_display_request(question_analysis)
+    overfetch_budget = max(visible_limit, visible_limit * 3)
+    return min(max(retrieval_budget, overfetch_budget), max_top_k_size)
 
 
 def _resolve_display_request(question_analysis: Any) -> int:
@@ -724,8 +739,22 @@ async def node_rag_search(
                 cache_anchor = FocusEntity(kind=resolved_entity_ref.entity_kind, source=resolved_entity_ref.source, **{k: (v[0] if isinstance(v, list) and v else None) for k, v in resolved_entity_ref.seed_map.items()})
             cache_key = make_entity_cache_key(cache_anchor)
             cache_entry = (getattr(view_state, "detail_cache", {}) or {}).get(cache_key)
+            cache_schema_version = int(getattr(cache_entry, "schema_version", 0) or 0) if cache_entry is not None else 0
+            if cache_entry is not None and cache_schema_version != DETAIL_CACHE_SCHEMA_VERSION:
+                cache_entry = None
+                log_event(
+                    "DETAIL.CACHE.STALE_SCHEMA",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    entity_key=cache_key,
+                    cache_schema_version=cache_schema_version,
+                    expected_schema_version=DETAIL_CACHE_SCHEMA_VERSION,
+                )
             if cache_entry and coverage_satisfies_fields(cache_entry.coverage, requested_fields):
-                answer_text = render_detail_answer(cache_entry.coverage, requested_fields=requested_fields)
+                detail_context_text = build_detail_answer_context(
+                    cache_entry.coverage,
+                    requested_fields=requested_fields,
+                )
                 log_event(
                     "DETAIL.CACHE.HIT",
                     request_id=state.request_id,
@@ -733,19 +762,26 @@ async def node_rag_search(
                     entity_key=cache_key,
                     requested_fields=sorted(requested_fields),
                 )
-                log_event(
-                    "ANSWER.FALLBACK.APPLIED",
-                    request_id=state.request_id,
-                    conversation_id=state.conversation_id,
-                    reason="detail_cache_hit",
+                retrieval_bundle = _build_retrieval_bundle(
+                    docs=[],
+                    canonical_evidence=[],
+                    render_profile={"context_kind": getattr(cache_entry.anchor, "kind", "project"), "name": "detail"},
+                    raw_count=1,
+                    answer_context_text=detail_context_text,
+                    context_source="detail_contract_context",
                 )
                 return {
-                    "answer_artifact": _build_answer_artifact(
-                        text=answer_text,
-                        answer_kind="detail_cache",
-                        answer_source="detail_cache",
-                    ),
+                    "context": [],
+                    "canonical_evidence": [],
+                    "retrieval_bundle": retrieval_bundle,
+                    "answer_context_text": detail_context_text,
+                    "resolved_retrieval_query": state.messages[-1].content,
+                    "actual_retrieval_query": state.messages[-1].content,
+                    "render_profile": {"context_kind": getattr(cache_entry.anchor, "kind", "project"), "name": "detail"},
+                    "no_result_message": None,
+                    "clarification": None,
                     "view_state": view_state,
+                    "answer_artifact": None,
                 }
             log_event(
                 "DETAIL.CACHE.MISS",
@@ -780,7 +816,11 @@ async def node_rag_search(
         if output_type == "detail" and exact_detail_lookup and focus_seed_map:
             resolved_retrieval_query = str(next(iter(focus_seed_map.values()))[0]).strip()
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
-        search_num = 1 if exact_detail_lookup else _resolve_retrieval_budget(qa, max_top_k_size=max_top_k_size)
+        search_num = _resolve_runtime_top_k(
+            qa,
+            max_top_k_size=max_top_k_size,
+            exact_detail_lookup=exact_detail_lookup,
+        )
         planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
         planner_display_limit = _coerce_positive_int(getattr(qa, "display_limit", None))
         log_event(
@@ -1015,12 +1055,22 @@ async def node_rag_search(
                     coverage=coverage,
                     hydrated_fields=sorted(set(coverage.available_fields)),
                     source_turn_id=state.request_id,
+                    schema_version=DETAIL_CACHE_SCHEMA_VERSION,
                 )
-                detail_answer = render_detail_answer(coverage, requested_fields=requested_fields)
-                answer_artifact = _build_answer_artifact(
-                    text=detail_answer,
-                    answer_kind=("detail_profile" if coverage.detail_level == "profile_only" else "detail_cache"),
-                    answer_source="detail_lookup",
+                detail_context_text = build_detail_answer_context(
+                    coverage,
+                    requested_fields=requested_fields,
+                )
+                answer_context_text = detail_context_text
+                retrieval_bundle = _build_retrieval_bundle(
+                    docs=docs,
+                    canonical_evidence=canonical_evidence,
+                    render_profile=render_profile,
+                    raw_count=raw_result_count,
+                    clarification=clarification,
+                    no_result_message=no_result_message,
+                    answer_context_text=detail_context_text,
+                    context_source="detail_contract_context",
                 )
                 log_event(
                     "DETAIL.COVERAGE",
@@ -1030,12 +1080,6 @@ async def node_rag_search(
                     detail_level=coverage.detail_level,
                     available_fields=coverage.available_fields,
                     missing_fields=coverage.missing_fields,
-                )
-                log_event(
-                    "ANSWER.FALLBACK.APPLIED",
-                    request_id=state.request_id,
-                    conversation_id=state.conversation_id,
-                    reason="detail_contract",
                 )
 
         log_event(

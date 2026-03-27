@@ -26,13 +26,13 @@ def _first_text(*values: Any) -> str:
     return ""
 
 
-def _resolve_followup_locked_route(followup_resolution: dict[str, Any]) -> tuple[str | None, list[str] | None, str | None]:
+def _resolve_followup_owner_lock(followup_resolution: dict[str, Any]) -> tuple[str | None, str | None]:
     if not isinstance(followup_resolution, dict):
-        return None, None, None
+        return None, None
 
     status = str(followup_resolution.get("followup_resolution_status") or "").strip().lower()
     if status != "resolved":
-        return None, None, None
+        return None, None
 
     selected_prev_item = dict(followup_resolution.get("selected_prev_item") or {})
     focus_entity = dict(followup_resolution.get("focus_entity") or {})
@@ -43,45 +43,35 @@ def _resolve_followup_locked_route(followup_resolution: dict[str, Any]) -> tuple
     ).lower()
 
     if context_kind == "perf":
-        return "perf", ["ntis_perf_v1"], "followup_context_perf"
+        return "perf", "followup_context_perf"
     if context_kind == "project":
-        return "project", ["ntis_project_v1"], "followup_context_project"
-    return None, None, None
+        return "project", "followup_context_project"
+    return None, None
 
 
 def _apply_followup_context_lock(normalized_intent: Any, followup_resolution: dict[str, Any]) -> Any:
-    locked_base_route, locked_target_cols, lock_reason = _resolve_followup_locked_route(followup_resolution)
-    if not locked_base_route or not locked_target_cols:
+    locked_owner_kind, lock_reason = _resolve_followup_owner_lock(followup_resolution)
+    if not locked_owner_kind:
         return normalized_intent
 
     if isinstance(normalized_intent, dict):
         patched = dict(normalized_intent)
-        patched["base_route"] = locked_base_route
-        patched["target_cols"] = list(locked_target_cols)
-        patched["context_owner_lock"] = locked_base_route
+        patched["context_owner_lock"] = locked_owner_kind
         patched["context_owner_lock_reason"] = lock_reason
         return patched
 
     if is_dataclass(normalized_intent):
         updates: dict[str, Any] = {}
-        if hasattr(normalized_intent, "base_route"):
-            updates["base_route"] = locked_base_route
-        if hasattr(normalized_intent, "target_cols"):
-            updates["target_cols"] = list(locked_target_cols)
         if hasattr(normalized_intent, "context_owner_lock"):
-            updates["context_owner_lock"] = locked_base_route
+            updates["context_owner_lock"] = locked_owner_kind
         if hasattr(normalized_intent, "context_owner_lock_reason"):
             updates["context_owner_lock_reason"] = lock_reason
         return replace(normalized_intent, **updates) if updates else normalized_intent
 
-    if hasattr(normalized_intent, "base_route") or hasattr(normalized_intent, "target_cols"):
+    if hasattr(normalized_intent, "context_owner_lock") or hasattr(normalized_intent, "context_owner_lock_reason"):
         try:
-            if hasattr(normalized_intent, "base_route"):
-                setattr(normalized_intent, "base_route", locked_base_route)
-            if hasattr(normalized_intent, "target_cols"):
-                setattr(normalized_intent, "target_cols", list(locked_target_cols))
             if hasattr(normalized_intent, "context_owner_lock"):
-                setattr(normalized_intent, "context_owner_lock", locked_base_route)
+                setattr(normalized_intent, "context_owner_lock", locked_owner_kind)
             if hasattr(normalized_intent, "context_owner_lock_reason"):
                 setattr(normalized_intent, "context_owner_lock_reason", lock_reason)
         except Exception:

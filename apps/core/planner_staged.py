@@ -2,7 +2,7 @@
 
 """Stagewise planner and deterministic gate artifact helpers."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, List, Literal, Optional
 
 from apps.core.schemas import default_target_collections_for_route
@@ -25,6 +25,21 @@ _PERF_SEED_KEYS = (
     "paper_id",
     "patent_reg_no",
     "patent_app_no",
+)
+_LOOKUP_FILTER_KEYS = (
+    "participant_researcher_name",
+    "participant_researcher_names",
+    "participant_researcher",
+    "participant_researchers",
+    "researcher_name",
+    "researcher_names",
+    "researcher",
+    "people_name",
+    "org_name",
+    "lead_org_name",
+    "performing_org_name",
+    "participant_org_name",
+    "people_affiliation_org_name",
 )
 
 
@@ -121,6 +136,31 @@ def has_new_regate_seed(*, base_seed_map: Dict[str, List[str]], stage2_seed_map:
     return False
 
 
+def _normalize_terms(values: Any) -> List[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        values = [values]
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _has_stage2_lookup_gate(stage2: Any) -> bool:
+    filters = getattr(stage2, "filters", None) if not isinstance(stage2, dict) else stage2.get("filters")
+    if not isinstance(filters, dict):
+        return False
+    return any(_normalize_terms(filters.get(key)) for key in _LOOKUP_FILTER_KEYS)
+
+
 def regate_locked_strategy(
     *,
     request_id: Optional[str],
@@ -145,6 +185,7 @@ def regate_locked_strategy(
         base_seed_map=base_seed_map,
         stage2_seed_map=stage2_seed_map,
     )
+    can_upgrade_search_to_lookup = locked_mode == "SEARCH" and _has_stage2_lookup_gate(stage2)
 
     updated: DeterministicGateStrategy | Dict[str, Any] = locked_strategy
     if can_regate:
@@ -169,6 +210,21 @@ def regate_locked_strategy(
         )
         if isinstance(locked_strategy, dict):
             updated = updated.to_prompt_payload()
+    elif can_upgrade_search_to_lookup:
+        if isinstance(locked_strategy, dict):
+            updated = dict(locked_strategy)
+            updated["mode"] = "LOOKUP"
+            updated["relation"] = None
+            updated["join_key_mode"] = None
+            updated["target_cols"] = _default_target_cols(updated.get("head"), None)
+        else:
+            updated = replace(
+                locked_strategy,
+                mode="LOOKUP",
+                relation=None,
+                join_key_mode=None,
+                target_cols=_default_target_cols(locked_strategy.head, None),
+            )
 
     def _locked_field(value: DeterministicGateStrategy | Dict[str, Any], field: str) -> Any:
         """Read a field from either dataclass or dict form for before/after comparison."""
@@ -182,7 +238,7 @@ def regate_locked_strategy(
         "PLANNER.REGATE",
         request_id=request_id,
         conversation_id=conversation_id,
-        regate_eligible=int(can_regate),
+        regate_eligible=int(can_regate or can_upgrade_search_to_lookup),
         regate_changed=int(changed),
         before_mode=locked_mode,
         after_mode=_locked_field(updated, "mode"),
@@ -227,6 +283,10 @@ def compose_locked_strategy(
     if relation in (PROJECT_TO_PERF, PERF_TO_PROJECT) and (explicit_join_seed or has_prev_anchor):
         mode: Mode = "JOIN"
     elif action == "topic" and not explicit_join_seed:
+        mode = "SEARCH"
+        relation = None
+        join_key_mode = None
+    elif action in {"list", "stats"} and not explicit_join_seed:
         mode = "SEARCH"
         relation = None
         join_key_mode = None

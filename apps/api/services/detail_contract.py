@@ -89,17 +89,31 @@ def _pick_nested(items: Any, key: str) -> list[str]:
 def _infer_entity_kind(anchor: Optional[FocusEntity], doc: Dict[str, Any], ids: Dict[str, Any]) -> str:
     if anchor is not None and getattr(anchor, "kind", None):
         return str(anchor.kind).strip().lower() or "project"
+    if _text(ids.get("pjt_id")) or _text(ids.get("pjt_no")) or _text(doc.get("pjt_id")) or _text(doc.get("pjt_no")):
+        return "project"
+    if _text(ids.get("rst_id")) or _text(ids.get("doi")) or _text(ids.get("issn")) or _text(doc.get("rst_id")):
+        return "perf"
     if _text(ids.get("person_no")) or _text(doc.get("person_no")) or _text(doc.get("hm_id")):
         return "people"
     if _text(ids.get("org_id")) or _text(ids.get("org_code")) or _text(ids.get("biz_no")) or _text(doc.get("org_id")):
         return "org"
-    if _text(ids.get("rst_id")) or _text(ids.get("doi")) or _text(ids.get("issn")) or _text(doc.get("rst_id")):
-        return "perf"
     return "project"
 
 
+def _canonical_cache_kind(anchor: FocusEntity) -> str:
+    if getattr(anchor, "pjt_id", None) or getattr(anchor, "pjt_no", None):
+        return "project"
+    if getattr(anchor, "rst_id", None) or getattr(anchor, "doi", None) or getattr(anchor, "issn", None):
+        return "perf"
+    if getattr(anchor, "person_no", None):
+        return "people"
+    if getattr(anchor, "org_id", None) or getattr(anchor, "org_code", None) or getattr(anchor, "biz_no", None):
+        return "org"
+    return str(getattr(anchor, "kind", "") or "").strip().lower() or "project"
+
+
 def make_entity_cache_key(anchor: FocusEntity) -> str:
-    kind = str(getattr(anchor, "kind", "") or "").strip().lower() or "project"
+    kind = _canonical_cache_kind(anchor)
     for kind, key, value in (
         (kind, "pjt_id", getattr(anchor, "pjt_id", None)),
         (kind, "pjt_no", getattr(anchor, "pjt_no", None)),
@@ -226,6 +240,49 @@ def render_detail_answer(coverage: DetailCoverage, *, requested_fields: Optional
         rendered_outputs = ", ".join(str(v) for v in outputs if str(v).strip()) if isinstance(outputs, list) else str(outputs)
         if rendered_outputs:
             lines.append(f"{_decode_text(_FIELD_LABELS['outputs'])}: {rendered_outputs}")
+    return "\n".join(lines)
+
+
+def build_detail_answer_context(
+    coverage: DetailCoverage,
+    *,
+    requested_fields: Optional[Iterable[str]] = None,
+) -> str:
+    requested = sorted(set(requested_fields or []))
+    core = coverage.core_profile or {}
+    rich = coverage.rich_detail or {}
+
+    lines = ["[detail_evidence]"]
+    lines.append(f"entity_kind: {core.get('entity_kind') or 'project'}")
+    if requested:
+        lines.append(f"requested_fields: {', '.join(requested)}")
+
+    for key in ("title", "pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn", "year", "lead_org"):
+        value = core.get(key)
+        if value:
+            lines.append(f"{key}: {value}")
+
+    participant_org = core.get("participant_org") or []
+    if participant_org:
+        lines.append(f"participant_org: {', '.join(participant_org)}")
+
+    researchers = core.get("researchers") or []
+    if researchers:
+        lines.append(f"researchers: {', '.join(researchers)}")
+
+    for key in ("summary", "goal", "period", "budget", "perf_type", "affiliation"):
+        value = rich.get(key)
+        if value:
+            lines.append(f"{key}: {value}")
+
+    outputs = rich.get("outputs") or []
+    if outputs:
+        lines.append(f"outputs: {', '.join(outputs)}")
+
+    if coverage.missing_fields:
+        lines.append(f"missing_fields: {', '.join(sorted(coverage.missing_fields))}")
+
+    lines.append("answer_rule: use only supported fields and state clearly when a requested field is unavailable.")
     return "\n".join(lines)
 
 

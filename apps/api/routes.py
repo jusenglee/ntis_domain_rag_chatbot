@@ -173,6 +173,10 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         """SSE 한 프레임을 현재 route 규약에 맞는 문자열로 인코딩한다."""
         return encode_sse_payload(tag, **payload)
 
+    def _stream_legacy_payload(**payload: Any) -> str:
+        """Legacy flat payload는 tag envelope 없이 기존 wire shape로 유지한다."""
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
     def _normalize_stream_model_key(model_key: str) -> str:
         normalized = str(model_key or "").strip().lower()
         if normalized in {"solar", "upstage"}:
@@ -214,7 +218,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     )
                 )
         elif event.kind == "reference.set":
-            payloads.append(_stream_data("reference", reference=list((event.meta or {}).get("references") or [])))
+            payloads.append(_stream_legacy_payload(reference=list((event.meta or {}).get("references") or [])))
         elif event.kind == "error":
             meta = dict(event.meta or {})
             payloads.append(

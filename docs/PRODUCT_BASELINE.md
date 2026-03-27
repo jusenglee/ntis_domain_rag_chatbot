@@ -3,7 +3,8 @@
 이 저장소의 상품화 게이트는 `전체 pytest` 하나로 끝나지 않는다. 아래 3축을 함께 만족해야 한다.
 
 1. 수집/회귀 게이트
-   - `PYTHONPATH=. python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-*`
+   - `PYTHONPATH=. python -m pytest --collect-only -q`
+   - 기본 collect-only 경로와 `pytest-cache-files-*` 제외 규칙은 루트 `pytest.ini`를 따른다.
    - 아래 핵심 계약 테스트 묶음 통과
      - `tests/test_planner_stagewise.py`
      - `tests/test_retrieval_workflow_detail_runtime.py`
@@ -19,6 +20,7 @@
    - fixture schema 테스트가 통과
 3. 운영 게이트
    - baseline 스크립트가 수집, 핵심 회귀, eval fixture 존재 여부를 함께 확인
+   - baseline 스크립트의 `--ignore-glob`는 저장소 설정을 대체하는 규칙이 아니라 추가 방어막으로 유지한다.
 
 운영 원칙:
 

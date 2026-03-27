@@ -61,6 +61,23 @@ _PREV_CONTEXT_SEED_ID_KEYS = (
     "doi",
     "issn",
 )
+_RESEARCHER_FILTER_KEYS = (
+    "participant_researcher_name",
+    "participant_researcher_names",
+    "participant_researcher",
+    "participant_researchers",
+    "researcher_name",
+    "researcher_names",
+    "researcher",
+    "people_name",
+)
+_GENERIC_ORG_FILTER_KEYS = ("org_name",)
+_ROLE_SCOPED_ORG_FILTER_KEYS = (
+    "lead_org_name",
+    "performing_org_name",
+    "participant_org_name",
+    "people_affiliation_org_name",
+)
 
 
 def _normalize_stage2_slots_payload(
@@ -141,6 +158,102 @@ def _validation_hints_payload(result: Stage2ValidationResult) -> dict[str, Any]:
         "missing_years": list(result.missing_years),
         "missing_perf_types": list(result.missing_perf_types),
     }
+
+
+def _normalize_terms(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        values = [values]
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _append_terms_to_query(query: str, terms: list[str]) -> str:
+    merged: list[str] = []
+    base = str(query or "").strip()
+    if base:
+        merged.append(base)
+    for term in terms:
+        text = str(term or "").strip()
+        if not text or text in merged:
+            continue
+        merged.append(text)
+    return " ".join(merged).strip()
+
+
+def _sanitize_stage2_structured_filters(
+    *,
+    slots: Any,
+    planner_stage2_slots_cls: Any,
+    entity_role_plan: PlannerEntityRolePlan,
+    request_id: Optional[str],
+    conversation_id: str,
+    log_event: Any,
+) -> Any:
+    payload = slots.model_dump() if hasattr(slots, "model_dump") else dict(slots or {})
+    filters = dict(payload.get("filters") or {})
+    retrieval_query = str(payload.get("retrieval_query") or "").strip()
+
+    allowed_people_terms = list(getattr(entity_role_plan, "people_terms_to_keep", []) or [])
+    allowed_org_terms = list(getattr(entity_role_plan, "org_terms_to_keep", []) or [])
+    org_role_hint = str(getattr(entity_role_plan, "org_role_hint", "") or "").strip().lower()
+    dropped: dict[str, list[str]] = {}
+
+    if not allowed_people_terms:
+        for key in _RESEARCHER_FILTER_KEYS:
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+
+    if not allowed_org_terms:
+        for key in (*_GENERIC_ORG_FILTER_KEYS, *_ROLE_SCOPED_ORG_FILTER_KEYS):
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+    elif org_role_hint not in {"lead_org", "participant_org", "affiliation_org"}:
+        for key in _ROLE_SCOPED_ORG_FILTER_KEYS:
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+    elif org_role_hint == "lead_org":
+        for key in ("participant_org_name", "people_affiliation_org_name"):
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+    elif org_role_hint == "participant_org":
+        for key in ("lead_org_name", "performing_org_name", "people_affiliation_org_name"):
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+    elif org_role_hint == "affiliation_org":
+        for key in ("lead_org_name", "performing_org_name", "participant_org_name"):
+            values = _normalize_terms(filters.pop(key, None))
+            if values:
+                dropped[key] = values
+
+    salvaged_terms = [term for values in dropped.values() for term in values]
+    if salvaged_terms:
+        payload["retrieval_query"] = _append_terms_to_query(retrieval_query, salvaged_terms)
+        log_event(
+            "PLANNER.STAGE2.FILTERS.SANITIZED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            dropped_fields=sorted(key for key, values in dropped.items() if values),
+            salvaged_terms=salvaged_terms,
+        )
+
+    payload["filters"] = {key: value for key, value in filters.items() if value not in (None, [], {}, "")}
+    return planner_stage2_slots_cls.model_validate(payload)
 
 
 def _has_explicit_perf_seed(ids_map: dict[str, list[str]]) -> bool:
@@ -506,6 +619,14 @@ async def run_planner_stage2(
         log_event=log_event,
     )
     slots = parser.parse(json.dumps(normalized_slots, ensure_ascii=False))
+    slots = _sanitize_stage2_structured_filters(
+        slots=slots,
+        planner_stage2_slots_cls=planner_stage2_slots_cls,
+        entity_role_plan=entity_role_plan,
+        request_id=request_id,
+        conversation_id=conversation_id,
+        log_event=log_event,
+    )
     log_event(
         "PLANNER.STAGE2",
         request_id=request_id,

@@ -279,6 +279,13 @@ def _build_filter(
         return qmodels.Filter(**kwargs)
 
 
+def _wrap_filter_in_must_gate(filter_obj: Any) -> Optional[Any]:
+    """Keep a should-based gate conjunctive when paired with another nested must clause."""
+    if filter_obj is None:
+        return None
+    return _build_filter(must=[filter_obj], should=None, must_not=None)
+
+
 def and_filter(a: Any, b: Any) -> Any:
     """두 Filter의 must/should/must_not 조건을 보존하며 AND 로 합성한다."""
     if qmodels is None:
@@ -720,7 +727,9 @@ def _build_prtcp_mp_people_nested_filter(
         if org_should:
             org_gate = _build_filter(must=None, should=org_should, must_not=None, min_should=1)
             if people_terms or person_ids:
-                nested_must.append(org_gate)
+                nested_gate = _wrap_filter_in_must_gate(org_gate)
+                if nested_gate is not None:
+                    nested_must.append(nested_gate)
             else:
                 nested_should.extend(org_should)
 
