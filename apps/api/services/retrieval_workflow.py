@@ -369,7 +369,10 @@ def _normalize_display_payloads(
         str(output_type or "").strip().lower() in {"list", "relation", "comparison", "series", "stats"}
         and normalized_canonical
         and docs_kind == "collection_wrapper"
-        and len(normalized_canonical) >= max(1, fallback_threshold)
+        and (
+            str(base_route or "").strip().lower() in {"people", "org"}
+            or len(normalized_canonical) >= max(1, fallback_threshold)
+        )
     ):
         normalized_docs = _build_display_docs_from_canonical(normalized_canonical)
         docs_kind = _classify_docs_kind(normalized_docs)
@@ -393,7 +396,10 @@ def _normalize_display_payloads(
         prefer_canonical = (
             str(output_type or "").strip().lower() == "list"
             and canonical_count > docs_count
-            and canonical_count >= max(1, fallback_threshold)
+            and (
+                str(base_route or "").strip().lower() in {"people", "org"}
+                or canonical_count >= max(1, fallback_threshold)
+            )
             and (docs_kind == "collection_wrapper" or docs_count < max(1, fallback_threshold))
         )
         if prefer_canonical:
@@ -917,6 +923,8 @@ async def node_rag_search(
                 "raw_query": raw_query,
                 "planner_query": planner_query,
                 "selected_search_query": resolved_retrieval_query,
+                "actual_retrieval_query": actual_retrieval_query,
+                "query_mismatch": bool(actual_retrieval_query != resolved_retrieval_query),
             }
             view_state.refinement_history.append({
                 "turn_id": state.request_id,
@@ -1046,6 +1054,7 @@ async def node_rag_search(
             "retrieval_bundle": retrieval_bundle,
             "answer_context_text": answer_context_text,
             "resolved_retrieval_query": resolved_retrieval_query,
+            "actual_retrieval_query": actual_retrieval_query,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
             "clarification": clarification,

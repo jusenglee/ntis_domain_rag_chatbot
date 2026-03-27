@@ -11,11 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
-from langchain_core.messages import HumanMessage
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import Tool
-from langgraph.graph import END, StateGraph
 
 from apps.api.contracts.runtime_contracts import (
     friendly_strategy_violation_message,
@@ -97,8 +92,6 @@ from apps.core.query_intent import (
     normalize_org_terms,
 )
 from apps.core.rag_runtime_observability import get_code_fingerprint_fields, set_log_context
-from apps.core.rag_store import build_rag_objects
-from apps.core.retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
 from apps.core.schemas import IntentPayloadV3, PlannerStage1Decision, PlannerStage2Slots
 from apps.core.settings import (
     MAX_CONTEXT_CHARS,
@@ -297,6 +290,15 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "selected_prev_index": strategy_meta.get("selected_prev_index"),
         "selected_prev_context_kind": strategy_meta.get("selected_prev_context_kind"),
         "seed_source": strategy_meta.get("seed_source"),
+        "raw_query": getattr(state, "question", None),
+        "planner_query": timings.get("info.planner_query") or None,
+        "resolved_retrieval_query": getattr(state, "resolved_retrieval_query", None),
+        "actual_retrieval_query": getattr(state, "actual_retrieval_query", None),
+        "retrieval_query_mismatch": int(bool(
+            getattr(state, "actual_retrieval_query", None)
+            and getattr(state, "resolved_retrieval_query", None)
+            and getattr(state, "actual_retrieval_query", None) != getattr(state, "resolved_retrieval_query", None)
+        )),
         "docs_found": len(context),
         "selected_model": merge_debug.get("selected_model"),
         "rendered_context_used": int(bool(getattr(state, "rendered_context_used", False))),
@@ -467,6 +469,11 @@ def build_advanced_workflow() -> Any:
     메모리 로드, planner 분석, retrieval, 답변 생성, 병합, 저장 노드를 wiring하고
     각 노드에 프로젝트 전용 의존성과 정책 함수를 주입한다.
     """
+    from langchain_core.output_parsers import PydanticOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.tools import Tool
+    from langgraph.graph import END, StateGraph
+
     load_memory_node = partial(
         node_load_memory,
         load_conversation_memory_fn=partial(
@@ -582,6 +589,10 @@ def create_app() -> FastAPI:
     runtime 초기화, route 등록, workflow wiring, lifespan cleanup을 한곳에 모아
     `apps/api/main.py`가 단순한 composition root로 남도록 한다.
     """
+    from langchain_core.messages import HumanMessage
+    from apps.core.rag_store import build_rag_objects
+    from apps.core.retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
+
     @asynccontextmanager
     async def runtime_lifespan(app: FastAPI):
         """앱 시작과 종료 시 필요한 runtime 자원을 관리한다.

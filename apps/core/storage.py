@@ -16,6 +16,10 @@ class KVStore:
         """키에 값을 저장하고 필요하면 TTL을 설정한다."""
         raise NotImplementedError
 
+    async def delete(self, key: str) -> None:
+        """키에 해당하는 값을 삭제한다."""
+        raise NotImplementedError
+
     async def ping(self) -> bool:
         """백엔드 상태가 사용 가능한지 가볍게 확인한다."""
         return True
@@ -47,6 +51,10 @@ class MemoryKVStore(KVStore):
         """키에 값을 저장하고 필요하면 TTL을 설정한다."""
         exp = (time.time() + ex) if ex else None
         self._data[key] = (value, exp)
+
+    async def delete(self, key: str) -> None:
+        """메모리 저장소에서 키를 삭제한다."""
+        self._data.pop(key, None)
 
     async def ping(self) -> bool:
         """백엔드 상태가 사용 가능한지 가볍게 확인한다."""
@@ -97,6 +105,12 @@ class FileKVStore(KVStore):
         payload = {"value": value, "expire_at": expire_at}
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(payload, ensure_ascii=False))
+
+    async def delete(self, key: str) -> None:
+        """파일 저장소에서 키에 대응하는 JSON 파일을 삭제한다."""
+        path = self._path_for_key(key)
+        if os.path.exists(path):
+            os.remove(path)
 
     async def ping(self) -> bool:
         """백엔드 상태가 사용 가능한지 가볍게 확인한다."""

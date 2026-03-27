@@ -104,19 +104,29 @@ async def save_conversation_memory(
         ex=history_ttl_seconds,
     )
 
-    if canonical_evidence:
+    canonical_key = f"conversation:{conversation_id}:last_canonical_evidence"
+    if canonical_evidence is None:
+        pass
+    elif canonical_evidence:
         await kv_store.set(
-            f"conversation:{conversation_id}:last_canonical_evidence",
+            canonical_key,
             json.dumps(canonical_evidence, ensure_ascii=False),
             ex=history_ttl_seconds,
         )
+    else:
+        await kv_store.delete(canonical_key)
 
-    if render_profile:
+    render_profile_key = f"conversation:{conversation_id}:last_render_profile"
+    if render_profile is None:
+        pass
+    elif render_profile:
         await kv_store.set(
-            f"conversation:{conversation_id}:last_render_profile",
+            render_profile_key,
             json.dumps(render_profile, ensure_ascii=False),
             ex=history_ttl_seconds,
         )
+    else:
+        await kv_store.delete(render_profile_key)
 
     if view_state is not None:
         payload = view_state.model_dump() if hasattr(view_state, "model_dump") else dict(view_state)

@@ -4,11 +4,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_COUNT_SUFFIXES = ("개", "건", "명", "편", "종")
-_ORDINAL_SUFFIXES = ("번", "번째")
-_YEAR_SUFFIXES = ("년",)
+_COUNT_SUFFIXES = ("\uac1c", "\uac74", "\uba85", "\ud3b8", "\uc885")
+_ORDINAL_SUFFIXES = ("\ubc88", "\ubc88\uc9f8")
+_YEAR_SUFFIXES = ("\ub144",)
 _ID_LABELS = ("PJT_ID", "PJT_NO", "RST_ID", "DOI", "ISSN")
-_FOLLOWUP_CUES = ("이", "그", "저", "앞의", "이전", "위", "해당")
+_FOLLOWUP_CUES = ("\uc774", "\uadf8", "\uc800", "\uc55e\uc758", "\uc774\uc804", "\uc704", "\ud574\ub2f9")
+_ORG_HINTS = (
+    "\uc5f0\uad6c\uc6d0",
+    "\ub300\ud559",
+    "\uc0b0\ud559\ud611\ub825\ub2e8",
+    "\uc13c\ud130",
+    "\uc7ac\ub2e8",
+    "\ud559\uad50",
+    "\uae30\uad00",
+    "\ud68c\uc0ac",
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,35 @@ def _dedupe(values: list[str]) -> list[str]:
 
 def _tokenize(question: str) -> list[str]:
     return [token.strip() for token in str(question or "").replace(",", " ").split() if token.strip()]
+
+
+def _looks_org_like(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _ORG_HINTS)
+
+
+def _looks_internal_perf_tag(text: str) -> bool:
+    normalized = str(text or "").strip().upper()
+    return normalized.startswith("IRD_")
+
+
+def _scan_parenthesized_entity_terms(question: str) -> tuple[list[str], list[str]]:
+    people_terms: list[str] = []
+    org_terms: list[str] = []
+    for token in _tokenize(question):
+        if "(" not in token or ")" not in token:
+            continue
+        left, _, rest = token.partition("(")
+        inner, _, _ = rest.partition(")")
+        left = left.strip()
+        inner = inner.strip()
+        if left and not _looks_org_like(left):
+            people_terms.append(left)
+        if inner and _looks_org_like(inner):
+            org_terms.append(inner)
+    return _dedupe(people_terms), _dedupe(org_terms)
 
 
 def _scan_explicit_count(question: str) -> int | None:
@@ -86,9 +125,26 @@ def _scan_followup_cues(question: str) -> list[str]:
 
 
 def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSignals:
-    people_terms = _dedupe([str(value).strip() for value in (getattr(normalized_intent, "people_terms", None) or []) if str(value).strip()])
-    org_terms = _dedupe([str(value).strip() for value in (getattr(normalized_intent, "org_terms", None) or []) if str(value).strip()])
-    perf_types = _dedupe([str(value).strip() for value in (getattr(normalized_intent, "perf_types", None) or []) if str(value).strip()])
+    normalized_people = [
+        str(value).strip()
+        for value in (getattr(normalized_intent, "people_terms", None) or [])
+        if str(value).strip()
+    ]
+    normalized_orgs = [
+        str(value).strip()
+        for value in (getattr(normalized_intent, "org_terms", None) or [])
+        if str(value).strip()
+    ]
+    fallback_people, fallback_orgs = _scan_parenthesized_entity_terms(question)
+    people_terms = _dedupe(normalized_people or fallback_people)
+    org_terms = _dedupe(normalized_orgs or fallback_orgs)
+    perf_types = _dedupe(
+        [
+            str(value).strip()
+            for value in (getattr(normalized_intent, "perf_types", None) or [])
+            if str(value).strip() and not _looks_internal_perf_tag(value)
+        ]
+    )
     years = _scan_years(question, normalized_intent)
     id_like_terms = _scan_id_labels(question, normalized_intent)
     followup_cues = _scan_followup_cues(question)

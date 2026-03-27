@@ -512,6 +512,10 @@ async def run_planner_stage2(
         conversation_id=conversation_id,
         confidence=round(slots.confidence, 3),
         planner_stage2_prompt_version=planner_stage2_prompt_version,
+        retrieval_query=str(getattr(slots, "retrieval_query", "") or ""),
+        filters=dict(getattr(slots, "filters", {}) or {}),
+        limit=getattr(slots, "limit", None),
+        display_limit=getattr(slots, "display_limit", None),
     )
     return slots
 

@@ -1,18 +1,36 @@
-"""Answer-selection policy shared by the dual-model generation path.\n\nThe selector is pure so fallback and timeout behavior can be tested without running the\ncomplete LangGraph workflow.\n"""
+"""Answer-selection policy shared by the dual-model generation path.
+
+The selector is pure so fallback and timeout behavior can be tested without running the
+complete LangGraph workflow.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 
+_REFUSAL_CONTEXT_MARKERS = (
+    "\uc81c\uacf5\ub41c \uc815\ubcf4",
+    "\uc8fc\uc5b4\uc9c4 \uc815\ubcf4",
+)
+_REFUSAL_PHRASES = (
+    "\ucc3e\uc744 \uc218 \uc5c6",
+    "\ud655\uc778\ud560 \uc218 \uc5c6",
+    "\uc548\ub0b4\uac00 \uc5b4\ub835",
+    "\ud3ec\ud568\ub418\uc5b4 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
+    "\uba85\uc2dc\ub418\uc5b4 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
+    "\uc548\ub0b4\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4",
+    "\uc694\uccad\ud558\uc2e0 \ub0b4\uc6a9\uc744 \uc548\ub0b4\ud558\uae30 \uc5b4\ub835\uc2b5\ub2c8\ub2e4",
+)
+
+
 def _looks_like_context_refusal(text: str) -> bool:
     normalized = " ".join(str(text or "").split()).lower()
     if not normalized:
         return False
-    return (
-        ("제공된 정보" in normalized and ("찾을 수 없" in normalized or "확인할 수 없" in normalized or "안내가 어렵" in normalized))
-        or "주어진 정보만으로" in normalized
-    )
+    has_context_marker = any(marker in normalized for marker in _REFUSAL_CONTEXT_MARKERS)
+    has_refusal_phrase = any(phrase in normalized for phrase in _REFUSAL_PHRASES)
+    return (has_context_marker and has_refusal_phrase) or ("\uc8fc\uc5b4\uc9c4 \uc815\ubcf4\ub9cc\uc73c\ub85c" in normalized)
 
 
 def select_final_answer(
@@ -24,11 +42,7 @@ def select_final_answer(
     fallback_message: str,
     min_answer_chars: int,
 ) -> dict[str, Any]:
-    """Solar와 Gemma 답변, 스트리밍 메타, 정책 설정을 바탕으로 최종 답변을 선택한다.
-
-    Solar 출력이 너무 짧거나 스트리밍 guard에 걸리면 Gemma나 fallback 메시지로 내리고,
-    선택 근거와 실패 사유는 호출자가 그대로 로그와 merge_debug에 남길 수 있게 함께 반환한다.
-    """
+    """Select the final answer from Solar/Gemma outputs and streamed metadata."""
     solar_answer = (answer_solar or "").strip()
     gemma_answer = (answer_gemma or "").strip()
     meta = solar_meta or {}
@@ -122,5 +136,3 @@ def select_final_answer(
         "gemma_answer_chars": len(gemma_answer),
         "solar_meta": meta,
     }
-
-

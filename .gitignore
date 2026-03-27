@@ -1,2 +1,10 @@
 .idea/
 .tests/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.iml
+logs/
+rag_bench_logs/
+local_kvstore/
+tests/pytest-cache-files-*/

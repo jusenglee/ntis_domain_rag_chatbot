@@ -94,8 +94,10 @@ def resolve_collection_server_filter(
         elif col == context.col_perf:
             if context.title_filter_server_applied:
                 base_filter = and_filter_fn(base_filter, context.title_filter)
-            if context.base_route == "perf" and context.people_filter and apply_name_filters:
+            if context.people_filter and apply_name_filters:
                 base_filter = and_filter_fn(base_filter, context.people_filter)
+            if apply_name_filters and (context.participant_org_filter or context.org_filter):
+                base_filter = and_filter_fn(base_filter, context.participant_org_filter or context.org_filter)
             if context.perf_tag_filter:
                 base_filter = and_filter_fn(base_filter, context.perf_tag_filter)
         return base_filter
@@ -157,7 +159,11 @@ def resolve_collection_server_filter(
     if col == context.col_project:
         if context.base_route == "people":
             tag_filter_local = build_tag_only_filter_fn(["IRD_NAI_PJT_INFO"])
-            base_filter = and_filter_fn(tag_filter_local, context.people_filter) if (context.people_filter and lookup_has_ids) else tag_filter_local
+            base_filter = tag_filter_local
+            if context.people_filter:
+                base_filter = and_filter_fn(base_filter, context.people_filter)
+            if context.participant_org_filter or context.org_filter:
+                base_filter = and_filter_fn(base_filter, context.participant_org_filter or context.org_filter)
             return _apply_extra_filters(with_org_must_gate_fn(base_filter))
         if context.base_route == "org":
             tag_filter_local = build_tag_only_filter_fn(["IRD_NAI_PJT_INFO"])
@@ -169,10 +175,12 @@ def resolve_collection_server_filter(
                 combined_filter = build_tag_only_filter_fn(["IRD_NAI_PJT_INFO"])
             return _apply_extra_filters(with_org_must_gate_fn(combined_filter))
 
-    if col == context.col_perf and context.base_route == "perf":
+    if col == context.col_perf and context.base_route in {"perf", "people", "org"}:
         combined_filter = base_filter_lookup
-        if context.people_filter and (lookup_has_ids or context.planner_org_filter_present):
+        if context.people_filter:
             combined_filter = and_filter_fn(combined_filter, context.people_filter) if combined_filter else context.people_filter
+        if context.participant_org_filter or context.org_filter:
+            combined_filter = and_filter_fn(combined_filter, context.participant_org_filter or context.org_filter) if combined_filter else (context.participant_org_filter or context.org_filter)
         if context.perf_tag_filter:
             combined_filter = and_filter_fn(combined_filter, context.perf_tag_filter) if combined_filter else context.perf_tag_filter
         if combined_filter is not None:

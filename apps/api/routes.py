@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -364,7 +365,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         kv_connected = False
         if kv_store:
             kv_connected = await kv_store.ping()
-        ready = graph_ready
+        ready = graph_ready and kv_connected
         status = "healthy" if graph_ready and kv_connected else ("degraded" if graph_ready else "not_ready")
         return {
             "status": status,
@@ -688,9 +689,13 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    debug_routes_enabled = os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() in {"1", "true", "yes", "on"}
+
     @app.post("/query/debug")
     async def query_debug(payload: QueryRequest, request: Request) -> Dict[str, Any]:
         """디버그용으로 graph 실행 결과를 JSON으로 그대로 노출한다."""
+        if not debug_routes_enabled:
+            raise HTTPException(status_code=404, detail="not found")
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"

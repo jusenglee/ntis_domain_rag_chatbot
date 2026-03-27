@@ -74,6 +74,7 @@
 
 - Set semantic_kind explicitly for broad_history, explicit_perf, explicit_relation, or generic_lookup.
 - Use perf_type_policy=explicit_only for broad history queries unless the user explicitly asked for a performance type.
+- Do not put count expressions such as `3건`, `20건`, or `5명` into `must_keep_terms`; keep those only through explicit_count, limit, and display_limit.
 
 <conflict_resolution>
 1) explicit person/org mention

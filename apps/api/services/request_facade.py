@@ -1,9 +1,12 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass, is_dataclass, replace
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from langchain_core.messages import BaseMessage
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+else:
+    BaseMessage = Any
 
 from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, resolve_followup_anchor
 from apps.core.followup_resolution import resolve_reference_context_followup

@@ -4,10 +4,6 @@ import aiofiles
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from apps.core.openai_compat_llm import OpenAICompatChatModel
-from apps.core.triton_llm import TritonChatModel
-
-
 _LLM_CACHE: Dict[str, Any] = {}
 _PROMPT_CACHE: dict[tuple[str, float], str] = {}
 
@@ -17,6 +13,9 @@ def build_llm(*, model_name: str, solar_vllm_config: Any) -> Any:
 
     Solar는 OpenAI 호환 클라이언트를, 나머지는 TritonChatModel을 사용해 호출 경로 차이를 이 함수 안에 가둔다.
     """
+    from apps.core.openai_compat_llm import OpenAICompatChatModel
+    from apps.core.triton_llm import TritonChatModel
+
     cached = _LLM_CACHE.get(model_name)
     if cached is not None:
         return cached
@@ -56,7 +55,7 @@ def resolve_system_prompt_path(
     gemma_path: Optional[Path] = None,
     solar_path: Optional[Path] = None,
 ) -> Path:
-    """Return the configured final-answer prompt path for the target model."""
+    """대상 모델에 맞는 최종 answer prompt 경로를 반환한다."""
     if model_name == "gemma_triton_0" and gemma_path is not None:
         return gemma_path
     if model_name == "solar_vllm_0" and solar_path is not None:

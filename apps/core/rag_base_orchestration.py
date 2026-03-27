@@ -47,6 +47,7 @@ class BaseOrchestrationRequest:
     people_terms: Optional[List[str]]
     people_ids: Optional[List[str]]
     org_terms: Optional[List[str]]
+    people_org_terms: Optional[List[str]]
     org_role: Optional[str]
     intent_payload: Any
     per_col_stats_log_tier: str = "normal"
@@ -286,6 +287,7 @@ def execute_base_orchestration(*, request: BaseOrchestrationRequest, runtime: Ba
         intent_payload=request.intent_payload,
         people_terms=request.people_terms,
         people_ids=request.people_ids,
+        people_org_terms=request.people_org_terms,
         query_text=request.query_text,
         org_terms=request.org_terms,
         org_role=request.org_role,

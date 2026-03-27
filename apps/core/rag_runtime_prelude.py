@@ -364,6 +364,31 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
         org_filter = build_org_filter(OrgFilterInput(org_terms, role=None if org_role in (None, "lead", "performer", "performing") else org_role))
     participant_org_filter = build_prtcp_org_nested_filter(OrgFilterInput(participant_org_terms, role="participant")) if participant_org_terms else None
     people_filter = build_people_filter(PeopleFilterInput(people_terms=people_terms, person_ids=people_ids, gender_terms=gender_terms, org_terms=people_org_terms, filter_spec=None, min_should=people_min_should, promote_one_must=people_promote_one_must)) if (people_terms or people_ids or gender_terms or people_org_terms) else None
+    if people_terms and people_filter is None:
+        runtime.log_kv_fn(
+            "PLANNER.FILTER_COMPILE.MISSING_PEOPLE_AXIS",
+            tier="error",
+            base_route=ctx.base_route,
+            people_terms=list(people_terms or []),
+            people_ids=list(people_ids or []),
+            people_org_terms=list(people_org_terms or []),
+        )
+    if participant_org_terms and participant_org_filter is None:
+        runtime.log_kv_fn(
+            "PLANNER.FILTER_COMPILE.MISSING_PARTICIPANT_ORG_AXIS",
+            tier="error",
+            base_route=ctx.base_route,
+            participant_org_terms=list(participant_org_terms or []),
+        )
+    if (lead_org_terms or org_terms) and org_filter is None:
+        runtime.log_kv_fn(
+            "PLANNER.FILTER_COMPILE.MISSING_ORG_AXIS",
+            tier="error",
+            base_route=ctx.base_route,
+            org_terms=list(org_terms or []),
+            lead_org_terms=list(lead_org_terms or []),
+            org_role=org_role,
+        )
 
     year_from = str(ctx.year_from or "").strip() or None
     year_to = str(ctx.year_to or "").strip() or None

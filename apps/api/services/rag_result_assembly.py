@@ -132,6 +132,7 @@ class ResultAssemblyRequest:
     people_terms: Optional[List[str]]
     people_ids: Optional[List[str]]
     org_terms: Optional[List[str]]
+    people_org_terms: Optional[List[str]]
     org_role: Optional[str]
     stack: str
     plan_mode: str
@@ -281,6 +282,151 @@ def collect_filter_probe_docs(
     }
 
 
+def _payload_list_texts(payload: Dict[str, Any], key: str) -> List[str]:
+    values: List[str] = []
+    current = payload.get(key)
+    if isinstance(current, list):
+        for item in current:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                values.append(text)
+    elif current is not None:
+        text = str(current).strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _match_any_term(value: str, terms: Sequence[str]) -> bool:
+    target = str(value or "").strip().lower()
+    if not target:
+        return False
+    return any(str(term or "").strip().lower() in target for term in terms if str(term or "").strip())
+
+
+def _match_same_member_constraints(
+    members_raw: Any,
+    *,
+    people_terms: Sequence[str],
+    people_ids: Sequence[str],
+    affiliation_org_terms: Sequence[str],
+) -> bool:
+    if not isinstance(members_raw, list):
+        return False
+    normalized_people = [str(term).strip() for term in people_terms if str(term).strip()]
+    normalized_ids = [str(term).strip() for term in people_ids if str(term).strip()]
+    normalized_affiliations = [str(term).strip() for term in affiliation_org_terms if str(term).strip()]
+    for member in members_raw:
+        if not isinstance(member, dict):
+            continue
+        hm_nm = str(member.get("hm_nm") or "").strip()
+        hm_id = str(member.get("hm_id") or "").strip()
+        blng_org_nm = str(member.get("blng_org_nm") or "").strip()
+        person_ok = True
+        affiliation_ok = True
+        if normalized_people:
+            person_ok = _match_any_term(hm_nm, normalized_people)
+        if normalized_ids:
+            person_ok = person_ok and hm_id in normalized_ids
+        if normalized_affiliations:
+            affiliation_ok = _match_any_term(blng_org_nm, normalized_affiliations)
+        if person_ok and affiliation_ok:
+            return True
+    return False
+
+
+def _point_satisfies_structured_constraint(
+    point: Any,
+    *,
+    people_terms: Sequence[str],
+    people_ids: Sequence[str],
+    org_terms: Sequence[str],
+    people_org_terms: Sequence[str],
+    org_role: Optional[str],
+) -> bool:
+    payload = getattr(point, "payload", None) or {}
+    role = str(org_role or "").strip().lower()
+    normalized_people = [str(term).strip() for term in people_terms if str(term).strip()]
+    normalized_ids = [str(term).strip() for term in people_ids if str(term).strip()]
+    normalized_orgs = [str(term).strip() for term in org_terms if str(term).strip()]
+    normalized_people_orgs = [str(term).strip() for term in people_org_terms if str(term).strip()]
+
+    if normalized_people or normalized_ids or normalized_people_orgs:
+        if _match_same_member_constraints(
+            payload.get("prtcp_mp"),
+            people_terms=normalized_people,
+            people_ids=normalized_ids,
+            affiliation_org_terms=normalized_people_orgs,
+        ):
+            people_axis_ok = True
+        else:
+            people_axis_ok = not (normalized_people or normalized_ids or normalized_people_orgs)
+        if not people_axis_ok:
+            return False
+
+    if normalized_orgs:
+        if role in {"affiliation", "affiliation_org"}:
+            return _match_same_member_constraints(
+                payload.get("prtcp_mp"),
+                people_terms=[],
+                people_ids=[],
+                affiliation_org_terms=normalized_orgs,
+            )
+        if role in {"participant", "participant_org"}:
+            participant_orgs = [
+                str((item or {}).get("org_nm") or "").strip()
+                for item in (payload.get("prtcp_org") or [])
+                if isinstance(item, dict)
+            ]
+            return any(_match_any_term(value, normalized_orgs) for value in participant_orgs)
+        top_org = str(payload.get("org_nm") or "").strip()
+        if role in {"lead", "performer", "performing", "lead_org"}:
+            return _match_any_term(top_org, normalized_orgs)
+        participant_orgs = [
+            str((item or {}).get("org_nm") or "").strip()
+            for item in (payload.get("prtcp_org") or [])
+            if isinstance(item, dict)
+        ]
+        return _match_any_term(top_org, normalized_orgs) or any(_match_any_term(value, normalized_orgs) for value in participant_orgs)
+    return True
+
+
+def apply_structured_result_constraint(
+    reranked: Sequence[Any],
+    *,
+    people_terms: Sequence[str],
+    people_ids: Sequence[str],
+    org_terms: Sequence[str],
+    people_org_terms: Sequence[str],
+    org_role: Optional[str],
+) -> tuple[List[Any], Dict[str, Any]]:
+    constrained = list(reranked or [])
+    constraints_present = bool(people_terms or people_ids or org_terms or people_org_terms)
+    if not constraints_present:
+        return constrained, {"applied": False, "input_count": len(constrained), "output_count": len(constrained), "dropped_count": 0}
+
+    filtered = [
+        point
+        for point in constrained
+        if _point_satisfies_structured_constraint(
+            point,
+            people_terms=people_terms,
+            people_ids=people_ids,
+            org_terms=org_terms,
+            people_org_terms=people_org_terms,
+            org_role=org_role,
+        )
+    ]
+    return filtered, {
+        "applied": True,
+        "input_count": len(constrained),
+        "output_count": len(filtered),
+        "dropped_count": max(0, len(constrained) - len(filtered)),
+    }
+
+
 def collect_merged_hits(sources: Sequence[Any], *, hit_key: HitKey) -> List[Any]:
     """여러 source에서 들어온 hit를 key 기준으로 중복 제거해 합친다.
     source별 히트를 다른 순서로 받더라도 같은 문서를 두 번 집계하지 않게 한다.
@@ -344,6 +490,7 @@ def assemble_rag_result(
     query_text: str,
     people_terms: Optional[List[str]],
     person_ids: Optional[List[str]],
+    people_org_terms: Optional[List[str]],
     org_terms: Optional[List[str]],
     org_role: Optional[str],
     timings: Dict[str, Any],
@@ -379,6 +526,7 @@ def assemble_rag_result(
         people_terms=people_terms,
         person_ids=person_ids,
         org_terms=org_terms,
+        people_org_terms=people_org_terms,
         org_role=org_role,
     )
     context = context_bundle["context"]
@@ -633,6 +781,31 @@ class SearchLookupResultOrchestrator:
             logger=self.runtime.logger,
             timing_put=self.runtime.timing_put,
         )
+        reranked, structured_constraint = apply_structured_result_constraint(
+            reranked,
+            people_terms=list(self.request.people_terms or []),
+            people_ids=list(self.request.people_ids or []),
+            org_terms=list(self.request.org_terms or []),
+            people_org_terms=list(self.request.people_org_terms or []),
+            org_role=self.request.org_role,
+        )
+        self.runtime.log_kv(
+            "RAG.STRUCTURED_RESULT_CONSTRAINT",
+            tier="debug",
+            applied=int(bool(structured_constraint.get("applied"))),
+            input_count=int(structured_constraint.get("input_count", 0)),
+            output_count=int(structured_constraint.get("output_count", 0)),
+            dropped_count=int(structured_constraint.get("dropped_count", 0)),
+            base_route=self.request.base_route,
+            org_role=self.request.org_role,
+            people_terms=list(self.request.people_terms or []),
+            people_ids=list(self.request.people_ids or []),
+            org_terms=list(self.request.org_terms or []),
+            people_org_terms=list(self.request.people_org_terms or []),
+        )
+        if structured_constraint.get("applied") and not reranked:
+            contract_fail_reason = contract_fail_reason or "structured_post_filter_empty"
+            self.runtime.timing_put("info.contract_fail_reason", contract_fail_reason)
 
         multi_hop_bundle = None
         if callable(self.runtime.multi_hop_bundle_builder):
@@ -693,6 +866,7 @@ class SearchLookupResultOrchestrator:
             people_terms=self.request.people_terms,
             person_ids=self.request.people_ids,
             org_terms=self.request.org_terms,
+            people_org_terms=self.request.people_org_terms,
             org_role=self.request.org_role,
             timings=self.runtime.timings,
             t_all0=self.runtime.t_all0,
@@ -729,6 +903,7 @@ def finalize_rag_result(
     intent_payload: Any,
     people_terms: Optional[List[str]],
     people_ids: Optional[List[str]],
+    people_org_terms: Optional[List[str]],
     query_text: str,
     org_terms: Optional[List[str]],
     org_role: Optional[str],
@@ -778,6 +953,7 @@ def finalize_rag_result(
         people_terms=people_terms,
         people_ids=people_ids,
         org_terms=org_terms,
+        people_org_terms=people_org_terms,
         org_role=org_role,
         stack=stack,
         plan_mode=plan_mode,

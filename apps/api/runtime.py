@@ -54,6 +54,10 @@ class RedisKVStore(KVStore):
         """
         await self.client.set(key, value, ex=ex)
 
+    async def delete(self, key: str) -> None:
+        """Redis에서 키를 삭제한다."""
+        await self.client.delete(key)
+
     async def ping(self) -> bool:
         """Redis 연결 상태를 건강 체크 형태로 확인한다.
         예외를 삼켜 boolean으로 바꿔 startup/shutdown 점검이 저장소 오류로 연쇄 실패하지 않게 한다.

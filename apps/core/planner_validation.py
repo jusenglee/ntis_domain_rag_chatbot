@@ -6,6 +6,18 @@ from typing import Any
 
 
 _EXPLICIT_PERF_ID_KEYS = ("rst_id", "doi", "issn", "perf_id", "paper_id", "patent_reg_no", "patent_app_no")
+_COUNT_TERM_SUFFIXES = ("\uac1c", "\uac74", "\uba85", "\ud3b8", "\uc885")
+_BROAD_HISTORY_GENERIC_TERMS = {
+    "\ud65c\ub3d9",
+    "\ud65c\ub3d9\uc774\ub825",
+    "\ud65c\ub3d9\ub0b4\uc5ed",
+    "\uc774\ub825",
+    "\uc5c5\uc801",
+    "\ucc38\uc5ec\uc774\ub825",
+    "\ud504\ub85c\ud544",
+    "\uc18c\uc18d",
+    "\ud604\ud669",
+}
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,25 @@ def _contains_term(haystack: str, term: str) -> bool:
     return bool(pattern.search(haystack))
 
 
+def _is_count_like_term(term: str) -> bool:
+    normalized = str(term or "").strip()
+    if not normalized:
+        return False
+    for suffix in _COUNT_TERM_SUFFIXES:
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)].strip().isdigit()
+    return False
+
+
+def _is_ignorable_broad_history_term(term: str, *, semantic_kind: str | None) -> bool:
+    normalized = str(term or "").strip()
+    if not normalized:
+        return True
+    if _is_count_like_term(normalized):
+        return True
+    return semantic_kind == "broad_history" and normalized in _BROAD_HISTORY_GENERIC_TERMS
+
+
 def validate_stage2_slots(
     *,
     question: str,
@@ -82,7 +113,13 @@ def validate_stage2_slots(
     missing_orgs = [value for value in getattr(entity_role_plan, "org_terms_to_keep", []) if value and not _contains_term(haystack, value)]
     missing_years = [value for value in getattr(signals, "years", []) if value and not _contains_term(haystack, value)]
     missing_perf = [value for value in getattr(entity_role_plan, "perf_type_hints", []) if value and not _contains_term(haystack, value)]
-    missing_must_keep = [value for value in getattr(entity_role_plan, "must_keep_terms", []) if value and not _contains_term(haystack, value)]
+    missing_must_keep = [
+        value
+        for value in getattr(entity_role_plan, "must_keep_terms", [])
+        if value
+        and not _is_ignorable_broad_history_term(value, semantic_kind=semantic_kind)
+        and not _contains_term(haystack, value)
+    ]
 
     if semantic_kind == "broad_history" and perf_type_policy == "explicit_only":
         missing_perf = []

@@ -1,4 +1,4 @@
-﻿"""실행 계층의 질의 분기와 결과 shaping을 돕는 RAG retrieval 헬퍼 모음."""
+"""실행 계층의 질의 분기와 결과 shaping을 돕는 RAG retrieval 헬퍼 모음."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel, ConfigDict
 
-from apps.core.rag_pipeline import run_rag_ab_compare
 from apps.core.pipeline_steps import NormalizedIntent
 from apps.core.schemas import IntentPayloadV3
 from apps.core.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload
@@ -17,6 +16,29 @@ from apps.core.followup_resolution import build_followup_clarification_message, 
 from apps.api.services.context_helpers import resolve_title_from_payload
 from apps.api.services.detail_contract import FIELD_ALIASES, extract_requested_fields
 from apps.api.contracts.runtime_contracts import friendly_strategy_violation_message
+
+
+def _load_run_rag_ab_compare() -> Any:
+    """실제 runtime 구현을 지연 import한다."""
+    from apps.core.rag_pipeline import run_rag_ab_compare as runtime_run_rag_ab_compare
+
+    return runtime_run_rag_ab_compare
+
+
+def _run_rag_ab_compare_proxy(*args: Any, **kwargs: Any) -> Any:
+    """기존 monkeypatch 포인트를 유지하기 위한 모듈 레벨 프록시다."""
+    return _load_run_rag_ab_compare()(*args, **kwargs)
+
+
+run_rag_ab_compare = _run_rag_ab_compare_proxy
+
+
+def _get_run_rag_ab_compare() -> Any:
+    """패치된 함수가 있으면 그것을, 아니면 지연 import 구현을 반환한다."""
+    patched = globals().get("run_rag_ab_compare")
+    if patched is not None and patched is not _run_rag_ab_compare_proxy:
+        return patched
+    return _load_run_rag_ab_compare()
 
 
 def _get_normalized_intent(state: Any) -> Any:
@@ -517,7 +539,7 @@ def detect_retrieval_query_drift(*, raw_query: Any, hint_query: Any) -> tuple[bo
 
 def _ensure_run_rag_ab_compare_supports_request_overrides() -> None:
     """현재 로딩된 runtime이 `request_overrides` 계약을 지원하는지 확인한다."""
-    params = signature(run_rag_ab_compare).parameters
+    params = signature(_get_run_rag_ab_compare()).parameters
     if "request_overrides" in params:
         return
     raise TypeError(
@@ -645,7 +667,7 @@ class CustomRAGRetriever(BaseModel):
             }
 
         _ensure_run_rag_ab_compare_supports_request_overrides()
-        res_map = run_rag_ab_compare(
+        res_map = _get_run_rag_ab_compare()(
             query=query,
             model_name=self.model_name,
             intent_payload=self._build_rag_intent_payload(self.intent_payload),

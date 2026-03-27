@@ -125,6 +125,9 @@ def merge_planner_hints(
     intent: Any,
     qa: Any,
     *,
+    request_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    log_event: Any = None,
     normalize_org_terms: Any,
     normalize_hint_terms: Any,
     collect_researcher_name_terms: Any,
@@ -171,7 +174,7 @@ def merge_planner_hints(
     if planner_org_role == "affiliation" and (people_affiliation_org_terms or org_terms) and not planner_people_terms:
         planner_people_terms = []
 
-    return replace(
+    merged_intent = replace(
         intent,
         planner_limit=int(getattr(qa, "limit", 20) or 20),
         retrieval_query=getattr(qa, "retrieval_query", None),
@@ -195,6 +198,39 @@ def merge_planner_hints(
         bundle_targets=planner_bundle_targets or list(getattr(intent, "bundle_targets", []) or []),
         guidance_required=bool(planner_guidance_required),
     )
+    if callable(log_event):
+        if normalize_hint_terms(filters.get("participant_researcher_name")) and not list(getattr(merged_intent, "people_terms", []) or []):
+            log_event(
+                "PLANNER.INTENT_INVARIANT.MISSING_PEOPLE_TERMS",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                filters={"participant_researcher_name": normalize_hint_terms(filters.get("participant_researcher_name"))},
+                retrieval_query=getattr(qa, "retrieval_query", None),
+            )
+        if normalize_hint_terms(filters.get("people_affiliation_org_name")) and not list(getattr(merged_intent, "people_affiliation_org_terms", []) or []):
+            log_event(
+                "PLANNER.INTENT_INVARIANT.MISSING_PEOPLE_AFFILIATION_TERMS",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                filters={"people_affiliation_org_name": normalize_hint_terms(filters.get("people_affiliation_org_name"))},
+                retrieval_query=getattr(qa, "retrieval_query", None),
+            )
+        if (
+            normalize_hint_terms(filters.get("participant_researcher_name"))
+            and normalize_hint_terms(filters.get("people_affiliation_org_name"))
+            and not list(getattr(merged_intent, "org_terms", []) or [])
+        ):
+            log_event(
+                "PLANNER.INTENT_INVARIANT.MISSING_ORG_TERMS",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                filters={
+                    "participant_researcher_name": normalize_hint_terms(filters.get("participant_researcher_name")),
+                    "people_affiliation_org_name": normalize_hint_terms(filters.get("people_affiliation_org_name")),
+                },
+                retrieval_query=getattr(qa, "retrieval_query", None),
+            )
+    return merged_intent
 
 
 def apply_planner_strategy(
@@ -482,7 +518,16 @@ def apply_question_analysis_v3(
                     stripped_values=list(stripped_values),
                 )
 
-    hinted_intent = merge_planner_hints(intent, sanitized_qa)
+    try:
+        hinted_intent = merge_planner_hints(
+            intent,
+            sanitized_qa,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            log_event=log_event,
+        )
+    except TypeError:
+        hinted_intent = merge_planner_hints(intent, sanitized_qa)
 
     return apply_planner_strategy_fn(
         hinted_intent,

@@ -24,10 +24,16 @@
 - `docs/04_회귀기준과_점검.md`
 - `docs/05_유지보수와_확장.md`
 - `docs/SESSION_HANDOFF_*.md`가 있으면 함께 읽는다.
-- `.agents/skills/ntis-rag-context-refine/references/source-data-semantics.md`
-- `.agents/skills/ntis-rag-context-refine/references/canonical-schema.md`
-- `.agents/skills/ntis-rag-context-refine/references/raw-to-context-examples.md`
-- `.agents/skills/ntis-rag-context-refine/references/invariants.md`
+- `.agents/skills/ntis-rag-context-refine/SKILL.md`
+- `.agents/skills/ntis-rag-context-refine/references/SKILL_revised_ko.md`
+
+## 2-1. 신규 기여자용 빠른 진입점
+
+- 루트 `README.md`
+- `docs/00_ONBOARDING.md`
+- `apps/api/routes.py`
+- `apps/api/services/request_facade.py`
+- `apps/api/services/retrieval_workflow.py`
 
 ## 3. 절대 섞으면 안 되는 의미
 

@@ -692,6 +692,7 @@ def _build_prtcp_mp_people_nested_filter(
     org_terms = _expand_org_partial_terms(org_terms)
 
     force_one_must = bool(promote_one_must and not person_ids and len(people_terms) == 1)
+    force_name_must = bool((people_terms and org_terms) or force_one_must)
 
     nested_must: List[Any] = []
     nested_should: List[Any] = []
@@ -702,7 +703,7 @@ def _build_prtcp_mp_people_nested_filter(
     # - org/gender conditions usually stay in should unless the caller hardens them.
     if people_terms:
         name_cond = qmodels.FieldCondition(key="hm_nm", match=make_match_any(people_terms))
-        if force_one_must:
+        if force_name_must:
             nested_must.append(name_cond)
         else:
             nested_should.append(name_cond)
@@ -715,7 +716,13 @@ def _build_prtcp_mp_people_nested_filter(
         nested_should.append(qmodels.FieldCondition(key="gndr_slct_nm", match=make_match_any(gender_terms)))
 
     if org_terms:
-        nested_should.extend(_build_match_text_conditions("blng_org_nm", org_terms))
+        org_should = _build_match_text_conditions("blng_org_nm", org_terms)
+        if org_should:
+            org_gate = _build_filter(must=None, should=org_should, must_not=None, min_should=1)
+            if people_terms or person_ids:
+                nested_must.append(org_gate)
+            else:
+                nested_should.extend(org_should)
 
     if not nested_must and not nested_should:
         return None

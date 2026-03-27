@@ -840,6 +840,7 @@ def _run_rag_with_vectors(
             people_terms=people_terms,
             people_ids=people_ids,
             org_terms=org_terms,
+            people_org_terms=people_org_terms,
             org_role=org_role,
             intent_payload=intent_payload,
             perf_followup_join_ids_count=len(perf_followup_join_ids),
