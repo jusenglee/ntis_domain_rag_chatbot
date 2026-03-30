@@ -63,7 +63,10 @@ def _decode_text(value: str) -> str:
 
 
 def _text(value: Any) -> str:
-    return str(value or "").strip()
+    text = str(value or "")
+    text = text.replace("_x000D_\n", "\n").replace("_x000D_", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip()
 
 
 def _present(value: Any) -> bool:
@@ -81,6 +84,21 @@ def _pick_nested(items: Any, key: str) -> list[str]:
     if isinstance(items, list):
         for item in items:
             text = _text(item.get(key)) if isinstance(item, dict) else _text(item)
+            if text and text not in out:
+                out.append(text)
+    return out
+
+
+def _normalize_outputs(*values: Any) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            for item in value:
+                text = _text(item.get("name")) if isinstance(item, dict) else _text(item)
+                if text and text not in out:
+                    out.append(text)
+        else:
+            text = _text(value)
             if text and text not in out:
                 out.append(text)
     return out
@@ -189,7 +207,14 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
         "doi": _text(getattr(anchor, "doi", None) or doc.get("doi") or ids.get("doi") or meta_detail.get("doi") or meta_basic.get("doi")),
         "issn": _text(getattr(anchor, "issn", None) or doc.get("issn") or ids.get("issn") or meta_detail.get("issn") or meta_basic.get("issn")),
         "year": _text(facts.get("year") or doc.get("stan_yr") or meta_basic.get("stan_yr") or meta_detail.get("stan_yr") or getattr(anchor, "year", None)),
-        "lead_org": _text(doc.get("org_nm") or meta_detail.get("org_nm") or ((roles.get("lead_org_name") or [None])[0]) or getattr(anchor, "lead_org", None)),
+        "lead_org": _text(
+            doc.get("org_nm")
+            or meta_detail.get("org_nm")
+            or meta_basic.get("pjt_prfrm_org_nm")
+            or meta_basic.get("org_nm")
+            or ((roles.get("lead_org_name") or [None])[0])
+            or getattr(anchor, "lead_org", None)
+        ),
         "participant_org": _pick_nested(doc.get("prtcp_org"), "org_nm") or [str(v).strip() for v in (roles.get("participant_org_name") or []) if str(v).strip()] or [str(v).strip() for v in (getattr(anchor, "participant_org", None) or []) if str(v).strip()],
         "researchers": _pick_nested(doc.get("prtcp_mp"), "hm_nm") or [str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()] or [str(v).strip() for v in (getattr(anchor, "researchers", None) or []) if str(v).strip()],
     }
@@ -197,6 +222,7 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
         "summary": _text(
             doc.get("summary")
             or facts.get("summary")
+            or meta_detail.get("summary")
             or meta_detail.get("smry")
             or meta_basic.get("summary")
             or meta_basic.get("rsch_abstract")
@@ -208,6 +234,7 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
             meta_detail.get("goal")
             or meta_detail.get("obj")
             or meta_detail.get("research_goal")
+            or facts.get("goal")
             or meta_basic.get("rsch_goal_abstract")
             or doc.get("content1")
         ),
@@ -215,6 +242,7 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
             meta_detail.get("period")
             or meta_detail.get("research_period")
             or meta_detail.get("date_range")
+            or facts.get("period")
             or _format_period(
                 meta_basic.get("tot_rsch_start_dt") or doc.get("start_dt") or doc.get("dt1"),
                 meta_basic.get("tot_rsch_end_dt") or doc.get("end_dt") or doc.get("dt2"),
@@ -224,12 +252,13 @@ def compute_detail_coverage(document: Dict[str, Any], *, anchor: Optional[FocusE
             meta_detail.get("budget")
             or meta_detail.get("research_expense")
             or meta_detail.get("total_budget")
+            or facts.get("budget")
             or meta_basic.get("rndco_tot_amt")
             or doc.get("rndco_tot_amt")
         ),
-        "outputs": _pick_nested(meta_detail.get("outputs"), "name") or _pick_nested(doc.get("outputs"), "name") or ([_text(meta_detail.get("outputs"))] if _text(meta_detail.get("outputs")) else []),
-        "perf_type": _text(meta_detail.get("perf_type") or facts.get("tag") or doc.get("tag")),
-        "affiliation": _text(meta_detail.get("affiliation") or meta_detail.get("blng_org_nm") or meta_basic.get("affiliation") or ((roles.get("people_affiliation_org_name") or [None])[0]) or getattr(anchor, "lead_org", None)),
+        "outputs": _normalize_outputs(meta_detail.get("outputs"), doc.get("outputs"), facts.get("outputs")),
+        "perf_type": _text(meta_detail.get("perf_type") or facts.get("perf_type") or facts.get("tag") or doc.get("tag")),
+        "affiliation": _text(meta_detail.get("affiliation") or meta_detail.get("blng_org_nm") or meta_basic.get("affiliation") or facts.get("affiliation") or ((roles.get("people_affiliation_org_name") or [None])[0]) or getattr(anchor, "lead_org", None)),
     }
     available = [key for key, value in {**core_profile, **rich_detail}.items() if _present(value)]
     missing = [key for key in list(CORE_FIELDS) + list(RICH_FIELDS) if key not in available]

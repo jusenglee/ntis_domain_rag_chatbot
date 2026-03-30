@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 else:
     BaseMessage = Any
 
-from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, resolve_followup_anchor
+from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.api.services.view_state import ConversationViewState
@@ -337,7 +337,9 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
             "context_kind": anchor.kind,
             "view_id": anchor.view_id,
         }
-    reference_kind = "deictic" if anchor.source == "display_snapshot" and parse_ordinal_reference(question) is None else "ordinal" if anchor.source == "display_snapshot" else "focus" if anchor.source != "explicit_id" else "explicit_id"
+    source_reference = parse_source_reference(question)
+    ordinal_reference = parse_ordinal_reference(question)
+    reference_kind = "source_reference" if anchor.source == "display_snapshot" and source_reference is not None else "deictic" if anchor.source == "display_snapshot" and ordinal_reference is None else "ordinal" if anchor.source == "display_snapshot" else "focus" if anchor.source != "explicit_id" else "explicit_id"
     return {
         "followup_resolution_status": "resolved",
         "selected_prev_item": selected_prev_item,

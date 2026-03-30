@@ -26,6 +26,12 @@ _EXPLICIT_ORDINAL_PATTERNS = (
     re.compile(r"\b(\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450)\b"),
     re.compile(r"\b(\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)\b"),
 )
+_SOURCE_REFERENCE_PATTERNS = (
+    re.compile(r"(?:\ucd9c\ucc98|source)\s*(\d{1,3})"),
+    re.compile(r"(?:\ucd9c\ucc98|source)\s*(\uccab\ubc88\uc9f8|\uccab\s*\ubc88\uc9f8|\uccab\uc9f8|\uccab|\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450|\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)"),
+    re.compile(r"\ucc38\uace0\s*(?:\ubb38\ud5cc|\uc790\ub8cc)\s*(\d{1,3})"),
+    re.compile(r"\ucc38\uace0\s*(?:\ubb38\ud5cc|\uc790\ub8cc)\s*(\uccab\ubc88\uc9f8|\uccab\s*\ubc88\uc9f8|\uccab\uc9f8|\uccab|\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450|\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)"),
+)
 _LAST_ITEM_RE = re.compile(r"(?:\ub9e8\s*\ub9c8\uc9c0\ub9c9|\ub9c8\uc9c0\ub9c9)")
 _DEICTIC_PATTERNS = {
     "project": (
@@ -64,6 +70,9 @@ def is_ordinal_reference_token(value: Any) -> bool:
         return False
     if _LAST_ITEM_RE.search(text):
         return True
+    for pattern in _SOURCE_REFERENCE_PATTERNS:
+        if pattern.search(text):
+            return True
     for patterns in _DEICTIC_PATTERNS.values():
         for pattern in patterns:
             if pattern.search(text):
@@ -221,6 +230,28 @@ def _parse_explicit_ordinal(question: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def _parse_source_reference(question: str) -> Optional[dict[str, Any]]:
+    text = _normalize_text(question)
+    if not text:
+        return None
+    for pattern in _SOURCE_REFERENCE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        token = _normalize_text(match.group(0))
+        raw = _normalize_text(match.group(1))
+        if raw.isdigit():
+            ordinal = int(raw)
+            if ordinal <= 0:
+                return None
+            return {"kind": "source_reference", "index": ordinal - 1, "token": token}
+        normalized_raw = raw.replace(" ", "")
+        for ordinal_token, mapped in _ORDINAL_WORD_TO_INDEX.items():
+            if _decode_token(ordinal_token).replace(" ", "") == normalized_raw:
+                return {"kind": "source_reference", "index": mapped, "token": token}
+    return None
+
+
 def _parse_deictic_followup(question: str, *, default_context_kind: str) -> Optional[dict[str, Any]]:
     text = _normalize_text(question)
     if not text:
@@ -252,7 +283,9 @@ def _select_deictic_candidate_items(items: list[dict[str, Any]], *, context_kind
     return project_org_carriers
 
 def resolve_reference_context_followup(*, question: str, canonical_evidence: list[dict[str, Any]], prev_context: list[dict[str, Any]], default_context_kind: str = "project") -> dict[str, Any]:
-    parsed = _parse_explicit_ordinal(question)
+    parsed = _parse_source_reference(question)
+    if parsed is None:
+        parsed = _parse_explicit_ordinal(question)
     if parsed is None:
         parsed = _parse_deictic_followup(question, default_context_kind=default_context_kind)
     items = build_reference_items(canonical_evidence=canonical_evidence, prev_context=prev_context, default_context_kind=default_context_kind)
@@ -285,6 +318,15 @@ def build_followup_clarification_message(strategy_meta: Dict[str, Any]) -> Optio
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
+    reference_kind = _normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower()
+    available_count = int((strategy_meta or {}).get("available_count") or 0)
+    if reference_kind == "source_reference":
+        if status == "missing_context":
+            return "\uc774\uc804 \ucd9c\ucc98 \ubaa9\ub85d\uc774 \uc5c6\uc5b4 \uba87 \ubc88\uc9f8 \ucd9c\ucc98\uc778\uc9c0 \ud310\ub2e8\ud558\uae30 \uc5b4\ub835\uc2b5\ub2c8\ub2e4. \uba3c\uc800 \ubaa9\ub85d\uc744 \ud655\uc778\ud55c \ub4a4 \ub2e4\uc2dc \uc9c8\ubb38\ud574 \uc8fc\uc138\uc694."
+        if status == "out_of_range":
+            return f"\uc774\uc804 \ucd9c\ucc98 \ubaa9\ub85d\uc5d0\ub294 {available_count}\uac1c\ub9cc \uc788\uc2b5\ub2c8\ub2e4. \uba87 \ubc88\uc9f8 \ucd9c\ucc98\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ub2e4\uc2dc \uc54c\ub824\uc8fc\uc138\uc694."
+        if status == "unresolved":
+            return "\uc774\uc804 \ubaa9\ub85d\uc5d0\uc11c \uc5b4\ub290 \ucd9c\ucc98\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ud655\uc778\ud574 \uc8fc\uc138\uc694."
     selected_prev_item = (strategy_meta or {}).get("selected_prev_item") or {}
     context_kind = _normalize_text(selected_prev_item.get("context_kind") or (strategy_meta or {}).get("selected_prev_context_kind") or "project").lower()
     subject_map = {"project": "과제", "perf": "성과", "people": "연구자", "org": "소속기관"}
@@ -303,6 +345,7 @@ def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optio
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
+    reference_kind = _normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower()
     candidates = [item for item in ((strategy_meta or {}).get("candidate_items") or []) if isinstance(item, dict)]
     if not candidates and status != "missing_context":
         return None
@@ -311,7 +354,7 @@ def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optio
         "status": status,
         "requested_token": (strategy_meta or {}).get("requested_token"),
         "available_count": int((strategy_meta or {}).get("available_count") or 0),
-        "selection_hint": "ordinal_or_entity_reference",
+        "selection_hint": "source_reference_or_entity_reference" if reference_kind == "source_reference" else "ordinal_or_entity_reference",
         "candidates": candidates,
         "resume_token": {
             "followup_reference_kind": (strategy_meta or {}).get("followup_reference_kind"),

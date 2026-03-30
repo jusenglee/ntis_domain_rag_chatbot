@@ -8,7 +8,10 @@ def _clean_text(value: Any) -> str:
     """임의의 값을 공백이 정리된 문자열로 만든다.
     canonical evidence는 빈 값을 넣지 않는다는 가정이 있어 모든 수집 헬퍼가 먼저 이 정규화를 거친다.
     """
-    return str(value or "").strip()
+    text = str(value or "")
+    text = text.replace("_x000D_\n", "\n").replace("_x000D_", "\n")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip()
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -52,6 +55,39 @@ def _pick_nested_value(items: Any, *keys: str) -> str:
     return ""
 
 
+def _collect_nested_values(items: Any, *keys: str) -> List[str]:
+    values: List[str] = []
+    for item in _normalize_nested_list(items):
+        for key in keys:
+            value = _clean_text(item.get(key))
+            if value and value not in values:
+                values.append(value)
+    return values
+
+
+def _format_period(start: Any, end: Any) -> str:
+    start_text = _clean_text(start)
+    end_text = _clean_text(end)
+    if start_text and end_text:
+        return f"{start_text} ~ {end_text}"
+    return start_text or end_text
+
+
+def _collect_output_values(value: Any) -> List[str]:
+    outputs: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                text = _first_non_empty(item.get("name"), item.get("title"), item.get("value"))
+            else:
+                text = _clean_text(item)
+            if text and text not in outputs:
+                outputs.append(text)
+        return outputs
+    text = _clean_text(value)
+    return [text] if text else []
+
+
 def _collect_ids(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, str]:
     """payload와 meta에서 의미 있는 식별자를 canonical id map으로 수집한다.
     `pjt_id`, `pjt_no`, `rst_id`, `doc_id`가 서로 다른 의미를 가진 채 보존되도록 필드를 섞지 않고 정리한다.
@@ -93,11 +129,16 @@ def _collect_ids(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, str
     return {key: value for key, value in ids.items() if value}
 
 
-def _collect_roles(payload: Dict[str, Any]) -> Dict[str, List[str]]:
+def _collect_roles(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, List[str]]:
     """payload 내 수행기관·참여기관·참여인력 소속을 role 별로 분리 수집한다.
     lead org, participant org, people affiliation을 같은 기관명 문자열로 통합하지 않고 역할 그대로 보존한다.
     """
-    lead_org_name = _clean_text(payload.get("org_nm"))
+    lead_org_name = _first_non_empty(
+        payload.get("org_nm"),
+        payload.get("pjt_prfrm_org_nm"),
+        meta.get("org_nm"),
+        meta.get("pjt_prfrm_org_nm"),
+    )
     participant_orgs = [
         _clean_text(item.get("org_nm"))
         for item in _normalize_nested_list(payload.get("prtcp_org"))
@@ -138,7 +179,44 @@ def _collect_facts(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, A
         meta.get("eng_pjt_nm"),
         meta.get("title"),
     )
-    summary = _first_non_empty(payload.get("summary"), meta.get("summary"), payload.get("content"))
+    summary = _first_non_empty(
+        payload.get("summary"),
+        meta.get("summary"),
+        meta.get("rsch_abstract"),
+        payload.get("content2"),
+        payload.get("content"),
+        payload.get("content_text"),
+    )
+    goal = _first_non_empty(
+        meta.get("goal"),
+        meta.get("obj"),
+        meta.get("research_goal"),
+        meta.get("rsch_goal_abstract"),
+        payload.get("content1"),
+    )
+    period = _first_non_empty(
+        meta.get("period"),
+        meta.get("research_period"),
+        meta.get("date_range"),
+        _format_period(
+            meta.get("tot_rsch_start_dt") or payload.get("start_dt") or payload.get("dt1"),
+            meta.get("tot_rsch_end_dt") or payload.get("end_dt") or payload.get("dt2"),
+        ),
+    )
+    budget = _first_non_empty(
+        meta.get("budget"),
+        meta.get("research_expense"),
+        meta.get("total_budget"),
+        meta.get("rndco_tot_amt"),
+        payload.get("rndco_tot_amt"),
+    )
+    outputs = _collect_output_values(meta.get("outputs")) or _collect_output_values(payload.get("outputs"))
+    perf_type = _first_non_empty(payload.get("perf_type"), meta.get("perf_type"), payload.get("tag"), meta.get("tag"))
+    affiliation = _first_non_empty(
+        meta.get("affiliation"),
+        meta.get("blng_org_nm"),
+        *_collect_nested_values(payload.get("prtcp_mp"), "blng_org_nm"),
+    )
     year = _first_non_empty(payload.get("stan_yr"), meta.get("stan_yr"), payload.get("dt1"))
     tag = _first_non_empty(payload.get("tag"), meta.get("tag"))
     relation = _first_non_empty(payload.get("relation"), meta.get("relation"))
@@ -148,6 +226,18 @@ def _collect_facts(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, A
         facts["title"] = title
     if summary:
         facts["summary"] = summary
+    if goal:
+        facts["goal"] = goal
+    if period:
+        facts["period"] = period
+    if budget:
+        facts["budget"] = budget
+    if outputs:
+        facts["outputs"] = outputs
+    if perf_type:
+        facts["perf_type"] = perf_type
+    if affiliation:
+        facts["affiliation"] = affiliation
     if year:
         facts["year"] = year
     if tag:
@@ -190,7 +280,7 @@ def build_canonical_evidence(
     meta = _pick_meta(payload)
     ids = _collect_ids(payload, meta)
     facts = _collect_facts(payload, meta)
-    roles = _collect_roles(payload)
+    roles = _collect_roles(payload, meta)
     source_type = _first_non_empty(payload.get("source_type"), base_route, "project")
     identity = _first_non_empty(
         ids.get("doc_id"),

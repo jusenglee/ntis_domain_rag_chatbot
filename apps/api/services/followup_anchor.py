@@ -10,6 +10,12 @@ _ORDINAL_PATTERNS = (
     re.compile(r"(?:\uc81c\s*)?(\d{1,3})\s*\ubc88\uc9f8"),
     re.compile(r"(?:\uc81c\s*)?(\d{1,3})\s*\ubc88"),
 )
+_SOURCE_REFERENCE_PATTERNS = (
+    re.compile(r"(?:\ucd9c\ucc98|source)\s*(\d{1,3})"),
+    re.compile(r"(?:\ucd9c\ucc98|source)\s*(\uccab\ubc88\uc9f8|\uccab\s*\ubc88\uc9f8|\uccab\uc9f8|\uccab|\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450|\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)"),
+    re.compile(r"\ucc38\uace0\s*(?:\ubb38\ud5cc|\uc790\ub8cc)\s*(\d{1,3})"),
+    re.compile(r"\ucc38\uace0\s*(?:\ubb38\ud5cc|\uc790\ub8cc)\s*(\uccab\ubc88\uc9f8|\uccab\s*\ubc88\uc9f8|\uccab\uc9f8|\uccab|\ub450\ubc88\uc9f8|\ub450\s*\ubc88\uc9f8|\ub458\uc9f8|\ub450|\uc138\ubc88\uc9f8|\uc138\s*\ubc88\uc9f8|\uc14b\uc9f8|\uc138)"),
+)
 _ORDINAL_WORDS = {
     "\uccab": 1,
     "\uccab\ubc88\uc9f8": 1,
@@ -64,15 +70,45 @@ def _decode_token(token: str) -> str:
     return token.encode("utf-8").decode("unicode_escape")
 
 
+def _resolve_ordinal_value(raw: str) -> Optional[int]:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        ordinal = int(token)
+        return ordinal if ordinal > 0 else None
+    compact = re.sub(r"\s+", "", token)
+    for candidate, ordinal in _ORDINAL_WORDS.items():
+        if _decode_token(candidate).replace(" ", "") == compact:
+            return ordinal
+    return None
+
+
+def parse_source_reference(question: str) -> Optional[int]:
+    text = str(question or "").strip()
+    if not text:
+        return None
+    for pattern in _SOURCE_REFERENCE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        resolved = _resolve_ordinal_value(match.group(1))
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def parse_ordinal_reference(question: str) -> Optional[int]:
     text = str(question or "").strip()
     if not text:
         return None
+    source_reference = parse_source_reference(text)
+    if source_reference is not None:
+        return source_reference
     for pattern in _ORDINAL_PATTERNS:
         match = pattern.search(text)
         if match:
-            ordinal = int(match.group(1))
-            return ordinal if ordinal > 0 else None
+            return _resolve_ordinal_value(match.group(1))
     compact = re.sub(r"\s+", "", text)
     for token, ordinal in _ORDINAL_WORDS.items():
         if _decode_token(token).replace(" ", "") in compact:
