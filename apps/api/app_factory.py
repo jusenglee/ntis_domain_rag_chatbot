@@ -321,12 +321,24 @@ APP_RUNTIME_CONFIG = AppRuntimeConfig(
     sparse_warmup_on_boot=os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT", "true").strip().lower() in {"1", "true", "yes", "on"},
     metrics_timeout_seconds=METRICS_PROMETHEUS_TIMEOUT,
     payload_keyword_index_targets={
-        "ntis_project_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id","doc_id"],
-        "ntis_perf_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id","doc_id"],
+        "ntis_project_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id", "doc_id", "prtcp_mp[].hm_nm"],
+        "ntis_perf_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id", "doc_id", "prtcp_mp[].hm_nm", "rst_id"],
+    },
+    payload_optional_keyword_index_targets={
+        "ntis_project_v1": ["prtcp_mp[].gndr_slct_nm"],
+        "ntis_perf_v1": ["perf_id", "paper_id", "prtcp_mp[].gndr_slct_nm"],
     },
     payload_text_index_targets={
-        "ntis_project_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
-        "ntis_perf_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],
+        "ntis_project_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm", "title_text", "title1", "title2"],
+        "ntis_perf_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm", "title_text", "title1", "title2"],
+    },
+    payload_integer_index_targets={
+        "ntis_project_v1": ["stan_yr", "meta_basic.stan_yr"],
+        "ntis_perf_v1": ["stan_yr", "meta_basic.stan_yr"],
+    },
+    payload_datetime_index_targets={
+        "ntis_project_v1": ["dt1", "dt2", "meta_basic.tot_rsch_start_dt", "meta_basic.tot_rsch_end_dt"],
+        "ntis_perf_v1": ["dt1", "dt2", "meta_basic.tot_rsch_start_dt", "meta_basic.tot_rsch_end_dt"],
     },
 )
 
@@ -592,7 +604,13 @@ def create_app() -> FastAPI:
     """
     from langchain_core.messages import HumanMessage
     from apps.core.rag_store import build_rag_objects
-    from apps.core.retrieval import ensure_keyword_index, ensure_text_index, warmup_sparse_encoder
+    from apps.core.retrieval import (
+        ensure_datetime_index,
+        ensure_integer_index,
+        ensure_keyword_index,
+        ensure_text_index,
+        warmup_sparse_encoder,
+    )
 
     @asynccontextmanager
     async def runtime_lifespan(app: FastAPI):
@@ -611,6 +629,8 @@ def create_app() -> FastAPI:
                 build_rag_objects=build_rag_objects,
                 ensure_keyword_index=ensure_keyword_index,
                 ensure_text_index=ensure_text_index,
+                ensure_integer_index=ensure_integer_index,
+                ensure_datetime_index=ensure_datetime_index,
                 warmup_sparse_encoder=warmup_sparse_encoder,
                 build_workflow=build_advanced_workflow,
             )

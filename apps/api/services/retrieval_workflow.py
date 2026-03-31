@@ -22,6 +22,9 @@ from apps.api.services.view_state import (
     FocusEntity,
     build_display_snapshot,
     focus_entity_from_detail,
+    set_active_child_anchor_scope,
+    set_active_focus_scope,
+    set_active_result_scope,
 )
 from apps.api.services.rag_retriever import has_active_anchor_seed
 from apps.api.streaming.contracts import AnswerArtifact
@@ -376,6 +379,24 @@ def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
     return any(current_values) and current_values == incoming_values
 
 
+def _log_scope_transition(log_event: Any, *, state: Any, view_state: Any) -> None:
+    active_scope = getattr(view_state, "active_scope", None)
+    parent_chain = getattr(active_scope, "parent_chain", None) or []
+    if not parent_chain:
+        return
+    entry = parent_chain[-1]
+    if not isinstance(entry, dict):
+        return
+    log_event(
+        "SCOPE.TRANSITION",
+        request_id=getattr(state, "request_id", None),
+        conversation_id=getattr(state, "conversation_id", None),
+        scope_kind=entry.get("scope_kind"),
+        view_id=entry.get("view_id"),
+        entity_kind=entry.get("entity_kind"),
+        anchor_kind=entry.get("anchor_kind"),
+        reason=entry.get("reason"),
+    )
 
 
 def _build_detail_coverage_input(
@@ -607,6 +628,13 @@ async def node_knowledge_sufficiency(
     if should_short_circuit_followup_clarification(strategy_meta):
         no_result_message = build_followup_clarification_message(strategy_meta)
         clarification = build_followup_clarification_payload(strategy_meta)
+        log_event(
+            "CLARIFICATION.ISSUED",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            clarification_type=(clarification or {}).get("clarification_type") if isinstance(clarification, dict) else None,
+            reason=dict(strategy_meta.get("clarification_payload") or {}).get("reason"),
+        )
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="low",
                 search_intent="followup clarification required",
@@ -820,8 +848,23 @@ async def node_rag_search(
             try:
                 restored_focus_entity = FocusEntity.model_validate(focus_entity_payload)
                 current_focus_entity = getattr(view_state, "latest_focus_entity", None)
-                if current_focus_entity is None or _is_equivalent_focus_entity(current_focus_entity, restored_focus_entity):
-                    view_state.latest_focus_entity = restored_focus_entity
+                is_child_anchor = str(getattr(restored_focus_entity, "source", "") or "").strip().lower().startswith("detail_")
+                if is_child_anchor or current_focus_entity is None or _is_equivalent_focus_entity(current_focus_entity, restored_focus_entity):
+                    if is_child_anchor:
+                        view_state = set_active_child_anchor_scope(
+                            view_state,
+                            anchor=restored_focus_entity,
+                            turn_id=getattr(state, "request_id", None),
+                            reason="followup_anchor_restore",
+                        )
+                    else:
+                        view_state = set_active_focus_scope(
+                            view_state,
+                            focus=restored_focus_entity,
+                            turn_id=getattr(state, "request_id", None),
+                            scope_kind="detail",
+                            reason="followup_anchor_restore",
+                        )
                     log_event(
                         "FOCUS.ENTITY.SET",
                         request_id=state.request_id,
@@ -834,7 +877,8 @@ async def node_rag_search(
                         org_id=getattr(view_state.latest_focus_entity, "org_id", None),
                         org_code=getattr(view_state.latest_focus_entity, "org_code", None),
                         biz_no=getattr(view_state.latest_focus_entity, "biz_no", None),
-                )
+                    )
+                    _log_scope_transition(log_event, state=state, view_state=view_state)
             except Exception:
                 pass
         latest_focus_entity = getattr(view_state, "latest_focus_entity", None)
@@ -861,6 +905,13 @@ async def node_rag_search(
                 "resume_token": dict(resolved_entity_ref.resume_token),
                 "message": resolved_entity_ref.message,
             }
+            log_event(
+                "CLARIFICATION.ISSUED",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                clarification_type=resolved_entity_ref.clarification_type,
+                reason=dict(strategy_meta.get("clarification_payload") or {}).get("reason"),
+            )
             return {
                 "clarification": clarification_payload,
                 "no_result_message": resolved_entity_ref.message,
@@ -1165,10 +1216,16 @@ async def node_rag_search(
                 items=retrieval_bundle.items,
                 raw_count=raw_result_count,
             )
-            view_state.latest_display_snapshot = snapshot
-            view_state.active_result_set_kind = output_type
-            view_state.active_result_view_id = snapshot.view_id
-            view_state.entity_scope = context_kind or "project"
+            scope_kind = "child" if str(strategy_meta.get("followup_reference_kind") or "").strip().lower() == "child_entity" else "list"
+            view_state = set_active_result_scope(
+                view_state,
+                snapshot=snapshot,
+                output_type=output_type,
+                context_kind=context_kind or "project",
+                turn_id=getattr(state, "request_id", None),
+                scope_kind=scope_kind,
+                reason="retrieval_list_result",
+            )
             view_state.last_query_contract = {
                 "action": str(_pick_attr(query_intent, qa, key="action", default="") or ""),
                 "output_type": output_type,
@@ -1234,6 +1291,7 @@ async def node_rag_search(
                 conversation_id=state.conversation_id,
                 view_id=snapshot.view_id,
             )
+            _log_scope_transition(log_event, state=state, view_state=view_state)
 
         answer_artifact = None
         if output_type == "detail" and docs and view_state is not None:
@@ -1244,7 +1302,14 @@ async def node_rag_search(
                 source="detail_lookup",
             )
             if focus_entity is not None:
-                view_state.latest_focus_entity = focus_entity
+                view_state = set_active_focus_scope(
+                    view_state,
+                    focus=focus_entity,
+                    turn_id=getattr(state, "request_id", None),
+                    scope_kind="detail",
+                    reason="detail_lookup",
+                    preserve_child_anchor=True,
+                )
                 log_event(
                     "FOCUS.ENTITY.SET",
                     request_id=state.request_id,
@@ -1274,6 +1339,7 @@ async def node_rag_search(
                     source_turn_id=state.request_id,
                     schema_version=DETAIL_CACHE_SCHEMA_VERSION,
                 )
+                _log_scope_transition(log_event, state=state, view_state=view_state)
                 detail_prompt_context = build_detail_prompt_context(
                     coverage,
                     requested_fields=requested_fields,

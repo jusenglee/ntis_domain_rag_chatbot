@@ -323,6 +323,21 @@ def build_followup_clarification_message(strategy_meta: Dict[str, Any]) -> Optio
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
+    if status == "clarification_required":
+        payload = dict((strategy_meta or {}).get("clarification_payload") or {})
+        message = _normalize_text(payload.get("message") or (strategy_meta or {}).get("clarification_message"))
+        if message:
+            return message
+        reason = _normalize_text(payload.get("reason") or (strategy_meta or {}).get("clarification_reason")).lower()
+        if reason == "child_entity_ambiguity":
+            return "현재 상세 안에서 어떤 대상을 뜻하는지 다시 지정해 주세요."
+        if reason == "child_entity_missing_id":
+            return "현재 상세 안의 대상은 보이지만 정확한 식별자를 확인할 수 없습니다. 다른 기준으로 다시 지정해 주세요."
+        if reason == "refinement_target_missing":
+            return "무엇을 기준으로 좁힐지 먼저 목록이나 상세 대상을 정해 주세요."
+        if reason == "reference_missing_context":
+            return "이전 결과 목록이나 상세 맥락이 없어 무엇을 가리키는지 판단하기 어렵습니다. 먼저 목록을 확인해 주세요."
+        return "무엇을 가리키는지 다시 확인해 주세요."
     reference_kind = _normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower()
     available_count = int((strategy_meta or {}).get("available_count") or 0)
     if reference_kind == "source_reference":
@@ -350,6 +365,22 @@ def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optio
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
+    if status == "clarification_required":
+        payload = dict((strategy_meta or {}).get("clarification_payload") or {})
+        return {
+            "clarification_type": payload.get("clarification_type") or (strategy_meta or {}).get("clarification_type") or "followup_reference",
+            "status": status,
+            "requested_token": (strategy_meta or {}).get("requested_token"),
+            "available_count": int((strategy_meta or {}).get("available_count") or 0),
+            "selection_hint": payload.get("reason") or (strategy_meta or {}).get("clarification_reason"),
+            "candidates": [item for item in (payload.get("candidates") or (strategy_meta or {}).get("candidate_items") or []) if isinstance(item, dict)],
+            "resume_token": {
+                **dict(payload.get("resume_token") or {}),
+                "followup_reference_kind": (strategy_meta or {}).get("followup_reference_kind"),
+                "requested_token": (strategy_meta or {}).get("requested_token"),
+                "display_view_id": (strategy_meta or {}).get("display_view_id"),
+            },
+        }
     reference_kind = _normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower()
     candidates = [item for item in ((strategy_meta or {}).get("candidate_items") or []) if isinstance(item, dict)]
     if not candidates and status != "missing_context":
@@ -372,12 +403,12 @@ def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optio
 def should_short_circuit_followup_clarification(strategy_meta: Dict[str, Any]) -> bool:
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     explicit_followup = bool((strategy_meta or {}).get("explicit_followup"))
-    return explicit_followup and status in {"missing_context", "out_of_range", "unresolved"}
+    return explicit_followup and status in {"missing_context", "out_of_range", "unresolved", "clarification_required"}
 
 
 def resolve_entity_ref_from_strategy_meta(strategy_meta: Dict[str, Any]) -> ResolvedEntityRef | ClarificationRequest | None:
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
-    if status in {"missing_context", "out_of_range", "unresolved"}:
+    if status in {"missing_context", "out_of_range", "unresolved", "clarification_required"}:
         message = build_followup_clarification_message(strategy_meta)
         payload = build_followup_clarification_payload(strategy_meta) or {}
         return ClarificationRequest(
@@ -403,6 +434,9 @@ def resolve_entity_ref_from_strategy_meta(strategy_meta: Dict[str, Any]) -> Reso
     allowed_sources = {
         "display_snapshot",
         "detail_lookup",
+        "detail_participant_match",
+        "detail_org_match",
+        "detail_perf_match",
         "reference_context_ordinal",
         "reference_context_source_reference",
         "reference_context_deictic",

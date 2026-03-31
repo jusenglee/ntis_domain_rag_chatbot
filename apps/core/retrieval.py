@@ -737,6 +737,44 @@ def ensure_keyword_index(
         logger.debug(f"[retrieval] ensure_keyword_index skip: {collection_name}.{field_name}: {e}")
 
 
+def ensure_integer_index(
+        client: QdrantClient,
+        collection_name: str,
+        field_name: str,
+        *,
+        wait: bool = True,
+) -> None:
+    """Qdrant payload 필드에 INTEGER index 생성을 시도한다."""
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name=field_name,
+            field_schema=models.PayloadSchemaType.INTEGER,
+            wait=wait,
+        )
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"[retrieval] ensure_integer_index skip: {collection_name}.{field_name}: {e}")
+
+
+def ensure_datetime_index(
+        client: QdrantClient,
+        collection_name: str,
+        field_name: str,
+        *,
+        wait: bool = True,
+) -> None:
+    """Qdrant payload 필드에 DATETIME index 생성을 시도한다."""
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name=field_name,
+            field_schema=models.PayloadSchemaType.DATETIME,
+            wait=wait,
+        )
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"[retrieval] ensure_datetime_index skip: {collection_name}.{field_name}: {e}")
+
+
 # =========================
 # Payload helpers
 # =========================

@@ -8,12 +8,13 @@ if TYPE_CHECKING:
 else:
     BaseMessage = Any
 
+from apps.api.services.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
 from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
 from apps.api.services.scope_resolver import resolve_scope_decision
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.api.contracts.repo_manifest import PLANNER_PROMPT_DEFAULTS
 from apps.core.settings import MAX_TOP_K_SIZE
-from apps.api.services.view_state import ConversationViewState
+from apps.api.services.view_state import ConversationViewState, clear_view_state_scope
 
 _DISPLAY_LIMIT_SENTINEL = 10**9
 _DEFAULT_RETRIEVAL_LIMIT = 20
@@ -108,129 +109,6 @@ def _has_ids_map_values(ids_map: Any) -> bool:
     return False
 
 
-def _merge_seed_into_ids_map(ids_map: Any, seed_map: dict[str, list[str]]) -> dict[str, list[str]]:
-    merged = dict(ids_map or {}) if isinstance(ids_map, dict) else {}
-
-    def _normalize(values: Any) -> list[str]:
-        if isinstance(values, str):
-            values = [values]
-        elif not isinstance(values, (list, tuple, set)):
-            values = [values]
-        out: list[str] = []
-        seen: set[str] = set()
-        for value in values:
-            text = str(value or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            out.append(text)
-        return out
-
-    seed_pjt_ids = _normalize(seed_map.get("pjt_id"))
-    seed_pjt_nos = _normalize(seed_map.get("pjt_no"))
-
-    if seed_pjt_ids:
-        merged.pop("pjt_no", None)
-        merged["pjt_id"] = seed_pjt_ids
-    elif seed_pjt_nos:
-        merged.pop("pjt_id", None)
-        merged["pjt_no"] = seed_pjt_nos
-
-    for key, values in (seed_map or {}).items():
-        if key in {"pjt_id", "pjt_no"}:
-            continue
-        normalized = _normalize(values)
-        if not normalized:
-            continue
-        merged[key] = normalized
-    return merged
-
-
-def _apply_anchor_lock(normalized_intent: Any, seed_map: dict[str, list[str]]) -> Any:
-    if not seed_map:
-        return normalized_intent
-
-    def _resolve_policy(ids_map: dict[str, list[str]]) -> Optional[str]:
-        if ids_map.get("pjt_id"):
-            return "anchor_locked_pjt_id"
-        if ids_map.get("pjt_no"):
-            return "anchor_locked_pjt_no"
-        return None
-
-    if isinstance(normalized_intent, dict):
-        patched = dict(normalized_intent)
-        merged_ids_map = _merge_seed_into_ids_map(patched.get("ids_map") or {}, seed_map)
-        patched["ids_map"] = merged_ids_map
-        policy = _resolve_policy(merged_ids_map)
-        if policy is not None:
-            patched["project_key_policy"] = policy
-        return patched
-    if is_dataclass(normalized_intent):
-        merged_ids_map = _merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map)
-        project_key_policy = getattr(normalized_intent, "project_key_policy", None)
-        policy = _resolve_policy(merged_ids_map)
-        if policy is not None:
-            project_key_policy = policy
-        return replace(normalized_intent, ids_map=merged_ids_map, project_key_policy=project_key_policy)
-    if hasattr(normalized_intent, "ids_map"):
-        try:
-            merged_ids_map = _merge_seed_into_ids_map(getattr(normalized_intent, "ids_map", {}) or {}, seed_map)
-            setattr(normalized_intent, "ids_map", merged_ids_map)
-            policy = _resolve_policy(merged_ids_map)
-            if policy is not None and hasattr(normalized_intent, "project_key_policy"):
-                setattr(normalized_intent, "project_key_policy", policy)
-        except Exception:
-            pass
-    return normalized_intent
-
-
-def _merge_text_terms(values: Any, additions: Any) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for source in (values, additions):
-        if isinstance(source, str):
-            iterable = [source]
-        elif isinstance(source, (list, tuple, set)):
-            iterable = list(source)
-        elif source is None:
-            iterable = []
-        else:
-            iterable = [source]
-        for value in iterable:
-            text = str(value or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            merged.append(text)
-    return merged
-
-
-def _apply_resolved_anchor_seed(normalized_intent: Any, anchor: Any) -> Any:
-    if anchor is None:
-        return normalized_intent
-
-    patched = _apply_anchor_lock(normalized_intent, anchor_to_seed_map(anchor))
-    if str(getattr(anchor, "kind", "") or "").strip().lower() != "people":
-        return patched
-
-    person_name = _first_text(getattr(anchor, "title_text", None))
-    if not person_name:
-        return patched
-
-    if isinstance(patched, dict):
-        patched = dict(patched)
-        patched["people_terms"] = _merge_text_terms(patched.get("people_terms") or [], [person_name])
-        return patched
-    if is_dataclass(patched) and hasattr(patched, "people_terms"):
-        return replace(patched, people_terms=_merge_text_terms(getattr(patched, "people_terms", []) or [], [person_name]))
-    if hasattr(patched, "people_terms"):
-        try:
-            setattr(patched, "people_terms", _merge_text_terms(getattr(patched, "people_terms", []) or [], [person_name]))
-        except Exception:
-            pass
-    return patched
-
-
 def _get_field(source: Any, key: str, default: Any = None) -> Any:
     if source is None:
         return default
@@ -257,26 +135,7 @@ def _replace_fields(source: Any, **updates: Any) -> Any:
 
 
 def _clear_active_view_scope(view_state: ConversationViewState) -> ConversationViewState:
-    try:
-        return view_state.model_copy(
-            update={
-                "latest_display_snapshot": None,
-                "latest_focus_entity": None,
-                "active_result_set_kind": None,
-                "active_result_view_id": None,
-            }
-        )
-    except Exception:
-        return ConversationViewState(
-            detail_cache=dict(getattr(view_state, "detail_cache", {}) or {}),
-            raw_candidates_cache=dict(getattr(view_state, "raw_candidates_cache", {}) or {}),
-            applied_filters=dict(getattr(view_state, "applied_filters", {}) or {}),
-            sort_key=getattr(view_state, "sort_key", None),
-            sort_dir=getattr(view_state, "sort_dir", None),
-            entity_scope=getattr(view_state, "entity_scope", None),
-            refinement_history=list(getattr(view_state, "refinement_history", []) or []),
-            last_query_contract=dict(getattr(view_state, "last_query_contract", {}) or {}),
-        )
+    return clear_view_state_scope(view_state)
 
 
 def _normalize_org_role_hint(normalized_intent: Any, question: str) -> Optional[str]:
@@ -429,7 +288,7 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
     ordinal_reference = parse_ordinal_reference(question)
     reference_kind = (
         "child_entity"
-        if anchor.source == "detail_participant_match"
+        if str(anchor.source or "").strip().lower().startswith("detail_")
         else
         "source_reference"
         if anchor.source == "display_snapshot" and source_reference is not None
@@ -505,6 +364,9 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "seed_source": followup_resolution.get("seed_source"),
         "anchor_source": followup_resolution.get("anchor_source"),
         "anchor_reference_kind": followup_resolution.get("followup_reference_kind"),
+        "clarification_type": followup_resolution.get("clarification_type"),
+        "clarification_reason": followup_resolution.get("clarification_reason"),
+        "clarification_payload": dict(followup_resolution.get("clarification_payload") or {}),
         "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("rst_id") or focus_entity.get("person_no") or focus_entity.get("org_id") or focus_entity.get("org_code") or focus_entity.get("biz_no") or focus_entity.get("doi") or focus_entity.get("issn") or focus_entity.get("doc_id"),
         "focus_entity": focus_entity or None,
         "candidate_items": list(followup_resolution.get("candidate_items") or []),
@@ -669,6 +531,8 @@ class RequestUnderstandingFacade:
         active_view_state = view_state or ConversationViewState()
         latest_snapshot = active_view_state.latest_display_snapshot
         latest_focus_entity = active_view_state.latest_focus_entity
+        scope_focus_entity = getattr(getattr(active_view_state, "active_scope", None), "focus", None) or latest_focus_entity
+        latest_anchor_entity = getattr(getattr(active_view_state, "active_scope", None), "child_anchor", None) or latest_focus_entity
         question_analysis = None
         planner_failed = 0
         base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
@@ -690,16 +554,27 @@ class RequestUnderstandingFacade:
             needs_clarification=int(bool(scope_decision.needs_clarification)),
             resolved_anchor_source=getattr(scope_decision.resolved_anchor, "source", None),
             resolved_anchor_kind=getattr(scope_decision.resolved_anchor, "kind", None),
+            clarification_type=((scope_decision.clarification_payload or {}).get("clarification_type") if scope_decision.clarification_payload else None),
+            clarification_reason=((scope_decision.clarification_payload or {}).get("reason") if scope_decision.clarification_payload else None),
         )
         if scope_decision.reset_requested:
             active_view_state = _clear_active_view_scope(active_view_state)
             latest_snapshot = None
             latest_focus_entity = None
+            scope_focus_entity = None
+            latest_anchor_entity = None
             self.log_event(
                 "ANCHOR.ESCAPED",
                 request_id=request_id,
                 conversation_id=conversation_id,
                 reason="scope_reset",
+            )
+        if scope_decision.followup_type == "refinement_followup":
+            self.log_event(
+                "REFINEMENT.APPLIED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                filters=scope_decision.refinement_filters,
             )
         anchor = scope_decision.resolved_anchor
         followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
@@ -715,7 +590,8 @@ class RequestUnderstandingFacade:
                     question=question,
                     normalized_intent=normalized_intent_base,
                     latest_display_snapshot=latest_snapshot,
-                    latest_focus_entity=latest_focus_entity,
+                    latest_focus_entity=latest_anchor_entity,
+                    scope_focus_entity=scope_focus_entity,
                 )
                 if anchor is not None:
                     followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
@@ -724,7 +600,8 @@ class RequestUnderstandingFacade:
                 question=question,
                 normalized_intent=normalized_intent_base,
                 latest_display_snapshot=latest_snapshot,
-                latest_focus_entity=latest_focus_entity,
+                latest_focus_entity=latest_anchor_entity,
+                scope_focus_entity=scope_focus_entity,
             )
             followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
             if anchor is None:
@@ -734,6 +611,25 @@ class RequestUnderstandingFacade:
                     prev_context=prev_context,
                     default_context_kind=base_route,
                 )
+        if anchor is None and scope_decision.needs_clarification:
+            clarification_payload = dict(scope_decision.clarification_payload or {})
+            followup_resolution = {
+                "followup_resolution_status": "clarification_required",
+                "selected_prev_item": None,
+                "seed_map": {},
+                "seed_source": None,
+                "explicit_followup": True,
+                "followup_reference_kind": "child_entity" if scope_decision.followup_type == "child_entity_followup" else scope_decision.followup_type,
+                "requested_token": None,
+                "requested_index": None,
+                "available_count": len(getattr(latest_snapshot, "items", []) or []),
+                "anchor_source": None,
+                "focus_entity": None,
+                "candidate_items": list(clarification_payload.get("candidates") or []),
+                "clarification_type": clarification_payload.get("clarification_type"),
+                "clarification_reason": clarification_payload.get("reason"),
+                "clarification_payload": clarification_payload,
+            }
         if (
             anchor is None
             and not has_explicit_seed

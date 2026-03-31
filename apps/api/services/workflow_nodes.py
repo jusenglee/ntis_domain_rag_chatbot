@@ -5,30 +5,12 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
-from apps.api.streaming.contracts import AnswerArtifact
-
 from apps.api.services.canonical_context import rehydrate_prev_context_from_canonical_evidence
-from apps.api.services.followup_anchor import is_referential_followup, parse_ordinal_reference, parse_source_reference
-
-_GENERIC_FOLLOWUP_PATTERNS = (
-    re.compile(r"다시\s*(?:보여줘|정리해줘|말해줘|알려줘)"),
-    re.compile(r"(?:조금\s*더|더)\s*(?:상세하게|자세하게|길게)"),
-    re.compile(r"(?:과제번호|번호|pjt_id|pjt_no)\s*(?:가|는|은|를|을)?\s*(?:아닌|말고|대신)"),
-    re.compile(r"(?:제목|과제명)\s*(?:으로|만)?\s*(?:보여줘|정리해줘|말해줘|알려줘)"),
-)
-
-
-def _looks_like_ambiguous_followup(raw_query: str) -> bool:
-    text = str(raw_query or "").strip()
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in _GENERIC_FOLLOWUP_PATTERNS)
+from apps.api.streaming.contracts import AnswerArtifact
 
 
 def is_short_query_exception(raw_query: str) -> bool:
-    """짧은 질의라도 id 형태라면 예외로 허용할지 판정한다.
-    숫자 시퀀스나 약어 시드에 해당하는 경우에는 길이가 짧아도 direct reject 하지 않는다.
-    """
+    """짧은 질의라도 identifier 형태면 direct reject하지 않는다."""
     text = str(raw_query or "").strip()
     if not text:
         return False
@@ -47,9 +29,7 @@ async def node_load_memory(
     load_conversation_memory_fn: Any,
     log_event: Any,
 ) -> Dict[str, Any]:
-    """conversation memory에서 history·canonical evidence·render profile을 로드하여 workflow state로 환원한다.
-    canonical evidence로부터 prev_context를 재수화해 memory 계약과 workflow 입력 shape를 연결한다.
-    """
+    """conversation memory를 workflow state 입력 형태로 복원한다."""
     cid = state.conversation_id
     loaded_history, canonical_evidence, render_profile, view_state = await load_conversation_memory_fn(
         cid,
@@ -82,34 +62,17 @@ async def node_rule_precheck(
     rule_decision_cls: Any,
     is_short_query_exception_fn: Any = is_short_query_exception,
 ) -> Dict[str, Any]:
-    """간단한 인사나 너무 짧은 질의를 룰 기반으로 먼저 처리한다.
-    LLM/planner 호출 전에 즉시 답변할 수 있는 경로를 거르고, id 형태 예외는 따로 허용한다.
-    """
+    """인사와 너무 짧은 질의만 rule 단계에서 바로 처리한다."""
     raw_user_msg = state.messages[-1].content.strip()
     user_msg = raw_user_msg.lower()
 
-    greetings = ["안녕", "hello", "hi", "헬로", "반가", "하이"]
+    greetings = ["안녕", "hello", "hi", "여보", "반가", "헤이"]
     if any(g in user_msg for g in greetings) and len(user_msg) < 10:
         return {
             "rule_decision": rule_decision_cls(
                 action="direct_answer",
                 direct_response="안녕하세요. 무엇을 도와드릴까요?",
                 reason="Simple greeting detected",
-            )
-        }
-
-    has_prev_context = bool(getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
-    has_explicit_followup_reference = (
-        parse_source_reference(raw_user_msg) is not None
-        or parse_ordinal_reference(raw_user_msg) is not None
-        or is_referential_followup(raw_user_msg)
-    )
-    if has_prev_context and _looks_like_ambiguous_followup(raw_user_msg) and not has_explicit_followup_reference:
-        return {
-            "rule_decision": rule_decision_cls(
-                action="direct_answer",
-                direct_response="이전 결과 중 어떤 항목을 기준으로 다시 보여드릴지 확인해 주세요. 예: 2번 과제, 출처 1, 방금 본 과제",
-                reason="Ambiguous follow-up without anchor",
             )
         }
 
@@ -135,9 +98,7 @@ async def node_analyze_question(
     *,
     build_intent_payload_fn: Any,
 ) -> Dict[str, Any]:
-    """question analysis가 없을 때 intent payload와 planner 결과를 생성한다.
-    이미 분석이 끝난 state라면 그대로 재사용해 workflow가 불필요한 분석을 반복하지 않게 한다.
-    """
+    """question analysis가 없으면 intent payload와 planner 결과를 생성한다."""
     if state.question_analysis and state.intent_payload:
         return {
             "question_analysis": state.question_analysis,
@@ -160,9 +121,7 @@ async def node_analyze_question(
 
 
 async def node_direct_answer(state: Any) -> Dict[str, Any]:
-    """rule precheck에서 즉시 답변이 결정된 경우 같은 문구를 양쪽 모델 채널에 채운다.
-    후속 merge node가 특수 처리 없이 같은 입력 shape를 받을 수 있게 하는 workflow 호환 헬퍼다.
-    """
+    """rule precheck에서 즉시 응답이 결정된 경우 동일한 shape의 artifact를 만든다."""
     response_text = state.rule_decision.direct_response
     artifact = AnswerArtifact(
         text=response_text,
@@ -201,9 +160,7 @@ async def node_save_history(
     max_history_turns: int,
     history_ttl_seconds: int,
 ) -> Dict[str, Any]:
-    """요청 종료 시 history, canonical evidence, render profile를 KV store에 저장한다.
-    save payload 조립, memory write, summary/end event 로깅을 함께 처리해 후속 회고와 재수화가 같은 근거를 공유하게 한다.
-    """
+    """요청 종료 시 history, canonical evidence, render profile을 저장한다."""
     kv_store = getattr(state, "kv_store", None)
     save_payload = build_save_history_payload_fn(
         state,
@@ -239,7 +196,5 @@ async def node_save_history(
 
 
 def node_join_answers(state: Any) -> Dict[str, Any]:
-    """답변 조인 전용 node 자리를 유지하는 no-op 헬퍼다.
-    LangGraph 그래프 구조에서 분기 후 합류 지점을 명시하고, 실제 merge 로직은 다른 node에 위임한다.
-    """
+    """join 전용 no-op node."""
     return {}

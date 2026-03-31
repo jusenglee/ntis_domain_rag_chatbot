@@ -220,7 +220,12 @@ def _normalize_view_state(view_state: ConversationViewState) -> ConversationView
         parent_chain=parent_chain,
         scope_kind=scope_kind,
     )
-    legacy_focus_out = normalized_scope.child_anchor or normalized_scope.focus
+    if normalized_scope.scope_kind == "detail" and normalized_scope.focus is not None:
+        legacy_focus_out = normalized_scope.focus
+    elif normalized_scope.scope_kind == "child" and normalized_scope.child_anchor is not None:
+        legacy_focus_out = normalized_scope.child_anchor
+    else:
+        legacy_focus_out = normalized_scope.focus or normalized_scope.child_anchor
     return view_state.model_copy(
         update={
             "active_scope": normalized_scope,
@@ -948,7 +953,7 @@ def set_active_result_scope(
             "active_result_set_kind": output_type,
             "active_result_view_id": getattr(snapshot, "view_id", None),
             "entity_scope": context_kind or snapshot.context_kind,
-            "latest_focus_entity": next_scope.child_anchor or next_scope.focus,
+            "latest_focus_entity": (next_scope.child_anchor if resolved_scope_kind == "child" else (next_scope.focus or next_scope.child_anchor)),
         }
     )
 
@@ -983,7 +988,7 @@ def set_active_focus_scope(
     return normalized.model_copy(
         update={
             "active_scope": next_scope,
-            "latest_focus_entity": next_scope.child_anchor or focus,
+            "latest_focus_entity": focus,
             "entity_scope": getattr(focus, "kind", None) or normalized.entity_scope,
         }
     )

@@ -28,7 +28,10 @@ class AppRuntimeConfig:
     sparse_warmup_on_boot: bool
     metrics_timeout_seconds: float
     payload_keyword_index_targets: dict[str, list[str]]
+    payload_optional_keyword_index_targets: dict[str, list[str]]
     payload_text_index_targets: dict[str, list[str]]
+    payload_integer_index_targets: dict[str, list[str]]
+    payload_datetime_index_targets: dict[str, list[str]]
 
 
 class RedisKVStore(KVStore):
@@ -85,6 +88,8 @@ async def initialize_app_runtime(
     build_rag_objects: Any,
     ensure_keyword_index: Any,
     ensure_text_index: Any,
+    ensure_integer_index: Any,
+    ensure_datetime_index: Any,
     warmup_sparse_encoder: Any,
     build_workflow: Any,
 ) -> None:
@@ -107,54 +112,148 @@ async def initialize_app_runtime(
 
     if config.ensure_payload_index_on_boot:
         client = rag_resources.qdrant_client
+        payload_schema_cache: dict[str, dict[str, Any]] = {}
+        payload_probe_cache: dict[str, list[Any]] = {}
 
-        for collection_name, field_names in config.payload_keyword_index_targets.items():
-            for field_name in field_names:
+        def _payload_schema_type_name(collection_name: str, field_name: str) -> str:
+            payload_schema = payload_schema_cache.get(collection_name)
+            if payload_schema is None:
+                collection_info = client.get_collection(collection_name=collection_name)
+                payload_schema = getattr(collection_info, "payload_schema", None) or {}
+                payload_schema_cache[collection_name] = payload_schema
+            field_schema = payload_schema.get(field_name)
+            schema_type = getattr(field_schema, "data_type", None)
+            return str(schema_type).upper() if schema_type is not None else ""
+
+        def _payload_has_non_empty_field(payload: Any, field_name: str) -> bool:
+            normalized = field_name.replace("[]", "")
+            parts = [part for part in normalized.split(".") if part]
+
+            def _walk(value: Any, remaining: list[str]) -> bool:
+                if not remaining:
+                    if value is None:
+                        return False
+                    if isinstance(value, str):
+                        return bool(value.strip())
+                    if isinstance(value, (list, dict)):
+                        return bool(value)
+                    return True
+                if isinstance(value, list):
+                    return any(_walk(item, remaining) for item in value)
+                if not isinstance(value, dict):
+                    return False
+                head, *tail = remaining
+                if head not in value:
+                    return False
+                return _walk(value.get(head), tail)
+
+            return _walk(payload, parts)
+
+        def _payload_field_exists_in_collection(collection_name: str, field_name: str) -> bool:
+            points = payload_probe_cache.get(collection_name)
+            if points is None:
+                scroll_kwargs = {
+                    "collection_name": collection_name,
+                    "limit": 64,
+                    "with_payload": True,
+                    "with_vectors": False,
+                }
                 try:
-                    collection_info = client.get_collection(collection_name=collection_name)
-                    payload_schema = getattr(collection_info, "payload_schema", None) or {}
-                    field_schema = payload_schema.get(field_name)
-                    schema_type = getattr(field_schema, "data_type", None)
-                    schema_type_name = str(schema_type).upper() if schema_type is not None else ""
+                    scroll_result = client.scroll(**scroll_kwargs)
+                except Exception:
+                    return False
 
-                    if "KEYWORD" in schema_type_name:
+                if isinstance(scroll_result, tuple):
+                    points = scroll_result[0] or []
+                else:
+                    points = getattr(scroll_result, "points", None) or scroll_result or []
+                payload_probe_cache[collection_name] = list(points)
+
+            for point in points:
+                payload = getattr(point, "payload", None)
+                if not isinstance(payload, dict) and isinstance(point, dict):
+                    payload = point.get("payload")
+                if isinstance(payload, dict) and _payload_has_non_empty_field(payload, field_name):
+                    return True
+            return False
+
+        def _ensure_payload_indexes(
+            *,
+            label: str,
+            targets: dict[str, list[str]],
+            ensure_fn: Any,
+            expected_schema_type: str,
+            require_payload_probe: bool = False,
+        ) -> None:
+            for collection_name, field_names in targets.items():
+                for field_name in field_names:
+                    try:
+                        schema_type_name = _payload_schema_type_name(collection_name, field_name)
+                        if expected_schema_type in schema_type_name:
+                            logger.info(
+                                "[startup][payload-index][%s] %s.%s: skip (already exists)",
+                                label,
+                                collection_name,
+                                field_name,
+                            )
+                            continue
+
+                        if require_payload_probe and not _payload_field_exists_in_collection(collection_name, field_name):
+                            logger.info(
+                                "[startup][payload-index][%s] %s.%s: skip (field not observed)",
+                                label,
+                                collection_name,
+                                field_name,
+                            )
+                            continue
+
+                        ensure_fn(client, collection_name, field_name)
                         logger.info(
-                            "[startup][payload-index][keyword] %s.%s: skip (already exists)",
+                            "[startup][payload-index][%s] %s.%s: ensure called",
+                            label,
                             collection_name,
                             field_name,
                         )
-                        continue
+                    except Exception as exc:
+                        logger.warning(
+                            "[startup][payload-index][%s] %s.%s: warning (%s)",
+                            label,
+                            collection_name,
+                            field_name,
+                            exc,
+                        )
 
-                    ensure_keyword_index(client, collection_name, field_name)
-                    logger.info(
-                        "[startup][payload-index][keyword] %s.%s: ensure called",
-                        collection_name,
-                        field_name,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[startup][payload-index][keyword] %s.%s: warning (%s)",
-                        collection_name,
-                        field_name,
-                        exc,
-                    )
-
-        for collection_name, field_names in config.payload_text_index_targets.items():
-            for field_name in field_names:
-                try:
-                    ensure_text_index(client, collection_name, field_name)
-                    logger.info(
-                        "[startup][payload-index][text] %s.%s: ensure called",
-                        collection_name,
-                        field_name,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[startup][payload-index][text] %s.%s: warning (%s)",
-                        collection_name,
-                        field_name,
-                        exc,
-                    )
+        _ensure_payload_indexes(
+            label="keyword",
+            targets=config.payload_keyword_index_targets,
+            ensure_fn=ensure_keyword_index,
+            expected_schema_type="KEYWORD",
+        )
+        _ensure_payload_indexes(
+            label="keyword-optional",
+            targets=config.payload_optional_keyword_index_targets,
+            ensure_fn=ensure_keyword_index,
+            expected_schema_type="KEYWORD",
+            require_payload_probe=True,
+        )
+        _ensure_payload_indexes(
+            label="text",
+            targets=config.payload_text_index_targets,
+            ensure_fn=ensure_text_index,
+            expected_schema_type="TEXT",
+        )
+        _ensure_payload_indexes(
+            label="integer",
+            targets=config.payload_integer_index_targets,
+            ensure_fn=ensure_integer_index,
+            expected_schema_type="INTEGER",
+        )
+        _ensure_payload_indexes(
+            label="datetime",
+            targets=config.payload_datetime_index_targets,
+            ensure_fn=ensure_datetime_index,
+            expected_schema_type="DATETIME",
+        )
     else:
         logger.info("[startup][payload-index] skipped by config")
 

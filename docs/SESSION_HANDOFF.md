@@ -1,5 +1,82 @@
 # SESSION_HANDOFF.md
 
+## 2026-03-31T20:11:04.8410632+09:00 Improver
+- branch/head: `고도화` / `881265916b9900e4dd5e8425487ce47010a2506d`
+- inspected files:
+  - `apps/api/app_factory.py`
+  - `apps/api/runtime.py`
+  - `apps/core/retrieval.py`
+  - `apps/core/filters.py`
+  - `apps/core/rag_filter_policy.py`
+  - `tests/test_runtime_payload_indexes.py`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/README.md`
+- findings:
+  - startup payload index warmup was limited to `KEYWORD` and `TEXT`, so year/date filters and exact perf follow-up ids were not being warmed proactively.
+  - participant researcher name and title filter axes that are actively used in filter compilation were missing from the boot-time target set.
+  - there was no focused regression test for runtime payload index warmup, and optional alias fields such as `perf_id` / `paper_id` had no guard against blind index creation.
+- changes:
+  - `app_factory.py`: expanded runtime payload-index targets for `ntis_project_v1` and `ntis_perf_v1`, adding researcher-name keyword targets, title text targets, integer/date targets, and optional keyword targets for sampled-only fields.
+  - `runtime.py`: extended `AppRuntimeConfig`, added integer/datetime warmup hooks, skipped already-indexed schema types, and added conservative startup payload sampling before creating optional keyword indexes.
+  - `retrieval.py`: added `ensure_integer_index()` and `ensure_datetime_index()` helpers.
+  - `tests/test_runtime_payload_indexes.py`: added unit coverage for required/optional index warmup and nested optional-field probing.
+  - `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`: documented the expanded Qdrant payload-index startup contract and regression expectations.
+  - `docs/README.md` was reviewed and left unchanged because the document map and source-of-truth pointers still match after this runtime-only change.
+- validations:
+  - `python -m py_compile apps/api/app_factory.py apps/api/runtime.py apps/core/retrieval.py tests/test_runtime_payload_indexes.py` passed
+  - `python -m pytest tests/test_runtime_payload_indexes.py -q -p no:cacheprovider` passed (`2 passed`)
+- next best task:
+  - run the real app against a live Qdrant instance and verify startup logs plus `get_collection(...).payload_schema` for `ntis_project_v1` / `ntis_perf_v1` after boot.
+  - measure whether the optional-field sampling window is sufficient for live collections or whether the alias-field decision should move to an explicit schema manifest.
+
+## 2026-03-31T23:40:00+09:00 Improver
+- branch/head: `고도화` / `fc8c6027bd5a766c12d3ab34739d1a894dfb03d5`
+- inspected files:
+  - `apps/api/services/view_state.py`
+  - `apps/api/services/conversation_store.py`
+  - `apps/api/services/followup_anchor.py`
+  - `apps/api/services/scope_resolver.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/api/services/retrieval_workflow.py`
+  - `apps/api/services/workflow_nodes.py`
+  - `apps/core/entity_reference.py`
+  - `apps/core/followup_resolution.py`
+  - `apps/core/filters.py`
+  - `apps/core/rag_runtime_prelude.py`
+  - `apps/core/rag_pipeline.py`
+  - `tests/test_view_state_child_refs.py`
+  - `tests/test_scope_resolver.py`
+  - `tests/test_request_facade_child_anchor.py`
+  - `tests/test_people_filter_nested_gate.py`
+  - `tests/test_view_state_active_scope.py`
+  - `tests/test_anchor_constraint_compiler.py`
+  - `tests/test_scope_resolver_v2.py`
+  - `tests/test_followup_clarification_scope.py`
+  - `docs/01_아키텍처와_흐름.md`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/ADR/ADR-0011-scope-aware-followup-resolution-and-exact-constraint-compilation.md`
+- findings:
+  - P0 child researcher anchor는 이미 일부 들어와 있었지만, state/model/compiler/clarification 계약은 아직 흩어져 있었다.
+  - `latest_focus_entity` 하나만으로는 detail focus와 child anchor를 함께 보존하기 어려워 multi-hop follow-up에서 scope drift 위험이 남아 있었다.
+  - downstream exact filter는 이미 준비돼 있었고, 남은 문제는 upstream scope resolution과 planner 전후 seed 재적용의 일관성이었다.
+- changes:
+  - `view_state.py`: `ActiveScope(result_set/focus/child_anchor/parent_chain/scope_kind)`를 추가하고 legacy mirror와 load normalization을 붙였다. child refs는 `people | org | perf`를 지원하도록 일반화했다.
+  - `anchor_constraint_compiler.py`: anchor seed merge/apply를 별도 서비스로 분리했다. `people -> person_no`, `org -> org_id/org_code/biz_no`, `perf -> rst_id/doi/issn`, `project -> pjt_id/pjt_no`를 exact truth로 고정한다.
+  - `scope_resolver.py`: `refinement_followup`을 추가하고, `active_scope.focus`를 기준으로 named child anchor / reset / refinement / ambiguity를 판정하도록 재작성했다.
+  - `followup_anchor.py`: child anchor resolver를 `people/org/perf` generic 경로로 확장했다.
+  - `request_facade.py`: planner 전후 동일 compiler를 사용하도록 정리하고, `clarification_required`, `REFINEMENT.APPLIED`, structured clarification metadata를 strategy meta로 내려준다.
+  - `retrieval_workflow.py`: follow-up restore, list result, detail result에서 `active_scope`를 갱신하고 `SCOPE.TRANSITION`, `CLARIFICATION.ISSUED`를 남기도록 연결했다.
+  - `workflow_nodes.py`: ambiguous follow-up direct-answer 가드를 제거하고 greeting / short-query만 rule에서 처리하도록 단순화했다.
+  - docs/ADR/test를 이번 runtime 계약에 맞춰 갱신했다.
+- validations:
+  - `python -m py_compile apps/api/services/anchor_constraint_compiler.py apps/api/services/view_state.py apps/api/services/followup_anchor.py apps/api/services/scope_resolver.py apps/api/services/request_facade.py apps/api/services/retrieval_workflow.py apps/api/services/workflow_nodes.py apps/core/entity_reference.py apps/core/followup_resolution.py tests/test_view_state_active_scope.py tests/test_anchor_constraint_compiler.py tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py` passed
+  - `python -m pytest tests/test_view_state_child_refs.py tests/test_scope_resolver.py tests/test_request_facade_child_anchor.py tests/test_people_filter_nested_gate.py tests/test_view_state_active_scope.py tests/test_anchor_constraint_compiler.py tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py -q -p no:cacheprovider` passed (`18 passed`)
+- next best task:
+  - `rag_retriever.py`의 anchor drift 복구를 `project/perf/people/org/refinement` 축으로 일반화하고 `WIDENING.BLOCKED` 로그를 추가할 것.
+  - `org/perf child ref -> related projects/detail` golden flow를 실제 retrieval runtime에서 재현하고 `hm_id/org_id/rst_id must` filter path를 end-to-end 로그로 확인할 것.
+
 ## 한 줄 요약
 - 이 문서는 다음 루프가 바로 이어받을 수 있게 현재 상태, 열린 리스크, 다음 액션, 최근 작업 로그를 남기는 내부 handoff 문서다.
 
@@ -1143,3 +1220,45 @@
 - next best task:
   - 비개발자 또는 운영자 관점에서 `README.md`와 `docs/03_운영과_환경.md` 첫 화면만 읽고 목적/흐름/우선 확인 항목을 30초 안에 설명할 수 있는지 짧은 reader pass를 수행할 것
   - dependency bootstrap을 복구한 뒤 `scripts/run_baseline_checks.ps1`를 다시 실행하고, 필요하면 `docs/04_회귀기준과_점검.md`의 baseline 설명을 manifest coverage 현실에 맞게 한 번 더 다듬을 것
+
+## 2026-03-31T20:02:36.2670617+09:00 Architect
+- branch/head: `고도화` / `881265916b9900e4dd5e8425487ce47010a2506d`
+- inspected files:
+  - `apps/api/contracts/repo_manifest.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `pytest.ini`
+  - `apps/api/app_factory.py`
+  - `apps/api/services/planner_runtime.py`
+  - `apps/api/services/planner_context_cards.py`
+  - `apps/api/services/answer_generation.py`
+  - `apps/api/services/answer_merge.py`
+  - `apps/api/services/retrieval_workflow.py`
+  - `tests/test_repo_contract_defaults.py`
+  - `tests/test_llm_runtime_prompt_paths.py`
+  - `tests/test_request_overrides.py`
+  - `tests/test_retrieval_workflow_freshness_override.py`
+  - `tests/test_retrieval_workflow_detail_followup_freshness.py`
+  - `tests/test_runtime_helpers_stream_bypass.py`
+  - `tests/test_request_facade_source_reference_fallback.py`
+  - `docs/PRODUCT_BASELINE.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`
+  - `docs/README_NEXT_STEPS.md`
+- findings:
+  - `ADR-0007` 이후 baseline owner는 정리됐지만, 현재 manifest는 test membership만 표현하고 capability boundary는 표현하지 못한다.
+  - `core_contract_subset` 안에는 import-light contract 회귀와 `langgraph`/`aiofiles`/`llama_index`/`transformers`를 밟는 runtime/provider integration 회귀가 섞여 있다.
+  - watcher가 이미 green으로 닫은 source-reference fallback, child-anchor, people-gate, groundedness snapshot 계열은 shared shell minimal lane 후보인데, 현재 manifest/runbook에는 lane 개념이 없어 baseline 해석이 계속 환경 blocker와 섞인다.
+  - 이 문제는 retrieval semantics가 아니라 validation architecture 문제다. planner immutability, SEARCH no-hard-must, LOOKUP/JOIN hard gating을 건드릴 필요가 없다.
+- changes:
+  - `docs/ADR/ADR-0010-validation-capability-profiles.md`를 추가했다.
+  - 새 ADR은 manifest-owned baseline 다음 단계로 validation capability profile(`repo_minimal_contract`, `app_runtime_contract`, `provider_runtime_contract`, `full_release_gate`)을 제안하고, additive metadata -> profile-aware script -> docs/runbook alignment 순서의 staged migration을 정의한다.
+  - `docs/SESSION_HANDOFF.md`에 이번 architect 판단과 다음 안전한 구현 순서를 append했다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `881265916b9900e4dd5e8425487ce47010a2506d`
+  - explicit reads confirmed current baseline owner surfaces are still `apps/api/contracts/repo_manifest.py`, `scripts/run_baseline_checks.ps1`, `pytest.ini`, `docs/PRODUCT_BASELINE.md`, `docs/03_운영과_환경.md`
+  - static inspection confirmed current import-heavy boundary examples: `tests/test_repo_contract_defaults.py` -> `apps.api.app_factory`, `tests/test_llm_runtime_prompt_paths.py` -> `apps.api.services.llm_runtime`, `tests/test_request_overrides.py` -> route/provider surfaces, freshness workflow tests -> `apps.api.contracts.workflow_models`
+  - UTF-8 read of `docs/ADR/ADR-0010-validation-capability-profiles.md` and this handoff append is required because the PowerShell console can still hide encoding issues
+- next best task:
+  - smallest implementation step: `apps/api/contracts/repo_manifest.py`에 additive `validation_profiles` metadata를 넣고, shared shell에서 이미 green인 source-reference / child-anchor / people-gate / groundedness snapshot 회귀를 `repo_minimal_contract`로 분리할 것
+  - 그 다음 `scripts/run_baseline_checks.ps1`에 profile-aware readiness/blocked reporting을 추가하되, default full behavior는 바로 깨지지 않게 staged option으로 도입할 것
