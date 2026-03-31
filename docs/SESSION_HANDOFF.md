@@ -1,53 +1,46 @@
 # SESSION_HANDOFF.md
 
-## Bootstrap checkpoint
+## 한 줄 요약
+- 이 문서는 다음 루프가 바로 이어받을 수 있게 현재 상태, 열린 리스크, 다음 액션, 최근 작업 로그를 남기는 내부 handoff 문서다.
+
+## 이 문서를 읽을 사람
+- Codex Watcher / Improver / Architect
+- 이번 브랜치 상태를 빠르게 파악해야 하는 온콜 개발자
+
+## 이 문서에서 바로 찾을 수 있는 것
+- 현재 branch expectation과 source-of-truth owner
+- 지금 열린 리스크
+- 다음에 바로 할 일
+- 최근 작업 히스토리
+
+## 지금 챙길 것
+- expected branch는 `고도화`다.
+- planner defaults와 baseline inventory owner는 `apps/api/contracts/repo_manifest.py`다.
+- baseline entrypoint는 `pytest.ini`와 `scripts/run_baseline_checks.ps1`다.
+- 상단 요약은 빠르게 읽고, 상세 히스토리는 아래 내부 로그로 내려가며 확인한다.
+
+## 현재 상태
 - repo: `ntis_domain_rag_chatbot`
 - working branch expected: `고도화`
-- created_for: Codex Watcher / Improver / Architect
-
-## What is confirmed
-- 프로젝트는 NTIS 도메인 RAG이며 retrieval strategy와 answer generation을 분리한다.
-- retrieval strategy는 `SEARCH` / `LOOKUP` / `JOIN`으로 고정되고 planner는 질의마다 단일 strategy를 만든다.
+- 시스템은 retrieval strategy와 answer generation을 분리하고, `SEARCH / LOOKUP / JOIN` 계약을 유지한다.
 - 사람/기관 기반 질의는 기본적으로 `LOOKUP`으로 다루고, group join은 `pjt_no`, instance join은 `pjt_id`를 사용한다.
-- 운영 기본값은 promotion disable, fallback chat off, planner prompt defaults `v2 / v1 / v2`다.
-- planner live path는 `apps/api/app_factory.py -> apps/api/services/query_analysis.py -> apps/api/services/planner_runtime.py`다.
-- answer live path는 `apps/api/app_factory.py::_generate_answer -> apps/api/services/answer_generation.py -> apps/api/services/llm_runtime.py`이고 system prompt asset은 `prompts/ntis_chatbot*.md`다.
-- 별도 answer verifier/repair prompt stack은 없고, groundedness verdict contract는 `apps/api/contracts/answer_groundedness.py`, answer gate는 `apps/api/services/answer_merge.py`, query repair는 `apps/api/services/rag_retriever.py`가 맡는다.
-- streaming path는 `apps/api/routes.py`, `apps/core/llm_streaming.py`, `apps/api/streaming/*`이고 `/query/stream` 외부 계약은 canonical event envelope 기준으로 유지된다.
-- observability/logging path는 `apps/api/app_factory.py::_log_event`, `apps/api/services/runtime_helpers.py::setup_file_logging`이며 기본 log file은 `logs/app.log`다.
-- planner defaults와 baseline inventory의 owner는 `apps/api/contracts/repo_manifest.py`이고, 검증 진입점은 `pytest.ini`와 `scripts/run_baseline_checks.ps1`이다.
+- planner prompt defaults는 `v2 / v1 / v2`이고, `/query/stream` 외부 계약은 canonical event envelope 기준으로 유지된다.
+- answer verifier/repair 전용 prompt stack은 아직 없고, groundedness verdict contract는 `apps/api/contracts/answer_groundedness.py`가 맡는다.
 
-## What remains risky
-- 오래된 handoff history 일부는 문자 오염 상태로 남아 있다. 이번 복구는 현재 상단 요약과 최신 entry 위주다.
-- `tests/test_request_facade_source_reference_fallback.py`는 존재하지만 `apps/api/contracts/repo_manifest.py`의 `BASELINE_INVENTORY["core_contract_subset"]`에는 아직 포함되지 않는다.
-- 현재 watcher shell에는 `pytest`가 없어 baseline 스크립트와 수동 pytest subset을 이 환경에서 끝까지 검증할 수 없다.
+## 열린 리스크
+- `tests/test_request_facade_source_reference_fallback.py`는 존재하지만 baseline inventory core subset에는 아직 포함되지 않는다.
+- 현재 shell에는 `pytest`가 없어 baseline 스크립트와 수동 pytest subset을 끝까지 검증할 수 없다.
 - `출처 N` follow-up은 reference context가 없을 때 display snapshot anchor fallback이 허용돼 있어, citation semantics를 더 엄격히 할지 product intent 확인이 남아 있다.
 - unsupported groundedness verdict는 아직 selector 차원의 강한 차단보다 passive verdict 성격이 강하다.
+- 오래된 handoff history 일부는 문자 오염 상태로 남아 있다. 상단 요약은 복구했지만 과거 로그 전체를 다시 정리한 것은 아니다.
 
-## First tasks for Watcher
-1. branch / head 확인
-2. planner / answer / streaming / baseline source-of-truth 대조
-3. docs / prompts / tests drift 식별
-4. 검증 가능 여부와 환경 blocker 확인
-5. findings를 handoff에 append
-## First tasks for Improver
-1. Watcher findings에서 가장 안전한 P1 1건을 고른다.
-2. 관련 검증 명령과 현재 shell blocker를 먼저 확인한다.
-3. 1회 실행당 1패치만 적용한다.
-4. 회귀 테스트 또는 관련 문서를 같은 변경 세트로 맞춘다.
-5. 다음 루프를 위해 handoff를 갱신한다.
-## First tasks for Architect
-1. 현재 answer pipeline / planner / baseline drift를 staged migration 관점으로 정리한다.
-2. prompt stack, verifier stack, baseline ownership을 분리된 설계 문서로 정리한다.
-3. staged ADR 또는 RFC를 작성한다.
-4. production code는 건드리지 않는다.
-
-## Candidate first improvement
-- repo 전용 Python environment를 복구해 `scripts/run_baseline_checks.ps1`를 실제로 끝까지 실행한다.
+## 다음 액션
+- repo 전용 Python environment 또는 dependency bootstrap을 먼저 복구해 `scripts/run_baseline_checks.ps1`를 끝까지 실행한다.
 - source-reference fallback 회귀를 baseline inventory에 포함할지 product intent 기준으로 결정한다.
+- planner / runtime / streaming / baseline owner가 바뀌면 코어 문서와 이 handoff를 같은 변경 세트에서 같이 갱신한다.
 
-## Update rule
-모든 실행은 아래 형식으로 append 한다.
+## 이력 기록 규칙
+- 모든 실행은 아래 형식으로 append 한다.
 - date/time
 - branch/head
 - inspected files
@@ -55,8 +48,44 @@
 - changes
 - validations
 - next best task
+- 상세 히스토리는 최신 항목부터 아래에 쌓는다.
 
 ---
+
+### 2026-03-31T17:58:07.8388346+09:00 Improver
+- branch/head: `고도화` / `b22a7cb6b538f87d822a53e9915cfdab6e248100`
+- inspected files:
+  - `apps/api/services/view_state.py`
+  - `apps/api/services/followup_anchor.py`
+  - `apps/api/services/scope_resolver.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/core/filters.py`
+  - `apps/core/anchor_resolution.py`
+  - `apps/core/rag_runtime_prelude.py`
+  - `apps/core/rag_pipeline.py`
+  - `tests/test_view_state_child_refs.py`
+  - `tests/test_scope_resolver.py`
+  - `tests/test_request_facade_child_anchor.py`
+  - `tests/test_people_filter_nested_gate.py`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+- findings:
+  - follow-up 검색 품질의 병목은 planner나 prompt가 아니라 runtime upstream이었다. `latest_focus_entity`만으로는 detail 내부 참여연구자 `hm_id`를 다음 턴 exact anchor로 다시 만들 수 없었다.
+  - downstream exact-id 경로는 이미 준비돼 있었고, 핵심은 `child researcher -> person_no seed -> hm_id must`를 planner 전후로 잃지 않게 만드는 것이었다.
+- changes:
+  - `view_state.py`: `ChildEntityRef`와 `child_refs`를 추가하고, display snapshot/detail focus에서 top-level 연구자와 `prtcp_mp[]` 연구자를 `person_no` 기반 child ref로 보존하도록 연결했다.
+  - `followup_anchor.py`: 직전 `project` 상세의 child researcher 이름이 질문에 exact unique match되면 `detail_participant_match` people anchor로 승격하는 resolver를 추가했다.
+  - `scope_resolver.py`: pre-planner scope decision을 도입해 `child_entity_followup`, `scope_reset`, `ambiguous_followup`을 deterministic하게 분기하고 reset cue를 처리하도록 했다.
+  - `request_facade.py`: scope decision 로그(`SCOPE.DECISION`), participant anchor 로그(`FOLLOWUP.PARTICIPANT_ANCHOR.RESOLVED`), reset 로그(`ANCHOR.ESCAPED`), ambiguity 로그(`ANCHOR.AMBIGUOUS`)를 추가하고, child researcher anchor를 `ids_map.person_no`와 `people_terms`로 planner 전후 모두 고정하도록 바꿨다. `selected_prev_item`도 display rank 없이 researcher anchor를 담을 수 있게 확장했다.
+  - 회귀 테스트와 운영/계약 문서를 새 scope/anchor 흐름 기준으로 갱신했다.
+- validations:
+  - `python -m py_compile apps/api/services/view_state.py apps/api/services/followup_anchor.py apps/api/services/scope_resolver.py apps/api/services/request_facade.py tests/test_view_state_child_refs.py tests/test_scope_resolver.py tests/test_request_facade_child_anchor.py tests/test_people_filter_nested_gate.py` passed
+  - `python -m pytest tests/test_view_state_child_refs.py tests/test_scope_resolver.py tests/test_request_facade_child_anchor.py tests/test_people_filter_nested_gate.py -q -p no:cacheprovider` passed (`8 passed`)
+  - `python -m pytest tests/test_contract_debt_paydown.py -q -p no:cacheprovider` is still blocked in this shell because importing `apps.api.app_factory` requires `langgraph`
+- next best task:
+  - `list -> detail -> child researcher -> related projects`를 실제 앱 runtime 로그로 한 번 재현해 `SCOPE.DECISION`, `FOLLOWUP.PARTICIPANT_ANCHOR.RESOLVED`, `RAG.FILTER.COMPILED.QDRANT`의 `hm_id must` 경로를 같이 확인한다.
+  - P1로는 `child_refs`를 `org/perf`까지 일반화하고, ambiguity를 structured clarification payload로 승격한다.
 
 ### 2026-03-31T13:30:00+09:00 Improver
 - branch/head: `고도화` / `3478854f4a34341938041af8196d45b64d009fbe`
@@ -1030,3 +1059,87 @@
 - next best task:
   - repo 전용 Python environment 또는 dependency bootstrap을 먼저 복구한 뒤 `scripts/run_baseline_checks.ps1`를 다시 실행해 docs change와 actual baseline 상태를 같은 환경에서 확인할 것
   - source-reference fallback contract를 baseline inventory에 포함할지, 아니면 policy 문서/ADR로 먼저 확정할지 다음 watcher/improver 루프에서 결정할 것
+
+## 2026-03-31T18:42:15.7910931+09:00 Watcher
+- branch/head: `고도화` / `b22a7cb6b538f87d822a53e9915cfdab6e248100`
+- inspected files:
+  - `docs/SESSION_HANDOFF.md`
+  - `docs/CODEX_CONTEXT.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/GOLDEN_TESTS.md`
+  - `apps/api/contracts/repo_manifest.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `apps/api/services/answer_generation.py`
+  - `apps/api/contracts/workflow_models.py`
+  - `apps/api/services/runtime_helpers.py`
+  - `apps/core/llm_streaming.py`
+  - `apps/core/runtime_strategy_policy.py`
+  - `apps/core/result_contract.py`
+  - `tests/test_answer_generation_groundedness_snapshot.py`
+  - `tests/test_answer_groundedness_verdict.py`
+  - `tests/test_runtime_helpers_stream_bypass.py`
+  - `tests/test_request_facade_source_reference_fallback.py`
+  - `tests/test_view_state_child_refs.py`
+  - `tests/test_scope_resolver.py`
+  - `tests/test_request_facade_child_anchor.py`
+  - `tests/test_people_filter_nested_gate.py`
+  - `tests/test_repo_contract_defaults.py`
+- findings:
+  - P1 validation blocker: manifest-driven baseline entrypoint는 현재 shell에서 subset execution까지 도달하지 못한다. `scripts/run_baseline_checks.ps1`의 collect-only가 `tests/test_contract_debt_paydown.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_planner_stagewise.py`, `tests/test_repo_contract_defaults.py`, `tests/test_request_overrides.py`, `tests/test_retrieval_workflow_detail_followup_freshness.py`, `tests/test_retrieval_workflow_freshness_override.py` import 단계에서 멈추며, concrete missing module은 `langgraph`, `aiofiles`, `llama_index`, `transformers`였다.
+  - P1 coverage gap: source-reference / child-anchor / nested people-gate regressions는 이미 문서상 baseline-worthy이고 targeted pytest도 green이지만, `BASELINE_INVENTORY["core_contract_subset"]`에는 `tests/test_request_facade_source_reference_fallback.py`, `tests/test_view_state_child_refs.py`, `tests/test_scope_resolver.py`, `tests/test_request_facade_child_anchor.py`, `tests/test_people_filter_nested_gate.py`가 아직 없다.
+  - P1 coverage gap: answer groundedness fixture verdict는 manifest에 들어갔지만, pipeline integration test인 `tests/test_answer_generation_groundedness_snapshot.py`는 아직 manifest-driven baseline 밖에 있어 snapshot-to-selector regression이 verdict-only green 뒤에 숨어 버릴 수 있다.
+  - P2 streaming coverage gap (static inference): `docs/GOLDEN_TESTS.md`는 `AsyncStream.close`, `emitted_chunks`, `ttft` semantics를 watchlist로 두지만, 현재 inspected baseline surface는 `derive_stream_error_code()` 우선순위만 직접 잠그고 있다. `apps/core/llm_streaming.py::run_llm_streaming` 자체를 건드리는 dedicated pytest는 이번 pass에서 찾지 못했다.
+  - no new static drift found: planner defaults(`v2 / v1 / v2`), answer prompt의 internal schema-label ban, `RAG_FORCE_FALLBACK_CHAT`의 response-only fallback policy는 inspected code/docs/prompt surface에서 여전히 일치한다.
+- changes:
+  - 이번 watcher 결과를 `docs/SESSION_HANDOFF.md` 말미에 append했다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `b22a7cb6b538f87d822a53e9915cfdab6e248100`
+  - `python -m apps.api.contracts.repo_manifest --section planner_prompt_defaults` passed and returned `{"stage1":"v2","stage15":"v1","stage2":"v2"}`.
+  - `python -m apps.api.contracts.repo_manifest --section baseline_inventory` passed and confirmed the current manifest-driven baseline owner.
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` reached collect-only, discovered `141 tests`, then failed with `7` collection errors caused by missing imports `langgraph`, `aiofiles`, `llama_index`, `transformers`.
+  - `python -m pytest tests/test_request_facade_source_reference_fallback.py tests/test_people_filter_nested_gate.py tests/test_scope_resolver.py tests/test_request_facade_child_anchor.py tests/test_view_state_child_refs.py -q -p no:cacheprovider` passed (`9 passed`).
+  - `python -m pytest tests/test_answer_generation_groundedness_snapshot.py tests/test_answer_groundedness_verdict.py tests/test_runtime_helpers_stream_bypass.py -q -p no:cacheprovider` passed (`11 passed`).
+- next best task:
+  - smallest repo patch: `apps/api/contracts/repo_manifest.py`의 baseline inventory에 이미 green인 source-reference / child-anchor / people-gate / groundedness-snapshot tests를 포함시키고, `docs/04_회귀기준과_점검.md`의 baseline command와 source-of-truth를 manifest 기준으로 다시 맞출 것
+  - parallel env task: watcher shell에 `langgraph`, `aiofiles`, `llama_index`, `transformers`를 복구한 뒤 `scripts/run_baseline_checks.ps1`를 다시 실행해 collect-only와 core subset을 같은 환경에서 닫을 것
+
+## 2026-03-31T19:32:00.1692131+09:00 Watcher
+- branch/head: `고도화` / `fc8c6027bd5a766c12d3ab34739d1a894dfb03d5`
+- inspected files:
+  - `README.md`
+  - `docs/README.md`
+  - `docs/00_ONBOARDING.md`
+  - `docs/01_아키텍처와_흐름.md`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/05_유지보수와_확장.md`
+  - `docs/SESSION_HANDOFF.md`
+  - `apps/api/contracts/repo_manifest.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `pytest.ini`
+- findings:
+  - 코어 문서들은 기준 사실은 비교적 정확했지만, 첫 화면에서 "누가 읽고 무엇을 바로 챙겨야 하는지"가 약해 비개발자와 신규 참여자가 빠르게 진입하기 어려웠다.
+  - 상위 문서와 기술 문서의 층위가 충분히 분리되지 않아, 시스템 설명과 운영 규칙이 같은 밀도로 이어지는 구간이 있었다.
+  - 운영/회귀/유지보수 문서에는 현재 우선 리스크, 바로 확인할 로그/테스트, 문서 갱신 트리거를 한눈에 보여 주는 블록이 부족했다.
+  - baseline entrypoint와 planner defaults source-of-truth는 여전히 맞지만, 현재 shell에서는 `langgraph`, `aiofiles`, `llama_index`, `transformers` 누락으로 manifest-driven baseline을 끝까지 닫을 수 없다.
+- changes:
+  - `README.md`, `docs/README.md`, `docs/00_ONBOARDING.md`, `docs/01_아키텍처와_흐름.md` 상단에 `한 줄 요약 / 이 문서를 읽을 사람 / 이 문서에서 바로 찾을 수 있는 것 / 지금 챙길 것` 레이어를 추가해 비개발자 친화 진입면을 만들었다.
+  - `docs/02_실행계약과_전략규칙.md`에는 쉬운 진입 레이어와 함께 핵심 용어 빠른 풀이를 추가해 contract, canonical evidence, follow-up, groundedness, drift, baseline을 일관된 한국어 설명으로 맞췄다.
+  - `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`, `docs/05_유지보수와_확장.md`는 "요약 -> 현재 우선 리스크 -> 지금 볼 로그/테스트 -> 다음 문서 업데이트 트리거 -> 상세 규칙" 순서로 재정리했다.
+  - `docs/SESSION_HANDOFF.md`는 내부 로그 문서로 유지하되 상단을 `현재 상태 / 열린 리스크 / 다음 액션` 중심으로 읽히게 정리하고, 상세 이력은 그대로 아래에 보존했다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `fc8c6027bd5a766c12d3ab34739d1a894dfb03d5`
+  - `python -m apps.api.contracts.repo_manifest --section planner_prompt_defaults` passed and returned `{"stage1": "v2", "stage15": "v1", "stage2": "v2"}`.
+  - `python -m apps.api.contracts.repo_manifest --section baseline_inventory` passed and confirmed the current manifest-driven baseline owner and entrypoint surface.
+  - PowerShell heading search confirmed all target core docs now expose `## 한 줄 요약`, `## 이 문서를 읽을 사람`, `## 이 문서에서 바로 찾을 수 있는 것`, `## 지금 챙길 것` in their active top sections.
+  - UTF-8 explicit reads confirmed `README.md`, `docs/03_운영과_환경.md`, `docs/SESSION_HANDOFF.md` 상단 요약이 한글로 정상 노출된다.
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` reached collect-only, discovered `141 tests`, then failed with `7` collection errors caused by missing imports `langgraph`, `aiofiles`, `llama_index`, `transformers`.
+- remains risky:
+  - 문서의 첫 화면 가독성은 개선됐지만, 실제 PM/QA/비개발자 독자에게 읽혀 본 usability check는 아직 없다.
+  - `BASELINE_INVENTORY["core_contract_subset"]`에는 여전히 source-reference fallback, child-anchor, people-gate, groundedness snapshot 계열이 직접 포함되지 않아 문서 설명과 baseline coverage 기대치 사이에 간격이 남아 있다.
+  - 현재 shell dependency가 복구되지 않으면 문서에 적은 baseline 진입점과 실제 실행 결과를 같은 환경에서 닫지 못한다.
+- next best task:
+  - 비개발자 또는 운영자 관점에서 `README.md`와 `docs/03_운영과_환경.md` 첫 화면만 읽고 목적/흐름/우선 확인 항목을 30초 안에 설명할 수 있는지 짧은 reader pass를 수행할 것
+  - dependency bootstrap을 복구한 뒤 `scripts/run_baseline_checks.ps1`를 다시 실행하고, 필요하면 `docs/04_회귀기준과_점검.md`의 baseline 설명을 manifest coverage 현실에 맞게 한 번 더 다듬을 것

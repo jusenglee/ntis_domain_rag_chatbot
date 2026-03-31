@@ -321,8 +321,8 @@ APP_RUNTIME_CONFIG = AppRuntimeConfig(
     sparse_warmup_on_boot=os.getenv("RAG_FASTEMBED_WARMUP_ON_BOOT", "true").strip().lower() in {"1", "true", "yes", "on"},
     metrics_timeout_seconds=METRICS_PROMETHEUS_TIMEOUT,
     payload_keyword_index_targets={
-        "ntis_project_v1": ["pjt_id", "pjt_no", "tag"],
-        "ntis_perf_v1": ["pjt_id", "pjt_no", "tag"],
+        "ntis_project_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id","doc_id"],
+        "ntis_perf_v1": ["pjt_id", "pjt_no", "tag", "prtcp_mp[].hm_id","doc_id"],
     },
     payload_text_index_targets={
         "ntis_project_v1": ["org_nm", "prtcp_org[].org_nm", "prtcp_mp[].blng_org_nm"],

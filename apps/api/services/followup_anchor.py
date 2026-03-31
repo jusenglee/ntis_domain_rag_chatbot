@@ -168,7 +168,126 @@ def _normalize_ids_map(values: Any) -> Dict[str, list[str]]:
     return normalized
 
 
-def resolve_followup_anchor(*, question: str, normalized_intent: Any, latest_display_snapshot: Optional[DisplaySnapshot], latest_focus_entity: Optional[FocusEntity]) -> Optional[FocusEntity]:
+_CHILD_ANCHOR_SOURCES = {
+    "people": "detail_participant_match",
+    "org": "detail_org_match",
+    "perf": "detail_perf_match",
+}
+
+
+def _build_child_focus_anchor(*, kind: str, ids_map: Dict[str, list[str]], ref: Any, focus: FocusEntity) -> Optional[FocusEntity]:
+    if kind == "people":
+        person_ids = ids_map.get("person_no") or []
+        if not person_ids:
+            return None
+        return FocusEntity(
+            kind="people",
+            source=_CHILD_ANCHOR_SOURCES["people"],
+            view_id=focus.view_id,
+            person_no=person_ids[0],
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    if kind == "org":
+        org_ids = ids_map.get("org_id") or []
+        org_codes = ids_map.get("org_code") or []
+        biz_nos = ids_map.get("biz_no") or []
+        if not any([org_ids, org_codes, biz_nos]):
+            return None
+        return FocusEntity(
+            kind="org",
+            source=_CHILD_ANCHOR_SOURCES["org"],
+            view_id=focus.view_id,
+            org_id=org_ids[0] if org_ids else None,
+            org_code=org_codes[0] if org_codes else None,
+            biz_no=biz_nos[0] if biz_nos else None,
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    if kind == "perf":
+        rst_ids = ids_map.get("rst_id") or []
+        dois = ids_map.get("doi") or []
+        issns = ids_map.get("issn") or []
+        if not any([rst_ids, dois, issns]):
+            return None
+        return FocusEntity(
+            kind="perf",
+            source=_CHILD_ANCHOR_SOURCES["perf"],
+            view_id=focus.view_id,
+            rst_id=rst_ids[0] if rst_ids else None,
+            doi=dois[0] if dois else None,
+            issn=issns[0] if issns else None,
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    return None
+
+
+def _resolve_named_child_anchor_from_focus(*, question: str, focus_entity: Optional[FocusEntity]) -> Optional[FocusEntity]:
+    if focus_entity is None:
+        return None
+    if str(focus_entity.kind or "").strip().lower() != "project":
+        return None
+
+    refs = list(getattr(focus_entity, "child_refs", []) or [])
+    if not refs:
+        return None
+
+    matches: list[FocusEntity] = []
+    seen_keys: set[str] = set()
+    text = str(question or "").strip()
+    if not text:
+        return None
+
+    for ref in refs:
+        kind = str(getattr(ref, "kind", "") or "").strip().lower()
+        if kind not in _CHILD_ANCHOR_SOURCES:
+            continue
+        display_name = str(getattr(ref, "display_name", "") or "").strip()
+        ids_map = _normalize_ids_map(getattr(ref, "ids_map", {}) or {})
+        if not display_name or display_name not in text:
+            continue
+        focus_anchor = _build_child_focus_anchor(kind=kind, ids_map=ids_map, ref=ref, focus=focus_entity)
+        if focus_anchor is None:
+            continue
+        identity = "|".join(
+            [
+                kind,
+                str(getattr(focus_anchor, "person_no", None) or ""),
+                str(getattr(focus_anchor, "org_id", None) or ""),
+                str(getattr(focus_anchor, "org_code", None) or ""),
+                str(getattr(focus_anchor, "biz_no", None) or ""),
+                str(getattr(focus_anchor, "rst_id", None) or ""),
+                str(getattr(focus_anchor, "doi", None) or ""),
+                str(getattr(focus_anchor, "issn", None) or ""),
+            ]
+        )
+        if identity in seen_keys:
+            continue
+        seen_keys.add(identity)
+        matches.append(focus_anchor)
+
+    if len(matches) != 1:
+        return None
+
+    return matches[0]
+
+
+def resolve_followup_anchor(
+    *,
+    question: str,
+    normalized_intent: Any,
+    latest_display_snapshot: Optional[DisplaySnapshot],
+    latest_focus_entity: Optional[FocusEntity],
+    scope_focus_entity: Optional[FocusEntity] = None,
+) -> Optional[FocusEntity]:
+    child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=scope_focus_entity or latest_focus_entity)
+    if child_anchor is not None:
+        return child_anchor
+
     ids_map = _normalize_ids_map(getattr(normalized_intent, "ids_map", {}) or {})
     for key in _EXPLICIT_ID_KEYS:
         values = ids_map.get(key) or []

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,15 @@ _SYNTHETIC_TITLE_PRIMARY_TYPES = {
     "multi_hop_bundle",
 }
 _META_TITLE_KEYS = ("kor_pjt_nm", "eng_pjt_nm", "title", "paper_nm")
+
+
+class ChildEntityRef(BaseModel):
+    kind: Literal["people", "org", "perf"]
+    display_name: str
+    ids_map: Dict[str, List[str]] = Field(default_factory=dict)
+    role: Optional[str] = None
+    affiliation: Optional[str] = None
+    parent_relation: Optional[str] = None
 
 
 class DisplayItem(BaseModel):
@@ -35,6 +44,7 @@ class DisplayItem(BaseModel):
     lead_org: Optional[str] = None
     participant_org: List[str] = Field(default_factory=list)
     researchers: List[str] = Field(default_factory=list)
+    child_refs: List[ChildEntityRef] = Field(default_factory=list)
     score: Optional[float] = None
 
 
@@ -70,6 +80,7 @@ class FocusEntity(BaseModel):
     lead_org: Optional[str] = None
     participant_org: List[str] = Field(default_factory=list)
     researchers: List[str] = Field(default_factory=list)
+    child_refs: List[ChildEntityRef] = Field(default_factory=list)
 
 
 class DetailCoverage(BaseModel):
@@ -90,9 +101,18 @@ class DetailCacheEntry(BaseModel):
     schema_version: int = DETAIL_CACHE_SCHEMA_VERSION
 
 
+class ActiveScope(BaseModel):
+    result_set: Optional[DisplaySnapshot] = None
+    focus: Optional[FocusEntity] = None
+    child_anchor: Optional[FocusEntity] = None
+    parent_chain: List[Dict[str, Any]] = Field(default_factory=list)
+    scope_kind: Literal["list", "detail", "child", "fresh"] = "fresh"
+
+
 class ConversationViewState(BaseModel):
     latest_display_snapshot: Optional[DisplaySnapshot] = None
     latest_focus_entity: Optional[FocusEntity] = None
+    active_scope: ActiveScope = Field(default_factory=ActiveScope)
     detail_cache: Dict[str, DetailCacheEntry] = Field(default_factory=dict)
     raw_candidates_cache: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     active_result_set_kind: Optional[str] = None
@@ -107,13 +127,108 @@ class ConversationViewState(BaseModel):
 
 def load_view_state(payload: Any) -> ConversationViewState:
     if isinstance(payload, ConversationViewState):
-        return payload
+        return _normalize_view_state(payload)
     if isinstance(payload, dict):
         try:
-            return ConversationViewState.model_validate(payload)
+            return _normalize_view_state(ConversationViewState.model_validate(payload))
         except Exception:
             return ConversationViewState()
     return ConversationViewState()
+
+
+def _normalize_scope_kind(value: Any) -> Literal["list", "detail", "child", "fresh"]:
+    text = str(value or "").strip().lower()
+    if text in {"list", "detail", "child"}:
+        return text  # type: ignore[return-value]
+    return "fresh"
+
+
+def _focus_entity_identity(entity: Optional[FocusEntity]) -> tuple[Any, ...]:
+    if entity is None:
+        return ()
+    return (
+        getattr(entity, "kind", None),
+        getattr(entity, "pjt_id", None),
+        getattr(entity, "pjt_no", None),
+        getattr(entity, "rst_id", None),
+        getattr(entity, "person_no", None),
+        getattr(entity, "org_id", None),
+        getattr(entity, "org_code", None),
+        getattr(entity, "biz_no", None),
+        getattr(entity, "doi", None),
+        getattr(entity, "issn", None),
+        getattr(entity, "doc_id", None),
+        getattr(entity, "title_text", None),
+    )
+
+
+def _append_scope_transition(
+    chain: List[Dict[str, Any]],
+    *,
+    scope_kind: str,
+    turn_id: Optional[str],
+    view_id: Optional[str] = None,
+    entity_kind: Optional[str] = None,
+    anchor_kind: Optional[str] = None,
+    reason: Optional[str] = None,
+    max_items: int = 12,
+) -> List[Dict[str, Any]]:
+    entry = {
+        "scope_kind": _normalize_scope_kind(scope_kind),
+        "turn_id": str(turn_id or "").strip() or None,
+        "view_id": str(view_id or "").strip() or None,
+        "entity_kind": str(entity_kind or "").strip().lower() or None,
+        "anchor_kind": str(anchor_kind or "").strip().lower() or None,
+        "reason": str(reason or "").strip() or None,
+    }
+    next_chain = list(chain or [])
+    next_chain.append(entry)
+    return next_chain[-max_items:]
+
+
+def _normalize_view_state(view_state: ConversationViewState) -> ConversationViewState:
+    active_scope = getattr(view_state, "active_scope", None)
+    if not isinstance(active_scope, ActiveScope):
+        try:
+            active_scope = ActiveScope.model_validate(active_scope or {})
+        except Exception:
+            active_scope = ActiveScope()
+
+    result_set = active_scope.result_set or getattr(view_state, "latest_display_snapshot", None)
+    child_anchor = active_scope.child_anchor
+    focus = active_scope.focus
+    legacy_focus = getattr(view_state, "latest_focus_entity", None)
+    if focus is None and legacy_focus is not None:
+        focus = legacy_focus
+    if child_anchor is None and legacy_focus is not None and _focus_entity_identity(legacy_focus) != _focus_entity_identity(focus):
+        child_anchor = legacy_focus
+
+    scope_kind = _normalize_scope_kind(active_scope.scope_kind)
+    if scope_kind == "fresh":
+        if child_anchor is not None:
+            scope_kind = "child"
+        elif focus is not None:
+            scope_kind = "detail"
+        elif result_set is not None:
+            scope_kind = "list"
+
+    parent_chain = [entry for entry in list(active_scope.parent_chain or []) if isinstance(entry, dict)]
+    normalized_scope = ActiveScope(
+        result_set=result_set,
+        focus=focus,
+        child_anchor=child_anchor,
+        parent_chain=parent_chain,
+        scope_kind=scope_kind,
+    )
+    legacy_focus_out = normalized_scope.child_anchor or normalized_scope.focus
+    return view_state.model_copy(
+        update={
+            "active_scope": normalized_scope,
+            "latest_display_snapshot": normalized_scope.result_set,
+            "latest_focus_entity": legacy_focus_out,
+            "active_result_view_id": getattr(normalized_scope.result_set, "view_id", None),
+        }
+    )
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -154,6 +269,251 @@ def _list_texts(items: Any, key: str) -> List[str]:
         if text and text not in out:
             out.append(text)
     return out
+
+
+def _normalize_child_ids_map(raw_ids_map: Dict[str, Any]) -> Dict[str, List[str]]:
+    normalized: Dict[str, List[str]] = {}
+    for key, raw_values in (raw_ids_map or {}).items():
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        items: List[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = _first_text(value)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            items.append(text)
+        if items:
+            normalized[str(key).strip()] = items
+    return normalized
+
+
+def _build_child_identity(*, kind: str, display_name: Optional[str], ids_map: Dict[str, List[str]], role: Optional[str], affiliation: Optional[str]) -> str:
+    if kind == "people" and ids_map.get("person_no"):
+        return f"people:id:{ids_map['person_no'][0]}"
+    if kind == "org":
+        if ids_map.get("org_id"):
+            return f"org:org_id:{ids_map['org_id'][0]}"
+        if ids_map.get("org_code"):
+            return f"org:org_code:{ids_map['org_code'][0]}"
+        if ids_map.get("biz_no"):
+            return f"org:biz_no:{ids_map['biz_no'][0]}"
+    if kind == "perf":
+        if ids_map.get("rst_id"):
+            return f"perf:rst_id:{ids_map['rst_id'][0]}"
+        if ids_map.get("doi"):
+            return f"perf:doi:{ids_map['doi'][0]}"
+        if ids_map.get("issn"):
+            return f"perf:issn:{ids_map['issn'][0]}"
+    return (
+        f"{kind}:name:{(display_name or '').strip().lower()}"
+        f"|aff:{(affiliation or '').strip().lower()}"
+        f"|role:{(role or '').strip().lower()}"
+    )
+
+
+def _extract_people_child_refs(*sources: Any) -> List[ChildEntityRef]:
+    refs: List[ChildEntityRef] = []
+    seen: set[str] = set()
+
+    def _append(source: Any, *, parent_relation: str) -> None:
+        if not isinstance(source, dict):
+            return
+        display_name = _first_text(source.get("hm_nm"), source.get("person_name"), source.get("name"))
+        person_no = _first_text(
+            source.get("hm_id"),
+            source.get("person_no"),
+            source.get("prtcp_mp_id"),
+            source.get("mp_id"),
+            source.get("id"),
+        )
+        ids_map = _normalize_child_ids_map({"person_no": person_no} if person_no else {})
+        role = _first_text(source.get("role_slct_nm"), source.get("role_nm"), source.get("role"))
+        affiliation = _first_text(source.get("blng_org_nm"), source.get("affiliation"), source.get("org_nm"))
+        if not display_name and not ids_map:
+            return
+
+        identity = _build_child_identity(
+            kind="people",
+            display_name=display_name,
+            ids_map=ids_map,
+            role=role,
+            affiliation=affiliation,
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        refs.append(
+            ChildEntityRef(
+                kind="people",
+                display_name=display_name or person_no or "researcher",
+                ids_map=ids_map,
+                role=role or None,
+                affiliation=affiliation or None,
+                parent_relation=parent_relation,
+            )
+        )
+
+    for source in sources:
+        _append(source, parent_relation="top_level_researcher")
+
+    for source in sources:
+        members = source.get("prtcp_mp") if isinstance(source, dict) else None
+        if not isinstance(members, list):
+            continue
+        for member in members:
+            _append(member, parent_relation="participant_researcher")
+
+    return refs
+
+
+def _extract_org_child_refs(*sources: Any) -> List[ChildEntityRef]:
+    refs: List[ChildEntityRef] = []
+    seen: set[str] = set()
+
+    def _append(source: Any, *, parent_relation: str) -> None:
+        if not isinstance(source, dict):
+            return
+        display_name = _first_text(
+            source.get("org_nm"),
+            source.get("org_name"),
+            source.get("lead_org_name"),
+            source.get("pjt_prfrm_org_nm"),
+            source.get("affiliation"),
+        )
+        ids_map = _normalize_child_ids_map(
+            {
+                "org_id": _first_text(source.get("org_id")),
+                "org_code": _first_text(source.get("org_code"), source.get("org_cd")),
+                "biz_no": _first_text(source.get("biz_no"), source.get("org_no")),
+            }
+        )
+        role = _first_text(source.get("role"), source.get("role_nm"), source.get("role_slct_nm"))
+        affiliation = _first_text(source.get("blng_org_nm"))
+        if not display_name and not ids_map:
+            return
+
+        identity = _build_child_identity(
+            kind="org",
+            display_name=display_name,
+            ids_map=ids_map,
+            role=role,
+            affiliation=affiliation,
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        refs.append(
+            ChildEntityRef(
+                kind="org",
+                display_name=display_name or _first_text(*(ids_map.get("org_id") or []), *(ids_map.get("org_code") or []), *(ids_map.get("biz_no") or [])) or "organization",
+                ids_map=ids_map,
+                role=role or None,
+                affiliation=affiliation or None,
+                parent_relation=parent_relation,
+            )
+        )
+
+    for source in sources:
+        _append(source, parent_relation="top_level_org")
+
+    for source in sources:
+        orgs = source.get("prtcp_org") if isinstance(source, dict) else None
+        if not isinstance(orgs, list):
+            continue
+        for org in orgs:
+            _append(org, parent_relation="participant_org")
+
+    return refs
+
+
+def _iter_perf_candidates(source: Any) -> List[tuple[dict[str, Any], str]]:
+    if not isinstance(source, dict):
+        return []
+
+    candidates: List[tuple[dict[str, Any], str]] = []
+    for key, relation in (
+        ("outputs", "linked_output"),
+        ("linked_outputs", "linked_output"),
+        ("perf_items", "linked_output"),
+        ("related_outputs", "linked_output"),
+        ("related_perf", "related_perf"),
+    ):
+        items = source.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                candidates.append((item, relation))
+            elif str(item or "").strip():
+                candidates.append(({"name": str(item).strip()}, relation))
+
+    for key, relation in (("origin_perf", "origin_perf"), ("perf", "linked_output")):
+        item = source.get(key)
+        if isinstance(item, dict):
+            candidates.append((item, relation))
+    return candidates
+
+
+def _extract_perf_child_refs(*sources: Any) -> List[ChildEntityRef]:
+    refs: List[ChildEntityRef] = []
+    seen: set[str] = set()
+
+    for source in sources:
+        for item, parent_relation in _iter_perf_candidates(source):
+            display_name = _first_text(item.get("title"), item.get("title_text"), item.get("name"), item.get("value"))
+            ids_map = _normalize_child_ids_map(
+                {
+                    "rst_id": _first_text(item.get("rst_id")),
+                    "doi": _first_text(item.get("doi")),
+                    "issn": _first_text(item.get("issn")),
+                }
+            )
+            role = _first_text(item.get("perf_type"), item.get("tag"), item.get("type"))
+            affiliation = _first_text(item.get("org_nm"), item.get("affiliation"))
+            if not display_name and not ids_map:
+                continue
+
+            identity = _build_child_identity(
+                kind="perf",
+                display_name=display_name,
+                ids_map=ids_map,
+                role=role,
+                affiliation=affiliation,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            refs.append(
+                ChildEntityRef(
+                    kind="perf",
+                    display_name=display_name or _first_text(*(ids_map.get("rst_id") or []), *(ids_map.get("doi") or []), *(ids_map.get("issn") or [])) or "performance",
+                    ids_map=ids_map,
+                    role=role or None,
+                    affiliation=affiliation or None,
+                    parent_relation=parent_relation,
+                )
+            )
+    return refs
+
+
+def _extract_child_refs(*sources: Any) -> List[ChildEntityRef]:
+    refs: List[ChildEntityRef] = []
+    refs.extend(_extract_people_child_refs(*sources))
+    refs.extend(_extract_org_child_refs(*sources))
+    refs.extend(_extract_perf_child_refs(*sources))
+    return refs
+
+
+def _researcher_names_from_child_refs(child_refs: List[ChildEntityRef]) -> List[str]:
+    names: List[str] = []
+    for ref in child_refs or []:
+        if str(getattr(ref, "kind", "") or "").strip().lower() != "people":
+            continue
+        name = _first_text(getattr(ref, "display_name", None))
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _normalize_kind(value: Any, *, default: str) -> str:
@@ -367,6 +727,8 @@ def build_display_snapshot(
             ids = canonical.get("ids") or {}
             facts = canonical.get("facts") or {}
             roles = canonical.get("roles") or {}
+            child_refs = _extract_child_refs(display, canonical)
+            researchers = [str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()] or _researcher_names_from_child_refs(child_refs)
             normalized_items.append(
                 DisplayItem(
                     display_rank=index,
@@ -393,7 +755,8 @@ def build_display_snapshot(
                     year=_to_int(facts.get("year")),
                     lead_org=_first_text(*list(roles.get("lead_org_name") or []), display.get("org_nm")),
                     participant_org=[str(v).strip() for v in (roles.get("participant_org_name") or []) if str(v).strip()],
-                    researchers=[str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()],
+                    researchers=researchers,
+                    child_refs=child_refs,
                     score=(float(display.get("score")) if display.get("score") is not None else None),
                 )
             )
@@ -420,6 +783,8 @@ def build_display_snapshot(
         roles = evidence.get("roles") or {}
         rank_item = _extract_rank_item(doc)
         entity_kind = _infer_entity_kind(context_kind=context_kind, doc=doc, evidence=evidence, ids=ids, rank_item=rank_item)
+        child_refs = _extract_child_refs(doc, rank_item, evidence)
+        researchers = [str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()] or _researcher_names_from_child_refs(child_refs)
         items.append(
             DisplayItem(
                 display_rank=index + 1,
@@ -446,7 +811,8 @@ def build_display_snapshot(
                 year=_to_int(facts.get("year") or rank_item.get("year")),
                 lead_org=_first_text(*list(roles.get("lead_org_name") or []), doc.get("org_nm"), rank_item.get("lead_org_name"), rank_item.get("org_name")),
                 participant_org=[str(v).strip() for v in (roles.get("participant_org_name") or []) if str(v).strip()],
-                researchers=[str(v).strip() for v in (roles.get("participant_researcher_name") or []) if str(v).strip()],
+                researchers=researchers,
+                child_refs=child_refs,
                 score=(float(doc.get("score")) if doc.get("score") is not None else None),
             )
         )
@@ -484,6 +850,7 @@ def focus_entity_from_item(*, item: DisplayItem, kind: str, source: str, view_id
         lead_org=item.lead_org,
         participant_org=list(item.participant_org or []),
         researchers=list(item.researchers or []),
+        child_refs=list(item.child_refs or []),
     )
 
 
@@ -500,6 +867,7 @@ def focus_entity_from_detail(
     facts = evidence.get("facts") or {}
     rank_item = _extract_rank_item(doc)
     entity_kind = _infer_entity_kind(context_kind=context_kind, doc=doc, evidence=evidence, ids=ids, rank_item=rank_item)
+    child_refs = _extract_child_refs(doc, rank_item, evidence)
     title_text = _resolve_title_text(
         doc=doc,
         facts=facts,
@@ -525,7 +893,8 @@ def focus_entity_from_detail(
         year=_to_int(facts.get("year") or doc.get("stan_yr") or (doc.get("meta_basic") or {}).get("stan_yr") or (doc.get("meta_detail") or {}).get("stan_yr")),
         lead_org=_first_text(*list((evidence.get("roles") or {}).get("lead_org_name") or []), doc.get("org_nm"), (doc.get("meta_detail") or {}).get("org_nm"), rank_item.get("lead_org_name"), rank_item.get("org_name")),
         participant_org=[str(v).strip() for v in ((evidence.get("roles") or {}).get("participant_org_name") or []) if str(v).strip()] or _list_texts(doc.get("prtcp_org"), "org_nm"),
-        researchers=[str(v).strip() for v in ((evidence.get("roles") or {}).get("participant_researcher_name") or []) if str(v).strip()] or _list_texts(doc.get("prtcp_mp"), "hm_nm"),
+        researchers=[str(v).strip() for v in ((evidence.get("roles") or {}).get("participant_researcher_name") or []) if str(v).strip()] or _researcher_names_from_child_refs(child_refs),
+        child_refs=child_refs,
     )
     if not any([
         focus.title_text,
@@ -542,6 +911,142 @@ def focus_entity_from_detail(
     ]):
         return None
     return focus
+
+
+def set_active_result_scope(
+    view_state: ConversationViewState,
+    *,
+    snapshot: DisplaySnapshot,
+    output_type: Optional[str],
+    context_kind: Optional[str],
+    turn_id: Optional[str],
+    scope_kind: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> ConversationViewState:
+    normalized = _normalize_view_state(view_state)
+    active_scope = normalized.active_scope
+    resolved_scope_kind = _normalize_scope_kind(scope_kind or ("child" if active_scope.child_anchor is not None else "list"))
+    next_scope = active_scope.model_copy(
+        update={
+            "result_set": snapshot,
+            "scope_kind": resolved_scope_kind,
+            "parent_chain": _append_scope_transition(
+                active_scope.parent_chain,
+                scope_kind=resolved_scope_kind,
+                turn_id=turn_id,
+                view_id=getattr(snapshot, "view_id", None),
+                entity_kind=str(context_kind or snapshot.context_kind or "").strip().lower() or None,
+                anchor_kind=getattr(active_scope.child_anchor, "kind", None),
+                reason=reason or str(output_type or "").strip().lower() or "result_set_update",
+            ),
+        }
+    )
+    return normalized.model_copy(
+        update={
+            "active_scope": next_scope,
+            "latest_display_snapshot": snapshot,
+            "active_result_set_kind": output_type,
+            "active_result_view_id": getattr(snapshot, "view_id", None),
+            "entity_scope": context_kind or snapshot.context_kind,
+            "latest_focus_entity": next_scope.child_anchor or next_scope.focus,
+        }
+    )
+
+
+def set_active_focus_scope(
+    view_state: ConversationViewState,
+    *,
+    focus: FocusEntity,
+    turn_id: Optional[str],
+    scope_kind: Optional[str] = None,
+    reason: Optional[str] = None,
+    preserve_child_anchor: bool = True,
+) -> ConversationViewState:
+    normalized = _normalize_view_state(view_state)
+    active_scope = normalized.active_scope
+    next_scope = active_scope.model_copy(
+        update={
+            "focus": focus,
+            "scope_kind": _normalize_scope_kind(scope_kind or "detail"),
+            "child_anchor": active_scope.child_anchor if preserve_child_anchor else None,
+            "parent_chain": _append_scope_transition(
+                active_scope.parent_chain,
+                scope_kind=scope_kind or "detail",
+                turn_id=turn_id,
+                entity_kind=getattr(focus, "kind", None),
+                view_id=getattr(focus, "view_id", None),
+                anchor_kind=getattr(active_scope.child_anchor, "kind", None) if preserve_child_anchor else None,
+                reason=reason or str(getattr(focus, "source", "") or "").strip().lower() or "focus_update",
+            ),
+        }
+    )
+    return normalized.model_copy(
+        update={
+            "active_scope": next_scope,
+            "latest_focus_entity": next_scope.child_anchor or focus,
+            "entity_scope": getattr(focus, "kind", None) or normalized.entity_scope,
+        }
+    )
+
+
+def set_active_child_anchor_scope(
+    view_state: ConversationViewState,
+    *,
+    anchor: FocusEntity,
+    turn_id: Optional[str],
+    reason: Optional[str] = None,
+) -> ConversationViewState:
+    normalized = _normalize_view_state(view_state)
+    active_scope = normalized.active_scope
+    next_scope = active_scope.model_copy(
+        update={
+            "child_anchor": anchor,
+            "scope_kind": _normalize_scope_kind("child"),
+            "parent_chain": _append_scope_transition(
+                active_scope.parent_chain,
+                scope_kind="child",
+                turn_id=turn_id,
+                entity_kind=getattr(active_scope.focus, "kind", None),
+                view_id=getattr(active_scope.result_set, "view_id", None) or getattr(anchor, "view_id", None),
+                anchor_kind=getattr(anchor, "kind", None),
+                reason=reason or str(getattr(anchor, "source", "") or "").strip().lower() or "child_anchor_update",
+            ),
+        }
+    )
+    return normalized.model_copy(
+        update={
+            "active_scope": next_scope,
+            "latest_focus_entity": anchor,
+            "entity_scope": getattr(anchor, "kind", None) or normalized.entity_scope,
+        }
+    )
+
+
+def clear_view_state_scope(view_state: ConversationViewState) -> ConversationViewState:
+    normalized = _normalize_view_state(view_state)
+    next_scope = normalized.active_scope.model_copy(
+        update={
+            "result_set": None,
+            "focus": None,
+            "child_anchor": None,
+            "scope_kind": "fresh",
+            "parent_chain": _append_scope_transition(
+                normalized.active_scope.parent_chain,
+                scope_kind="fresh",
+                turn_id=None,
+                reason="scope_reset",
+            ),
+        }
+    )
+    return normalized.model_copy(
+        update={
+            "active_scope": next_scope,
+            "latest_display_snapshot": None,
+            "latest_focus_entity": None,
+            "active_result_set_kind": None,
+            "active_result_view_id": None,
+        }
+    )
 
 
 def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_chars: int = 1200) -> str:

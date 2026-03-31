@@ -9,6 +9,7 @@ else:
     BaseMessage = Any
 
 from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
+from apps.api.services.scope_resolver import resolve_scope_decision
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.api.contracts.repo_manifest import PLANNER_PROMPT_DEFAULTS
 from apps.core.settings import MAX_TOP_K_SIZE
@@ -183,6 +184,53 @@ def _apply_anchor_lock(normalized_intent: Any, seed_map: dict[str, list[str]]) -
     return normalized_intent
 
 
+def _merge_text_terms(values: Any, additions: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in (values, additions):
+        if isinstance(source, str):
+            iterable = [source]
+        elif isinstance(source, (list, tuple, set)):
+            iterable = list(source)
+        elif source is None:
+            iterable = []
+        else:
+            iterable = [source]
+        for value in iterable:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
+def _apply_resolved_anchor_seed(normalized_intent: Any, anchor: Any) -> Any:
+    if anchor is None:
+        return normalized_intent
+
+    patched = _apply_anchor_lock(normalized_intent, anchor_to_seed_map(anchor))
+    if str(getattr(anchor, "kind", "") or "").strip().lower() != "people":
+        return patched
+
+    person_name = _first_text(getattr(anchor, "title_text", None))
+    if not person_name:
+        return patched
+
+    if isinstance(patched, dict):
+        patched = dict(patched)
+        patched["people_terms"] = _merge_text_terms(patched.get("people_terms") or [], [person_name])
+        return patched
+    if is_dataclass(patched) and hasattr(patched, "people_terms"):
+        return replace(patched, people_terms=_merge_text_terms(getattr(patched, "people_terms", []) or [], [person_name]))
+    if hasattr(patched, "people_terms"):
+        try:
+            setattr(patched, "people_terms", _merge_text_terms(getattr(patched, "people_terms", []) or [], [person_name]))
+        except Exception:
+            pass
+    return patched
+
+
 def _get_field(source: Any, key: str, default: Any = None) -> Any:
     if source is None:
         return default
@@ -206,6 +254,29 @@ def _replace_fields(source: Any, **updates: Any) -> Any:
         except Exception:
             pass
     return source
+
+
+def _clear_active_view_scope(view_state: ConversationViewState) -> ConversationViewState:
+    try:
+        return view_state.model_copy(
+            update={
+                "latest_display_snapshot": None,
+                "latest_focus_entity": None,
+                "active_result_set_kind": None,
+                "active_result_view_id": None,
+            }
+        )
+    except Exception:
+        return ConversationViewState(
+            detail_cache=dict(getattr(view_state, "detail_cache", {}) or {}),
+            raw_candidates_cache=dict(getattr(view_state, "raw_candidates_cache", {}) or {}),
+            applied_filters=dict(getattr(view_state, "applied_filters", {}) or {}),
+            sort_key=getattr(view_state, "sort_key", None),
+            sort_dir=getattr(view_state, "sort_dir", None),
+            entity_scope=getattr(view_state, "entity_scope", None),
+            refinement_history=list(getattr(view_state, "refinement_history", []) or []),
+            last_query_contract=dict(getattr(view_state, "last_query_contract", {}) or {}),
+        )
 
 
 def _normalize_org_role_hint(normalized_intent: Any, question: str) -> Optional[str]:
@@ -320,7 +391,22 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
             "focus_entity": None,
         }
     selected_prev_item = None
-    if anchor.display_rank is not None:
+    if anchor is not None and any(
+        [
+            anchor.display_rank is not None,
+            anchor.pjt_id,
+            anchor.pjt_no,
+            anchor.rst_id,
+            anchor.person_no,
+            anchor.org_id,
+            anchor.org_code,
+            anchor.biz_no,
+            anchor.doi,
+            anchor.issn,
+            anchor.doc_id,
+            anchor.title_text,
+        ]
+    ):
         selected_prev_item = {
             "index": anchor.display_rank,
             "pjt_id": anchor.pjt_id,
@@ -335,12 +421,16 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
             "doc_id": anchor.doc_id,
             "doc_type": anchor.doc_type,
             "title": anchor.title_text,
+            "person_name": anchor.title_text if str(getattr(anchor, "kind", "") or "").strip().lower() == "people" else None,
             "context_kind": anchor.kind,
             "view_id": anchor.view_id,
         }
     source_reference = parse_source_reference(question)
     ordinal_reference = parse_ordinal_reference(question)
     reference_kind = (
+        "child_entity"
+        if anchor.source == "detail_participant_match"
+        else
         "source_reference"
         if anchor.source == "display_snapshot" and source_reference is not None
         else "deictic"
@@ -585,9 +675,35 @@ class RequestUnderstandingFacade:
         base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
         has_explicit_seed = has_explicit_precheck_signals(precheck) or _has_ids_map_values(base_ids_map)
         source_reference_requested = parse_source_reference(question) is not None
-        anchor = None
+        scope_decision = resolve_scope_decision(
+            question=question,
+            view_state=active_view_state,
+            normalized_intent_base=normalized_intent_base,
+            strategy_meta=None,
+        )
+        self.log_event(
+            "SCOPE.DECISION",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            followup_type=scope_decision.followup_type,
+            reset_requested=int(bool(scope_decision.reset_requested)),
+            needs_clarification=int(bool(scope_decision.needs_clarification)),
+            resolved_anchor_source=getattr(scope_decision.resolved_anchor, "source", None),
+            resolved_anchor_kind=getattr(scope_decision.resolved_anchor, "kind", None),
+        )
+        if scope_decision.reset_requested:
+            active_view_state = _clear_active_view_scope(active_view_state)
+            latest_snapshot = None
+            latest_focus_entity = None
+            self.log_event(
+                "ANCHOR.ESCAPED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                reason="scope_reset",
+            )
+        anchor = scope_decision.resolved_anchor
         followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
-        if not has_explicit_seed and source_reference_requested:
+        if not has_explicit_seed and source_reference_requested and anchor is None:
             followup_resolution = resolve_reference_context_followup(
                 question=question,
                 canonical_evidence=list(canonical_evidence or []),
@@ -603,7 +719,7 @@ class RequestUnderstandingFacade:
                 )
                 if anchor is not None:
                     followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
-        elif not has_explicit_seed:
+        elif not has_explicit_seed and anchor is None:
             anchor = resolve_followup_anchor(
                 question=question,
                 normalized_intent=normalized_intent_base,
@@ -618,10 +734,22 @@ class RequestUnderstandingFacade:
                     prev_context=prev_context,
                     default_context_kind=base_route,
                 )
+        if (
+            anchor is None
+            and not has_explicit_seed
+            and str(followup_resolution.get("followup_resolution_status") or "").strip().lower() != "resolved"
+            and scope_decision.needs_clarification
+        ):
+            self.log_event(
+                "ANCHOR.AMBIGUOUS",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                followup_type=scope_decision.followup_type,
+                reason=((scope_decision.clarification_payload or {}).get("reason") if scope_decision.clarification_payload else None),
+            )
 
         if anchor is not None:
-            seed_map = anchor_to_seed_map(anchor)
-            normalized_intent_base = _apply_anchor_lock(normalized_intent_base, seed_map)
+            normalized_intent_base = _apply_resolved_anchor_seed(normalized_intent_base, anchor)
             normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
             self.log_event(
                 "FOLLOWUP.ANCHOR.RESOLVED",
@@ -637,6 +765,17 @@ class RequestUnderstandingFacade:
                 person_no=getattr(anchor, "person_no", None),
                 org_id=getattr(anchor, "org_id", None),
             )
+            if str(getattr(anchor, "source", "") or "").strip().lower() == "detail_participant_match":
+                self.log_event(
+                    "FOLLOWUP.PARTICIPANT_ANCHOR.RESOLVED",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    source=anchor.source,
+                    person_no=getattr(anchor, "person_no", None),
+                    person_name=getattr(anchor, "title_text", None),
+                    source_project_pjt_id=getattr(anchor, "pjt_id", None),
+                    source_project_pjt_no=getattr(anchor, "pjt_no", None),
+                )
             normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
                 normalized_intent_base,
                 question_analysis,
@@ -695,9 +834,13 @@ class RequestUnderstandingFacade:
         )
         # Planner merge is the only final writer of route truth.
         # Post-merge facade code may preserve anchor ids, but must not relock base_route/target_cols.
-        normalized_intent = _apply_anchor_lock(
-            normalized_intent,
-            followup_resolution.get("seed_map") or {},
+        normalized_intent = (
+            _apply_resolved_anchor_seed(normalized_intent, anchor)
+            if anchor is not None
+            else _apply_anchor_lock(
+                normalized_intent,
+                followup_resolution.get("seed_map") or {},
+            )
         )
         normalized_intent, question_analysis = _coerce_project_anchor_role_followup(
             normalized_intent,
