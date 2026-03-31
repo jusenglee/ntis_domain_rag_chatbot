@@ -5,6 +5,10 @@ from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from apps.api.contracts.answer_groundedness import (
+    AnswerGroundednessVerdict,
+    build_groundedness_snapshot_from_canonical_evidence,
+)
 from apps.api.services.canonical_context import render_canonical_evidence_text
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.core.canonical_evidence import build_canonical_evidence
@@ -58,6 +62,26 @@ def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+def _resolve_groundedness_visible_count(state: Any) -> Optional[int]:
+    render_profile = getattr(state, "render_profile", None) or {}
+    question_analysis = getattr(state, "question_analysis", None)
+    output_name = str(
+        _pick_attr(render_profile, question_analysis, key="name", default=None)
+        or _pick_attr(question_analysis, key="output_type", default=None)
+        or ""
+    ).strip().lower()
+    if output_name not in {"list", "relation", "comparison", "series", "stats"}:
+        return None
+    view_state = getattr(state, "view_state", None)
+    latest_display_snapshot = getattr(view_state, "latest_display_snapshot", None)
+    try:
+        value = getattr(latest_display_snapshot, "visible_count", None)
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
 
 def build_answer_context(
     *,
@@ -428,6 +452,12 @@ async def merge_answers(
     solar_meta = getattr(state, "answer_solar_meta", None) or {}
     answer_artifact_gemma = getattr(state, "answer_artifact_gemma", None)
     answer_artifact_solar = getattr(state, "answer_artifact_solar", None)
+    canonical_evidence = getattr(state, "canonical_evidence", None) or []
+    groundedness_snapshot_model = build_groundedness_snapshot_from_canonical_evidence(
+        canonical_evidence=canonical_evidence,
+        visible_count=_resolve_groundedness_visible_count(state),
+    )
+    groundedness_snapshot = groundedness_snapshot_model.model_dump()
     selection = select_final_answer_fn(
         answer_solar=answer_solar,
         answer_gemma=answer_gemma,
@@ -436,6 +466,7 @@ async def merge_answers(
         policy=dual_model_merge_policy,
         fallback_message=dual_model_fallback_message,
         min_answer_chars=solar_min_answer_chars,
+        evidence_snapshot=groundedness_snapshot,
     )
     solar_fail_reasons = list(selection["solar_fail_reasons"])
     solar_warning_reasons = list(selection["solar_warning_reasons"])
@@ -443,6 +474,8 @@ async def merge_answers(
     gemma_fail_reasons = list(selection.get("gemma_fail_reasons", []))
     gemma_warning_reasons = list(selection.get("gemma_warning_reasons", []))
     gemma_failed = bool(selection.get("gemma_failed", False))
+    solar_groundedness = dict(selection.get("solar_groundedness") or {})
+    gemma_groundedness = dict(selection.get("gemma_groundedness") or {})
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
     degraded = bool(getattr(state, "degraded", False)) or (selected_answer == dual_model_fallback_message)
@@ -465,6 +498,37 @@ async def merge_answers(
             user_visible_final_required=True,
             meta={"answer_source": selected_answer_source, "model_key": selected_model},
         )
+    if selected_model == "solar":
+        selected_groundedness = solar_groundedness
+    elif selected_model == "gemma":
+        selected_groundedness = gemma_groundedness
+    else:
+        selected_groundedness = AnswerGroundednessVerdict(
+            status="skipped_fallback",
+            reason_codes=[],
+            unsupported_claims=[],
+            insufficient_axes=[],
+            checked_claims=0,
+            snapshot_source=str(groundedness_snapshot.get("snapshot_source") or "none"),
+            claims={},
+        ).model_dump()
+    if isinstance(selected_artifact, AnswerArtifact):
+        enriched_meta = dict(selected_artifact.meta or {})
+        enriched_meta.setdefault("answer_source", selected_answer_source)
+        enriched_meta.setdefault("model_key", selected_model)
+        enriched_meta["groundedness_status"] = selected_groundedness.get("status")
+        enriched_meta["groundedness_reason_codes"] = list(selected_groundedness.get("reason_codes") or [])
+        enriched_meta["groundedness_summary"] = selected_groundedness
+        selected_artifact = AnswerArtifact(
+            text=selected_artifact.text,
+            answer_kind=selected_artifact.answer_kind,
+            stream_metrics=dict(selected_artifact.stream_metrics or {}),
+            user_visible_final_required=bool(selected_artifact.user_visible_final_required),
+            references=list(selected_artifact.references or []),
+            clarification=selected_artifact.clarification,
+            error=selected_artifact.error,
+            meta=enriched_meta,
+        )
 
     merge_debug = {
         "policy": dual_model_merge_policy,
@@ -483,6 +547,10 @@ async def merge_answers(
         "gemma_answer_chars": selection["gemma_answer_chars"],
         "min_chars_threshold": solar_min_answer_chars,
         "selected_answer_kind": (selected_artifact.answer_kind if isinstance(selected_artifact, AnswerArtifact) else None),
+        "groundedness_snapshot": groundedness_snapshot,
+        "solar_groundedness": solar_groundedness,
+        "gemma_groundedness": gemma_groundedness,
+        "selected_groundedness": selected_groundedness,
     }
 
     log_event(
@@ -497,6 +565,8 @@ async def merge_answers(
         gemma_fail_reasons=gemma_fail_reasons,
         gemma_answer_chars=len(answer_gemma),
         solar_answer_chars=len(answer_solar),
+        groundedness_status=selected_groundedness.get("status"),
+        groundedness_reason_codes=list(selected_groundedness.get("reason_codes") or []),
     )
     logger.info(
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
@@ -512,6 +582,8 @@ async def merge_answers(
         "answer_solar_raw": answer_solar_raw,
         "merge_debug": merge_debug,
         "selected_answer_meta": (selected_artifact.to_meta_dict() if isinstance(selected_artifact, AnswerArtifact) else selected_meta),
+        "answer_groundedness_snapshot": groundedness_snapshot_model,
+        "answer_groundedness_verdict": AnswerGroundednessVerdict.model_validate(selected_groundedness),
         "rendered_context_used": rendered_context_used,
         "degraded": degraded,
     }

@@ -3,17 +3,9 @@
 이 저장소의 상품화 게이트는 `전체 pytest` 하나로 끝나지 않는다. 아래 3축을 함께 만족해야 한다.
 
 1. 수집/회귀 게이트
-   - `PYTHONPATH=. python -m pytest --collect-only -q`
+   - collect-only arg, 핵심 회귀 목록, eval fixture 목록의 authoritative owner는 `apps/api/contracts/repo_manifest.py`의 `BASELINE_INVENTORY`다.
+   - `scripts/run_baseline_checks.ps1`는 이 manifest를 직접 읽어 같은 목록을 실행해야 한다.
    - 기본 collect-only 경로와 `pytest-cache-files-*` 제외 규칙은 루트 `pytest.ini`를 따른다.
-   - 아래 핵심 계약 테스트 묶음 통과
-     - `tests/test_planner_stagewise.py`
-     - `tests/test_retrieval_workflow_detail_runtime.py`
-     - `tests/test_rag_anchor_truth.py`
-     - `tests/test_rag_anchor_truth_active_only.py`
-     - `tests/test_request_facade_followup_seed_priority.py`
-     - `tests/test_request_facade_strategy_meta_focus_entity.py`
-     - `tests/test_retrieval_workflow_detail_cache_gate.py`
-     - `tests/test_contract_debt_paydown.py`
 2. 제품 품질 게이트
    - `eval/sample_queries.jsonl` 또는 후속 골든 질의 세트가 존재
    - 도메인별 검색 질의가 최소한 `project / perf / people / org / follow-up / id` 축을 포함

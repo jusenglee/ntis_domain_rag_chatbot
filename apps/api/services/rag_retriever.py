@@ -203,6 +203,7 @@ def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dic
         return {
             "present": False,
             "anchor_source": None,
+            "anchor_reference_kind": None,
             "entity_key": None,
             "entity_kind": None,
             "title_text": None,
@@ -272,6 +273,10 @@ def get_followup_anchor_context(state: Any, *, active_only: bool = False) -> Dic
             or (None if active_only else getattr(latest_focus, "source", None))
             or strategy_meta.get("seed_source")
         ),
+        "anchor_reference_kind": (
+            strategy_meta.get("anchor_reference_kind")
+            or strategy_meta.get("followup_reference_kind")
+        ),
         "entity_key": entity_key,
         "entity_kind": _first_non_empty_text(*entity_kind_candidates) or "project",
         "title_text": title_text,
@@ -313,6 +318,7 @@ def _build_anchor_preserving_query_from_context(*, state: Any, query: Any, ancho
     metadata = {
         "anchor_present": anchor_context.get("present", False),
         "anchor_source": anchor_context.get("anchor_source"),
+        "anchor_reference_kind": anchor_context.get("anchor_reference_kind"),
         "anchor_entity_key": anchor_context.get("entity_key"),
         "anchor_query_repaired": False,
         "anchor_repair_reason": None,
@@ -354,6 +360,7 @@ def repair_query_for_resolved_anchor(*, state: Any, query: Any) -> tuple[str, Di
     metadata = {
         "anchor_present": anchor_context.get("present", False),
         "anchor_source": anchor_context.get("anchor_source"),
+        "anchor_reference_kind": anchor_context.get("anchor_reference_kind"),
         "anchor_entity_key": anchor_context.get("entity_key"),
         "anchor_query_repaired": False,
         "anchor_repair_reason": None,

@@ -1,4 +1,4 @@
-﻿# SESSION_HANDOFF.md
+# SESSION_HANDOFF.md
 
 ## Bootstrap checkpoint
 - repo: `ntis_domain_rag_chatbot`
@@ -562,3 +562,239 @@
 - next best task:
   - in `apps/api/services/request_facade.py`, short-circuit `parse_source_reference(question)` before `resolve_followup_anchor()` and replace the dirty display-snapshot regression in `tests/test_planner_stagewise.py` with a coexistence test that proves reference-context precedence
   - after that, sync `docs/03_운영과_환경.md` to `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1`, then add direct precedence tests for `derive_stream_error_code()` and a source-reference provenance regression
+
+## 2026-03-30T11:40:00+09:00 Improver
+- branch/head: `고도화 / `797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files: `apps/api/services/retrieval_workflow.py`, `apps/api/contracts/workflow_models.py`, `docs/02_실행계약과_전략규칙.md`, `docs/GOLDEN_TESTS.md`, `tests/test_retrieval_workflow_detail_runtime.py`
+- findings:
+  - `node_knowledge_sufficiency()` still let summary-like questions with live `prev_context` fall through to LLM sufficiency, even when the user explicitly asked for fresh data via cues like `latest/current/update`.
+  - answer generation still hard-locks to `[제공된 정보]`, so when that sufficiency path returned low the runtime could repeatedly end in refusal-like answers instead of issuing a new retrieval.
+  - anchored detail follow-ups could also stay on stale fast paths because exact lookup/detail cache logic had no freshness bypass.
+- changes:
+  - `apps/api/contracts/workflow_models.py`: added `knowledge_sufficiency_meta` to carry non-schema runtime metadata for KS overrides.
+  - `apps/api/services/retrieval_workflow.py`: added rule-based freshness/new-data override detection, `KS.FRESHNESS_OVERRIDE` and `RAG.FRESHNESS_OVERRIDE` logging, and a detail freshness bypass that skips stale cache/exact-lookup fast paths while preserving the active anchor in the retrieval query.
+  - `docs/02_실행계약과_전략규칙.md`, `docs/GOLDEN_TESTS.md`: synced the contract and golden coverage to the new freshness-override behavior.
+  - added `tests/test_retrieval_workflow_freshness_override.py` for KS short-circuit and anchored-detail bypass coverage.
+- validations:
+  - `python -m py_compile apps/api/contracts/workflow_models.py apps/api/services/retrieval_workflow.py` passed
+  - `python -m py_compile apps/api/contracts/workflow_models.py apps/api/services/retrieval_workflow.py tests/test_retrieval_workflow_freshness_override.py` passed
+  - `python -m pytest tests/test_retrieval_workflow_freshness_override.py -q` passed (`3 passed`), with a Windows `PytestCacheWarning` because the workspace still contains inaccessible `pytest-cache-files-*` directories
+  - `python -m pytest tests/test_retrieval_workflow_freshness_override.py tests/test_retrieval_workflow_detail_runtime.py -k "fresh or stale_cache or exact_lookup" -q` passed (`7 passed, 12 deselected`), with the same cache warning
+- next best task:
+  - clean up the inaccessible `pytest-cache-files-*` directories so pytest can write cache data without warnings and future patch refreshes do not fail under the Windows sandbox
+  - confirm the new `KS.FRESHNESS_OVERRIDE` / `RAG.FRESHNESS_OVERRIDE` events on one live request such as `그 과제 최신 정보` and verify the answer no longer falls back to a context-only refusal
+
+## 2026-03-30T12:05:00+09:00 Improver
+- branch/head: `고도화 / `797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files: `apps/api/services/retrieval_workflow.py`, `apps/api/contracts/workflow_models.py`, `tests/test_retrieval_workflow_freshness_override.py`, `docs/02_실행계약과_전략규칙.md`, `docs/GOLDEN_TESTS.md`
+- findings:
+  - cue substring 기반 freshness override는 사용자가 요구한 방향과 맞지 않았고, 오탐 시 불필요한 검색을 강제할 수 있었다.
+  - 실제 필요한 것은 keyword 규칙이 아니라 knowledge sufficiency LLM이 “이 질문은 기존 문맥만 쓰면 stale answer risk가 큰가”를 구조적으로 판정하고, 그 결과를 runtime fast-path bypass까지 전달하는 계약이었다.
+- changes:
+  - `apps/api/contracts/workflow_models.py`: `KnowledgeSufficiency.prefer_fresh_retrieval`를 추가하고, 임시 `knowledge_sufficiency_meta` state 필드를 제거했다.
+  - `apps/api/services/retrieval_workflow.py`: cue-based override 함수를 제거하고, knowledge sufficiency prompt에 fresh-retrieval 판단 규칙과 `prefer_fresh_retrieval` 출력 필드를 추가했다.
+  - `apps/api/services/retrieval_workflow.py`: detail runtime은 `ks.prefer_fresh_retrieval=true`일 때만 stale cache/exact-lookup fast path를 우회하고, query는 anchor seed를 보존한 fresh retrieval query로 다시 조립한다.
+  - `tests/test_retrieval_workflow_freshness_override.py`: heuristic 테스트를 제거하고, LLM structured result 기반 KS 판정과 detail bypass 회귀로 교체했다.
+  - `docs/02_실행계약과_전략규칙.md`, `docs/GOLDEN_TESTS.md`: fresh retrieval 판단의 source of truth를 LLM structured decision으로 다시 맞췄다.
+- validations:
+  - `python -m py_compile apps/api/contracts/workflow_models.py apps/api/services/retrieval_workflow.py tests/test_retrieval_workflow_freshness_override.py` passed
+  - `python -m pytest tests/test_retrieval_workflow_freshness_override.py -q` passed
+  - `python -m pytest tests/test_retrieval_workflow_freshness_override.py tests/test_retrieval_workflow_detail_runtime.py -k "fresh or stale_cache or exact_lookup" -q` passed
+- next best task:
+  - live request에서 `knowledge_sufficiency.prefer_fresh_retrieval=true`가 debug payload로 보이고, 같은 요청이 stale detail cache를 타지 않는지 확인
+  - source-reference precedence dirty worktree issue는 별도 패치로 계속 분리 대응
+
+## 2026-03-30T16:35:07+09:00 Improver
+- branch/head: `고도화 / `797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files:
+  - `apps/api/contracts/repo_manifest.py`
+  - `apps/api/contracts/answer_groundedness.py`
+  - `apps/api/contracts/workflow_models.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/api/services/answer_merge.py`
+  - `apps/api/services/answer_generation.py`
+  - `apps/api/services/rag_retriever.py`
+  - `apps/api/services/retrieval_workflow.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `tests/test_planner_stagewise.py`
+  - `tests/test_rag_anchor_truth_active_only.py`
+  - `tests/test_runtime_helpers_stream_bypass.py`
+  - `tests/test_answer_merge_bypass.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `tests/test_eval_fixture_schema.py`
+  - `tests/test_repo_contract_defaults.py`
+  - `tests/test_answer_groundedness_verdict.py`
+  - `eval/answer_groundedness_cases.jsonl`
+  - `README.md`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/PRODUCT_BASELINE.md`
+- findings:
+  - ADR-0006/0007/0005/0008 관련 dirty groundwork는 이미 일부 들어와 있었지만, single owner 연결과 regression coverage가 끝까지 닫히지 않았다.
+  - `answer_merge.py`가 groundedness helper를 자체 구현으로 복제하고 있어, 새 계약 파일 `apps/api/contracts/answer_groundedness.py`와 drift 가능성이 있었다.
+  - `scripts/run_baseline_checks.ps1`는 manifest owner가 추가된 뒤에도 하드코딩 상태였고, 이번 PowerShell 환경에서는 `ConvertFrom-Json -Depth`도 지원되지 않았다.
+  - 실행 검증 환경은 불완전했다. 현재 기본 `python`에는 `pytest`와 `pydantic`가 모두 없어 pytest/baseline 실행을 끝까지 돌릴 수 없었다.
+- changes:
+  - `apps/api/services/request_facade.py`: helper default를 `PLANNER_PROMPT_DEFAULTS["stage1"] / ["stage15"] / ["stage2"]`로 맞췄다.
+  - `apps/api/contracts/repo_manifest.py`, `scripts/run_baseline_checks.ps1`: baseline inventory와 prompt default의 owner를 manifest로 고정하고, baseline 스크립트가 그 JSON을 읽어 collect/core/eval 단계를 조립하도록 바꿨다.
+  - `apps/api/services/answer_merge.py`, `apps/api/services/answer_generation.py`, `apps/api/contracts/workflow_models.py`: groundedness helper의 owner를 contract 모듈로 모으고, state에 passive snapshot/verdict를 추가했다.
+  - `apps/api/services/rag_retriever.py`, `apps/api/services/retrieval_workflow.py`: `anchor_reference_kind`를 anchor context/query-repair/log payload까지 전파했다.
+  - `tests/test_planner_stagewise.py`: 잘못 잠겨 있던 display-snapshot source-reference regression을 reference-context precedence 회귀로 교체했다.
+  - `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_rag_anchor_truth_active_only.py`: stream error precedence, bypass groundedness skip, debug route groundedness meta preservation, source-reference provenance 보존 회귀를 추가했다.
+  - `tests/test_repo_contract_defaults.py`, `tests/test_answer_groundedness_verdict.py`, `eval/answer_groundedness_cases.jsonl`, `tests/test_eval_fixture_schema.py`: manifest drift regression과 passive groundedness fixture/schema/verdict coverage를 추가했다.
+  - `README.md`, `docs/02_실행계약과_전략규칙.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`, `docs/PRODUCT_BASELINE.md`: source-reference precedence, passive groundedness contract, manifest-owned defaults/baseline 흐름으로 문서를 sync했다.
+- validations:
+  - `python -m py_compile apps/api/contracts/repo_manifest.py apps/api/contracts/answer_groundedness.py apps/api/contracts/workflow_models.py apps/api/services/request_facade.py apps/api/services/answer_merge.py apps/api/services/answer_generation.py apps/api/services/rag_retriever.py apps/api/services/retrieval_workflow.py tests/test_repo_contract_defaults.py tests/test_answer_groundedness_verdict.py tests/test_answer_merge_bypass.py tests/test_runtime_helpers_stream_bypass.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py tests/test_planner_stagewise.py tests/test_rag_anchor_truth_active_only.py` passed
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` now reaches manifest-driven collect-only, then fails with `No module named pytest`
+  - `python -c "import pytest"` failed with `No module named pytest`
+  - `python -c "import pydantic"` failed with `No module named pydantic`
+- next best task:
+  - repo 전용 Python environment 또는 dependency bootstrap을 먼저 복구한 뒤, `scripts/run_baseline_checks.ps1`와 이번 pytest subset을 실제로 돌려 green 상태를 확인할 것
+  - 그 다음 live request 하나에서 `출처 2의 연구자 정보`와 groundedness debug metadata가 새 provenance/metadata contract를 그대로 노출하는지 확인할 것
+
+## 2026-03-30T18:37:23.4769285+09:00 Improver
+- branch/head: `고도화 / 797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files:
+  - `apps/api/services/retrieval_workflow.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/api/services/planner_runtime.py`
+  - `apps/core/planner_validation.py`
+  - `tests/test_retrieval_workflow_freshness_override.py`
+  - `tests/test_retrieval_workflow_detail_runtime.py`
+  - `tests/test_planner_stagewise.py`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/GOLDEN_TESTS.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - anchored detail follow-up에서 `detail` search-required early exit와 `prev_context=[]` early exit 때문에 `prefer_fresh_retrieval` LLM 판단이 사라질 수 있었다.
+  - `출처 N` follow-up은 reference-context owner가 비어 있을 때 display snapshot fallback이 없어 source-reference 질의가 그대로 끊길 수 있었다.
+  - planner runtime legality guard는 `gate_seed_map`가 없는 locked strategy fixture에서 `AttributeError`를 냈고, deterministic repair는 broad-history semantic cue(`활동이력`)를 retrieval query에 다시 살리지 못해 raw fallback 직전 의미 보존이 약했다.
+- changes:
+  - `apps/api/services/retrieval_workflow.py`: anchored detail follow-up이면 `detail`/`prev_context=[]` early exit보다 앞서 freshness LLM probe를 허용하고, search-required action이라도 LLM의 `prefer_fresh_retrieval`/`retrieval_query`를 유지한 채 `requires_new_knowledge=high`로 승격하도록 정리했다.
+  - `apps/api/services/request_facade.py`: `출처 N`은 reference-context owner를 먼저 쓰고, 그 결과가 `missing_context|none`일 때만 display snapshot ordinal fallback을 허용하도록 바꿨다.
+  - `apps/api/services/planner_runtime.py`: legality guard를 safe `getattr()`로 고치고, broad-history deterministic repair가 `활동이력` 같은 semantic cue를 retrieval query에 복구하도록 보강했다.
+  - `tests/test_retrieval_workflow_detail_followup_freshness.py`, `tests/test_request_facade_source_reference_fallback.py`: fresh detail follow-up과 source-reference display fallback 회귀를 추가했다.
+  - `docs/02_실행계약과_전략규칙.md`, `docs/GOLDEN_TESTS.md`: follow-up precedence, cache-backed freshness probe, broad-history deterministic repair 계약을 문서화했다.
+- validations:
+  - `python -m pytest tests/test_retrieval_workflow_detail_followup_freshness.py tests/test_request_facade_source_reference_fallback.py -q` passed (`4 passed`)
+  - `python -m pytest tests/test_retrieval_workflow_detail_followup_freshness.py tests/test_retrieval_workflow_freshness_override.py tests/test_request_facade_source_reference_fallback.py tests/test_detail_contract.py tests/test_answer_merge_bypass.py -q` passed (`39 passed`)
+  - `python -m pytest tests/test_retrieval_workflow_detail_runtime.py -q -k "detail_cache_hit_returns_evidence_context_not_direct_answer or uses_anchor_locked_exact_lookup_for_detail_followup"` passed (`2 passed`)
+  - `python -m pytest tests/test_planner_stagewise.py -q -k "source_reference or deterministic_repair_before_raw_fallback"` passed (`4 passed`)
+  - `python -m pytest tests/test_planner_prompt_cards.py -q -k "broad_history_validation_ignores_count_and_generic_history_must_keep_terms"` passed (`1 passed`)
+  - `python -m py_compile apps/api/services/retrieval_workflow.py apps/api/services/request_facade.py apps/api/services/planner_runtime.py tests/test_retrieval_workflow_detail_followup_freshness.py tests/test_request_facade_source_reference_fallback.py` passed
+  - all pytest runs emitted `PytestCacheWarning` because the workspace still contains inaccessible `pytest-cache-files-*` directories under Windows.
+- next best task:
+  - `apps/core/followup_resolution.py` / `apps/core/entity_reference.py`에서 source-reference provenance literal을 ordinal과 분리해 observability까지 일관되게 맞출 것
+  - Windows workspace의 inaccessible `pytest-cache-files-*` 디렉터리를 정리해 patch refresh / pytest cache warning 노이즈를 제거할 것
+
+## 2026-03-30T18:40:49.5052998+09:00 Watcher
+- branch/head: `고도화 / 797380e952c15a0be91f3a44adee0b3165911cab`
+- worktree: dirty (`README.md`, `apps/api/app_factory.py`, `apps/api/contracts/workflow_models.py`, `apps/api/services/answer_generation.py`, `apps/api/services/answer_merge.py`, `apps/api/services/planner_runtime.py`, `apps/api/services/rag_retriever.py`, `apps/api/services/request_facade.py`, `apps/api/services/retrieval_workflow.py`, `apps/core/entity_reference.py`, `apps/core/followup_resolution.py`, `docs/02_실행계약과_전략규칙.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`, `docs/SESSION_HANDOFF.md`, `scripts/run_baseline_checks.ps1`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_detail_contract.py`, `tests/test_eval_fixture_schema.py`, `tests/test_planner_stagewise.py`, `tests/test_rag_anchor_truth_active_only.py`, `tests/test_runtime_helpers_stream_bypass.py`, plus new contract/ADR/test files)
+- inspected_files:
+  - `docs/SESSION_HANDOFF.md`
+  - `docs/CODEX_CONTEXT.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/PRODUCT_BASELINE.md`
+  - `docs/ADR/ADR-0006-followup-reference-provenance-split.md`
+  - `docs/ADR/ADR-0008-answer-groundedness-verdict-contract.md`
+  - `pytest.ini`
+  - `scripts/run_baseline_checks.ps1`
+  - `apps/api/app_factory.py`
+  - `apps/api/contracts/repo_manifest.py`
+  - `apps/api/contracts/answer_groundedness.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/api/services/rag_retriever.py`
+  - `apps/api/services/runtime_helpers.py`
+  - `apps/api/services/answer_merge.py`
+  - `apps/api/services/answer_generation.py`
+  - `apps/core/followup_resolution.py`
+  - `apps/core/filters.py`
+  - `tests/test_planner_stagewise.py`
+  - `tests/test_request_facade_source_reference_fallback.py`
+  - `tests/test_runtime_helpers_stream_bypass.py`
+  - `tests/test_answer_merge_bypass.py`
+  - `tests/test_repo_contract_defaults.py`
+  - `tests/test_eval_fixture_schema.py`
+  - `tests/test_rag_filter_policy.py`
+  - `tests/test_rag_anchor_truth_active_only.py`
+  - `eval/answer_groundedness_cases.jsonl`
+  - `logs/app.log`
+  - `logs/app (3).log`
+- architecture_map:
+  - planner/baseline defaults owner는 `apps/api/contracts/repo_manifest.py`이고 `apps/api/app_factory.py`, `apps/api/services/request_facade.py`, `scripts/run_baseline_checks.ps1`가 이를 소비한다.
+  - source-reference follow-up path는 `apps/api/services/request_facade.py -> apps/core/followup_resolution.py -> apps/api/services/rag_retriever.py -> apps/api/services/retrieval_workflow.py`다.
+  - answer verifier path는 `apps/api/services/answer_generation.py -> apps/api/services/answer_merge.py -> apps/api/contracts/answer_groundedness.py`다.
+  - SEARCH people/org nested gate와 JOIN `pjt_id`/`pjt_no` strictness는 여전히 `apps/core/filters.py`와 관련 회귀 테스트가 source of truth다.
+- findings_by_priority:
+  - P1: unsupported structured groundedness는 아직 user-visible selection을 막지 않는다. `apps/api/services/answer_merge.py`는 groundedness verdict를 계산하지만 fail reason으로 승격하지 않고, `tests/test_answer_merge_bypass.py`는 unsupported id/year/org/count answer에서도 `solar_failed is False`와 `selected_model == "solar"`를 고정한다. 이는 ADR-0008 기준으로는 아직 Phase 2(passive verdict) 상태다.
+  - P1: `출처 N` follow-up이 reference context 없이 들어오면 display snapshot fallback이 계속 허용된다. `apps/api/services/request_facade.py`는 `missing_context|none`일 때 display snapshot anchor로 내려가고, `tests/test_request_facade_source_reference_fallback.py`는 그 상황에서도 `followup_reference_kind == "source_reference"`를 고정한다. citation-style 질문을 source list가 아닌 visible display list에 매핑하는 것이 product intent인지 아직 불확실하다.
+  - P2: `docs/03_운영과_환경.md`의 최소 smoke baseline은 여전히 없는 파일 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py`를 가리킨다. planner default와 manifest owner 설명은 최신화됐지만, 실제 triage용 smoke block은 아직 drift 상태다.
+  - P2: 새 source-reference fallback 회귀가 baseline inventory에 아직 포함되지 않았다. `tests/test_request_facade_source_reference_fallback.py`는 존재하지만 `apps/api/contracts/repo_manifest.py`의 `BASELINE_INVENTORY["core_contract_subset"]`에는 없다.
+  - P2: watcher가 볼 수 있는 로그는 여전히 얇다. `logs/app.log`는 0 bytes이고 최신 non-empty 파일은 `logs/app (3).log`(2026-03-27)다. 실제 runtime이 최근에 돌지 않은 것인지, file sink가 drift한 것인지는 현재 쉘만으로 확정할 수 없다.
+  - Stable in this pass: `apps/core/filters.py`와 `tests/test_rag_filter_policy.py` 기준으로 people-name/org nested hard gate는 유지되고, `apps/core/filters.py`의 JOIN must-key validation은 `pjt_id`/`pjt_no` 혼용 금지를 계속 강제한다. 이번 정적 점검에서는 fallback chat 재도입 증거도 보지 못했다.
+- user_quality_risks:
+  - fluent하지만 근거 밖인 project id / year / org / count answer가 여전히 최종 답변으로 선택될 수 있다.
+  - `출처 2의 연구자 정보` 같은 질의는 reference-context owner가 없을 때 visible display item 2로 연결될 수 있어, citation semantics와 실제 seed origin이 어긋날 수 있다.
+  - on-call triage 문서가 없는 smoke 파일을 계속 안내하므로, 실제 회귀 확인이 느려지고 잘못된 검증 루프를 만들 수 있다.
+- recommended_next_patch:
+  - ADR-0008 Phase 3를 좁은 범위로 시작해 `apps/api/services/answer_merge.py`에서 `llm_streamed`/`llm_collected` answer의 `groundedness.status == "unsupported"`를 fail reason으로 승격하고, 다른 이미 생성된 valid candidate가 없으면 명시적 degraded final로 내리도록 고정하는 것이 가장 값비싼 user-visible risk를 가장 작은 selector patch로 줄이는 길이다.
+- recommended_new_tests:
+  - `tests/test_answer_merge_bypass.py`에 unsupported groundedness가 alternate valid candidate 또는 degraded final을 선택하는 회귀를 추가할 것.
+  - `tests/test_request_facade_source_reference_fallback.py`를 `BASELINE_INVENTORY["core_contract_subset"]`에 포함해 baseline이 source-reference fallback contract를 실제로 실행하게 할 것.
+  - source-reference fallback이 유지될 정책이라면 `/query/debug` 또는 route-level payload에서 `anchor_source=display_snapshot`와 `anchor_reference_kind=source_reference` pair를 함께 노출하는 회귀를 추가할 것.
+- docs_to_sync:
+  - `docs/03_운영과_환경.md` with `apps/api/contracts/repo_manifest.py`, `pytest.ini`, and the actual existing smoke subset
+  - `docs/PRODUCT_BASELINE.md` if baseline inventory grows to include the new source-reference fallback regression
+  - `docs/04_회귀기준과_점검.md` and `docs/GOLDEN_TESTS.md` when groundedness gating moves from passive verdict to selector-enforced behavior
+- changes:
+  - appended this watcher handoff entry only; no production code edits
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `797380e952c15a0be91f3a44adee0b3165911cab`
+  - `python -m py_compile apps/api/services/request_facade.py apps/core/followup_resolution.py apps/api/services/rag_retriever.py apps/api/services/runtime_helpers.py apps/api/services/answer_merge.py apps/api/services/answer_generation.py apps/api/contracts/answer_groundedness.py apps/api/contracts/repo_manifest.py` passed
+  - `python -m apps.api.contracts.repo_manifest --section baseline_inventory` passed
+  - `python -c "import pytest"` failed with `No module named pytest`
+  - `python -c "import pydantic"` failed with `No module named pydantic`
+  - `python -m pytest tests/test_request_facade_source_reference_fallback.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_repo_contract_defaults.py tests/test_eval_fixture_schema.py -q -p no:cacheprovider` failed with `No module named pytest`
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed at collect-only with `No module named pytest`
+  - `Test-Path tests/test_api_routes_runtime.py` and `Test-Path tests/test_request_facade_and_context.py` both returned `False`
+  - `logs/app.log` is still `0` bytes and `logs/app (3).log` is the newest non-empty watcher-visible log
+- next best task:
+  - repo 전용 Python environment 또는 dependency bootstrap을 먼저 복구해 pytest/baseline을 다시 실행하고, 그 다음 unsupported groundedness gating 또는 source-reference fallback policy를 실제 runtime 로그와 함께 결정할 것
+
+## 2026-03-30T00:00:00+09:00 Improver
+- branch/head: `고도화` / `797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files: `apps/api/services/retrieval_workflow.py`, `apps/api/services/answer_generation.py`, `tests/test_retrieval_workflow_fresh_query_rewrite.py`, `tests/test_answer_generation_groundedness_snapshot.py`, `docs/SESSION_HANDOFF.md`
+- findings:
+  - `prefer_fresh_retrieval=true` 분기에서 fresh query를 `raw_query`로 다시 만들고 있어, `resolve_rag_queries_fn()`이 이미 고른 KS rewritten query가 detail follow-up에서 버려질 수 있었다.
+  - groundedness snapshot은 현재 turn이 detail이어도 이전 list turn의 `latest_display_snapshot.visible_count`를 그대로 넘겨, `unsupported_count`가 stale list 기준으로 계산될 수 있었다.
+  - `docs/02_실행계약과_전략규칙.md`는 fresh retrieval이 “현재 질문을 기준으로 다시 검색하되 anchor seed는 보존한다”는 계약을 이미 명시하고 있어, 이번 패치는 계약 변경이 아니라 구현 drift 복구다.
+- changes:
+  - `apps/api/services/retrieval_workflow.py`: fresh retrieval query 조립의 출발점을 `resolved_retrieval_query or raw_query`로 바꿔 KS rewritten query를 유지하면서 anchor만 보강하도록 수정했다.
+  - `apps/api/services/answer_generation.py`: groundedness snapshot용 `visible_count`를 현재 출력 타입이 list-like일 때만 사용하도록 helper를 추가했다. detail turn은 현재 `canonical_evidence` 길이만 근거로 삼는다.
+  - `tests/test_retrieval_workflow_fresh_query_rewrite.py`: KS rewritten query가 raw follow-up으로 되돌아가지 않는 회귀를 추가했다.
+  - `tests/test_answer_generation_groundedness_snapshot.py`: detail turn에서 stale list `visible_count`를 무시하고 current evidence count만 snapshot에 남기는 회귀를 추가했다.
+  - 계약 문서는 그대로 두고 handoff만 갱신했다. `docs/02_실행계약과_전략규칙.md`의 기존 설명이 이번 동작과 이미 일치한다.
+- validations:
+  - `python -m py_compile apps/api/services/retrieval_workflow.py apps/api/services/answer_generation.py tests/test_retrieval_workflow_fresh_query_rewrite.py tests/test_answer_generation_groundedness_snapshot.py` passed
+  - `python -m pytest tests/test_retrieval_workflow_freshness_override.py tests/test_retrieval_workflow_fresh_query_rewrite.py tests/test_answer_merge_bypass.py tests/test_answer_generation_groundedness_snapshot.py -q -p no:cacheprovider` passed (`16 passed`)
+- next best task:
+  - 실제 app/runtime request에서 `prefer_fresh_retrieval=true` debug payload와 detail follow-up groundedness metadata가 이번 회귀 의도대로 노출되는지 한 번 더 확인할 것
+## 2026-03-30T19:20:10+09:00 Improver
+- branch/head: `고도화` / `797380e952c15a0be91f3a44adee0b3165911cab`
+- inspected files: `apps/api/services/request_overrides.py`, `apps/api/routes.py`, `tests/test_oracle_request_overrides.py`, `docs/03_운영과_환경.md`, `docs/README.md`, `docs/GOLDEN_TESTS.md`, `docs/SESSION_HANDOFF.md`
+- findings:
+  - route-level Oracle skip coverage was a false positive because `CountingRequestDefaultsLoader` only counted `load_defaults()`, while the live controller path prefers `load_defaults_with_meta()`.
+  - the Oracle loader normalized only exact mixed-case aliases, so real Oracle cursor aliases like `TEMPERATURE` / `TOPP` could be read as an empty defaults row.
+  - the existing ops docs already describe the intended Oracle override contract and `REQ.ORACLE.DEFAULTS` triage fields, so this pass needed code/test hardening rather than new contract docs.
+- changes:
+  - `apps/api/services/request_overrides.py`: made Oracle default-row normalization case-insensitive so uppercase Oracle aliases still map into request overrides.
+  - `tests/test_oracle_request_overrides.py`: added coverage for uppercase Oracle aliases, direct loader `SELECT` execution, `/query/debug` Oracle lookup logging, no-param lookup calls for `/query/stream` and `/query/debug`, and full-param skip behavior for both routes.
+  - `tests/test_oracle_request_overrides.py`: fixed the counting loader test double so `load_defaults_with_meta()` calls are tracked on the same path the controller uses.
+- validations:
+  - `python -m py_compile apps/api/services/request_overrides.py apps/api/routes.py tests/test_oracle_request_overrides.py` passed
+  - inline Python validation passed: `request_overrides_inline_validation_ok`
+  - `python -c "import importlib.util; ..."` confirmed `fastapi_missing` and `pytest_missing` in this shell
+  - `python -m pytest tests/test_oracle_request_overrides.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
+- next best task:
+  - run `python -m pytest tests/test_oracle_request_overrides.py -q -p no:cacheprovider` inside the real app/runtime environment that has `fastapi` and `pytest`, then issue one override-empty `/query/stream` and one override-empty `/query/debug` request to confirm `REQ.ORACLE.DEFAULTS.oracle_lookup_attempted=True` and non-skip statuses against the actual Oracle connector.

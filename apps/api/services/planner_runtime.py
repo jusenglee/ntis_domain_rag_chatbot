@@ -203,6 +203,29 @@ def _append_terms_to_query(query: str, terms: list[str]) -> str:
     return " ".join(merged).strip()
 
 
+def _semantic_query_terms_for_repair(*, entity_role_plan: PlannerEntityRolePlan, retrieval_query: str) -> list[str]:
+    semantic_kind = str(getattr(entity_role_plan, "semantic_kind", "") or "").strip().lower()
+    if semantic_kind != "broad_history":
+        return []
+
+    existing_query = str(retrieval_query or "").strip()
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in getattr(entity_role_plan, "must_keep_terms", []) or []:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        if re.fullmatch(r"(?:19|20)\d{2}", text):
+            continue
+        if re.fullmatch(r"\d+\s*(?:개|건|명|편|종)", text):
+            continue
+        if text in existing_query:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
 def _looks_identifier_like_filter_term(value: Any) -> bool:
     text = str(value or "").strip()
     if not text or re.fullmatch(r"(?:19|20)\d{2}", text):
@@ -277,8 +300,13 @@ def _apply_deterministic_stage2_repair(
         if merged:
             injected_filters["years"] = merged
 
+    semantic_query_terms = _semantic_query_terms_for_repair(
+        entity_role_plan=entity_role_plan,
+        retrieval_query=retrieval_query_before,
+    )
     repair_terms = _normalize_terms(
         [
+            *semantic_query_terms,
             *list(validation.missing_must_keep_terms),
             *list(validation.missing_people_terms),
             *list(validation.missing_org_terms),
@@ -422,7 +450,10 @@ def _enforce_runtime_legality(
     people_terms = list(getattr(normalized_intent, "people_terms", None) or [])
     org_terms = list(getattr(normalized_intent, "org_terms", None) or [])
     broad_people_org_query = bool(people_terms or org_terms)
-    has_anchor_seed = bool(dict(locked_strategy.prev_context_seed or {}) or dict(locked_strategy.gate_seed_map or {}))
+    has_anchor_seed = bool(
+        dict(getattr(locked_strategy, "prev_context_seed", None) or {})
+        or dict(getattr(locked_strategy, "gate_seed_map", None) or {})
+    )
 
     if locked_strategy.head == "perf" and locked_strategy.action == "detail" and not _has_explicit_perf_seed(ids_map):
         _raise("PLANNER_PERF_DETAIL_EXPLICIT_ID_REQUIRED", "perf detail requires explicit perf id")

@@ -9,6 +9,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from apps.api.contracts.answer_groundedness import (
+    BYPASS_ANSWER_KINDS,
+    build_groundedness_snapshot_from_canonical_evidence as _build_groundedness_snapshot_from_canonical_evidence,
+    evaluate_answer_groundedness,
+)
+
 
 _REFUSAL_CONTEXT_MARKERS = (
     "\uc81c\uacf5\ub41c \uc815\ubcf4",
@@ -54,6 +60,31 @@ _INTERNAL_CONTEXT_FIELDS = {
     "perf_type",
     "affiliation",
 }
+_BYPASS_ANSWER_KINDS = BYPASS_ANSWER_KINDS
+
+
+def build_groundedness_snapshot_from_canonical_evidence(
+    *,
+    canonical_evidence: list[dict[str, Any]],
+    visible_count: Any = None,
+) -> dict[str, Any]:
+    return _build_groundedness_snapshot_from_canonical_evidence(
+        canonical_evidence=canonical_evidence,
+        visible_count=visible_count,
+    ).model_dump()
+
+
+def _evaluate_groundedness(
+    *,
+    answer_text: str,
+    answer_kind: str,
+    evidence_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return evaluate_answer_groundedness(
+        answer_text=answer_text,
+        answer_kind=answer_kind,
+        evidence_snapshot=evidence_snapshot,
+    ).model_dump()
 
 
 def _looks_like_context_refusal(text: str) -> bool:
@@ -94,6 +125,7 @@ def _evaluate_model_answer(
     answer_meta: dict[str, Any] | None,
     fallback_message: str,
     min_answer_chars: int,
+    evidence_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     answer = (answer_text or "").strip()
     meta = answer_meta or {}
@@ -130,7 +162,12 @@ def _evaluate_model_answer(
     if marker and marker in answer:
         fail_reasons.append("contains_fallback_notice")
 
-    bypass_like_answer = answer_kind in {"detail_cache", "detail_profile", "no_result", "clarification", "direct_answer", "error"}
+    bypass_like_answer = answer_kind in _BYPASS_ANSWER_KINDS
+    groundedness = _evaluate_groundedness(
+        answer_text=answer,
+        answer_kind=answer_kind,
+        evidence_snapshot=evidence_snapshot,
+    )
     refusal_like_answer = (
         answer_kind in {"llm_streamed", "llm_collected"}
         and _looks_like_context_refusal(answer)
@@ -150,6 +187,7 @@ def _evaluate_model_answer(
         "warning_reasons": warning_reasons,
         "answer_kind": answer_kind,
         "answer_chars": len(answer),
+        "groundedness": groundedness,
     }
 
 
@@ -162,6 +200,7 @@ def select_final_answer(
     policy: str,
     fallback_message: str,
     min_answer_chars: int,
+    evidence_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select the final answer from Solar/Gemma outputs and streamed metadata."""
     solar_eval = _evaluate_model_answer(
@@ -169,12 +208,14 @@ def select_final_answer(
         answer_meta=solar_meta,
         fallback_message=fallback_message,
         min_answer_chars=min_answer_chars,
+        evidence_snapshot=evidence_snapshot,
     )
     gemma_eval = _evaluate_model_answer(
         answer_text=answer_gemma,
         answer_meta=gemma_meta,
         fallback_message=fallback_message,
         min_answer_chars=min_answer_chars,
+        evidence_snapshot=evidence_snapshot,
     )
 
     solar_answer = solar_eval["answer"]
@@ -235,4 +276,7 @@ def select_final_answer(
         "gemma_fail_reasons": list(gemma_eval["fail_reasons"]),
         "gemma_warning_reasons": list(gemma_eval["warning_reasons"]),
         "gemma_meta": gemma_eval["meta"],
+        "solar_groundedness": dict(solar_eval["groundedness"]),
+        "gemma_groundedness": dict(gemma_eval["groundedness"]),
+        "groundedness_snapshot": dict(evidence_snapshot or {}),
     }

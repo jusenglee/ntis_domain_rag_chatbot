@@ -26,8 +26,8 @@ NTIS 도메인 검색 시스템과 chat UX 서버다.
 
 ## 4. 빠른 검증
 ```bash
-PYTHONPATH=. python -m pytest --collect-only -q
-python -m pytest -q tests/test_planner_stagewise.py tests/test_retrieval_workflow_detail_runtime.py
+python -m py_compile apps/api/services/request_facade.py apps/api/services/retrieval_workflow.py apps/api/services/answer_merge.py
+powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1
 ```
 
 - 기본 `pytest` 수집 기준은 저장소 루트 `pytest.ini`다.

@@ -310,7 +310,12 @@ def resolve_reference_context_followup(*, question: str, canonical_evidence: lis
     status = "resolved" if seed_map else "unresolved"
     seed_source = None
     if status == "resolved":
-        seed_source = "reference_context_deictic" if parsed["kind"] == "deictic" else "reference_context_ordinal"
+        if parsed["kind"] == "deictic":
+            seed_source = "reference_context_deictic"
+        elif parsed["kind"] == "source_reference":
+            seed_source = "reference_context_source_reference"
+        else:
+            seed_source = "reference_context_ordinal"
     return {"followup_resolution_status": status, "explicit_ordinal": parsed["kind"] != "deictic", "explicit_followup": True, "requested_token": parsed["token"], "requested_index": index, "available_count": len(items), "selected_prev_item": selected_item if seed_map else None, "seed_map": seed_map, "seed_source": seed_source, "followup_reference_kind": parsed["kind"], "candidate_items": candidate_items if status != "resolved" else []}
 
 
@@ -399,6 +404,7 @@ def resolve_entity_ref_from_strategy_meta(strategy_meta: Dict[str, Any]) -> Reso
         "display_snapshot",
         "detail_lookup",
         "reference_context_ordinal",
+        "reference_context_source_reference",
         "reference_context_deictic",
         "explicit_id",
     }
@@ -407,6 +413,7 @@ def resolve_entity_ref_from_strategy_meta(strategy_meta: Dict[str, Any]) -> Reso
         entity_kind=entity_kind if entity_kind in {"project", "perf", "people", "org"} else "project",
         seed_map={str(key): [str(v).strip() for v in (values or []) if str(v).strip()] for key, values in seed_map.items()},
         source=resolved_source,  # type: ignore[arg-type]
+        reference_kind=_normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower() or None,
         display_view_id=_normalize_text((strategy_meta or {}).get("display_view_id")),
         display_rank=((selected_prev_item.get("index") or focus_entity.get("display_rank")) if isinstance(selected_prev_item, dict) else None),
         anchor_fields=selected_prev_item or focus_entity,

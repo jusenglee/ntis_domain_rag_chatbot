@@ -79,6 +79,61 @@ def _first_text_value(*values: Any) -> Optional[str]:
     return None
 
 
+def _build_fresh_retrieval_query(
+    *,
+    question: str,
+    resolved_entity_ref: ResolvedEntityRef | None,
+    latest_focus_entity: Any,
+) -> str:
+    raw_question = str(question or "").strip()
+    anchor_query = None
+    if isinstance(resolved_entity_ref, ResolvedEntityRef):
+        primary_seed = _pick_primary_seed_map(
+            dict(resolved_entity_ref.seed_map or {}),
+            getattr(resolved_entity_ref, "entity_kind", None),
+        )
+        if primary_seed:
+            anchor_query = _first_text_value(*next(iter(primary_seed.values()), []))
+    anchor_query = _first_text_value(
+        anchor_query,
+        getattr(latest_focus_entity, "title_text", None),
+        getattr(latest_focus_entity, "pjt_id", None),
+        getattr(latest_focus_entity, "pjt_no", None),
+        getattr(latest_focus_entity, "rst_id", None),
+        getattr(latest_focus_entity, "person_no", None),
+        getattr(latest_focus_entity, "org_id", None),
+        getattr(latest_focus_entity, "org_code", None),
+        getattr(latest_focus_entity, "biz_no", None),
+    )
+    if not anchor_query:
+        return raw_question
+    if not raw_question:
+        return anchor_query
+    if anchor_query.lower() in raw_question.lower():
+        return raw_question
+    return f"{anchor_query} {raw_question}".strip()
+
+
+def _should_probe_llm_freshness_for_detail_followup(
+    *,
+    state: Any,
+    query_intent: Any,
+    qa: Any,
+    strategy_meta: dict[str, Any],
+) -> bool:
+    output_type = str(_pick_attr(query_intent, qa, key="output_type", default="summary") or "summary").strip().lower()
+    followup_resolution_status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
+    if output_type != "detail":
+        return False
+    if not has_active_anchor_seed(state):
+        return False
+    return bool(
+        strategy_meta.get("explicit_followup")
+        or strategy_meta.get("anchor_source")
+        or followup_resolution_status == "resolved"
+    )
+
+
 def _detail_uses_synthetic_title(*sources: Any) -> bool:
     for source in sources:
         if not isinstance(source, dict):
@@ -569,6 +624,12 @@ async def node_knowledge_sufficiency(
         return {"knowledge_sufficiency": result, "no_result_message": no_result_message, "clarification": clarification}
     retrieval_query = _pick_attr(query_intent, qa, key="retrieval_query", default=state.messages[-1].content)
     action = _pick_attr(query_intent, strategy, qa, key="action")
+    detail_followup_freshness_probe = _should_probe_llm_freshness_for_detail_followup(
+        state=state,
+        query_intent=query_intent,
+        qa=qa,
+        strategy_meta=strategy_meta,
+    )
 
     search_required_actions = {
         "list",
@@ -581,7 +642,7 @@ async def node_knowledge_sufficiency(
         "content",
     }
 
-    if (query_intent or strategy or qa) and not state.prev_context:
+    if (query_intent or strategy or qa) and not state.prev_context and not detail_followup_freshness_probe:
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="high",
             search_intent="이전 문맥이 없어 새로운 검색이 필요합니다.",
@@ -599,11 +660,12 @@ async def node_knowledge_sufficiency(
         )
         return {"knowledge_sufficiency": result}
 
-    if action in search_required_actions:
+    if action in search_required_actions and not detail_followup_freshness_probe:
         result = knowledge_sufficiency_cls(
             requires_new_knowledge="high",
             search_intent=f"query_intent action={action} requires retrieval",
             retrieval_query=retrieval_query,
+            prefer_fresh_retrieval=False,
             confidence=1.0,
         )
         log_event(
@@ -613,7 +675,9 @@ async def node_knowledge_sufficiency(
             stage="knowledge_sufficiency",
             requires_new_knowledge=result.requires_new_knowledge,
             retrieval_query=result.retrieval_query,
+            prefer_fresh_retrieval=int(bool(getattr(result, "prefer_fresh_retrieval", False))),
             confidence=round(float(result.confidence), 2),
+            early_exit_reason="search_required_action",
         )
         return {"knowledge_sufficiency": result}
 
@@ -657,6 +721,13 @@ async def node_knowledge_sufficiency(
         "   - 핵심 개념 5개 이내\n"
         "   - 최대 120자 이내\n"
         "4. confidence: 판단 신뢰도 (0.0~1.0)\n\n"
+        "5. prefer_fresh_retrieval:\n"
+        "   - true: 이전 문맥과 관련된 대상이라도, 현재 질문이 더 최신이거나 갱신된 상태를 다시 확인하려는 뜻이어서 기존 문맥/캐시만 재사용하면 오래된 답이 될 위험이 큼\n"
+        "   - false: 검색이 필요하더라도 최신성/갱신성 때문에 fresh retrieval을 강제할 필요는 없음\n\n"
+        "중요 규칙:\n"
+        "- 단어 포함 여부를 기계적으로 따르지 말고, [현재 질문]의 의미가 [참고 문서]보다 더 새롭거나 갱신된 사실 확인을 요구하는지 판단하세요.\n"
+        "- [참고 문서]가 같은 대상을 설명하더라도 사용자가 최신 상태, 현재 현황, 업데이트 여부, 새 결과 확인처럼 다시 조회해야 하는 의미를 담고 있으면 requires_new_knowledge=high, prefer_fresh_retrieval=true 로 판단하세요.\n"
+        "- [참고 문서]만으로 충분하고 다시 조회할 필요가 없을 때만 prefer_fresh_retrieval=false 로 두세요.\n\n"
         "{format_instructions}"
     )
 
@@ -680,6 +751,14 @@ async def node_knowledge_sufficiency(
                 "question": state.messages[-1].content,
             }
         )
+        if action in search_required_actions:
+            result = knowledge_sufficiency_cls(
+                requires_new_knowledge="high",
+                search_intent=str(getattr(result, "search_intent", "") or f"query_intent action={action} requires retrieval"),
+                retrieval_query=str(getattr(result, "retrieval_query", "") or retrieval_query or state.messages[-1].content),
+                prefer_fresh_retrieval=bool(getattr(result, "prefer_fresh_retrieval", False)),
+                confidence=float(getattr(result, "confidence", 0.0) or 0.0),
+            )
         log_event(
             "KS.RESULT",
             request_id=state.request_id,
@@ -687,7 +766,9 @@ async def node_knowledge_sufficiency(
             stage="knowledge_sufficiency",
             requires_new_knowledge=result.requires_new_knowledge,
             retrieval_query=result.retrieval_query,
+            prefer_fresh_retrieval=int(bool(getattr(result, "prefer_fresh_retrieval", False))),
             confidence=round(float(result.confidence), 2),
+            early_exit_reason=("search_required_action_llm_freshness_probe" if action in search_required_actions else None),
         )
         return {"knowledge_sufficiency": result}
     except Exception as exc:
@@ -697,6 +778,7 @@ async def node_knowledge_sufficiency(
                 requires_new_knowledge="high",
                 search_intent="knowledge fallback",
                 retrieval_query=state.messages[-1].content,
+                prefer_fresh_retrieval=False,
                 confidence=0.5,
             )
         }
@@ -723,6 +805,10 @@ async def node_rag_search(
     query_intent = _get_normalized_intent(state)
     view_state = getattr(state, "view_state", None)
     strategy_meta = dict(getattr(state.intent_payload, "strategy_meta", None) or {})
+    prefer_fresh_retrieval = bool(
+        getattr(ks, "prefer_fresh_retrieval", False)
+        and str(getattr(ks, "requires_new_knowledge", "") or "").strip().lower() != "low"
+    )
 
     try:
         output_type = str(_pick_attr(query_intent, qa, key="output_type", default="summary") or "summary").strip().lower()
@@ -796,7 +882,16 @@ async def node_rag_search(
                     conversation_id=state.conversation_id,
                     reason="detail follow-up signal exists but ids_map has no active anchor seed",
                 )
-        if output_type == "detail" and detail_anchor_active and isinstance(resolved_entity_ref, ResolvedEntityRef) and view_state is not None:
+        if output_type == "detail" and detail_anchor_active and prefer_fresh_retrieval:
+            log_event(
+                "RAG.DETAIL.FRESH_RETRIEVAL_BYPASS",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                prefer_fresh_retrieval=1,
+                ks_search_intent=str(getattr(ks, "search_intent", "") or ""),
+                anchor_source=strategy_meta.get("anchor_source"),
+            )
+        if output_type == "detail" and detail_anchor_active and isinstance(resolved_entity_ref, ResolvedEntityRef) and view_state is not None and not prefer_fresh_retrieval:
             requested_fields = extract_requested_fields(state.messages[-1].content)
             cache_anchor = latest_focus_entity
             if cache_anchor is None:
@@ -858,6 +953,7 @@ async def node_rag_search(
         exact_detail_lookup = bool(
             output_type == "detail"
             and detail_anchor_active
+            and not prefer_fresh_retrieval
             and isinstance(resolved_entity_ref, ResolvedEntityRef)
             and resolved_entity_ref.seed_map
         )
@@ -874,10 +970,41 @@ async def node_rag_search(
         anchor_query_meta = {
             "anchor_present": bool(focus_seed_map),
             "anchor_source": (resolved_entity_ref.source if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
+            "anchor_reference_kind": (resolved_entity_ref.reference_kind if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
             "anchor_entity_key": (str(next(iter(focus_seed_map.values()))[0]).strip() if focus_seed_map else None),
             "anchor_query_repaired": False,
             "anchor_repair_reason": None,
         }
+        if prefer_fresh_retrieval:
+            fresh_query_seed = _first_text_value(
+                getattr(ks, "retrieval_query", None),
+                resolved_retrieval_query,
+                raw_query,
+            ) or ""
+            overridden_query = _build_fresh_retrieval_query(
+                question=fresh_query_seed,
+                resolved_entity_ref=(resolved_entity_ref if isinstance(resolved_entity_ref, ResolvedEntityRef) else None),
+                latest_focus_entity=latest_focus_entity,
+            )
+            previous_query = resolved_retrieval_query
+            resolved_retrieval_query = str(overridden_query or previous_query or "").strip()
+            query_resolution_reason = "knowledge_sufficiency_llm_prefers_fresh_retrieval"
+            anchor_query_meta["anchor_query_repaired"] = bool(resolved_retrieval_query and resolved_retrieval_query != previous_query)
+            anchor_query_meta["anchor_repair_reason"] = (
+                "llm_prefer_fresh_retrieval_anchor_preserved"
+                if anchor_query_meta["anchor_query_repaired"]
+                else "llm_prefer_fresh_retrieval"
+            )
+            log_event(
+                "RAG.LLM_FRESH_RETRIEVAL",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                prefer_fresh_retrieval=1,
+                ks_search_intent=str(getattr(ks, "search_intent", "") or ""),
+                selected_search_query=resolved_retrieval_query,
+                detail_anchor_active=int(detail_anchor_active),
+                exact_detail_lookup_bypassed=int(bool(output_type == "detail" and detail_anchor_active)),
+            )
         if output_type == "detail" and exact_detail_lookup and focus_seed_map:
             resolved_retrieval_query = str(next(iter(focus_seed_map.values()))[0]).strip()
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
@@ -899,9 +1026,11 @@ async def node_rag_search(
             drift_detected=drift_detected,
             drift_reasons=drift_reasons,
             fallback_applied=fallback_applied,
+            prefer_fresh_retrieval=int(prefer_fresh_retrieval),
             query_resolution_reason=query_resolution_reason,
             anchor_present=anchor_query_meta.get("anchor_present"),
             anchor_source=anchor_query_meta.get("anchor_source"),
+            anchor_reference_kind=anchor_query_meta.get("anchor_reference_kind"),
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
             anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
             anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
@@ -919,9 +1048,11 @@ async def node_rag_search(
             planner_query=planner_query,
             drift_detected=drift_detected,
             fallback_applied=fallback_applied,
+            prefer_fresh_retrieval=int(prefer_fresh_retrieval),
             query_resolution_reason=query_resolution_reason,
             anchor_present=anchor_query_meta.get("anchor_present"),
             anchor_source=anchor_query_meta.get("anchor_source"),
+            anchor_reference_kind=anchor_query_meta.get("anchor_reference_kind"),
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
             anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
             anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),

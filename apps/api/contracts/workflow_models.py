@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from apps.api.contracts.answer_groundedness import AnswerEvidenceSnapshot, AnswerGroundednessVerdict
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.core.schemas import IntentPayloadV3
@@ -321,6 +322,7 @@ class KnowledgeSufficiency(BaseModel):
     requires_new_knowledge: Literal["low", "medium", "high"]
     search_intent: str
     retrieval_query: str
+    prefer_fresh_retrieval: bool = False
     confidence: float = Field(ge=0.0, le=1.0)
 
 
@@ -360,6 +362,8 @@ class AgentState(BaseModel):
     final_answer_artifact: Optional[AnswerArtifact] = None
     merge_debug: Dict[str, Any] = Field(default_factory=dict)
     selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
+    answer_groundedness_snapshot: Optional[AnswerEvidenceSnapshot] = None
+    answer_groundedness_verdict: Optional[AnswerGroundednessVerdict] = None
     clarification: Optional[Dict[str, Any]] = None
     retrieval_bundle: Optional[Any] = None
     answer_context_text: str = ""

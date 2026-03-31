@@ -12,9 +12,11 @@ class ResolvedEntityRef:
         "display_snapshot",
         "detail_lookup",
         "reference_context_ordinal",
+        "reference_context_source_reference",
         "reference_context_deictic",
         "explicit_id",
     ]
+    reference_kind: Optional[Literal["ordinal", "deictic", "source_reference", "focus", "explicit_id"]] = None
     display_view_id: Optional[str] = None
     display_rank: Optional[int] = None
     anchor_fields: dict[str, Any] = field(default_factory=dict)

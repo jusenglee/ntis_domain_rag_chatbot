@@ -17,6 +17,7 @@ from apps.api.contracts.runtime_contracts import (
     sanitize_ids_map_semantics,
     validate_project_key_env_contract,
 )
+from apps.api.contracts.repo_manifest import PLANNER_PROMPT_DEFAULTS
 from apps.api.contracts.workflow_models import (
     AgentState,
     KnowledgeSufficiency,
@@ -138,9 +139,9 @@ PRIORITY_CONTEXT_FIELDS = tuple(
     if field.strip()
 )
 PLANNER_DISABLE_THINKING = os.getenv("PLANNER_DISABLE_THINKING", "true").strip().lower() in {"1", "true", "yes", "on"}
-PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", "v2").strip()
-PLANNER_STAGE15_PROMPT_VERSION = os.getenv("PLANNER_STAGE15_PROMPT_VERSION", "v1").strip()
-PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", "v2").strip()
+PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage1"]).strip()
+PLANNER_STAGE15_PROMPT_VERSION = os.getenv("PLANNER_STAGE15_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage15"]).strip()
+PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage2"]).strip()
 DEFAULT_SYSTEM_PROMPT_PATH = Path(os.getenv("DEFAULT_SYSTEM_PROMPT_PATH", "prompts/ntis_chatbot.md").strip() or "prompts/ntis_chatbot.md")
 _GEMMA_SYSTEM_PROMPT_PATH_RAW = os.getenv("GEMMA_SYSTEM_PROMPT_PATH", "").strip()
 GEMMA_SYSTEM_PROMPT_PATH = Path(_GEMMA_SYSTEM_PROMPT_PATH_RAW) if _GEMMA_SYSTEM_PROMPT_PATH_RAW else None

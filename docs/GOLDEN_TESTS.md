@@ -65,7 +65,25 @@
 ### 11. Source reference follow-up keeps reference axis
 - query: `출처 2의 연구자 정보`
 - expected mode: follow-up resolution dependent
-- expected keep: source reference axis preserved
+- expected keep: source reference axis preserved, canonical/reference-context owner wins when evidence exists
+- expected fallback: if canonical/reference-context owner returns `missing_context|none`, display snapshot ordinal may seed the follow-up while keeping `followup_reference_kind=source_reference`
+
+### 11A. Freshness/new-data cue forces fresh retrieval
+- query: `그 과제 최신 정보`
+- expected mode: retrieval required
+- expected keep: knowledge sufficiency LLM returns `prefer_fresh_retrieval=true`, and the retrieval query uses the current question while preserving any active anchor seed
+- expected ban: stale `prev_context` only 답변, stale detail cache hit, anchor-only exact lookup 고정
+
+### 11B. Cache-backed detail follow-up still re-probes freshness
+- setup: previous turn answered from detail cache so `prev_context=[]`, but active anchor/view_state remains
+- query: `그 과제 최신 정보`
+- expected keep: knowledge sufficiency still calls the LLM freshness judgment and can emit `prefer_fresh_retrieval=true`
+- expected ban: `detail` action early-exit that skips the freshness probe
+
+### 11C. Broad-history deterministic repair keeps semantic cue
+- query: `2024 신동구(한국과학기술정보연구원) 연구자의 활동이력`
+- expected keep: deterministic repair preserves people/org/year filters and keeps the semantic cue `활동이력` in `retrieval_query`
+- expected ban: immediate raw-query fallback that drops the broad-history cue
 ## Safety / contract bans
 ### 12. No fallback chat
 - when retrieval is weak, system must not silently switch to fallback chat mode.
@@ -88,6 +106,8 @@
 
 ### 18. No unsupported IDs or dates
 - answer must not invent pjt_id, perf_id, year, org, count.
+- passive groundedness verdict must emit `unsupported_project_id`, `unsupported_perf_id`, `unsupported_year`, `unsupported_org_name`, `unsupported_count` for clear structured claims.
+- until narrow gating is enabled, unsupported verdicts may remain debug/meta only and must not silently rewrite strategy or fallback policy.
 
 ### 19. No detail answer for broad people/org query
 - broad people/org query must not collapse into a fake single-detail answer.

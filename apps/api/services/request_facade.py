@@ -10,6 +10,7 @@ else:
 
 from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
 from apps.core.followup_resolution import resolve_reference_context_followup
+from apps.api.contracts.repo_manifest import PLANNER_PROMPT_DEFAULTS
 from apps.core.settings import MAX_TOP_K_SIZE
 from apps.api.services.view_state import ConversationViewState
 
@@ -339,7 +340,17 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
         }
     source_reference = parse_source_reference(question)
     ordinal_reference = parse_ordinal_reference(question)
-    reference_kind = "source_reference" if anchor.source == "display_snapshot" and source_reference is not None else "deictic" if anchor.source == "display_snapshot" and ordinal_reference is None else "ordinal" if anchor.source == "display_snapshot" else "focus" if anchor.source != "explicit_id" else "explicit_id"
+    reference_kind = (
+        "source_reference"
+        if anchor.source == "display_snapshot" and source_reference is not None
+        else "deictic"
+        if anchor.source == "display_snapshot" and ordinal_reference is None
+        else "ordinal"
+        if anchor.source == "display_snapshot"
+        else "focus"
+        if anchor.source != "explicit_id"
+        else "explicit_id"
+    )
     return {
         "followup_resolution_status": "resolved",
         "selected_prev_item": selected_prev_item,
@@ -403,6 +414,7 @@ def _build_strategy_meta(normalized_intent: Any, question_analysis: Any, *, foll
         "available_count": followup_resolution.get("available_count"),
         "seed_source": followup_resolution.get("seed_source"),
         "anchor_source": followup_resolution.get("anchor_source"),
+        "anchor_reference_kind": followup_resolution.get("followup_reference_kind"),
         "focus_entity_key": focus_entity.get("pjt_id") or focus_entity.get("pjt_no") or focus_entity.get("rst_id") or focus_entity.get("person_no") or focus_entity.get("org_id") or focus_entity.get("org_code") or focus_entity.get("biz_no") or focus_entity.get("doi") or focus_entity.get("issn") or focus_entity.get("doc_id"),
         "focus_entity": focus_entity or None,
         "candidate_items": list(followup_resolution.get("candidate_items") or []),
@@ -571,35 +583,43 @@ class RequestUnderstandingFacade:
         planner_failed = 0
         base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
         base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
+        has_explicit_seed = has_explicit_precheck_signals(precheck) or _has_ids_map_values(base_ids_map)
+        source_reference_requested = parse_source_reference(question) is not None
         anchor = None
-        if not has_explicit_precheck_signals(precheck) and not _has_ids_map_values(base_ids_map):
-            anchor = resolve_followup_anchor(
-                question=question,
-                normalized_intent=normalized_intent_base,
-                latest_display_snapshot=latest_snapshot,
-                latest_focus_entity=latest_focus_entity,
-            )
         followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
-        if anchor is None and not has_explicit_precheck_signals(precheck) and not _has_ids_map_values(base_ids_map):
+        if not has_explicit_seed and source_reference_requested:
             followup_resolution = resolve_reference_context_followup(
                 question=question,
                 canonical_evidence=list(canonical_evidence or []),
                 prev_context=prev_context,
                 default_context_kind=base_route,
             )
-            if str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
-                normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
-                normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
-                normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
-                    normalized_intent_base,
-                    question_analysis,
+            if str(followup_resolution.get("followup_resolution_status") or "").strip().lower() in {"missing_context", "none"}:
+                anchor = resolve_followup_anchor(
                     question=question,
-                    followup_resolution=followup_resolution,
-                    log_event=self.log_event,
-                    request_id=request_id,
-                    conversation_id=conversation_id,
+                    normalized_intent=normalized_intent_base,
+                    latest_display_snapshot=latest_snapshot,
+                    latest_focus_entity=latest_focus_entity,
                 )
-        elif anchor is not None:
+                if anchor is not None:
+                    followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
+        elif not has_explicit_seed:
+            anchor = resolve_followup_anchor(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                latest_display_snapshot=latest_snapshot,
+                latest_focus_entity=latest_focus_entity,
+            )
+            followup_resolution = _build_followup_resolution_from_anchor(anchor, latest_snapshot, question)
+            if anchor is None:
+                followup_resolution = resolve_reference_context_followup(
+                    question=question,
+                    canonical_evidence=list(canonical_evidence or []),
+                    prev_context=prev_context,
+                    default_context_kind=base_route,
+                )
+
+        if anchor is not None:
             seed_map = anchor_to_seed_map(anchor)
             normalized_intent_base = _apply_anchor_lock(normalized_intent_base, seed_map)
             normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
@@ -617,6 +637,18 @@ class RequestUnderstandingFacade:
                 person_no=getattr(anchor, "person_no", None),
                 org_id=getattr(anchor, "org_id", None),
             )
+            normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
+                normalized_intent_base,
+                question_analysis,
+                question=question,
+                followup_resolution=followup_resolution,
+                log_event=self.log_event,
+                request_id=request_id,
+                conversation_id=conversation_id,
+            )
+        elif not has_explicit_seed and str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
+            normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
+            normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
             normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
                 normalized_intent_base,
                 question_analysis,
@@ -714,9 +746,9 @@ async def build_intent_payload(
     log_event: Any,
     intent_payload_cls: Any,
     planner_stagewise_enabled: bool,
-    planner_stage1_prompt_version: str,
-    planner_stage15_prompt_version: str = "v1",
-    planner_stage2_prompt_version: str = "v1",
+    planner_stage1_prompt_version: str = PLANNER_PROMPT_DEFAULTS["stage1"],
+    planner_stage15_prompt_version: str = PLANNER_PROMPT_DEFAULTS["stage15"],
+    planner_stage2_prompt_version: str = PLANNER_PROMPT_DEFAULTS["stage2"],
 ) -> tuple[Any, Any]:
     facade = RequestUnderstandingFacade(
         cheap_precheck=cheap_precheck,

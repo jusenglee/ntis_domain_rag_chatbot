@@ -79,8 +79,9 @@ def merge_request_overrides(
 
 def normalize_oracle_request_defaults(row: Mapping[str, Any]) -> Dict[str, Any]:
     normalized: Dict[str, Any] = {}
+    row_values = {str(key).casefold(): value for key, value in dict(row or {}).items()}
     for oracle_key, request_key in ORACLE_TO_REQUEST_OVERRIDE_KEY.items():
-        value = row.get(oracle_key)
+        value = row_values.get(str(oracle_key).casefold())
         if value is None:
             continue
         try:
