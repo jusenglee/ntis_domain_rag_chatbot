@@ -579,7 +579,21 @@
 
     let rawA = "";
     let rawB = "";
+    let clarificationRendered = false;
     lastCompareTarget = "A";
+
+    function renderBodies() {
+      bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
+      bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
+    }
+
+    function renderClarification(text) {
+      if (!text) return;
+      rawA = text;
+      rawB = text;
+      clarificationRendered = true;
+      renderBodies();
+    }
 
     const payload = {
       model: aKey,
@@ -628,15 +642,27 @@
           continue;
         }
 
-        // === 여기부터 기존 로직 ===
-        if (json.conversationId) {
-          localStorage.setItem(CONV_KEY, json.conversationId);
-          conversationId = json.conversationId;
-          setConvChip();
+        const tag = String(json.tag || "");
+        if (tag !== "event" || !json.event || typeof json.event !== "object") {
           continue;
         }
 
-        if (json.status && json.status === 'done') {
+        const eventPayload = json.event;
+        const eventKind = String(eventPayload?.kind || "");
+        const eventContent = (typeof eventPayload?.content === "string") ? eventPayload.content : "";
+        const eventMeta = (eventPayload?.meta && typeof eventPayload.meta === "object") ? eventPayload.meta : {};
+
+        if (eventKind === "conversation") {
+          const nextConversationId = String(eventMeta.conversation_id || "");
+          if (nextConversationId) {
+            localStorage.setItem(CONV_KEY, nextConversationId);
+            conversationId = nextConversationId;
+            setConvChip();
+          }
+          continue;
+        }
+
+        if (eventKind === "done") {
           done = true;
           setStreaming(false);
           logBox.textContent += "[END]\n";
@@ -644,27 +670,63 @@
           return;
         }
 
-        const modelKey = String(json.model_key || "").toLowerCase();
-        const modelName = String(json.model || "").toUpperCase();
+        if (eventKind === "status" || eventKind === "reference.set") {
+          continue;
+        }
+
+        const clarificationPayload =
+          eventKind === "clarification" && eventMeta.clarification && typeof eventMeta.clarification === "object"
+            ? eventMeta.clarification
+            : null;
+        const clarificationText = String(eventContent || clarificationPayload?.message || "");
+
+        if (clarificationPayload) {
+          if (!clarificationRendered) {
+            renderClarification(clarificationText);
+          }
+          scrollToBottom();
+          continue;
+        }
+
+        const modelKey = String(eventPayload?.model_key || "").toLowerCase();
+        const isSolarFrame = modelKey === "solar";
+        const isGemmaFrame = modelKey === "gemma";
+
+        if (eventKind === "answer.final") {
+          if (clarificationRendered) {
+            scrollToBottom();
+            continue;
+          }
+          if (isSolarFrame) {
+            rawA = eventContent;
+          } else if (isGemmaFrame) {
+            rawB = eventContent;
+          } else {
+            rawA = eventContent;
+            rawB = eventContent;
+          }
+          renderBodies();
+          scrollToBottom();
+          continue;
+        }
 
         // MODEL_A / MODEL_B 처리 (model_key 기반 계약)
-        if (modelName === "SOLAR" || modelKey === "solar") {
-          rawA += json.content;
-          bubbles.bodyA.textContent = rawA;
-        } else if (modelName === "GEMMA" || modelKey === "gemma") {
-          rawB += json.content;
-          bubbles.bodyB.textContent = rawB;
+        if (eventKind === "answer.chunk") {
+          if (isSolarFrame) {
+            rawA += eventContent;
+          } else if (isGemmaFrame) {
+            rawB += eventContent;
+          }
         }
 
 
 
-        if (json.error){
+        if (eventKind === "error"){
           stopStream("❗ SSE fetch 오류");
         }
 
 
-        bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
-        bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
+        renderBodies();
         scrollToBottom();
       }
     }

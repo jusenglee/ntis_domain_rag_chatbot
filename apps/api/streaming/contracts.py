@@ -16,7 +16,16 @@ class ErrorArtifact:
 
 @dataclass(frozen=True)
 class StreamEvent:
-    kind: Literal["answer.chunk", "answer.final", "reference.set", "clarification", "error", "done"]
+    kind: Literal[
+        "conversation",
+        "status",
+        "answer.chunk",
+        "answer.final",
+        "reference.set",
+        "clarification",
+        "error",
+        "done",
+    ]
     request_id: str
     seq: int = 0
     model_key: Optional[str] = None

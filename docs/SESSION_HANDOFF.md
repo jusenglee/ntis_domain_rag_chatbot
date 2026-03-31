@@ -798,3 +798,103 @@
   - `python -m pytest tests/test_oracle_request_overrides.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
 - next best task:
   - run `python -m pytest tests/test_oracle_request_overrides.py -q -p no:cacheprovider` inside the real app/runtime environment that has `fastapi` and `pytest`, then issue one override-empty `/query/stream` and one override-empty `/query/debug` request to confirm `REQ.ORACLE.DEFAULTS.oracle_lookup_attempted=True` and non-skip statuses against the actual Oracle connector.
+
+## 2026-03-31T10:49:52.4233536+09:00 Improver
+- branch/head: `고도화` / `5a81e0cbd119841c327f3652a8c005f03e581c7d`
+- inspected files:
+  - `apps/api/routes.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `templates/index.html`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - `/query/stream`은 이미 `clarification`을 내보내고 있었지만 canonical `tag="event"` envelope 안의 `event.kind="clarification"`로만 보내고 `event.content`는 비어 있어, flat chunk 위주 소비자나 중첩 meta를 읽지 않는 프론트는 후속질문 문구를 화면에 못 띄울 수 있었다.
+  - route의 clarification 해석 로직이 stream/debug에 중복되어 있어 message backfill 규칙을 한쪽만 고치면 다른 쪽이 drift할 위험이 있었다.
+  - repo 안 `templates/index.html`은 테스트용 smoke harness지만, 현재는 `tag="clarification"`과 `event.kind="clarification"`를 둘 다 읽지 않아 이번 SSE 호환 패치를 눈으로 확인하기 어려운 상태였다.
+- changes:
+  - `apps/api/routes.py`: clarification payload 정규화 helper를 추가하고, `selected_artifact.text`로 visible `message`를 backfill하도록 묶었다.
+  - `apps/api/routes.py`: canonical clarification event에 `content`를 채우고, legacy flat compatibility frame `tag="clarification"`을 추가로 내보내 top-level `content`와 nested `clarification.message`를 같이 보존하도록 바꿨다.
+  - `tests/test_api_routes_reference_payload.py`: clarification 회귀를 “hidden” 기준에서 “flat clarification + event clarification + answer.final + done” 기준으로 바꾸고, `/query/debug` clarification message backfill 회귀를 추가했다.
+  - `templates/index.html`: smoke harness가 flat clarification/event clarification을 둘 다 파싱하고, clarification은 양쪽 카드에 1회만 복제 렌더링하며 뒤이은 duplicate `answer.final`은 무시하도록 보강했다.
+  - `docs/02_실행계약과_전략규칙.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`: canonical clarification event + compatibility flat clarification frame 계약과 legacy flat Solar label=`UPSTAGE` 문구로 sync했다.
+- validations:
+  - `python -m py_compile apps/api/routes.py tests/test_api_routes_reference_payload.py` passed
+  - `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
+  - inline manual smoke using FastAPI `TestClient` is blocked in this shell: `No module named fastapi`
+- next best task:
+  - repo 전용 runtime environment에서 `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider`를 다시 돌려 clarification stream/debug 회귀를 green으로 확인할 것
+  - 실제 프론트 서버에서 `tag="clarification"` 또는 canonical `event.kind="clarification"`를 소비하도록 파서를 맞추고, `출처 N` out-of-range follow-up 한 건으로 end-to-end 표시를 확인할 것
+
+## 2026-03-31T11:03:21.7647722+09:00 Improver
+- branch/head: `고도화` / `5a81e0cbd119841c327f3652a8c005f03e581c7d`
+- inspected files:
+  - `apps/api/routes.py`
+  - `apps/api/streaming/contracts.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `templates/index.html`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/05_유지보수와_확장.md`
+  - `docs/README.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - 직전 패치로 clarification 호환은 좋아졌지만 route는 여전히 conversation/status/chunk/reference/error/degraded-final 일부를 flat compatibility shape로 함께 내보내고 있어, “canonical event envelope only” 계약으로는 아직 닫히지 않은 상태였다.
+  - 테스트와 smoke harness도 top-level `conversationId`, `status`, `chunk`, `reference` 같은 legacy flat field를 계속 읽고 있어, 실제 소비자가 새 계약으로 이행했는지 확인하기 어려웠다.
+- changes:
+  - `apps/api/streaming/contracts.py`: canonical stream kind에 `conversation`, `status`를 추가해 flat handshake/progress payload도 event envelope 안으로 옮길 수 있게 했다.
+  - `apps/api/routes.py`: legacy flat serializer helper를 제거하고 `/query/stream`이 모든 frame을 `tag="event"` + `event.kind=*`로만 내보내도록 교체했다.
+  - `apps/api/routes.py`: conversation init은 `conversation` event `meta.conversation_id`, retrieve progress는 `status` event `meta.status="retrieve"`, reference payload는 `reference.set` event `meta.references`, degraded/error terminal도 canonical `answer.final`/`error`/`done` event로만 유지하게 정리했다.
+  - `tests/test_api_routes_reference_payload.py`: reference/clarification/chunk/guard-final 회귀를 event-only 기준으로 갱신하고, 모든 stream frame이 canonical event envelope만 쓰는지 확인하는 회귀를 추가했다.
+  - `templates/index.html`: 테스트 harness가 이제 flat field를 읽지 않고 canonical event만 파싱하도록 정리했다.
+  - `docs/02_실행계약과_전략규칙.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`, `docs/05_유지보수와_확장.md`, `docs/README.md`: current contract를 legacy flat 제거 후 canonical event-only 기준으로 sync했다.
+- validations:
+  - `python -m py_compile apps/api/routes.py apps/api/streaming/contracts.py tests/test_api_routes_reference_payload.py` passed
+  - `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider` is still blocked in this shell: `No module named pytest`
+  - route-level manual smoke via FastAPI `TestClient` is still blocked in this shell: `No module named fastapi`
+- next best task:
+  - 실제 runtime environment에서 `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider`를 돌려 event-only SSE contract 회귀를 green으로 확인할 것
+  - 외부 프론트 서버 파서를 `tag="event"` / `event.kind` 기준으로만 읽도록 맞추고, `conversation`, `status`, `answer.chunk`, `clarification`, `answer.final`, `reference.set`, `done` 경로를 end-to-end로 확인할 것
+
+## 2026-03-31T11:10:26.1412544+09:00 Improver
+- branch/head: `고도화` / `5a81e0cbd119841c327f3652a8c005f03e581c7d`
+- inspected files:
+  - `apps/api/routes.py`
+  - `apps/api/streaming/contracts.py`
+  - `docs/03_운영과_환경.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - 외부에 노출되는 API 계약은 현재 구현상 `/query/stream` event-only SSE와 `/query/debug` JSON shape로 수렴했지만, 소비자 입장에서는 요청/응답 키와 event kind를 한 곳에서 읽기 어려웠다.
+  - `docs/03_운영과_환경.md`의 기존 streaming 규칙은 내부 운영 관점 설명이 중심이라, 외부 연동용 request/response contract를 바로 복사해 쓰기엔 정보가 분산돼 있었다.
+- changes:
+  - `docs/03_운영과_환경.md`: `9.1 외부 API 계약` 섹션을 추가해 공통 요청 바디, `/query/stream` canonical SSE envelope, event kind별 의미, 소비 순서 규칙, `/query/debug` 성공/실패 JSON shape를 명시했다.
+  - `docs/SESSION_HANDOFF.md`: 이번 외부 계약 문서화 작업을 기록했다.
+- validations:
+  - 구현 대조 확인: `apps/api/routes.py`와 `apps/api/streaming/contracts.py` 기준으로 `/query/stream`, `/query/debug` 외부 계약 항목을 수기 대조했다.
+  - 추가 코드 검증은 수행하지 않았다. 이번 변경은 문서-only patch다.
+- next best task:
+  - 외부 프론트 서버 또는 API 소비 문서에서 `docs/03_운영과_환경.md`의 `9.1 외부 API 계약`을 기준 링크로 삼고, 샘플 payload를 실제 연동 가이드와 동일하게 유지할 것
+
+## 2026-03-31T11:55:00+09:00 Improver
+- branch/head: `고도화` / `5a81e0cbd119841c327f3652a8c005f03e581c7d`
+- inspected files:
+  - `apps/api/routes.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `docs/README.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+- findings:
+  - dirty tree의 `/query/stream` route와 회귀 문서는 canonical event-only 계약 쪽으로 기울어 있었고, legacy flat `{"reference":[...]}` / `{"status":"done"}` tail contract와 충돌했다.
+  - clarification short-circuit 경로는 selected artifact가 있으면 `clarification` 뒤에 `answer.final`도 함께 나갈 수 있어, 사용자가 기대한 `clarification -> reference -> done` 말미 계약을 깨고 있었다.
+- changes:
+  - `apps/api/routes.py`: legacy flat compatibility adapter를 복구하고, `/query/stream` 말미에 `reference` payload를 빈 리스트여도 항상 1회 내보내도록 고정했다. clarification 경로에서는 `answer.final`을 추가로 내보내지 않게 바꿨다.
+  - `tests/test_api_routes_reference_payload.py`: normal/clarification/guard terminal 경로에서 `terminal -> reference -> done` 순서와 empty reference tail을 회귀로 고정했다.
+  - `docs/README.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`: canonical event + legacy flat compatibility 공존, empty reference tail, clarification terminal 순서를 문서와 점검 기준에 맞게 갱신했다.
+- validations:
+  - `python -m py_compile apps/api/routes.py tests/test_api_routes_reference_payload.py` passed
+  - `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
+  - inline Python route smoke도 failed in this shell because `fastapi` is not installed
+- next best task:
+  - 실제 runtime environment에서 `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider`를 다시 돌려 legacy flat tail contract를 green으로 확인하고, 브라우저/외부 소비자 로그에서 `reference`와 `status=done` 말미 shape를 한 번 더 캡처할 것
