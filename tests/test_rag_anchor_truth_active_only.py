@@ -54,3 +54,31 @@ def test_active_only_uses_ids_map_seed_even_without_latest_focus():
     ctx = get_followup_anchor_context(state, active_only=True)
     assert ctx["present"] is True
     assert ctx["pjt_id"] == "2340006682"
+
+
+def test_followup_anchor_context_keeps_reference_kind_for_source_reference_seed():
+    state = SimpleNamespace(
+        view_state=SimpleNamespace(latest_focus_entity=None),
+        intent_payload=SimpleNamespace(
+            normalized_intent=SimpleNamespace(
+                ids_map={"pjt_id": ["PJT-222"]},
+                action="detail",
+                output_type="detail",
+            ),
+            strategy_meta={
+                "followup_resolution_status": "resolved",
+                "explicit_followup": True,
+                "anchor_source": None,
+                "seed_source": "reference_context_source_reference",
+                "anchor_reference_kind": "source_reference",
+                "focus_entity": {},
+                "selected_prev_item": {},
+            },
+        ),
+    )
+
+    ctx = get_followup_anchor_context(state, active_only=True)
+
+    assert ctx["present"] is True
+    assert ctx["anchor_source"] == "reference_context_source_reference"
+    assert ctx["anchor_reference_kind"] == "source_reference"

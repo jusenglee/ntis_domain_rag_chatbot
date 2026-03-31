@@ -2,54 +2,52 @@
 
 ## Bootstrap checkpoint
 - repo: `ntis_domain_rag_chatbot`
-- working branch expected: `怨좊룄??
+- working branch expected: `고도화`
 - created_for: Codex Watcher / Improver / Architect
 
 ## What is confirmed
-- ???꾨줈?앺듃??NTIS RAG??
-- retrieval strategy??SEARCH / LOOKUP / JOIN?쇰줈 遺꾨━?쒕떎.
-- planner???⑥씪쨌遺덈? strategy瑜??대젮???쒕떎.
-- ?щ엺/湲곌? 吏덉쓽??湲곕낯 LOOKUP?대떎.
-- group join? `pjt_no`, instance join? `pjt_id`瑜??대떎.
-- ?댁쁺 湲곕낯? promotion disable, fallback chat off ?대떎.
-- planner live path??`apps/api/app_factory.py -> apps/api/services/query_analysis.py -> apps/api/services/planner_runtime.py` ?닿퀬 湲곕낯 prompt version? `v2 / v1 / v2` ??
-- answer live path??`apps/api/app_factory.py::_generate_answer -> apps/api/services/answer_generation.py -> apps/api/services/llm_runtime.py` ?닿퀬 system prompt asset? `prompts/ntis_chatbot*.md` ??
-- 蹂꾨룄 answer verifier/repair prompt stack? ?녿떎. answer gate??`apps/api/services/answer_merge.py`, query repair??`apps/api/services/rag_retriever.py` ???덈떎.
-- streaming path??`apps/api/routes.py`, `apps/core/llm_streaming.py`, `apps/api/streaming/*` ?닿퀬 route 怨꾩링? `clarification`, `answer.final`, `done` terminal sequence瑜?吏곸젒 蹂댁옣?쒕떎.
-- observability/logging path??`apps/api/app_factory.py::_log_event` ? `apps/api/services/runtime_helpers.py::setup_file_logging` ?대ŉ 湲곕낯 log file? `logs/app.log` ??
-- baseline/source-of-truth 寃利?紐낅졊? `pytest.ini` ? `scripts/run_baseline_checks.ps1` ???덈떎.
+- 프로젝트는 NTIS 도메인 RAG이며 retrieval strategy와 answer generation을 분리한다.
+- retrieval strategy는 `SEARCH` / `LOOKUP` / `JOIN`으로 고정되고 planner는 질의마다 단일 strategy를 만든다.
+- 사람/기관 기반 질의는 기본적으로 `LOOKUP`으로 다루고, group join은 `pjt_no`, instance join은 `pjt_id`를 사용한다.
+- 운영 기본값은 promotion disable, fallback chat off, planner prompt defaults `v2 / v1 / v2`다.
+- planner live path는 `apps/api/app_factory.py -> apps/api/services/query_analysis.py -> apps/api/services/planner_runtime.py`다.
+- answer live path는 `apps/api/app_factory.py::_generate_answer -> apps/api/services/answer_generation.py -> apps/api/services/llm_runtime.py`이고 system prompt asset은 `prompts/ntis_chatbot*.md`다.
+- 별도 answer verifier/repair prompt stack은 없고, groundedness verdict contract는 `apps/api/contracts/answer_groundedness.py`, answer gate는 `apps/api/services/answer_merge.py`, query repair는 `apps/api/services/rag_retriever.py`가 맡는다.
+- streaming path는 `apps/api/routes.py`, `apps/core/llm_streaming.py`, `apps/api/streaming/*`이고 `/query/stream` 외부 계약은 canonical event envelope 기준으로 유지된다.
+- observability/logging path는 `apps/api/app_factory.py::_log_event`, `apps/api/services/runtime_helpers.py::setup_file_logging`이며 기본 log file은 `logs/app.log`다.
+- planner defaults와 baseline inventory의 owner는 `apps/api/contracts/repo_manifest.py`이고, 검증 진입점은 `pytest.ini`와 `scripts/run_baseline_checks.ps1`이다.
 
 ## What remains risky
-- `docs/03_?댁쁺怨??섍꼍.md` 媛 planner 湲곕낯媛믪쓣 `v1` 怨?`v2` 濡??숈떆???곴퀬 ?덇퀬, `pytest.ini`/`scripts/run_baseline_checks.ps1` ? 留욎? ?딅뒗 smoke 紐낅졊 諛??녿뒗 ?뚯뒪???뚯씪??媛由ы궓??
-- `apps/api/services/request_facade.py` ??exported helper default???꾩쭅 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ?대떎. ?꾩옱 app wiring? explicit version???섍꺼 active bug???꾨땲吏留??ъ궗????stale default媛 ?ㅼ떆 ?댁븘?????덈떎.
-- `apps/core/followup_resolution.py` ??source-reference follow-up? ?ъ슜??facing wording? 遺꾨━?먯?留? resolved `seed_source` 瑜??ъ쟾??`reference_context_ordinal` 濡??④린怨?`apps/core/entity_reference.py` ??蹂꾨룄 source variant瑜?媛吏吏 ?딆븘 observability ??ordinary ordinal怨?援щ텇?섏? ?딅뒗??
-- `tests/test_api_routes_reference_payload.py` ??route-level `answer.final -> done` sequencing怨?`MISSING_FINAL_ANSWER` guard瑜?怨좎젙?섏?留? `tests/test_runtime_helpers_stream_bypass.py` ???ъ쟾??non-empty stream??`EMPTY_STREAM` ?뚰뵾留?蹂몃떎. `TTFT_DEADLINE_EXCEEDED` / `GEN_DEADLINE_EXCEEDED` / `CHAR_LIMITED` ?곗꽑?쒖쐞???꾩쭅 ?뚭? ?뚯뒪?멸? ?쏀븯??
-- answer verifier???ъ쟾??`apps/api/services/answer_merge.py` ??heuristic gate肉먯씠?? 蹂꾨룄 verifier/repair prompt stack? ?녿떎.
-- ?꾩옱 watcher 濡쒖뺄 Python ?섍꼍?먮뒗 `pytest` 媛 ?놁뼱 ?고????뚯뒪???ㅽ뻾 寃利앹씠 留됲? ?덈떎.
+- 오래된 handoff history 일부는 문자 오염 상태로 남아 있다. 이번 복구는 현재 상단 요약과 최신 entry 위주다.
+- `tests/test_request_facade_source_reference_fallback.py`는 존재하지만 `apps/api/contracts/repo_manifest.py`의 `BASELINE_INVENTORY["core_contract_subset"]`에는 아직 포함되지 않는다.
+- 현재 watcher shell에는 `pytest`가 없어 baseline 스크립트와 수동 pytest subset을 이 환경에서 끝까지 검증할 수 없다.
+- `출처 N` follow-up은 reference context가 없을 때 display snapshot anchor fallback이 허용돼 있어, citation semantics를 더 엄격히 할지 product intent 확인이 남아 있다.
+- unsupported groundedness verdict는 아직 selector 차원의 강한 차단보다 passive verdict 성격이 강하다.
 
 ## First tasks for Watcher
-1. branch / head ?쇱튂 ?щ? ?뺤씤
-2. planner / answer / verifier / repair ?뚯씪 ?꾩튂 ?앸퀎
-3. fallback / degraded response 濡쒖쭅 ?꾩튂 ?앸퀎
-4. strategy drift 媛??寃쎈줈 ?앸퀎
-5. docs? 肄붾뱶??遺덉씪移?紐⑸줉??
+1. branch / head 확인
+2. planner / answer / streaming / baseline source-of-truth 대조
+3. docs / prompts / tests drift 식별
+4. 검증 가능 여부와 환경 blocker 확인
+5. findings를 handoff에 append
 ## First tasks for Improver
-1. Watcher 蹂닿퀬?쒖뿉??媛???묒? P0 ?먮뒗 媛??媛믪떬 P1 1嫄??좏깮
-2. 愿??寃利?紐낅졊 ?뺤씤
-3. 1媛??⑥튂留??섑뻾
-4. regression ?먮뒗 golden test 異붽?
-5. ?ㅼ쓬 ?꾪뿕 ?ъ씤??handoff ?④린湲?
+1. Watcher findings에서 가장 안전한 P1 1건을 고른다.
+2. 관련 검증 명령과 현재 shell blocker를 먼저 확인한다.
+3. 1회 실행당 1패치만 적용한다.
+4. 회귀 테스트 또는 관련 문서를 같은 변경 세트로 맞춘다.
+5. 다음 루프를 위해 handoff를 갱신한다.
 ## First tasks for Architect
-1. ?꾩옱 answer pipeline 臾몄꽌??2. prompt stack怨?verifier stack???쒖뒪??援ъ꽦?붿냼濡??뺣━
-3. staged ADR ?묒꽦
-4. production code ?섏젙? ?섏? ?딄린
+1. 현재 answer pipeline / planner / baseline drift를 staged migration 관점으로 정리한다.
+2. prompt stack, verifier stack, baseline ownership을 분리된 설계 문서로 정리한다.
+3. staged ADR 또는 RFC를 작성한다.
+4. production code는 건드리지 않는다.
 
 ## Candidate first improvement
-- ?ㅽ듃由щ컢 寃쎈줈?먯꽌 async close await ?꾨씫 ?щ? ?뺤씤
-- emitted_chunks=0 ?먯젙 濡쒖쭅怨?ttft deadline ?곹샇?묒슜 ?뺤씤
+- repo 전용 Python environment를 복구해 `scripts/run_baseline_checks.ps1`를 실제로 끝까지 실행한다.
+- source-reference fallback 회귀를 baseline inventory에 포함할지 product intent 기준으로 결정한다.
 
 ## Update rule
-???뚯씪? 留??ㅽ뻾 ???꾨옒瑜?append ?쒕떎.
+모든 실행은 아래 형식으로 append 한다.
 - date/time
 - branch/head
 - inspected files
@@ -59,6 +57,47 @@
 - next best task
 
 ---
+
+### 2026-03-31T13:30:00+09:00 Improver
+- branch/head: `고도화` / `3478854f4a34341938041af8196d45b64d009fbe`
+- inspected files:
+  - `apps/api/services/canonical_context.py`
+  - `apps/api/services/detail_contract.py`
+  - `apps/api/services/retrieval_workflow.py`
+  - `apps/api/services/answer_generation.py`
+  - `apps/api/services/answer_merge.py`
+  - `apps/api/contracts/workflow_models.py`
+  - `apps/api/services/result_set.py`
+  - `prompts/ntis_chatbot.md`
+  - `prompts/ntis_chatbot_gemma.md`
+  - `prompts/ntis_chatbot_solar.md`
+  - `tests/test_canonical_context.py`
+  - `tests/test_detail_contract.py`
+  - `tests/test_retrieval_workflow_detail_runtime.py`
+  - `tests/test_contract_debt_paydown.py`
+  - `tests/test_request_overrides.py`
+  - `tests/test_answer_merge_bypass.py`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+- findings:
+  - model-facing `[제공된 정보]` 경로에 `PJT_ID=...`, `LEAD_ORG=...`, `[detail_evidence]`, `missing_fields:` 같은 내부 schema/debug scaffold가 그대로 섞일 수 있었다.
+  - detail cache hit, fresh detail lookup, canonical fallback render가 모두 같은 `answer_context_text` 필드를 공유했지만 model-safe view와 debug/log view를 분리하지 않았다.
+  - selector는 `[detail_evidence]` 류의 명시적 scaffold는 막았지만 `(pjt_id)`, `(lead_org)` 같은 parenthetical schema label과 raw missing-field inventory는 invalid로 내리지 못했다.
+- changes:
+  - canonical renderer를 `# 출처 N.` + 한국어 라벨 기반 model-safe view로 바꾸고, 기존 schema-oriented text는 `render_canonical_evidence_debug_text()`로 분리했다.
+  - detail contract에 `build_detail_prompt_context()`를 추가하고, retrieval workflow/state/bundle에 `debug_answer_context_text`를 도입해 model-facing context와 log-only context를 분리했다.
+  - answer generation은 `[제공된 정보]`에 model-safe context만 넣고 `[Reference Context]` 로그에는 debug context를 남기도록 바꿨다.
+  - answer merge는 parenthetical schema label, raw missing-field inventory를 `internal_context_leak`로 degrade하도록 강화했다.
+  - prompt/test/docs를 새 계약에 맞게 갱신했다.
+- validations:
+  - `python -m py_compile apps/api/services/canonical_context.py apps/api/services/detail_contract.py apps/api/services/retrieval_workflow.py apps/api/services/answer_generation.py apps/api/services/answer_merge.py apps/api/contracts/workflow_models.py apps/api/services/result_set.py tests/test_canonical_context.py tests/test_detail_contract.py tests/test_retrieval_workflow_detail_runtime.py tests/test_contract_debt_paydown.py tests/test_request_overrides.py tests/test_answer_merge_bypass.py` passed
+  - `python -m pytest tests/test_canonical_context.py tests/test_detail_contract.py tests/test_retrieval_workflow_detail_runtime.py tests/test_contract_debt_paydown.py tests/test_request_overrides.py tests/test_answer_merge_bypass.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
+  - inline Python smoke passed for `apps/api/services/canonical_context.py`: `canonical_context_smoke_ok`
+  - inline import/runtime validation for `detail_contract` / `answer_merge` could not run in this shell because shared Windows Python lacks `pydantic`
+- next best task:
+  - real runtime에서 반도체/source-reference follow-up 질문을 다시 재현해 model prompt에는 `# 출처 N.` 블록만 들어가고, logs에는 debug scaffold만 남는지 확인한다.
+  - selector telemetry에서 `internal_context_leak`가 parenthetical schema label/raw missing-field inventory에도 안정적으로 찍히는지 확인한다.
 
 ### 2026-03-27 15:50:44 +09:00
 - branch/head: `怨좊룄?? / `224f3c3ec28474674535efdb21086723b371f005`
@@ -898,3 +937,96 @@
   - inline Python route smoke도 failed in this shell because `fastapi` is not installed
 - next best task:
   - 실제 runtime environment에서 `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider`를 다시 돌려 legacy flat tail contract를 green으로 확인하고, 브라우저/외부 소비자 로그에서 `reference`와 `status=done` 말미 shape를 한 번 더 캡처할 것
+
+## 2026-03-31T12:40:00+09:00 Improver
+- branch/head: `고도화` / `3478854f4a34341938041af8196d45b64d009fbe`
+- inspected files:
+  - `apps/api/routes.py`
+  - `apps/api/services/answer_generation.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `docs/README.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+- findings:
+  - `/query/stream` 말미의 `reference` payload는 여전히 `final_state.context` hit 문서만 다시 순회해서 만들고 있어, 실제 retrieval 근거가 `selected_answer_artifact.references`나 `canonical_evidence`에 남아 있어도 `{"reference":[]}`로 끝날 수 있었다.
+  - `AnswerArtifact.references` 필드는 merge 단계에서 유지되지만, retrieval evidence가 있어도 자동으로 채워지지 않아 route가 `context` 생존 여부에 과도하게 의존했다.
+- changes:
+  - `apps/api/routes.py`: reference collector helper를 추가해 `selected_artifact.references -> retrieval_bundle.items -> canonical_evidence -> context` 순서로 reference를 모으고, 기존 `tag/id/title` 정규화와 dedupe 규칙을 그대로 재사용하도록 바꿨다.
+  - `apps/api/services/answer_generation.py`: retrieval evidence에서 reference payload를 파생하는 helper를 추가하고, per-model artifact와 final selected artifact가 reference를 비워 두지 않도록 fallback 채움 로직을 넣었다.
+  - `tests/test_api_routes_reference_payload.py`: `context=[]`여도 explicit `final_answer_artifact.references` 또는 `canonical_evidence`가 있으면 canonical `reference.set`과 legacy flat `reference`가 같은 non-empty 리스트를 내는 회귀를 추가했다.
+  - `docs/README.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`: public wire shape는 유지한 채, `reference` source-of-truth가 artifact/retrieval evidence fallback이라는 점을 문서와 점검 기준에 반영했다.
+- validations:
+  - `python -m py_compile apps/api/routes.py apps/api/services/answer_generation.py tests/test_api_routes_reference_payload.py` passed
+  - `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider` failed in this shell: `No module named pytest`
+  - inline Python smoke for route regression failed in this shell because `fastapi` is not installed
+- next best task:
+  - 실제 runtime environment에서 `tests/test_api_routes_reference_payload.py`를 다시 실행해 artifact/canonical-evidence fallback 회귀를 green으로 확인하고, 동일 환경에서 `/query/stream` 한 건을 호출해 `reference`가 더 이상 빈 배열로 내려오지 않는지 캡처할 것
+
+## 2026-03-31T14:02:56.4700119+09:00 Improver
+- branch/head: `고도화` / `3478854f4a34341938041af8196d45b64d009fbe`
+- inspected files:
+  - `apps/api/routes.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `templates/index.html`
+  - `docs/README.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - 사용자가 캡처한 실제 SSE 로그 기준으로 `/query/stream`은 canonical `tag="event"` frame과 함께 legacy flat `chunk`, `reference`, `status=done` payload를 여전히 동시 방출하고 있었다.
+  - 같은 브랜치의 테스트 파일도 legacy flat tail을 기대하고 있어, 외부 계약 문서와 route 구현이 다시 드리프트한 상태였다.
+  - `templates/index.html`은 이미 canonical event만 읽고 있었으므로, 이번 이슈의 원인은 프런트 하네스가 아니라 route serializer와 회귀 기준의 잔존 legacy path였다.
+- changes:
+  - `apps/api/routes.py`: `encode_sse_payload` 기반 legacy serializer, chunk/reference/status flat payload 생성 helper, `_emit_legacy_stream_event()`를 제거하고 모든 `/query/stream` frame을 `encode_stream_event()` 기반 canonical event로만 내보내도록 정리했다.
+  - `apps/api/routes.py`: graph 미준비/error/degraded/guard/final/reference/done 경로를 모두 event-only로 재배선했고, `reference.set`은 기존 artifact/retrieval evidence fallback collector를 그대로 사용하도록 유지했다.
+  - `tests/test_api_routes_reference_payload.py`: legacy flat helper/기대를 제거하고, 모든 frame이 `tag="event"`인지 확인하는 `_assert_event_only_stream()` 회귀를 추가했다. chunk/status/clarification/guard/reference 경로 검증도 `event.kind`와 `event.meta` 기준으로 다시 맞췄다.
+  - `docs/README.md`, `docs/03_운영과_환경.md`, `docs/04_회귀기준과_점검.md`: 현재 외부 계약과 회귀 기준을 다시 canonical event-only 기준으로 복구했다.
+- validations:
+  - `python -m py_compile apps/api/routes.py tests/test_api_routes_reference_payload.py` passed
+  - `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider` is still blocked in this shell: `No module named pytest`
+  - route-level manual smoke via FastAPI `TestClient` is still blocked in this shell: `No module named fastapi`
+- next best task:
+  - 실제 runtime environment에서 `python -m pytest tests/test_api_routes_reference_payload.py -q -p no:cacheprovider`를 다시 돌려 event-only SSE 회귀를 green으로 확인할 것
+  - 외부 프론트/중계 서버가 같은 app instance를 바라보는지 확인하고, 배포 후 실제 SSE 로그에서 `tag="chunk"`, top-level `reference`, `tag="status"`가 더 이상 나오지 않는지 한 번 더 캡처할 것
+
+## 2026-03-31T15:59:28.6553676+09:00 Watcher
+- branch/head: `고도화` / `3478854f4a34341938041af8196d45b64d009fbe`
+- inspected files:
+  - `docs/SESSION_HANDOFF.md`
+  - `docs/03_운영과_환경.md`
+  - `docs/04_회귀기준과_점검.md`
+  - `docs/README.md`
+  - `docs/CODEX_CONTEXT.md`
+  - `docs/GOLDEN_TESTS.md`
+  - `docs/PRODUCT_BASELINE.md`
+  - `apps/api/contracts/repo_manifest.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `pytest.ini`
+  - `tests/test_planner_stagewise.py`
+  - `tests/test_api_routes_reference_payload.py`
+  - `tests/test_runtime_helpers_stream_bypass.py`
+  - `tests/test_request_facade_source_reference_fallback.py`
+  - `eval/sample_queries.jsonl`
+- findings:
+  - docs issue: `docs/SESSION_HANDOFF.md` 상단 bootstrap/current-risk 요약은 문자 오염으로 현재 source-of-truth를 읽기 어렵게 만들고 있었다.
+  - docs issue: `docs/03_운영과_환경.md`의 최소 smoke baseline 예시는 이미 없는 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py`를 가리키고 있었다.
+  - non-doc risk: 현재 shell에는 `pytest`가 없어 baseline 스크립트와 수동 pytest subset을 이 환경에서 끝까지 돌릴 수 없다.
+  - non-doc risk: `tests/test_request_facade_source_reference_fallback.py`는 존재하지만 baseline inventory core subset에는 직접 포함되지 않는다.
+- remains risky:
+  - 과거 handoff history 일부는 보존한 문자 오염 상태로 남아 있어, 장기적으로는 별도 archival/cleanup pass가 필요하다.
+  - source-reference fallback을 baseline에 승격할지, 아니면 product policy를 먼저 확정할지는 아직 결정되지 않았다.
+  - repo 전용 Python environment가 없으면 문서와 실제 runtime 회귀 상태를 같은 셸에서 닫을 수 없다.
+- changes:
+  - `docs/SESSION_HANDOFF.md` 상단 bootstrap/current-risk/role guide를 현재 기준의 UTF-8 한국어 요약으로 복구했다.
+  - `docs/03_운영과_환경.md`의 최소 smoke baseline을 manifest-driven baseline entrypoint와 실제 존재하는 수동 triage subset으로 교체했다.
+  - 이번 watcher 결과를 handoff 말미에 append했다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `3478854f4a34341938041af8196d45b64d009fbe`
+  - `python -m apps.api.contracts.repo_manifest --section planner_prompt_defaults` passed and returned `{"stage1":"v2","stage15":"v1","stage2":"v2"}`.
+  - `python -m apps.api.contracts.repo_manifest --section baseline_inventory` passed and confirmed the manifest-driven baseline inventory owner.
+  - targeted text search found stale smoke filenames / old planner-default strings only inside preserved `docs/SESSION_HANDOFF.md` history and this watcher finding block, not in the active core docs sections updated in this pass.
+  - UTF-8 explicit reads are required for `docs/SESSION_HANDOFF.md` and `docs/03_운영과_환경.md` because console display can still hide encoding problems.
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed at collect-only with `No module named pytest`; treated as environment blocker, not as a docs regression.
+- next best task:
+  - repo 전용 Python environment 또는 dependency bootstrap을 먼저 복구한 뒤 `scripts/run_baseline_checks.ps1`를 다시 실행해 docs change와 actual baseline 상태를 같은 환경에서 확인할 것
+  - source-reference fallback contract를 baseline inventory에 포함할지, 아니면 policy 문서/ADR로 먼저 확정할지 다음 watcher/improver 루프에서 결정할 것

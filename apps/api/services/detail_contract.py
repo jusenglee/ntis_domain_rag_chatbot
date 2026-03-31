@@ -55,6 +55,28 @@ _FIELD_LABELS = {
     "affiliation": "\uc18c\uc18d\uae30\uad00",
     "outputs": "\uc131\uacfc\ubb3c",
 }
+_PROMPT_UNAVAILABLE_MESSAGES = {
+    "pjt_id": "\uacfc\uc81c ID\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "pjt_no": "\uacfc\uc81c \ubc88\ud638\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "rst_id": "\uc131\uacfc ID\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "person_no": "\uc5f0\uad6c\uc790 \ubc88\ud638\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "org_id": "\uae30\uad00 ID\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "org_code": "\uae30\uad00 \ucf54\ub4dc \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "biz_no": "\uc0ac\uc5c5\uc790\ub4f1\ub85d\ubc88\ud638 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "doi": "DOI \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "issn": "ISSN \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "year": "\uc5f0\ub3c4 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "lead_org": "\uc218\ud589\uae30\uad00 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "participant_org": "\ucc38\uc5ec\uae30\uad00 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "researchers": "\uc5f0\uad6c\uc790 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "summary": "\uc694\uc57d \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "goal": "\ubaa9\ud45c \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "period": "\uc5f0\uad6c\uae30\uac04 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "budget": "\uc5f0\uad6c\ube44 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "outputs": "\uc131\uacfc\ubb3c \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "perf_type": "\uc131\uacfc \uc720\ud615 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+    "affiliation": "\uc18c\uc18d\uae30\uad00 \uc815\ubcf4\ub294 \uc81c\uacf5\ub41c \uc790\ub8cc\uc5d0\uc11c \ud655\uc778\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+}
 
 
 def _decode_text(value: str) -> str:
@@ -320,6 +342,52 @@ def render_detail_answer(coverage: DetailCoverage, *, requested_fields: Optional
         rendered_outputs = ", ".join(str(v) for v in outputs if str(v).strip()) if isinstance(outputs, list) else str(outputs)
         if rendered_outputs:
             lines.append(f"{_decode_text(_FIELD_LABELS['outputs'])}: {rendered_outputs}")
+    return "\n".join(lines)
+
+
+def build_detail_prompt_context(
+    coverage: DetailCoverage,
+    *,
+    requested_fields: Optional[Iterable[str]] = None,
+) -> str:
+    """LLM에 전달할 detail evidence를 사람 친화형 source block으로 렌더링한다."""
+    if not coverage.entity_found:
+        return "# 출처 1. 항목\n- 요청한 대상은 제공된 자료에서 확인되지 않습니다."
+
+    requested = sorted(set(requested_fields or []))
+    core = coverage.core_profile or {}
+    rich = coverage.rich_detail or {}
+    title = _text(core.get("title")) or _decode_text(_ENTITY_LABELS.get(str(core.get("entity_kind") or "project").strip().lower() or "project", "\ud56d\ubaa9"))
+    lines = [f"# 출처 1. {title}"]
+
+    for field in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn"):
+        if _present(core.get(field)):
+            lines.append(f"- {_decode_text(_FIELD_LABELS[field])}: {core.get(field)}")
+    for field in ("year", "lead_org"):
+        if _present(core.get(field)):
+            lines.append(f"- {_decode_text(_FIELD_LABELS[field])}: {core.get(field)}")
+    for field in ("participant_org", "researchers"):
+        if _present(core.get(field)):
+            values = core.get(field) or []
+            rendered = ", ".join(str(v) for v in values if str(v).strip()) if isinstance(values, list) else str(values)
+            if rendered:
+                lines.append(f"- {_decode_text(_FIELD_LABELS[field])}: {rendered}")
+    for field in ("summary", "goal", "period", "budget", "perf_type", "affiliation"):
+        if _present(rich.get(field)):
+            lines.append(f"- {_decode_text(_FIELD_LABELS[field])}: {rich.get(field)}")
+    if _present(rich.get("outputs")):
+        outputs = rich.get("outputs") or []
+        rendered_outputs = ", ".join(str(v) for v in outputs if str(v).strip()) if isinstance(outputs, list) else str(outputs)
+        if rendered_outputs:
+            lines.append(f"- {_decode_text(_FIELD_LABELS['outputs'])}: {rendered_outputs}")
+
+    for field in requested:
+        if field not in _PROMPT_UNAVAILABLE_MESSAGES:
+            continue
+        if field not in coverage.missing_fields:
+            continue
+        lines.append(f"- {_decode_text(_PROMPT_UNAVAILABLE_MESSAGES[field])}")
+
     return "\n".join(lines)
 
 

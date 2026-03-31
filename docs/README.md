@@ -64,4 +64,4 @@
 ## 스트리밍 참고(Streaming Note)
 
 - detail/no-result short-circuit는 답변을 만들기 전에 이미 대신 보낼 응답을 확정하는 흐름이다.
-- route 계층은 canonical SSE event를 유지하되, legacy flat compatibility payload도 함께 유지한다. 특히 `/query/stream` 말미에는 `{"reference":[...]}` 1회와 `{"status":"done"}` 1회가 항상 내려간다.
+- route 계층은 `/query/stream`에서 canonical SSE event만 유지한다. terminal 구간은 `clarification` 또는 `answer.final` 뒤에 `reference.set`, `done`으로 해석하며, `reference.set`은 `selected_answer_artifact.references` -> retrieval evidence(`retrieval_bundle.items`/`canonical_evidence`) -> `context` 순서로 채운다.
