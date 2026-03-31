@@ -17,17 +17,17 @@ from apps.api.contracts.answer_groundedness import (
 
 
 _REFUSAL_CONTEXT_MARKERS = (
-    "\uc81c\uacf5\ub41c \uc815\ubcf4",
-    "\uc8fc\uc5b4\uc9c4 \uc815\ubcf4",
+    "제공된 정보",
+    "주어진 정보",
 )
 _REFUSAL_PHRASES = (
-    "\ucc3e\uc744 \uc218 \uc5c6",
-    "\ud655\uc778\ud560 \uc218 \uc5c6",
-    "\uc548\ub0b4\uac00 \uc5b4\ub835",
-    "\ud3ec\ud568\ub418\uc5b4 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
-    "\uba85\uc2dc\ub418\uc5b4 \uc788\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
-    "\uc548\ub0b4\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4",
-    "\uc694\uccad\ud558\uc2e0 \ub0b4\uc6a9\uc744 \uc548\ub0b4\ud558\uae30 \uc5b4\ub835\uc2b5\ub2c8\ub2e4",
+    "찾을 수 없",
+    "확인할 수 없",
+    "안내가 어렵",
+    "포함되어 있지 않습니다",
+    "명시되어 있지 않습니다",
+    "안내할 수 없습니다",
+    "요청하신 내용을 안내하기 어렵습니다",
 )
 _INTERNAL_CONTEXT_MARKERS = (
     "[detail_evidence]",
@@ -35,7 +35,18 @@ _INTERNAL_CONTEXT_MARKERS = (
     "requested_fields:",
     "missing_fields:",
     "answer_rule:",
-    "\uc9c8\ubb38\uc744 \uc785\ub825\ud574\uc8fc\uc138\uc694.",
+    "질문을 입력해주세요.",
+)
+_HTML_LEAK_MARKERS = (
+    "<span",
+    "</span",
+    "<div",
+    "</div",
+    "<a ",
+    "</a",
+    "tooltip-wrap",
+    "tooltip-target",
+    "data-ref-index",
 )
 _INTERNAL_CONTEXT_FIELDS = {
     "title",
@@ -93,7 +104,7 @@ def _looks_like_context_refusal(text: str) -> bool:
         return False
     has_context_marker = any(marker in normalized for marker in _REFUSAL_CONTEXT_MARKERS)
     has_refusal_phrase = any(phrase in normalized for phrase in _REFUSAL_PHRASES)
-    return (has_context_marker and has_refusal_phrase) or ("\uc8fc\uc5b4\uc9c4 \uc815\ubcf4\ub9cc\uc73c\ub85c" in normalized)
+    return (has_context_marker and has_refusal_phrase) or ("주어진 정보만으로" in normalized)
 
 
 def _looks_like_internal_context_leak(text: str) -> bool:
@@ -105,6 +116,8 @@ def _looks_like_internal_context_leak(text: str) -> bool:
     if re.search(r"\[\s*detail[\s_-]*evidence\s*\]", normalized_lower):
         return True
     if any(marker in normalized_lower for marker in _INTERNAL_CONTEXT_MARKERS):
+        return True
+    if any(marker in normalized_lower for marker in _HTML_LEAK_MARKERS):
         return True
 
     structured_line_count = 0
