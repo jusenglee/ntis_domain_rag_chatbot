@@ -8,6 +8,21 @@ from langchain_core.messages import AIMessage
 from apps.api.streaming.contracts import AnswerArtifact
 
 from apps.api.services.canonical_context import rehydrate_prev_context_from_canonical_evidence
+from apps.api.services.followup_anchor import is_referential_followup, parse_ordinal_reference, parse_source_reference
+
+_GENERIC_FOLLOWUP_PATTERNS = (
+    re.compile(r"다시\s*(?:보여줘|정리해줘|말해줘|알려줘)"),
+    re.compile(r"(?:조금\s*더|더)\s*(?:상세하게|자세하게|길게)"),
+    re.compile(r"(?:과제번호|번호|pjt_id|pjt_no)\s*(?:가|는|은|를|을)?\s*(?:아닌|말고|대신)"),
+    re.compile(r"(?:제목|과제명)\s*(?:으로|만)?\s*(?:보여줘|정리해줘|말해줘|알려줘)"),
+)
+
+
+def _looks_like_ambiguous_followup(raw_query: str) -> bool:
+    text = str(raw_query or "").strip()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _GENERIC_FOLLOWUP_PATTERNS)
 
 
 def is_short_query_exception(raw_query: str) -> bool:
@@ -80,6 +95,21 @@ async def node_rule_precheck(
                 action="direct_answer",
                 direct_response="안녕하세요. 무엇을 도와드릴까요?",
                 reason="Simple greeting detected",
+            )
+        }
+
+    has_prev_context = bool(getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
+    has_explicit_followup_reference = (
+        parse_source_reference(raw_user_msg) is not None
+        or parse_ordinal_reference(raw_user_msg) is not None
+        or is_referential_followup(raw_user_msg)
+    )
+    if has_prev_context and _looks_like_ambiguous_followup(raw_user_msg) and not has_explicit_followup_reference:
+        return {
+            "rule_decision": rule_decision_cls(
+                action="direct_answer",
+                direct_response="이전 결과 중 어떤 항목을 기준으로 다시 보여드릴지 확인해 주세요. 예: 2번 과제, 출처 1, 방금 본 과제",
+                reason="Ambiguous follow-up without anchor",
             )
         }
 

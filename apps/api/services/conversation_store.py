@@ -1,4 +1,4 @@
-﻿"""Conversation-memory helpers isolated from the server entrypoint.
+"""Conversation-memory helpers isolated from the server entrypoint.
 
 The functions here convert Redis payloads to runtime objects and back so persistence policy
 is testable without importing the full FastAPI server.
@@ -6,6 +6,7 @@ is testable without importing the full FastAPI server.
 
 from __future__ import annotations
 
+import html
 import json
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +14,40 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from apps.api.services.view_state import ConversationViewState, load_view_state
 from apps.core.storage import KVStore
+
+
+def _strip_html_like_markup(text: str) -> str:
+    decoded = html.unescape(str(text or ""))
+    if "<" not in decoded or ">" not in decoded:
+        return decoded
+
+    out: list[str] = []
+    inside_tag = False
+    for ch in decoded:
+        if ch == "<":
+            inside_tag = True
+            if out and out[-1] != " ":
+                out.append(" ")
+            continue
+        if ch == ">":
+            if inside_tag:
+                inside_tag = False
+                if out and out[-1] != " ":
+                    out.append(" ")
+                continue
+        if not inside_tag:
+            out.append(ch)
+    return "".join(out)
+
+
+def _sanitize_history_content(content: Any, *, role: str) -> str:
+    text = str(content or "")
+    if not text or role != "ai":
+        return text
+
+    stripped = _strip_html_like_markup(text)
+    normalized = " ".join(stripped.split())
+    return normalized or text.strip()
 
 
 def safe_json_loads(raw: Optional[str], *, logger: Any, truncate_text: Any) -> Any:
@@ -29,7 +64,10 @@ def serialize_history(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     serialized: List[Dict[str, str]] = []
     for msg in messages:
         role = "human" if isinstance(msg, HumanMessage) else "ai"
-        serialized.append({"type": role, "content": msg.content})
+        content = _sanitize_history_content(getattr(msg, "content", ""), role=role)
+        if not content:
+            continue
+        serialized.append({"type": role, "content": content})
     return serialized
 
 
@@ -40,8 +78,8 @@ def deserialize_history(payload: Any) -> List[BaseMessage]:
     for msg in payload:
         if not isinstance(msg, dict):
             continue
-        role = msg.get("type")
-        content = msg.get("content")
+        role = str(msg.get("type") or "ai").strip().lower() or "ai"
+        content = _sanitize_history_content(msg.get("content"), role=role)
         if not content:
             continue
         if role == "human":
