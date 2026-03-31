@@ -20,4 +20,5 @@ class RetrievalBundle:
     no_result_message: str | None = None
     clarification: dict[str, Any] | None = None
     answer_context_text: str = ""
+    debug_answer_context_text: str = ""
     context_source: str = "pipeline_context"

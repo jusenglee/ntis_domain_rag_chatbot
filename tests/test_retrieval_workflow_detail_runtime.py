@@ -166,7 +166,10 @@ def test_node_rag_search_uses_anchor_locked_exact_lookup_for_detail_followup(mon
     )
 
     assert result["answer_artifact"] is None
-    assert "[detail_evidence]" in result["answer_context_text"]
+    assert result["answer_context_text"].startswith("# 출처 1. Project Alpha Detail")
+    assert "[detail_evidence]" not in result["answer_context_text"]
+    assert "[detail_evidence]" in result["debug_answer_context_text"]
+    assert "[detail_evidence]" in result["retrieval_bundle"].debug_answer_context_text
     assert DummyRetriever.calls[0]["top_k"] == 1
     assert DummyRetriever.calls[0]["intent_payload"] is state.intent_payload
     assert DummyRetriever.calls[0]["intent_payload"].normalized_intent.project_key_policy == "anchor_locked_pjt_id"
@@ -235,7 +238,10 @@ def test_node_rag_search_detail_cache_hit_returns_evidence_context_not_direct_an
     assert result["context"] == []
     assert result["canonical_evidence"] == []
     assert result["retrieval_bundle"].context_source == "detail_contract_context"
-    assert "[detail_evidence]" in result["answer_context_text"]
+    assert result["answer_context_text"].startswith("# 출처 1. Project Alpha")
+    assert "[detail_evidence]" not in result["answer_context_text"]
+    assert "[detail_evidence]" in result["debug_answer_context_text"]
+    assert "[detail_evidence]" in result["retrieval_bundle"].debug_answer_context_text
     assert any(event == "DETAIL.CACHE.HIT" for event, _ in events)
 
 

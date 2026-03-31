@@ -14,37 +14,38 @@ function Invoke-PytestChecked {
   }
 }
 
+function Get-RepoManifestSection {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Section
+  )
+
+  $json = & python -m apps.api.contracts.repo_manifest --section $Section
+  if ($LASTEXITCODE -ne 0) {
+    throw "repo manifest lookup failed with code $LASTEXITCODE"
+  }
+  return $json | ConvertFrom-Json
+}
+
+$baseline = Get-RepoManifestSection -Section "baseline_inventory"
+$collectOnlyArgs = @($baseline.collect_only_pytest_args | ForEach-Object { [string]$_ })
+$sharedPytestArgs = @($baseline.shared_pytest_args | ForEach-Object { [string]$_ })
+$coreContractSubset = @($baseline.core_contract_subset | ForEach-Object { [string]$_ })
+$evalFixtureTests = @($baseline.eval_fixture_tests | ForEach-Object { [string]$_ })
+$requiredFiles = @($baseline.required_files | ForEach-Object { [string]$_ })
+
 Write-Host "[baseline] collect-only"
-Invoke-PytestChecked @(
-  "-m", "pytest", "--collect-only", "-q",
-  "--ignore-glob=pytest-cache-files-*",
-  "--ignore-glob=tests/pytest-cache-files-*",
-  "-p", "no:cacheprovider"
-)
+Invoke-PytestChecked -Arguments (@("-m", "pytest") + $collectOnlyArgs)
 
 Write-Host "[baseline] core contract subset"
-Invoke-PytestChecked @(
-  "-m", "pytest", "-q",
-  "tests/test_planner_stagewise.py",
-  "tests/test_retrieval_workflow_detail_runtime.py",
-  "tests/test_rag_anchor_truth.py",
-  "tests/test_rag_anchor_truth_active_only.py",
-  "tests/test_request_facade_followup_seed_priority.py",
-  "tests/test_request_facade_strategy_meta_focus_entity.py",
-  "tests/test_retrieval_workflow_detail_cache_gate.py",
-  "tests/test_contract_debt_paydown.py",
-  "-p", "no:cacheprovider"
-)
+Invoke-PytestChecked -Arguments (@("-m", "pytest", "-q") + $coreContractSubset + $sharedPytestArgs)
 
 Write-Host "[baseline] eval fixtures"
-if (-not (Test-Path "eval/sample_queries.jsonl")) {
-  throw "missing eval/sample_queries.jsonl"
+foreach ($requiredPath in $requiredFiles) {
+  if (-not (Test-Path $requiredPath)) {
+    throw "missing $requiredPath"
+  }
 }
-if (-not (Test-Path "docs/PRODUCT_BASELINE.md")) {
-  throw "missing docs/PRODUCT_BASELINE.md"
-}
-Invoke-PytestChecked @(
-  "-m", "pytest", "-q", "tests/test_eval_fixture_schema.py", "-p", "no:cacheprovider"
-)
+Invoke-PytestChecked -Arguments (@("-m", "pytest", "-q") + $evalFixtureTests + $sharedPytestArgs)
 
 Write-Host "[baseline] ok"

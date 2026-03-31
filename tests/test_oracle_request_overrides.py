@@ -1,4 +1,5 @@
 ﻿import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -216,6 +217,32 @@ def test_normalize_oracle_request_defaults_maps_oracle_columns():
 
 
 
+def test_normalize_oracle_request_defaults_maps_oracle_uppercase_columns():
+    normalized = normalize_oracle_request_defaults(
+        {
+            "TEMPERATURE": 0.7,
+            "TOPP": 0.9,
+            "TOPK": 17,
+            "MAXTOKENS": 321,
+            "RAGMINDENSESCORE": 0.61,
+            "RAGWEIGHTLEXICAL": 0.33,
+            "RAGTOPKDENSE": 44,
+            "RAGTOPKLEXICALCANDIDATE": 555,
+        }
+    )
+
+    assert normalized == {
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "top_k": 17,
+        "max_tokens": 321,
+        "RAG_MIN_DENSE_SCORE": 0.61,
+        "RAG_W_LEX": 0.33,
+        "RAG_TOPK_DENSE": 44,
+        "RAG_TOPK_LEX_CAND": 555,
+    }
+
+
 def test_merge_request_overrides_preserves_request_precedence():
     merged, sources = merge_request_overrides(
         request_values={"temperature": 0.8, "top_k": 11},
@@ -242,6 +269,80 @@ def test_oracle_request_defaults_loader_from_env_uses_builtin_defaults(monkeypat
     assert "HOST=172.31.234.203" in loader.dsn
     assert "SERVICE_NAME=KNTIS" in loader.dsn
 
+
+
+def test_oracle_request_defaults_loader_executes_select_and_normalizes_uppercase_columns(monkeypatch):
+    connect_calls = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.description = [
+                ("TEMPERATURE",),
+                ("TOPP",),
+                ("TOPK",),
+                ("MAXTOKENS",),
+                ("RAGMINDENSESCORE",),
+                ("RAGWEIGHTLEXICAL",),
+                ("RAGTOPKDENSE",),
+                ("RAGTOPKLEXICALCANDIDATE",),
+            ]
+            self.executed = []
+            self.closed = False
+
+        def execute(self, query):
+            self.executed.append(query)
+
+        def fetchone(self):
+            return (0.4, 0.75, 9, 444, 0.61, 0.33, 44, 555)
+
+        def close(self):
+            self.closed = True
+
+    class FakeConnection:
+        def __init__(self):
+            self.cursor_obj = FakeCursor()
+            self.closed = False
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+
+    def fake_connect(*, user, password, dsn):
+        connect_calls.append({"user": user, "password": password, "dsn": dsn})
+        return connection
+
+    monkeypatch.setitem(sys.modules, "oracledb", SimpleNamespace(connect=fake_connect))
+    loader = OracleRequestDefaultsLoader(
+        user="ird",
+        password="pw",
+        dsn="(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=172.31.234.203)(PORT=1253))(CONNECT_DATA=(SERVICE_NAME=KNTIS)))",
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None),
+    )
+
+    defaults, meta = loader._load_defaults_sync_with_meta()
+
+    assert connect_calls == [{"user": "ird", "password": "pw", "dsn": loader.dsn}]
+    assert connection.cursor_obj.executed == [loader.query]
+    assert connection.cursor_obj.closed is True
+    assert connection.closed is True
+    assert defaults == {
+        "temperature": 0.4,
+        "top_p": 0.75,
+        "top_k": 9,
+        "max_tokens": 444,
+        "RAG_MIN_DENSE_SCORE": 0.61,
+        "RAG_W_LEX": 0.33,
+        "RAG_TOPK_DENSE": 44,
+        "RAG_TOPK_LEX_CAND": 555,
+    }
+    assert meta["oracle_lookup_status"] == "loaded"
+    assert meta["oracle_lookup_attempted"] is True
+    assert meta["oracle_loaded_key_count"] == 8
+    assert meta["oracle_loaded_keys"] == sorted(defaults.keys())
 
 
 def test_req_start_logs_request_override_sources():
@@ -288,6 +389,34 @@ def test_req_oracle_defaults_logs_lookup_status_for_query_stream():
     assert oracle_event["oracle_connector_service_name"] == "KNTIS"
 
 
+def test_req_oracle_defaults_logs_lookup_status_for_query_debug():
+    graph = CaptureDebugGraph()
+    capture = CaptureLogger()
+    client = _build_client(
+        graph,
+        request_defaults_loader=FakeRequestDefaultsLoader(
+            {"temperature": 0.4, "top_p": 0.75},
+            meta={
+                "oracle_connector_host": "172.31.234.203",
+                "oracle_connector_service_name": "KNTIS",
+            },
+        ),
+        log_event=capture,
+    )
+
+    response = client.post("/query/debug", json={"question": "test"})
+
+    assert response.status_code == 200
+    oracle_event = next(fields for name, fields in capture.events if name == "REQ.ORACLE.DEFAULTS")
+    assert oracle_event["route"] == "/query/debug"
+    assert oracle_event["oracle_lookup_status"] == "loaded"
+    assert oracle_event["oracle_lookup_attempted"] is True
+    assert oracle_event["oracle_loaded_key_count"] == 2
+    assert oracle_event["request_override_source_counts"] == {"oracle": 2}
+    assert oracle_event["oracle_connector_host"] == "172.31.234.203"
+    assert oracle_event["oracle_connector_service_name"] == "KNTIS"
+
+
 def test_req_oracle_defaults_logs_skip_when_all_request_values_present():
     graph = CaptureGraph()
     capture = CaptureLogger()
@@ -310,20 +439,57 @@ def test_req_oracle_defaults_logs_skip_when_all_request_values_present():
     )
 
     assert response.status_code == 200
-    assert loader.calls == 0
+    assert loader.lookup_calls == 0
     oracle_event = next(fields for name, fields in capture.events if name == "REQ.ORACLE.DEFAULTS")
     assert oracle_event["route"] == "/query/stream"
     assert oracle_event["oracle_lookup_status"] == "skipped_all_request_values_present"
     assert oracle_event["oracle_lookup_attempted"] is False
 
+
 class CountingRequestDefaultsLoader(FakeRequestDefaultsLoader):
     def __init__(self, defaults=None):
         super().__init__(defaults=defaults)
-        self.calls = 0
+        self.lookup_calls = 0
+        self.load_defaults_calls = 0
+        self.load_defaults_with_meta_calls = 0
 
     async def load_defaults(self):
-        self.calls += 1
+        self.lookup_calls += 1
+        self.load_defaults_calls += 1
         return await super().load_defaults()
+
+    async def load_defaults_with_meta(self):
+        self.lookup_calls += 1
+        self.load_defaults_with_meta_calls += 1
+        return await super().load_defaults_with_meta()
+
+
+def test_query_stream_calls_oracle_lookup_when_request_values_absent():
+    graph = CaptureGraph()
+    loader = CountingRequestDefaultsLoader({"temperature": 0.4, "top_p": 0.75})
+    client = _build_client(graph, request_defaults_loader=loader)
+
+    response = client.post("/query/stream", json={"question": "test"})
+
+    assert response.status_code == 200
+    assert loader.lookup_calls == 1
+    assert loader.load_defaults_calls == 0
+    assert loader.load_defaults_with_meta_calls == 1
+    assert graph.last_inputs["request_overrides"] == {"temperature": 0.4, "top_p": 0.75}
+
+
+def test_query_debug_calls_oracle_lookup_when_request_values_absent():
+    graph = CaptureDebugGraph()
+    loader = CountingRequestDefaultsLoader({"temperature": 0.4, "RAG_TOPK_DENSE": 44})
+    client = _build_client(graph, request_defaults_loader=loader)
+
+    response = client.post("/query/debug", json={"question": "test"})
+
+    assert response.status_code == 200
+    assert loader.lookup_calls == 1
+    assert loader.load_defaults_calls == 0
+    assert loader.load_defaults_with_meta_calls == 1
+    assert graph.last_inputs["request_overrides"] == {"temperature": 0.4, "RAG_TOPK_DENSE": 44}
 
 
 def test_query_stream_skips_oracle_lookup_when_all_request_values_present():
@@ -347,4 +513,28 @@ def test_query_stream_skips_oracle_lookup_when_all_request_values_present():
     )
 
     assert response.status_code == 200
-    assert loader.calls == 0
+    assert loader.lookup_calls == 0
+
+
+def test_query_debug_skips_oracle_lookup_when_all_request_values_present():
+    graph = CaptureDebugGraph()
+    loader = CountingRequestDefaultsLoader({"temperature": 0.4})
+    client = _build_client(graph, request_defaults_loader=loader)
+
+    response = client.post(
+        "/query/debug",
+        json={
+            "question": "test",
+            "Temperature": 0.7,
+            "Top-P": 0.9,
+            "Max-Token": 321,
+            "Top-K": 17,
+            "RAG_MIN_DENSE_SCORE": 0.61,
+            "RAG_TOPK_DENSE": 44,
+            "RAG_W_LEX": 0.33,
+            "RAG_TOPK_LEX_CAND": 555,
+        },
+    )
+
+    assert response.status_code == 200
+    assert loader.lookup_calls == 0

@@ -367,6 +367,7 @@ class AgentState(BaseModel):
     clarification: Optional[Dict[str, Any]] = None
     retrieval_bundle: Optional[Any] = None
     answer_context_text: str = ""
+    debug_answer_context_text: str = ""
     resolved_retrieval_query: Optional[str] = None
     strategy: Optional[Any] = None
     stream_emitter: Optional[AsyncStreamEmitter] = None

@@ -199,10 +199,11 @@ def test_node_rag_search_exact_lookup_uses_seed_query_and_hydrates_core_profile(
 
     assert any(event == "RAG.DETAIL.ANCHOR.EXACT_LOOKUP" and payload["selected_search_query"] == "PJT-1" for event, payload in events)
     assert result["answer_artifact"] is None
-    assert "[detail_evidence]" in result["answer_context_text"]
-    assert "year: 2025" in result["answer_context_text"]
-    assert "lead_org: Org Alpha" in result["answer_context_text"]
-    assert "participant_org: Org Beta" in result["answer_context_text"]
+    assert result["answer_context_text"].startswith("# 출처 1. Thin Project")
+    assert "연도: 2025" in result["answer_context_text"]
+    assert "수행기관: Org Alpha" in result["answer_context_text"]
+    assert "참여기관: Org Beta" in result["answer_context_text"]
+    assert "[detail_evidence]" in result["debug_answer_context_text"]
 
 
 def test_build_intent_payload_keeps_planner_locked_perf_route_without_post_merge_restore(monkeypatch):

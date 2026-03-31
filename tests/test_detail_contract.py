@@ -1,6 +1,12 @@
 from types import SimpleNamespace
 from apps.api.services.context_helpers import resolve_title_from_payload
-from apps.api.services.detail_contract import build_detail_answer_context, compute_detail_coverage, make_entity_cache_key, render_detail_answer
+from apps.api.services.detail_contract import (
+    build_detail_answer_context,
+    build_detail_prompt_context,
+    compute_detail_coverage,
+    make_entity_cache_key,
+    render_detail_answer,
+)
 from apps.api.services.view_state import FocusEntity, build_display_snapshot, focus_entity_from_detail
 from apps.core.canonical_evidence import build_canonical_evidence
 
@@ -171,6 +177,34 @@ def test_build_detail_answer_context_renders_structured_evidence():
     assert "pjt_id: PJT-123" in context
     assert "researchers: ???" in context
     assert "budget: 100??" in context
+
+
+def test_build_detail_prompt_context_renders_model_safe_source_block():
+    coverage = compute_detail_coverage(
+        {
+            "title": "자율주행차용 시스템반도체 보안성 평가 기반구축",
+            "pjt_id": "2410012330",
+            "pjt_no": "14342991",
+            "stan_yr": "2025",
+            "org_nm": "한국자동차연구원",
+            "prtcp_mp": [{"hm_nm": "박상일"}, {"hm_nm": "임병철"}],
+            "meta_detail": {"budget": "2574918000원", "goal": "보안성 평가 기반 구축"},
+        },
+        anchor=FocusEntity(kind="project", pjt_id="2410012330", title_text="자율주행차용 시스템반도체 보안성 평가 기반구축", source="detail_lookup"),
+    )
+
+    context = build_detail_prompt_context(coverage, requested_fields={"researchers", "outputs"})
+
+    assert context.startswith("# 출처 1. 자율주행차용 시스템반도체 보안성 평가 기반구축")
+    assert "- 과제 ID: 2410012330" in context
+    assert "- 과제 번호: 14342991" in context
+    assert "- 연구자: 박상일, 임병철" in context
+    assert "- 연구비: 2574918000원" in context
+    assert "성과물 정보는 제공된 자료에서 확인되지 않습니다." in context
+    assert "[detail_evidence]" not in context
+    assert "missing_fields:" not in context
+    assert "requested_fields:" not in context
+    assert "outputs:" not in context
 
 
 def test_build_display_snapshot_prefers_canonical_project_title_over_hit_title():
@@ -344,6 +378,83 @@ def test_compute_detail_coverage_hydrates_ntis_project_fields_from_meta_basic():
     assert coverage.rich_detail["goal"] == "Build a stable ternary inverter."
     assert coverage.rich_detail["period"] == "2021-06-01 ~ 2022-05-31"
     assert coverage.rich_detail["budget"] == "48400000"
+
+
+def test_build_canonical_evidence_hydrates_ntis_project_rich_facts():
+    evidence = build_canonical_evidence(
+        {
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+            "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+            "meta_basic": {
+                "pjt_prfrm_org_nm": "숙명여자대학",
+                "rsch_abstract": "요약 본문",
+                "rsch_goal_abstract": "목표 본문_x000D_\n후속 문장",
+                "tot_rsch_start_dt": "2021-06-01",
+                "tot_rsch_end_dt": "2022-05-31",
+                "rndco_tot_amt": "48400000",
+            },
+            "meta_detail": {
+                "outputs": [{"name": "SCI 논문"}],
+            },
+            "prtcp_mp": [{"hm_nm": "김봉준", "blng_org_nm": "숙명여자대학"}],
+            "content1": "목표 본문",
+            "content2": "요약 본문",
+        },
+        rank=1,
+        base_route="project",
+        output_type="detail",
+    ).to_dict()
+
+    assert evidence["roles"]["lead_org_name"] == ["숙명여자대학"]
+    assert evidence["facts"]["summary"] == "요약 본문"
+    assert evidence["facts"]["goal"] == "목표 본문\n후속 문장"
+    assert evidence["facts"]["period"] == "2021-06-01 ~ 2022-05-31"
+    assert evidence["facts"]["budget"] == "48400000"
+    assert evidence["facts"]["outputs"] == ["SCI 논문"]
+
+
+def test_compute_detail_coverage_hydrates_rich_project_fields_from_canonical_facts_when_doc_is_thin():
+    canonical = build_canonical_evidence(
+        {
+            "pjt_id": "1711135956",
+            "pjt_no": "2021R1F1A1057134",
+            "title1": "단일 반도체물질 기반 3진 논리 게이트 개발",
+            "meta_basic": {
+                "pjt_prfrm_org_nm": "숙명여자대학",
+                "rsch_abstract": "요약 본문",
+                "rsch_goal_abstract": "목표 본문_x000D_\n후속 문장",
+                "tot_rsch_start_dt": "2021-06-01",
+                "tot_rsch_end_dt": "2022-05-31",
+                "rndco_tot_amt": "48400000",
+            },
+            "meta_detail": {
+                "outputs": [{"name": "SCI 논문"}],
+            },
+            "prtcp_mp": [{"hm_nm": "김봉준", "blng_org_nm": "숙명여자대학"}],
+        },
+        rank=1,
+        base_route="project",
+        output_type="detail",
+    ).to_dict()
+
+    coverage = compute_detail_coverage(
+        {
+            "pjt_id": "1711135956",
+            "ids": canonical["ids"],
+            "facts": canonical["facts"],
+            "roles": canonical["roles"],
+        },
+        anchor=FocusEntity(kind="project", source="detail_lookup", pjt_id="1711135956", title_text="1. 김봉준"),
+    )
+
+    assert coverage.core_profile["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+    assert coverage.core_profile["lead_org"] == "숙명여자대학"
+    assert coverage.rich_detail["summary"] == "요약 본문"
+    assert coverage.rich_detail["goal"] == "목표 본문\n후속 문장"
+    assert coverage.rich_detail["period"] == "2021-06-01 ~ 2022-05-31"
+    assert coverage.rich_detail["budget"] == "48400000"
+    assert coverage.rich_detail["outputs"] == ["SCI 논문"]
 
 
 def test_resolve_title_from_payload_prefers_title1_over_title_text():

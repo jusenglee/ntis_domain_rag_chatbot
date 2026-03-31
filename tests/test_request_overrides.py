@@ -556,6 +556,7 @@ def test_generate_answer_prefers_pipeline_answer_context_text():
 def test_build_answer_context_uses_pipeline_context_before_canonical():
     result = build_answer_context(
         answer_context_text="pipeline context",
+        debug_answer_context_text="debug pipeline context",
         docs_for_ctx=[{"title": "ignored"}],
         canonical_evidence=[{"facts": {"title": "ignored"}}],
         render_profile={"name": "detail", "context_kind": "project"},
@@ -577,4 +578,5 @@ def test_build_answer_context_uses_pipeline_context_before_canonical():
     )
 
     assert result["context_text"] == "pipeline context"
+    assert result["debug_context_text"] == "debug pipeline context"
     assert result["context_source"] == "pipeline_context"

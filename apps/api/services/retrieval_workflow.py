@@ -9,6 +9,7 @@ from apps.core.canonical_evidence import build_canonical_evidence
 from apps.api.services.followup_anchor import parse_display_limit
 from apps.api.services.detail_contract import (
     build_detail_answer_context,
+    build_detail_prompt_context,
     compute_detail_coverage,
     coverage_satisfies_fields,
     extract_requested_fields,
@@ -223,6 +224,7 @@ def _build_retrieval_bundle(
     clarification: dict[str, Any] | None = None,
     no_result_message: str | None = None,
     answer_context_text: str = "",
+    debug_answer_context_text: str = "",
     context_source: str = "pipeline_context",
 ) -> RetrievalBundle:
     items: list[ResultItem] = []
@@ -239,6 +241,7 @@ def _build_retrieval_bundle(
         clarification=clarification,
         no_result_message=no_result_message,
         answer_context_text=str(answer_context_text or ""),
+        debug_answer_context_text=str(debug_answer_context_text or ""),
         context_source=str(context_source or "pipeline_context"),
     )
 
@@ -910,7 +913,11 @@ async def node_rag_search(
                     expected_schema_version=DETAIL_CACHE_SCHEMA_VERSION,
                 )
             if cache_entry and coverage_satisfies_fields(cache_entry.coverage, requested_fields):
-                detail_context_text = build_detail_answer_context(
+                detail_prompt_context = build_detail_prompt_context(
+                    cache_entry.coverage,
+                    requested_fields=requested_fields,
+                )
+                detail_debug_context = build_detail_answer_context(
                     cache_entry.coverage,
                     requested_fields=requested_fields,
                 )
@@ -926,14 +933,16 @@ async def node_rag_search(
                     canonical_evidence=[],
                     render_profile={"context_kind": getattr(cache_entry.anchor, "kind", "project"), "name": "detail"},
                     raw_count=1,
-                    answer_context_text=detail_context_text,
+                    answer_context_text=detail_prompt_context,
+                    debug_answer_context_text=detail_debug_context,
                     context_source="detail_contract_context",
                 )
                 return {
                     "context": [],
                     "canonical_evidence": [],
                     "retrieval_bundle": retrieval_bundle,
-                    "answer_context_text": detail_context_text,
+                    "answer_context_text": detail_prompt_context,
+                    "debug_answer_context_text": detail_debug_context,
                     "resolved_retrieval_query": state.messages[-1].content,
                     "actual_retrieval_query": state.messages[-1].content,
                     "render_profile": {"context_kind": getattr(cache_entry.anchor, "kind", "project"), "name": "detail"},
@@ -1101,6 +1110,11 @@ async def node_rag_search(
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
         clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
         answer_context_text = str(retrieve_result.get("answer_context_text") or "") if isinstance(retrieve_result, dict) else ""
+        debug_answer_context_text = (
+            str(retrieve_result.get("debug_answer_context_text") or answer_context_text)
+            if isinstance(retrieve_result, dict)
+            else answer_context_text
+        )
         raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
         retrieval_bundle = _build_retrieval_bundle(
             docs=docs,
@@ -1110,6 +1124,7 @@ async def node_rag_search(
             clarification=clarification,
             no_result_message=no_result_message,
             answer_context_text=answer_context_text,
+            debug_answer_context_text=debug_answer_context_text,
             context_source=("pipeline_context" if answer_context_text else "derived_canonical_evidence"),
         )
 
@@ -1259,11 +1274,16 @@ async def node_rag_search(
                     source_turn_id=state.request_id,
                     schema_version=DETAIL_CACHE_SCHEMA_VERSION,
                 )
-                detail_context_text = build_detail_answer_context(
+                detail_prompt_context = build_detail_prompt_context(
                     coverage,
                     requested_fields=requested_fields,
                 )
-                answer_context_text = detail_context_text
+                detail_debug_context = build_detail_answer_context(
+                    coverage,
+                    requested_fields=requested_fields,
+                )
+                answer_context_text = detail_prompt_context
+                debug_answer_context_text = detail_debug_context
                 retrieval_bundle = _build_retrieval_bundle(
                     docs=docs,
                     canonical_evidence=canonical_evidence,
@@ -1271,7 +1291,8 @@ async def node_rag_search(
                     raw_count=raw_result_count,
                     clarification=clarification,
                     no_result_message=no_result_message,
-                    answer_context_text=detail_context_text,
+                    answer_context_text=detail_prompt_context,
+                    debug_answer_context_text=detail_debug_context,
                     context_source="detail_contract_context",
                 )
                 log_event(
@@ -1299,6 +1320,7 @@ async def node_rag_search(
             "canonical_evidence": canonical_evidence,
             "retrieval_bundle": retrieval_bundle,
             "answer_context_text": answer_context_text,
+            "debug_answer_context_text": debug_answer_context_text,
             "resolved_retrieval_query": resolved_retrieval_query,
             "actual_retrieval_query": actual_retrieval_query,
             "render_profile": render_profile,

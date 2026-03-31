@@ -71,6 +71,19 @@ _INTERNAL_CONTEXT_FIELDS = {
     "perf_type",
     "affiliation",
 }
+_INTERNAL_SCHEMA_LABEL_PATTERN = re.compile(
+    r"\((?:pjt_id|pjt_no|rst_id|person_no|org_id|org_code|biz_no|doi|issn|lead_org|participant_org|researchers|summary|goal|period|budget|outputs|perf_type|affiliation)\)"
+)
+_RAW_INTERNAL_UNAVAILABLE_PHRASES = (
+    "필드는 제공된 정보",
+    "필드는 제공된 자료",
+    "필드는 확인할 수 없",
+    "필드가 제공되지",
+    "field is not provided",
+    "fields are not provided",
+    "fields were not provided",
+    "상세 정보 미제공",
+)
 _BYPASS_ANSWER_KINDS = BYPASS_ANSWER_KINDS
 
 
@@ -108,7 +121,8 @@ def _looks_like_context_refusal(text: str) -> bool:
 
 
 def _looks_like_internal_context_leak(text: str) -> bool:
-    normalized_lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    raw_text = str(text or "")
+    normalized_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     if not normalized_lines:
         return False
     normalized_text = "\n".join(normalized_lines)

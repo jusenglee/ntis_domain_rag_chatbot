@@ -5,11 +5,15 @@ from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from apps.api.rag_mapper.schema_types import DataTag
 from apps.api.contracts.answer_groundedness import (
     AnswerGroundednessVerdict,
     build_groundedness_snapshot_from_canonical_evidence,
 )
-from apps.api.services.canonical_context import render_canonical_evidence_text
+from apps.api.services.canonical_context import (
+    render_canonical_evidence_debug_text,
+    render_canonical_evidence_text,
+)
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.core.canonical_evidence import build_canonical_evidence
 
@@ -50,6 +54,134 @@ def _resolve_llm_request_overrides(state: Any) -> dict[str, Any]:
     return llm_overrides
 
 
+def _reference_tag_from_source_type(source_type: Any) -> Optional[str]:
+    normalized = str(source_type or "").strip().lower()
+    mapping = {
+        "project": DataTag.PROJECT.value,
+        "paper": DataTag.PAPER.value,
+        "patent": DataTag.PATENT.value,
+        "report": DataTag.REPORT.value,
+        "software": DataTag.SOFTWARE.value,
+        "standard": DataTag.STANDARD.value,
+        "compound": DataTag.COMPOUND.value,
+        "equipment": DataTag.EQUIPMENT.value,
+        "organism_info": DataTag.ORGANISM_INFO.value,
+        "organism_resource": DataTag.ORGANISM_RESOURCE.value,
+        "manual": DataTag.MANUAL.value,
+        "tech_summary": DataTag.TECH_SUMMARY.value,
+        "variety": DataTag.VARIETY.value,
+        "qna": DataTag.QNA.value,
+    }
+    return mapping.get(normalized)
+
+
+def _normalize_reference_id(reference: dict[str, Any]) -> Optional[str]:
+    tag = str(reference.get("tag") or "").strip()
+    source_type = str(reference.get("source_type") or "").strip().lower()
+    project_like = (
+        tag == DataTag.PROJECT.value
+        or source_type == "project"
+        or (reference.get("pjt_id") and not any(reference.get(key) for key in ("rst_id", "perf_id", "paper_id")))
+    )
+    if project_like:
+        value = reference.get("pjt_id") or reference.get("id")
+    else:
+        value = reference.get("rst_id") or reference.get("perf_id") or reference.get("paper_id") or reference.get("id")
+    text = str(value or "").strip()
+    return text or None
+
+
+def _normalize_reference_payload(reference: dict[str, Any]) -> Optional[dict[str, Any]]:
+    tag = str(reference.get("tag") or "").strip() or None
+    title = str(reference.get("title") or reference.get("title_text") or "").strip() or None
+    normalized = {
+        "tag": tag,
+        "id": _normalize_reference_id(reference),
+        "title": title,
+    }
+    if not any(normalized.values()):
+        return None
+    return normalized
+
+
+def _reference_seed_from_canonical_item(
+    canonical: dict[str, Any],
+    *,
+    fallback_doc: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    ids = canonical.get("ids") if isinstance(canonical.get("ids"), dict) else {}
+    facts = canonical.get("facts") if isinstance(canonical.get("facts"), dict) else {}
+    evidence = canonical.get("evidence") if isinstance(canonical.get("evidence"), dict) else {}
+    fallback = fallback_doc if isinstance(fallback_doc, dict) else {}
+    return {
+        "tag": str(fallback.get("tag") or "").strip() or _reference_tag_from_source_type(canonical.get("source_type")),
+        "source_type": canonical.get("source_type"),
+        "pjt_id": ids.get("pjt_id") or fallback.get("pjt_id"),
+        "pjt_no": ids.get("pjt_no") or fallback.get("pjt_no"),
+        "rst_id": ids.get("rst_id") or ids.get("perf_id") or ids.get("paper_id") or fallback.get("rst_id") or fallback.get("perf_id") or fallback.get("paper_id"),
+        "id": fallback.get("id"),
+        "title": facts.get("title") or evidence.get("title_text") or canonical.get("identity") or fallback.get("title"),
+        "title_text": evidence.get("title_text") or facts.get("title") or fallback.get("title_text"),
+    }
+
+
+def _collect_state_references(state: Any) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    seen_keys: set[tuple[Any, Any, Any]] = set()
+
+    def _append(reference: Optional[dict[str, Any]]) -> None:
+        if not isinstance(reference, dict):
+            return
+        normalized = _normalize_reference_payload(reference)
+        if normalized is None:
+            return
+        dedupe_key = (normalized.get("tag"), normalized.get("id"), normalized.get("title"))
+        if dedupe_key in seen_keys:
+            return
+        seen_keys.add(dedupe_key)
+        references.append(normalized)
+
+    retrieval_bundle = getattr(state, "retrieval_bundle", None)
+    if isinstance(retrieval_bundle, dict):
+        items = retrieval_bundle.get("items")
+    else:
+        items = getattr(retrieval_bundle, "items", None)
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                display = item.get("display")
+                canonical = item.get("canonical")
+            else:
+                display = getattr(item, "display", None)
+                canonical = getattr(item, "canonical", None)
+            display_doc = dict(display) if isinstance(display, dict) else {}
+            canonical_doc = dict(canonical) if isinstance(canonical, dict) else {}
+            _append(_reference_seed_from_canonical_item(canonical_doc, fallback_doc=display_doc))
+
+    if references:
+        return references
+
+    canonical_evidence = getattr(state, "canonical_evidence", None) or []
+    for item in canonical_evidence:
+        if not isinstance(item, dict):
+            continue
+        _append(_reference_seed_from_canonical_item(item))
+    return references
+
+
+def _with_references(artifact: AnswerArtifact, references: list[dict[str, Any]]) -> AnswerArtifact:
+    return AnswerArtifact(
+        text=artifact.text,
+        answer_kind=artifact.answer_kind,
+        stream_metrics=dict(artifact.stream_metrics or {}),
+        user_visible_final_required=bool(artifact.user_visible_final_required),
+        references=list(references or []),
+        clarification=artifact.clarification,
+        error=artifact.error,
+        meta=dict(artifact.meta or {}),
+    )
+
+
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
     """여러 객체나 dict에서 같은 속성의 첫 non-None 값을 찾는다."""
     for source in sources:
@@ -86,6 +218,7 @@ def _resolve_groundedness_visible_count(state: Any) -> Optional[int]:
 def build_answer_context(
     *,
     answer_context_text: Optional[str] = None,
+    debug_answer_context_text: Optional[str] = None,
     docs_for_ctx: list[Any],
     canonical_evidence: Optional[list[dict[str, Any]]] = None,
     render_profile: Optional[dict[str, Any]] = None,
@@ -123,14 +256,18 @@ def build_answer_context(
         }
 
     pipeline_context = str(answer_context_text or "").strip()
+    pipeline_debug_context = str(debug_answer_context_text or "").strip()
     if pipeline_context:
         context_text = pipeline_context
+        debug_context_text = pipeline_debug_context or context_text
         if is_solar and solar_max_context_chars > 0:
             context_text = context_text[:solar_max_context_chars]
+            debug_context_text = debug_context_text[:solar_max_context_chars]
         context_sentences = len(split_sentences_fn(context_text)) if context_text and context_text != "NONE" else 0
         context_tokens_est = len(context_text.split()) if context_text and context_text != "NONE" else 0
         return {
             "context_text": context_text,
+            "debug_context_text": debug_context_text,
             "rendered_context_used": context_text != "NONE",
             "context_sentences": context_sentences,
             "context_tokens_est": context_tokens_est,
@@ -163,14 +300,21 @@ def build_answer_context(
         profile,
         max_chars=solar_max_context_chars if is_solar else 0,
     )
+    debug_context_text = render_canonical_evidence_debug_text(
+        effective_canonical,
+        profile,
+        max_chars=solar_max_context_chars if is_solar else 0,
+    )
     rendered_context_used = bool(effective_canonical) and context_text != "NONE"
     if is_solar and solar_max_context_chars > 0:
         context_text = context_text[:solar_max_context_chars]
+        debug_context_text = debug_context_text[:solar_max_context_chars]
 
     context_sentences = len(split_sentences_fn(context_text)) if context_text and context_text != "NONE" else 0
     context_tokens_est = len(context_text.split()) if context_text and context_text != "NONE" else 0
     return {
         "context_text": context_text,
+        "debug_context_text": debug_context_text,
         "rendered_context_used": rendered_context_used,
         "context_sentences": context_sentences,
         "context_tokens_est": context_tokens_est,
@@ -270,12 +414,18 @@ async def generate_answer(
         or getattr(retrieval_bundle, "answer_context_text", None)
         or ""
     ).strip()
+    debug_answer_context_text = str(
+        getattr(state, "debug_answer_context_text", None)
+        or getattr(retrieval_bundle, "debug_answer_context_text", None)
+        or ""
+    ).strip()
     docs_for_ctx = getattr(state, "context", None) or getattr(state, "prev_context", None) or []
     canonical_evidence = getattr(state, "canonical_evidence", None) or []
     render_profile = getattr(state, "render_profile", None) or {}
 
     context_info = build_answer_context_fn(
         answer_context_text=answer_context_text,
+        debug_answer_context_text=debug_answer_context_text,
         docs_for_ctx=docs_for_ctx,
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,
@@ -285,6 +435,7 @@ async def generate_answer(
         model_name=model_name,
     )
     context_text = context_info["context_text"]
+    debug_context_text = context_info.get("debug_context_text") or context_text
     rendered_context_used = context_info["rendered_context_used"]
     context_sentences = context_info["context_sentences"]
     context_tokens_est = context_info["context_tokens_est"]
@@ -305,7 +456,7 @@ async def generate_answer(
         f"[원본 질문]\n{getattr(last_message, 'content', '')}\n\n"
         f"[제공된 정보]\n{context_text}"
     )
-    log_section_fn("Reference Context", context_text)
+    log_section_fn("Reference Context", debug_context_text)
 
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
     token_hint_source = qa
@@ -336,6 +487,10 @@ async def generate_answer(
             user_visible_final_required=True,
             meta={"model_key": final_field.replace("answer_", "")},
         )
+    if isinstance(final_artifact, AnswerArtifact) and not list(final_artifact.references or []):
+        inferred_references = _collect_state_references(state)
+        if inferred_references:
+            final_artifact = _with_references(final_artifact, inferred_references)
     final_answer = final_artifact.text
     stream_metrics = dict(final_artifact.stream_metrics or {})
 
@@ -496,6 +651,7 @@ async def merge_answers(
             answer_kind=("direct_answer" if selected_model == "fallback" else "llm_collected"),
             stream_metrics=dict(selected_meta or {}),
             user_visible_final_required=True,
+            references=_collect_state_references(state),
             meta={"answer_source": selected_answer_source, "model_key": selected_model},
         )
     if selected_model == "solar":
@@ -519,12 +675,15 @@ async def merge_answers(
         enriched_meta["groundedness_status"] = selected_groundedness.get("status")
         enriched_meta["groundedness_reason_codes"] = list(selected_groundedness.get("reason_codes") or [])
         enriched_meta["groundedness_summary"] = selected_groundedness
+        selected_references = list(selected_artifact.references or [])
+        if not selected_references:
+            selected_references = _collect_state_references(state)
         selected_artifact = AnswerArtifact(
             text=selected_artifact.text,
             answer_kind=selected_artifact.answer_kind,
             stream_metrics=dict(selected_artifact.stream_metrics or {}),
             user_visible_final_required=bool(selected_artifact.user_visible_final_required),
-            references=list(selected_artifact.references or []),
+            references=selected_references,
             clarification=selected_artifact.clarification,
             error=selected_artifact.error,
             meta=enriched_meta,
