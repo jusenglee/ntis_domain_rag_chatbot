@@ -168,6 +168,11 @@ def _normalize_ids_map(values: Any) -> Dict[str, list[str]]:
     return normalized
 
 
+def is_child_anchor_source(source: Any) -> bool:
+    text = str(source or "").strip().lower()
+    return text.startswith("detail_") or text.startswith("child_")
+
+
 _CHILD_ANCHOR_SOURCES = {
     "people": "detail_participant_match",
     "org": "detail_org_match",

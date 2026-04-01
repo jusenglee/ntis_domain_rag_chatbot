@@ -595,6 +595,13 @@
       renderBodies();
     }
 
+    function appendRawTrace(rawLine) {
+      if (!rawLine) return;
+      logBox.textContent += `${rawLine}\n\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+      console.log(rawLine);
+    }
+
     const payload = {
       model: aKey,
       question: q,
@@ -626,8 +633,6 @@
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const event = buffer.slice(0, idx).trim();
-
-        console.log(buffer);
         buffer = buffer.slice(idx + 2);
 
         if (!event.startsWith("data:")) continue;
@@ -651,6 +656,12 @@
         const eventKind = String(eventPayload?.kind || "");
         const eventContent = (typeof eventPayload?.content === "string") ? eventPayload.content : "";
         const eventMeta = (eventPayload?.meta && typeof eventPayload.meta === "object") ? eventPayload.meta : {};
+        const shouldTraceRawEvent = eventKind !== "conversation" && eventKind !== "status";
+        const rawTraceLine = `data: ${jsonStr}`;
+
+        if (shouldTraceRawEvent) {
+          appendRawTrace(rawTraceLine);
+        }
 
         if (eventKind === "conversation") {
           const nextConversationId = String(eventMeta.conversation_id || "");

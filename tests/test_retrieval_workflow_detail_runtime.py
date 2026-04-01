@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import apps.api.services.retrieval_workflow as retrieval_workflow
-from apps.api.services.view_state import ConversationViewState, FocusEntity
+from apps.api.services.view_state import ActiveScope, ConversationViewState, FocusEntity
 from apps.core.pipeline_steps import NormalizedIntent
 
 
@@ -65,6 +65,129 @@ def test_build_detail_coverage_input_prefers_canonical_project_title_over_pollut
 
     assert merged["title"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
     assert merged["title_text"] == "단일 반도체물질 기반 3진 논리 게이트 개발"
+
+
+def test_promote_unique_list_subject_anchor_supports_people_and_org_without_ids():
+    people_snapshot = SimpleNamespace(
+        context_kind="people",
+        view_id="view-people",
+        items=[
+            SimpleNamespace(display_rank=1, pjt_id="PJT-1", pjt_no="NO-1", rst_id=None, title_text="프로젝트 A", person_no=None, org_id=None, org_code=None, biz_no=None, doi=None, issn=None, researchers=["김봉준"], lead_org=None, participant_org=[], child_refs=[]),
+            SimpleNamespace(display_rank=2, pjt_id="PJT-1", pjt_no="NO-1", rst_id=None, title_text="프로젝트 B", person_no=None, org_id=None, org_code=None, biz_no=None, doi=None, issn=None, researchers=["김봉준"], lead_org=None, participant_org=[], child_refs=[]),
+        ],
+    )
+    org_snapshot = SimpleNamespace(
+        context_kind="org",
+        view_id="view-org",
+        items=[
+            SimpleNamespace(display_rank=1, pjt_id="PJT-1", pjt_no="NO-1", rst_id=None, title_text="프로젝트 A", person_no=None, org_id=None, org_code=None, biz_no=None, doi=None, issn=None, researchers=[], lead_org="숙명여자대학", participant_org=[], child_refs=[]),
+            SimpleNamespace(display_rank=2, pjt_id="PJT-1", pjt_no="NO-1", rst_id=None, title_text="프로젝트 B", person_no=None, org_id=None, org_code=None, biz_no=None, doi=None, issn=None, researchers=[], lead_org="숙명여자대학", participant_org=[], child_refs=[]),
+        ],
+    )
+
+    people_anchor, people_meta = retrieval_workflow._promote_unique_list_subject_anchor(
+        snapshot=people_snapshot,
+        parent_focus=FocusEntity(kind="project", source="detail_lookup", pjt_id="PJT-1", pjt_no="NO-1"),
+    )
+    org_anchor, org_meta = retrieval_workflow._promote_unique_list_subject_anchor(
+        snapshot=org_snapshot,
+        parent_focus=FocusEntity(kind="project", source="detail_lookup", pjt_id="PJT-1", pjt_no="NO-1"),
+    )
+
+    assert people_anchor is not None
+    assert people_anchor.kind == "people"
+    assert people_anchor.source == "child_list_unique_subject"
+    assert people_anchor.title_text == "김봉준"
+    assert people_anchor.pjt_id == "PJT-1"
+    assert people_meta["candidate_count"] == 1
+
+    assert org_anchor is not None
+    assert org_anchor.kind == "org"
+    assert org_anchor.source == "child_list_unique_subject"
+    assert org_anchor.title_text == "숙명여자대학"
+    assert org_anchor.pjt_no == "NO-1"
+    assert org_meta["candidate_count"] == 1
+
+
+def test_node_rag_search_promotes_unique_people_child_anchor_from_list_results(monkeypatch):
+    events = []
+    monkeypatch.setattr(retrieval_workflow, "DetailCacheEntry", lambda **kwargs: SimpleNamespace(**kwargs))
+
+    class PeopleListRetriever:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def retrieve(self, query):
+            return {
+                "documents": [
+                    {"title": "단일 반도체물질 기반 3진 논리 게이트 개발", "pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                    {"title": "관련 논문 A", "pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                ],
+                "canonical_evidence": [
+                    {
+                        "context_kind": "people",
+                        "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                        "facts": {"title": "단일 반도체물질 기반 3진 논리 게이트 개발", "year": 2021},
+                        "roles": {"participant_researcher_name": ["김봉준"]},
+                    },
+                    {
+                        "context_kind": "people",
+                        "ids": {"pjt_id": "1711135956", "pjt_no": "2021R1F1A1057134"},
+                        "facts": {"title": "관련 논문 A", "year": 2022},
+                        "roles": {"participant_researcher_name": ["김봉준"]},
+                    },
+                ],
+                "render_profile": {"context_kind": "people"},
+                "answer_context_text": "# 출처 1. 김봉준",
+                "raw_result_count": 2,
+            }
+
+    state = SimpleNamespace(
+        knowledge_sufficiency=SimpleNamespace(retrieval_query="2번 과제 연구자"),
+        question_analysis=SimpleNamespace(output_type="list", base_route="people", limit=20, display_limit=20, action="list"),
+        intent_payload=Payload(
+            normalized_intent=NormalizedIntent(
+                action="list",
+                base_route="people",
+                relation=None,
+                is_id_query=False,
+                output_type="list",
+                ids_map={"pjt_id": ["1711135956"]},
+            ),
+            strategy_meta={"explicit_followup": True, "followup_resolution_status": "resolved", "anchor_source": "display_snapshot", "followup_reference_kind": "reference_followup"},
+        ),
+        view_state=ConversationViewState(
+            active_scope=ActiveScope(
+                focus=FocusEntity(kind="project", source="detail_lookup", pjt_id="1711135956", pjt_no="2021R1F1A1057134", title_text="단일 반도체물질 기반 3진 논리 게이트 개발"),
+                scope_kind="detail",
+            ),
+            latest_focus_entity=FocusEntity(kind="project", source="detail_lookup", pjt_id="1711135956", pjt_no="2021R1F1A1057134", title_text="단일 반도체물질 기반 3진 논리 게이트 개발"),
+        ),
+        request_id="rid",
+        conversation_id="cid",
+        question="2번 과제 연구자를 보여줘",
+        messages=[SimpleNamespace(content="2번 과제 연구자를 보여줘")],
+        request_overrides={},
+    )
+
+    result = asyncio.run(
+        retrieval_workflow.node_rag_search(
+            state,
+            resolve_rag_queries_fn=lambda **kwargs: ("2번 과제 연구자를 보여줘", "2번 과제 연구자", "2번 과제 연구자를 보여줘", 1.0, False, [], False),
+            custom_rag_retriever_cls=PeopleListRetriever,
+            tool_cls=DummyTool,
+            max_top_k_size=20,
+            strategy_violation_cls=RuntimeError,
+            logger=SimpleNamespace(error=lambda *args, **kwargs: None),
+            log_event=lambda event, **payload: events.append((event, payload)),
+        )
+    )
+
+    assert result["view_state"].active_scope.child_anchor is not None
+    assert result["view_state"].active_scope.child_anchor.kind == "people"
+    assert result["view_state"].active_scope.child_anchor.title_text == "김봉준"
+    assert result["view_state"].active_scope.child_anchor.source == "child_list_unique_subject"
+    assert any(event == "FOLLOWUP.CHILD_ANCHOR.PROMOTED" for event, _ in events)
 
 
 def test_build_detail_coverage_input_keeps_wrapper_title_for_synthetic_rows():

@@ -133,6 +133,18 @@ def _looks_like_internal_context_leak(text: str) -> bool:
         return True
     if any(marker in normalized_lower for marker in _HTML_LEAK_MARKERS):
         return True
+    if _INTERNAL_SCHEMA_LABEL_PATTERN.search(normalized_lower):
+        return True
+
+    internal_field_mentions = {
+        field
+        for field in _INTERNAL_CONTEXT_FIELDS
+        if re.search(rf"(?<![a-z0-9_]){re.escape(field)}(?![a-z0-9_])", normalized_lower)
+    }
+    if internal_field_mentions and any(
+        marker in normalized_lower for marker in _RAW_INTERNAL_UNAVAILABLE_PHRASES
+    ):
+        return True
 
     structured_line_count = 0
     for line in normalized_lower.splitlines():

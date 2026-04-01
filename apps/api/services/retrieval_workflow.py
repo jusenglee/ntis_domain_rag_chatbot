@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from apps.api.services.canonical_context import build_prev_context_canonical_text
 from apps.core.canonical_evidence import build_canonical_evidence
-from apps.api.services.followup_anchor import parse_display_limit
+from apps.api.services.followup_anchor import is_child_anchor_source, parse_display_limit
 from apps.api.services.detail_contract import (
     build_detail_answer_context,
     build_detail_prompt_context,
@@ -359,6 +359,259 @@ def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]])
             }
         )
     return synthetic_docs
+
+
+def _subject_identity(kind: str, *, display_name: str | None, ids_map: dict[str, list[str]]) -> str:
+    if kind == "people" and ids_map.get("person_no"):
+        return f"people:person_no:{ids_map['person_no'][0]}"
+    if kind == "org":
+        if ids_map.get("org_id"):
+            return f"org:org_id:{ids_map['org_id'][0]}"
+        if ids_map.get("org_code"):
+            return f"org:org_code:{ids_map['org_code'][0]}"
+        if ids_map.get("biz_no"):
+            return f"org:biz_no:{ids_map['biz_no'][0]}"
+    if kind == "perf":
+        if ids_map.get("rst_id"):
+            return f"perf:rst_id:{ids_map['rst_id'][0]}"
+        if ids_map.get("doi"):
+            return f"perf:doi:{ids_map['doi'][0]}"
+        if ids_map.get("issn"):
+            return f"perf:issn:{ids_map['issn'][0]}"
+    return f"{kind}:name:{str(display_name or '').strip().lower()}"
+
+
+def _append_unique_subject_candidate(
+    candidates: list[dict[str, Any]],
+    seen: set[str],
+    *,
+    kind: str,
+    display_name: str | None,
+    ids_map: dict[str, list[str]],
+    item: Any,
+    source: str,
+) -> None:
+    display = str(display_name or "").strip()
+    normalized_ids = {
+        key: [str(value).strip() for value in values if str(value).strip()]
+        for key, values in (ids_map or {}).items()
+        if any(str(value).strip() for value in values)
+    }
+    if not display and not normalized_ids:
+        return
+    identity = _subject_identity(kind, display_name=display, ids_map=normalized_ids)
+    if identity in seen:
+        return
+    seen.add(identity)
+    candidates.append(
+        {
+            "kind": kind,
+            "display_name": display or None,
+            "ids_map": normalized_ids,
+            "display_rank": getattr(item, "display_rank", None),
+            "item_pjt_id": getattr(item, "pjt_id", None),
+            "item_pjt_no": getattr(item, "pjt_no", None),
+            "item_rst_id": getattr(item, "rst_id", None),
+            "item_title": getattr(item, "title_text", None),
+            "source": source,
+        }
+    )
+
+
+def _collect_subject_candidates_from_item(item: Any, *, subject_kind: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    child_refs = list(getattr(item, "child_refs", []) or [])
+
+    if subject_kind == "people":
+        person_no = str(getattr(item, "person_no", None) or "").strip()
+        if person_no:
+            researchers = [str(value).strip() for value in (getattr(item, "researchers", []) or []) if str(value).strip()]
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="people",
+                display_name=(researchers[0] if len(set(researchers)) == 1 else None),
+                ids_map={"person_no": [person_no]},
+                item=item,
+                source="item_person_no",
+            )
+        for ref in child_refs:
+            if str(getattr(ref, "kind", "") or "").strip().lower() != "people":
+                continue
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="people",
+                display_name=str(getattr(ref, "display_name", "") or "").strip() or None,
+                ids_map=dict(getattr(ref, "ids_map", {}) or {}),
+                item=item,
+                source="child_ref",
+            )
+        researchers = [str(value).strip() for value in (getattr(item, "researchers", []) or []) if str(value).strip()]
+        if len(set(researchers)) == 1:
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="people",
+                display_name=researchers[0],
+                ids_map={},
+                item=item,
+                source="researchers",
+            )
+        return candidates
+
+    if subject_kind == "org":
+        org_ids_map = {
+            "org_id": [str(getattr(item, "org_id", None) or "").strip()] if str(getattr(item, "org_id", None) or "").strip() else [],
+            "org_code": [str(getattr(item, "org_code", None) or "").strip()] if str(getattr(item, "org_code", None) or "").strip() else [],
+            "biz_no": [str(getattr(item, "biz_no", None) or "").strip()] if str(getattr(item, "biz_no", None) or "").strip() else [],
+        }
+        if any(org_ids_map.values()):
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="org",
+                display_name=str(getattr(item, "lead_org", None) or "").strip() or None,
+                ids_map=org_ids_map,
+                item=item,
+                source="item_org_id",
+            )
+        for ref in child_refs:
+            if str(getattr(ref, "kind", "") or "").strip().lower() != "org":
+                continue
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="org",
+                display_name=str(getattr(ref, "display_name", "") or "").strip() or None,
+                ids_map=dict(getattr(ref, "ids_map", {}) or {}),
+                item=item,
+                source="child_ref",
+            )
+        lead_org = str(getattr(item, "lead_org", None) or "").strip()
+        if lead_org:
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="org",
+                display_name=lead_org,
+                ids_map={},
+                item=item,
+                source="lead_org",
+            )
+        participant_org = [str(value).strip() for value in (getattr(item, "participant_org", []) or []) if str(value).strip()]
+        if len(set(participant_org)) == 1:
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="org",
+                display_name=participant_org[0],
+                ids_map={},
+                item=item,
+                source="participant_org",
+            )
+        return candidates
+
+    if subject_kind == "perf":
+        perf_ids_map = {
+            "rst_id": [str(getattr(item, "rst_id", None) or "").strip()] if str(getattr(item, "rst_id", None) or "").strip() else [],
+            "doi": [str(getattr(item, "doi", None) or "").strip()] if str(getattr(item, "doi", None) or "").strip() else [],
+            "issn": [str(getattr(item, "issn", None) or "").strip()] if str(getattr(item, "issn", None) or "").strip() else [],
+        }
+        if any(perf_ids_map.values()):
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="perf",
+                display_name=str(getattr(item, "title_text", "") or "").strip() or None,
+                ids_map=perf_ids_map,
+                item=item,
+                source="item_perf_id",
+            )
+        for ref in child_refs:
+            if str(getattr(ref, "kind", "") or "").strip().lower() != "perf":
+                continue
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="perf",
+                display_name=str(getattr(ref, "display_name", "") or "").strip() or None,
+                ids_map=dict(getattr(ref, "ids_map", {}) or {}),
+                item=item,
+                source="child_ref",
+            )
+        title_text = str(getattr(item, "title_text", "") or "").strip()
+        if title_text:
+            _append_unique_subject_candidate(
+                candidates,
+                seen,
+                kind="perf",
+                display_name=title_text,
+                ids_map={},
+                item=item,
+                source="title_text",
+            )
+        return candidates
+
+    return candidates
+
+
+def _promote_unique_list_subject_anchor(*, snapshot: Any, parent_focus: Any) -> tuple[FocusEntity | None, dict[str, Any]]:
+    subject_kind = str(getattr(snapshot, "context_kind", "") or "").strip().lower()
+    if subject_kind not in {"people", "org", "perf"}:
+        return None, {"subject_kind": subject_kind or None, "candidate_count": 0, "source": None}
+
+    candidates: list[dict[str, Any]] = []
+    for item in list(getattr(snapshot, "items", []) or []):
+        candidates.extend(_collect_subject_candidates_from_item(item, subject_kind=subject_kind))
+
+    unique_candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        identity = _subject_identity(
+            subject_kind,
+            display_name=candidate.get("display_name"),
+            ids_map=dict(candidate.get("ids_map") or {}),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_candidates.append(candidate)
+
+    if len(unique_candidates) != 1:
+        return None, {
+            "subject_kind": subject_kind,
+            "candidate_count": len(unique_candidates),
+            "source": None,
+        }
+
+    candidate = unique_candidates[0]
+    ids_map = dict(candidate.get("ids_map") or {})
+    anchor = FocusEntity(
+        kind=subject_kind,
+        source="child_list_unique_subject",
+        view_id=getattr(snapshot, "view_id", None),
+        display_rank=candidate.get("display_rank"),
+        pjt_id=_first_text_value(getattr(parent_focus, "pjt_id", None), candidate.get("item_pjt_id")),
+        pjt_no=_first_text_value(getattr(parent_focus, "pjt_no", None), candidate.get("item_pjt_no")),
+        rst_id=(ids_map.get("rst_id") or [candidate.get("item_rst_id"), None])[0],
+        person_no=(ids_map.get("person_no") or [None])[0],
+        org_id=(ids_map.get("org_id") or [None])[0],
+        org_code=(ids_map.get("org_code") or [None])[0],
+        biz_no=(ids_map.get("biz_no") or [None])[0],
+        doi=(ids_map.get("doi") or [None])[0],
+        issn=(ids_map.get("issn") or [None])[0],
+        title_text=str(candidate.get("display_name") or candidate.get("item_title") or "").strip() or None,
+        lead_org=getattr(parent_focus, "lead_org", None),
+    )
+    return anchor, {
+        "subject_kind": subject_kind,
+        "candidate_count": len(unique_candidates),
+        "source": candidate.get("source"),
+        "title_text": getattr(anchor, "title_text", None),
+        "identity_key": _subject_identity(subject_kind, display_name=getattr(anchor, "title_text", None), ids_map=ids_map),
+    }
 
 
 @dataclass(frozen=True)
@@ -848,7 +1101,7 @@ async def node_rag_search(
             try:
                 restored_focus_entity = FocusEntity.model_validate(focus_entity_payload)
                 current_focus_entity = getattr(view_state, "latest_focus_entity", None)
-                is_child_anchor = str(getattr(restored_focus_entity, "source", "") or "").strip().lower().startswith("detail_")
+                is_child_anchor = is_child_anchor_source(getattr(restored_focus_entity, "source", None))
                 if is_child_anchor or current_focus_entity is None or _is_equivalent_focus_entity(current_focus_entity, restored_focus_entity):
                     if is_child_anchor:
                         view_state = set_active_child_anchor_scope(
@@ -1291,6 +1544,36 @@ async def node_rag_search(
                 conversation_id=state.conversation_id,
                 view_id=snapshot.view_id,
             )
+            promoted_child_anchor, promotion_meta = _promote_unique_list_subject_anchor(
+                snapshot=snapshot,
+                parent_focus=getattr(getattr(view_state, "active_scope", None), "focus", None),
+            )
+            if promoted_child_anchor is not None:
+                view_state = set_active_child_anchor_scope(
+                    view_state,
+                    anchor=promoted_child_anchor,
+                    turn_id=getattr(state, "request_id", None),
+                    reason="result_list_unique_subject",
+                )
+                log_event(
+                    "FOLLOWUP.CHILD_ANCHOR.PROMOTED",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    view_id=snapshot.view_id,
+                    anchor_kind=getattr(promoted_child_anchor, "kind", None),
+                    anchor_source=getattr(promoted_child_anchor, "source", None),
+                    anchor_title=getattr(promoted_child_anchor, "title_text", None),
+                    person_no=getattr(promoted_child_anchor, "person_no", None),
+                    org_id=getattr(promoted_child_anchor, "org_id", None),
+                    org_code=getattr(promoted_child_anchor, "org_code", None),
+                    biz_no=getattr(promoted_child_anchor, "biz_no", None),
+                    rst_id=getattr(promoted_child_anchor, "rst_id", None),
+                    doi=getattr(promoted_child_anchor, "doi", None),
+                    issn=getattr(promoted_child_anchor, "issn", None),
+                    promotion_source=promotion_meta.get("source"),
+                    candidate_count=promotion_meta.get("candidate_count"),
+                    identity_key=promotion_meta.get("identity_key"),
+                )
             _log_scope_transition(log_event, state=state, view_state=view_state)
 
         answer_artifact = None

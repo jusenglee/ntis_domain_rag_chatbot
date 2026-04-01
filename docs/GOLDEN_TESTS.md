@@ -84,6 +84,21 @@
 - query: `2024 신동구(한국과학기술정보연구원) 연구자의 활동이력`
 - expected keep: deterministic repair preserves people/org/year filters and keeps the semantic cue `활동이력` in `retrieval_query`
 - expected ban: immediate raw-query fallback that drops the broad-history cue
+
+### 11D. Unique child-subject list follow-up stays on child axis
+- query chain:
+  - `반도체 관련 과제 3건`
+  - `2번 과제 연구자`
+  - `해당 연구자의 다른 활동은?`
+- expected keep: people list result promotes a stable child anchor when visible items collapse to one logical subject
+- expected keep: deictic follow-up reuses that child anchor and preserves the `people` axis
+- expected ban: clarification caused only by duplicate rows for the same logical subject
+
+### 11E. Explicit project id does not collapse broad child-subject query to project detail
+- query: `김봉준 (PJT_ID=1711135956) 의 다른 활동을 보여줘`
+- expected keep: planner still runs because the query is broad-history/child-subject scoped
+- expected keep: explicit `pjt_id` remains context seed only
+- expected ban: `resolved_retrieval_query=1711135956` exact-detail collapse unless the final contract is truly `detail`
 ## Safety / contract bans
 ### 12. No fallback chat
 - when retrieval is weak, system must not silently switch to fallback chat mode.

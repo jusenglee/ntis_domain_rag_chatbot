@@ -1,6 +1,7 @@
 """NTIS RAG 서버의 HTTP 라우트 계층.\n\n이 모듈은 FastAPI 요청/응답 계약만 맡는다.\n무거운 도메인 로직은 graph와 service helper에 두어 `apps/api/main.py`가 조립 진입점으로 남게 한다.\n"""
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -15,7 +16,7 @@ from apps.api.rag_mapper.schema_types import DataTag
 from apps.api.services.request_overrides import merge_request_overrides
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
-from apps.api.streaming.sse_encoder import encode_stream_event
+from apps.api.streaming.sse_encoder import encode_sse_payload, encode_stream_event
 from apps.core.metrics import MetricSnapshot
 from apps.core.schemas import strategy_spec_to_response
 
@@ -180,9 +181,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         }
 
     def _normalize_clarification_payload(
-        state: Any,
-        *,
-        selected_artifact: Optional[AnswerArtifact] = None,
+            state: Any,
+            *,
+            selected_artifact: Optional[AnswerArtifact] = None,
     ) -> Optional[dict[str, Any]]:
         clarification_payload = _dump_model(_state_get(state, "clarification"))
         if not isinstance(clarification_payload, dict):
@@ -217,8 +218,69 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             return "gemma"
         return normalized
 
-    def _emit_stream_event(event: StreamEvent) -> str:
-        return encode_stream_event(event)
+    def _stream_data(tag: str, **payload: Any) -> str:
+        """SSE 한 프레임을 현재 route 규약에 맞는 문자열로 인코딩한다."""
+        return encode_sse_payload(tag, **payload)
+
+    def _stream_legacy_payload(**payload: Any) -> str:
+        """Legacy flat payload는 tag envelope 없이 기존 wire shape로 유지한다."""
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _resolve_stream_model_label(model_key: str) -> str:
+        normalized = _normalize_stream_model_key(model_key)
+        if normalized == "solar":
+            return "UPSTAGE"
+        if normalized == "gemma":
+            return "GEMMA"
+        return normalized.upper() or "UNKNOWN"
+
+    def _stream_chunk(model_key: str, content: str) -> str:
+        normalized = _normalize_stream_model_key(model_key)
+        return _stream_data(
+            "chunk",
+            model=_resolve_stream_model_label(normalized),
+            content=content,
+        )
+
+    def _emit_legacy_stream_event(event: StreamEvent) -> list[str]:
+        payloads = [encode_stream_event(event)]
+        meta = dict(event.meta or {})
+        if event.kind == "conversation":
+            payloads.append(_stream_data("conversation", conversationId=str(meta.get("conversation_id") or "")))
+        elif event.kind == "status":
+            payloads.append(_stream_data("status", **meta))
+        elif event.kind == "answer.chunk":
+            payloads.append(_stream_chunk(event.model_key or "unknown", event.content or ""))
+        elif event.kind == "answer.final":
+            if bool(meta.get("degraded")):
+                payloads.append(
+                    _stream_data(
+                        "answer",
+                        answer=event.content or "",
+                        error_code=str(meta.get("error_code") or "DEGRADED_FINAL"),
+                        reason=str(meta.get("reason") or "degraded_final_answer"),
+                        degraded=True,
+                    )
+                )
+        elif event.kind == "reference.set":
+            payloads.append(_stream_legacy_payload(reference=list(meta.get("references") or [])))
+        elif event.kind == "error":
+            payloads.append(
+                _stream_data(
+                    "error",
+                    error=str(meta.get("error") or ""),
+                    error_code=str(meta.get("error_code") or "INTERNAL_ERROR"),
+                    reason=str(meta.get("reason") or ""),
+                )
+            )
+        elif event.kind == "done":
+            payload = {"status": "done"}
+            if bool(meta.get("degraded")):
+                payload["degraded"] = True
+            if bool(meta.get("error")):
+                payload["error"] = True
+            payloads.append(_stream_data("status", **payload))
+        return payloads
 
     def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
         """reference payload와 원본 doc를 넘나들며 첫 유효 값을 찾는다."""
@@ -273,151 +335,16 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     return text
         return None
 
-    def _normalize_reference_entry(reference: Dict[str, Any], doc: Dict[str, Any]) -> Dict[str, Any]:
-        """reference source가 달라도 public payload shape는 {tag,id,title}로 맞춘다."""
-        normalized_reference = dict(reference) if isinstance(reference, dict) else {}
-        normalized_doc = dict(doc) if isinstance(doc, dict) else {}
-        tag = str(normalized_reference.get("tag") or normalized_doc.get("tag") or "").strip() or None
-        return {
-            "tag": tag,
-            "id": _resolve_reference_id(normalized_reference, normalized_doc),
-            "title": _resolve_reference_title(normalized_reference, normalized_doc),
-        }
-
-    def _reference_tag_from_source_type(source_type: Any) -> Optional[str]:
-        normalized = str(source_type or "").strip().lower()
-        mapping = {
-            "project": DataTag.PROJECT.value,
-            "paper": DataTag.PAPER.value,
-            "patent": DataTag.PATENT.value,
-            "report": DataTag.REPORT.value,
-            "software": DataTag.SOFTWARE.value,
-            "standard": DataTag.STANDARD.value,
-            "compound": DataTag.COMPOUND.value,
-            "equipment": DataTag.EQUIPMENT.value,
-            "organism_info": DataTag.ORGANISM_INFO.value,
-            "organism_resource": DataTag.ORGANISM_RESOURCE.value,
-            "manual": DataTag.MANUAL.value,
-            "tech_summary": DataTag.TECH_SUMMARY.value,
-            "variety": DataTag.VARIETY.value,
-            "qna": DataTag.QNA.value,
-        }
-        return mapping.get(normalized)
-
-    def _reference_seed_from_canonical_item(
-        canonical: Dict[str, Any],
-        *,
-        fallback_doc: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        if not isinstance(canonical, dict):
-            return {}
-        ids = canonical.get("ids") if isinstance(canonical.get("ids"), dict) else {}
-        facts = canonical.get("facts") if isinstance(canonical.get("facts"), dict) else {}
-        evidence = canonical.get("evidence") if isinstance(canonical.get("evidence"), dict) else {}
-        fallback = fallback_doc if isinstance(fallback_doc, dict) else {}
-        return {
-            "tag": _reference_tag_from_source_type(canonical.get("source_type")) or fallback.get("tag"),
-            "pjt_id": ids.get("pjt_id") or fallback.get("pjt_id"),
-            "pjt_no": ids.get("pjt_no") or fallback.get("pjt_no"),
-            "rst_id": ids.get("rst_id") or ids.get("perf_id") or ids.get("paper_id") or fallback.get("rst_id") or fallback.get("perf_id") or fallback.get("paper_id"),
-            "title": facts.get("title") or evidence.get("title_text") or canonical.get("identity") or fallback.get("title"),
-            "title_text": evidence.get("title_text") or facts.get("title") or fallback.get("title_text"),
-        }
-
     def _normalize_reference_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
         """context 문서를 API 응답용 reference payload로 정규화한다."""
         mapped = rag_mapper.get_references(doc)
         if not isinstance(mapped, dict):
             mapped = {}
-        return _normalize_reference_entry(mapped, doc)
-
-    def _append_reference_payload(
-        collected: list[Dict[str, Any]],
-        seen_reference_keys: set[tuple[Any, Any, Any]],
-        *,
-        reference: Optional[Dict[str, Any]] = None,
-        doc: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        normalized = _normalize_reference_entry(reference or {}, doc or {})
-        if not any(normalized.get(key) for key in ("tag", "id", "title")):
-            return
-        dedupe_key = (
-            normalized.get("tag"),
-            normalized.get("id"),
-            normalized.get("title"),
-        )
-        if dedupe_key in seen_reference_keys:
-            return
-        seen_reference_keys.add(dedupe_key)
-        collected.append(normalized)
-
-    def _collect_reference_payloads(
-        state: Any,
-        *,
-        selected_artifact: Optional[AnswerArtifact] = None,
-    ) -> list[Dict[str, Any]]:
-        ref_docs: list[Dict[str, Any]] = []
-        seen_reference_keys: set[tuple[Any, Any, Any]] = set()
-
-        if isinstance(selected_artifact, AnswerArtifact):
-            for reference in list(selected_artifact.references or []):
-                if not isinstance(reference, dict):
-                    continue
-                _append_reference_payload(
-                    ref_docs,
-                    seen_reference_keys,
-                    reference=reference,
-                    doc=reference,
-                )
-
-        retrieval_bundle = _state_get(state, "retrieval_bundle")
-        if isinstance(retrieval_bundle, dict):
-            bundle_items = retrieval_bundle.get("items")
-        else:
-            bundle_items = getattr(retrieval_bundle, "items", None)
-        if isinstance(bundle_items, list):
-            for item in bundle_items:
-                if isinstance(item, dict):
-                    display_doc = item.get("display")
-                    canonical_doc = item.get("canonical")
-                else:
-                    display_doc = getattr(item, "display", None)
-                    canonical_doc = getattr(item, "canonical", None)
-                display_doc = dict(display_doc) if isinstance(display_doc, dict) else {}
-                canonical_doc = dict(canonical_doc) if isinstance(canonical_doc, dict) else {}
-                _append_reference_payload(
-                    ref_docs,
-                    seen_reference_keys,
-                    reference=_reference_seed_from_canonical_item(
-                        canonical_doc,
-                        fallback_doc=display_doc,
-                    ),
-                    doc=display_doc,
-                )
-
-        canonical_evidence = _state_get_list(state, "canonical_evidence")
-        for item in canonical_evidence:
-            if not isinstance(item, dict):
-                continue
-            _append_reference_payload(
-                ref_docs,
-                seen_reference_keys,
-                reference=_reference_seed_from_canonical_item(item),
-                doc={},
-            )
-
-        documents_used = _state_get_list(state, "context")
-        for doc in documents_used:
-            if not isinstance(doc, dict) or not is_hit_source(doc):
-                continue
-            _append_reference_payload(
-                ref_docs,
-                seen_reference_keys,
-                reference=_normalize_reference_payload(doc),
-                doc=doc,
-            )
-
-        return ref_docs
+        result = dict(mapped)
+        result["tag"] = str(result.get("tag") or doc.get("tag") or "").strip() or None
+        result["id"] = _resolve_reference_id(result, doc)
+        result["title"] = _resolve_reference_title(result, doc)
+        return result
 
     def _validate_request_override_ranges(overrides: dict[str, Any]) -> None:
         """잘못된 LLM override 값이 provider backend까지 내려가기 전에 막는다."""
@@ -461,11 +388,11 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return overrides
 
     async def _build_request_overrides(
-        payload: QueryRequest,
-        *,
-        request_id: str,
-        conversation_id: str,
-        route_name: str,
+            payload: QueryRequest,
+            *,
+            request_id: str,
+            conversation_id: str,
+            route_name: str,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """요청 payload와 Oracle 기본값을 병합해 최종 override와 source를 반환한다."""
         request_values = _extract_request_override_values(payload)
@@ -580,20 +507,27 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 return StreamEvent(kind=kind, request_id=request_id, seq=route_seq, model_key=model_key, content=content, meta=dict(meta or {}))
 
             if graph is None:
-                yield _emit_stream_event(
+                for payload_line in _emit_legacy_stream_event(
                     _next_route_event(
                         kind="error",
                         meta={"error": "runtime_not_ready", "error_code": "RUNTIME_NOT_READY", "reason": "compiled graph unavailable"},
                     )
-                )
-                yield _emit_stream_event(_next_route_event(kind="done", meta={"error": True}))
+                ):
+                    yield payload_line
+                for payload_line in _emit_legacy_stream_event(
+                    _next_route_event(kind="reference.set", meta={"references": []})
+                ):
+                    yield payload_line
+                for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
+                    yield payload_line
                 return
-            yield _emit_stream_event(
+            for payload_line in _emit_legacy_stream_event(
                 _next_route_event(
                     kind="conversation",
                     meta={"conversation_id": conversation_id},
                 )
-            )
+            ):
+                yield payload_line
             log_event(
                 "REQ.START",
                 request_id=request_id,
@@ -666,13 +600,15 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                             if stream_field == "reasoning" or not chunk_text:
                                 continue
                             model_key = "solar" if node == "generate_answer_solar" else "gemma"
-                            yield _emit_stream_event(
+                            for payload_line in _emit_legacy_stream_event(
                                 _next_route_event(kind="answer.chunk", model_key=model_key, content=chunk_text, meta={})
-                            )
+                            ):
+                                yield payload_line
                     final_state = dict(final_state or {})
                 else:
                     graph_task = asyncio.create_task(graph.ainvoke(inputs))
-                    yield _emit_stream_event(_next_route_event(kind="status", meta={"status": "retrieve"}))
+                    for payload_line in _emit_legacy_stream_event(_next_route_event(kind="status", meta={"status": "retrieve"})):
+                        yield payload_line
 
                     while True:
                         if graph_task.done() and emitter.empty():
@@ -686,10 +622,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                                 break
                             continue
                         route_seq = max(route_seq, int(getattr(emitted_event, "seq", 0) or 0))
-                        yield _emit_stream_event(emitted_event)
+                        for payload_line in _emit_legacy_stream_event(emitted_event):
+                            yield payload_line
 
                     final_state = await graph_task
                     question_analysis = _state_get(final_state, "question_analysis")
+                documents_used = _state_get_list(final_state, "context")
                 selected_answer_meta = _state_get_dict(final_state, "selected_answer_meta")
                 merge_debug = _state_get_dict(final_state, "merge_debug")
                 selected_artifact = _build_final_answer_artifact(final_state)
@@ -707,7 +645,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         content=clarification_message or None,
                         meta={"clarification": clarification_payload},
                     )
-                    yield _emit_stream_event(clarification_event)
+                    for payload_line in _emit_legacy_stream_event(clarification_event):
+                        yield payload_line
                     user_visible_terminal_emitted = True
 
                 if not clarification_payload and isinstance(selected_artifact, AnswerArtifact) and selected_artifact.text and selected_artifact.user_visible_final_required:
@@ -717,7 +656,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         content=selected_artifact.text,
                         meta=selected_artifact.to_meta_dict(),
                     )
-                    yield _emit_stream_event(final_event)
+                    for payload_line in _emit_legacy_stream_event(final_event):
+                        yield payload_line
                     user_visible_terminal_emitted = True
 
                 if not user_visible_terminal_emitted:
@@ -745,17 +685,31 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                             "degraded": True,
                         },
                     )
-                    yield _emit_stream_event(guard_event)
+                    for payload_line in _emit_legacy_stream_event(guard_event):
+                        yield payload_line
 
-                ref_docs = _collect_reference_payloads(
-                    final_state,
-                    selected_artifact=selected_artifact,
-                )
+                ref_docs = []
+                seen_reference_keys = set()
+                for doc in documents_used:
+                    if not is_hit_source(doc):
+                        continue
+                    normalized = _normalize_reference_payload(doc)
+                    dedupe_key = (
+                        normalized.get("tag"),
+                        normalized.get("id"),
+                        normalized.get("title"),
+                    )
+                    if dedupe_key in seen_reference_keys:
+                        continue
+                    seen_reference_keys.add(dedupe_key)
+                    ref_docs.append(normalized)
+
                 ref_event = _next_route_event(
                     kind="reference.set",
                     meta={"references": ref_docs},
                 )
-                yield _emit_stream_event(ref_event)
+                for payload_line in _emit_legacy_stream_event(ref_event):
+                    yield payload_line
 
                 solar_done = _state_get_dict(final_state, "answer_solar_meta")
                 gemma_done = _state_get_dict(final_state, "answer_gemma_meta")
@@ -776,7 +730,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     gemma_content_chars=gemma_done.get("content_chars"),
                 )
                 done_event = _next_route_event(kind="done", meta={})
-                yield _emit_stream_event(done_event)
+                for payload_line in _emit_legacy_stream_event(done_event):
+                    yield payload_line
 
             except Exception as exc:
                 logger.error("Stream Error: %s", exc, exc_info=True)
@@ -812,22 +767,34 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         error=ErrorArtifact(error_code=error_code, reason=reason),
                         meta={"degraded": True, "answer_source": "strategy_violation"},
                     )
-                    yield _emit_stream_event(
+                    for payload_line in _emit_legacy_stream_event(
                         _next_route_event(
                             kind="answer.final",
                             content=user_message,
                             meta=error_artifact.to_meta_dict() | {"error_code": error_code, "reason": reason, "degraded": True},
                         )
-                    )
-                    yield _emit_stream_event(_next_route_event(kind="done", meta={"degraded": True}))
+                    ):
+                        yield payload_line
+                    for payload_line in _emit_legacy_stream_event(
+                        _next_route_event(kind="reference.set", meta={"references": []})
+                    ):
+                        yield payload_line
+                    for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"degraded": True})):
+                        yield payload_line
                     return
-                yield _emit_stream_event(
+                for payload_line in _emit_legacy_stream_event(
                     _next_route_event(
                         kind="error",
                         meta={"error": str(exc), "error_code": error_code, "reason": reason},
                     )
-                )
-                yield _emit_stream_event(_next_route_event(kind="done", meta={"error": True}))
+                ):
+                    yield payload_line
+                for payload_line in _emit_legacy_stream_event(
+                    _next_route_event(kind="reference.set", meta={"references": []})
+                ):
+                    yield payload_line
+                for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
+                    yield payload_line
             finally:
                 await emitter.close()
                 set_log_context(request_id=None, conversation_id=None)

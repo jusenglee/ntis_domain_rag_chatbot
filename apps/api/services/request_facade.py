@@ -9,7 +9,7 @@ else:
     BaseMessage = Any
 
 from apps.api.services.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
-from apps.api.services.followup_anchor import anchor_to_seed_map, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
+from apps.api.services.followup_anchor import anchor_to_seed_map, is_child_anchor_source, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
 from apps.api.services.scope_resolver import resolve_scope_decision
 from apps.core.followup_resolution import resolve_reference_context_followup
 from apps.api.contracts.repo_manifest import PLANNER_PROMPT_DEFAULTS
@@ -19,6 +19,47 @@ from apps.api.services.view_state import ConversationViewState, clear_view_state
 _DISPLAY_LIMIT_SENTINEL = 10**9
 _DEFAULT_RETRIEVAL_LIMIT = 20
 _LIST_LIKE_OUTPUT_TYPES = {"list", "relation", "comparison", "series", "stats"}
+_BROAD_HISTORY_CUES = (
+    "다른 활동",
+    "활동 이력",
+    "활동이력",
+    "활동 내역",
+    "활동내역",
+    "참여이력",
+    "프로필",
+    "소속",
+    "현황",
+    "이력",
+    "업적",
+)
+_LIST_AXIS_CUES = (
+    "목록",
+    "리스트",
+    "보여줘",
+    "보여 줘",
+    "알려줘",
+    "알려 줘",
+    "찾아줘",
+    "찾아 줘",
+    "있는지",
+    "있어",
+)
+_SUBJECT_AXIS_CUES = (
+    "연구자",
+    "연구원",
+    "사람",
+    "기관",
+    "회사",
+    "조직",
+    "성과",
+    "논문",
+    "특허",
+    "보고서",
+    "참여과제",
+    "참여 과제",
+    "참여성과",
+    "참여 성과",
+)
 
 
 def _first_text(*values: Any) -> str:
@@ -136,6 +177,114 @@ def _replace_fields(source: Any, **updates: Any) -> Any:
 
 def _clear_active_view_scope(view_state: ConversationViewState) -> ConversationViewState:
     return clear_view_state_scope(view_state)
+
+
+def _merge_unique_terms(values: Any, *terms: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    iterable = values if isinstance(values, (list, tuple, set)) else [values]
+    for value in iterable:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    for term in terms:
+        text = str(term or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged
+
+
+def _has_subject_axis_request(question: str, normalized_intent: Any) -> bool:
+    for field in (
+        "people_terms",
+        "org_terms",
+        "lead_org_terms",
+        "participant_org_terms",
+        "people_affiliation_org_terms",
+        "perf_types",
+    ):
+        values = _get_field(normalized_intent, field, None) or []
+        if any(str(value or "").strip() for value in (values if isinstance(values, (list, tuple, set)) else [values])):
+            return True
+    if str(_get_field(normalized_intent, "org_role", "") or "").strip():
+        return True
+    text = str(question or "").strip()
+    return bool(text and any(token in text for token in _SUBJECT_AXIS_CUES))
+
+
+def _has_broad_history_or_list_cue(question: str) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return False
+    return any(token in text for token in [*_BROAD_HISTORY_CUES, *_LIST_AXIS_CUES])
+
+
+def _resolve_followup_subject_hint(anchor: Any = None, *, followup_resolution: Optional[Dict[str, Any]] = None) -> tuple[str | None, str | None]:
+    anchor_kind = str(getattr(anchor, "kind", "") or "").strip().lower()
+    anchor_title = str(getattr(anchor, "title_text", "") or "").strip()
+    if anchor_kind and anchor_title:
+        return anchor_kind, anchor_title
+
+    resolution = dict(followup_resolution or {})
+    selected_prev_item = dict(resolution.get("selected_prev_item") or {})
+    focus_entity = dict(resolution.get("focus_entity") or {})
+    kind = _first_text(
+        selected_prev_item.get("context_kind"),
+        focus_entity.get("kind"),
+    ).lower()
+    if not kind:
+        return None, None
+    title = _first_text(
+        selected_prev_item.get("person_name"),
+        selected_prev_item.get("title"),
+        focus_entity.get("title_text"),
+    )
+    return kind, title or None
+
+
+def _apply_followup_subject_hint(
+    normalized_intent: Any,
+    *,
+    anchor: Any = None,
+    followup_resolution: Optional[Dict[str, Any]] = None,
+) -> Any:
+    kind, title = _resolve_followup_subject_hint(anchor, followup_resolution=followup_resolution)
+    if not kind or not title:
+        return normalized_intent
+
+    if kind == "people":
+        people_terms = _merge_unique_terms(_get_field(normalized_intent, "people_terms", []) or [], title)
+        return _replace_fields(normalized_intent, people_terms=people_terms)
+    if kind == "org":
+        org_terms = _merge_unique_terms(_get_field(normalized_intent, "org_terms", []) or [], title)
+        return _replace_fields(normalized_intent, org_terms=org_terms)
+    if kind == "perf":
+        title_terms = _merge_unique_terms(_get_field(normalized_intent, "title", []) or [], title)
+        return _replace_fields(normalized_intent, title=title_terms)
+    return normalized_intent
+
+
+def _should_force_planner_for_explicit_seed(
+    *,
+    question: str,
+    normalized_intent: Any,
+    anchor: Any = None,
+    followup_resolution: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if is_child_anchor_source(getattr(anchor, "source", None)):
+        return True
+    followup_kind = str((followup_resolution or {}).get("followup_reference_kind") or "").strip().lower()
+    if followup_kind == "child_entity":
+        return True
+    if _has_subject_axis_request(question, normalized_intent):
+        return True
+    if _has_broad_history_or_list_cue(question):
+        return True
+    return False
 
 
 def _normalize_org_role_hint(normalized_intent: Any, question: str) -> Optional[str]:
@@ -288,7 +437,7 @@ def _build_followup_resolution_from_anchor(anchor: Any, snapshot: Any, question:
     ordinal_reference = parse_ordinal_reference(question)
     reference_kind = (
         "child_entity"
-        if str(anchor.source or "").strip().lower().startswith("detail_")
+        if is_child_anchor_source(getattr(anchor, "source", None))
         else
         "source_reference"
         if anchor.source == "display_snapshot" and source_reference is not None
@@ -647,6 +796,11 @@ class RequestUnderstandingFacade:
         if anchor is not None:
             normalized_intent_base = _apply_resolved_anchor_seed(normalized_intent_base, anchor)
             normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
+            normalized_intent_base = _apply_followup_subject_hint(
+                normalized_intent_base,
+                anchor=anchor,
+                followup_resolution=followup_resolution,
+            )
             self.log_event(
                 "FOLLOWUP.ANCHOR.RESOLVED",
                 request_id=request_id,
@@ -684,6 +838,10 @@ class RequestUnderstandingFacade:
         elif not has_explicit_seed and str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
             normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
             normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
+            normalized_intent_base = _apply_followup_subject_hint(
+                normalized_intent_base,
+                followup_resolution=followup_resolution,
+            )
             normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
                 normalized_intent_base,
                 question_analysis,
@@ -693,7 +851,27 @@ class RequestUnderstandingFacade:
                 request_id=request_id,
                 conversation_id=conversation_id,
             )
-        if not has_explicit_precheck_signals(precheck):
+        force_planner_for_explicit_seed = bool(
+            has_explicit_seed
+            and _should_force_planner_for_explicit_seed(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                anchor=anchor,
+                followup_resolution=followup_resolution,
+            )
+        )
+        if force_planner_for_explicit_seed:
+            self.log_event(
+                "PLANNER.EXPLICIT_SEED.OVERRIDE",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                reason="subject_axis_or_broad_history",
+                followup_reference_kind=followup_resolution.get("followup_reference_kind"),
+                anchor_source=getattr(anchor, "source", None),
+                has_subject_axis_request=int(_has_subject_axis_request(question, normalized_intent_base)),
+                has_broad_history_or_list_cue=int(_has_broad_history_or_list_cue(question)),
+            )
+        if not has_explicit_seed or force_planner_for_explicit_seed:
             question_analysis = await self.run_question_analysis(
                 question=question,
                 conversation_id=conversation_id,

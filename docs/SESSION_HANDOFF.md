@@ -1,5 +1,32 @@
 # SESSION_HANDOFF.md
 
+## 2026-03-31T20:23:14.5089387+09:00 Improver
+- branch/head: `고도화` / `e143313ca4a0e5ccd7207e22225f69be0441577d`
+- inspected files:
+  - `apps/api/services/answer_merge.py`
+  - `apps/api/services/scope_resolver.py`
+  - `tests/test_answer_merge_bypass.py`
+  - `tests/test_scope_resolver_v2.py`
+  - `tests/test_followup_clarification_scope.py`
+  - `docs/04_회귀기준과_점검.md`
+- findings:
+  - answer-stage leak detection declared `_INTERNAL_SCHEMA_LABEL_PATTERN` and `_RAW_INTERNAL_UNAVAILABLE_PHRASES` but never consumed them, so schema-label answers and raw missing-field inventory could still win under `solar_first`.
+  - `scope_resolver` kept refinement detection behind an active-scope gate, which made the documented `refinement_target_missing -> clarification_required` path unreachable for no-scope follow-ups such as `2021년만 보여줘`.
+  - the repo docs already described the intended refinement-clarification contract, so this task was runtime/test catch-up rather than a contract change.
+- changes:
+  - `answer_merge.py`: wired schema parenthetical labels and raw internal missing-field phrases into `_looks_like_internal_context_leak()` so those answers degrade consistently as `internal_context_leak`.
+  - `scope_resolver.py`: split active-scope detection from refinement-cue detection, counted `child_anchor` as an active target, and clarified only when the question is scope-dependent refinement without an independent search axis.
+  - `tests/test_scope_resolver_v2.py`: added regression coverage for `no active scope + years-only refinement -> clarification` and `no active scope + semantic axes -> fresh_search`.
+  - `tests/test_followup_clarification_scope.py`: added a `build_intent_payload()` regression to ensure `request_facade` propagates the no-scope refinement case as `clarification_required`.
+  - `docs/04_회귀기준과_점검.md` was reviewed and left unchanged because it already matches the intended refinement clarification behavior.
+- validations:
+  - `python -m pytest tests/test_answer_merge_bypass.py tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py tests/test_api_routes_reference_payload.py tests/test_runtime_helpers_stream_bypass.py tests/test_rag_anchor_truth.py tests/test_rag_anchor_truth_active_only.py -q -p no:cacheprovider` passed (`53 passed`)
+  - `python -m pytest tests/test_answer_merge_bypass.py tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py tests/test_request_facade_child_anchor.py tests/test_view_state_active_scope.py tests/test_api_routes_reference_payload.py tests/test_runtime_helpers_stream_bypass.py tests/test_rag_anchor_truth.py tests/test_rag_anchor_truth_active_only.py -q -p no:cacheprovider` passed (`56 passed`)
+  - `python -m py_compile apps/api/services/answer_merge.py apps/api/services/scope_resolver.py tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py` passed
+- next best task:
+  - rerun `tests/test_retrieval_workflow_detail_followup_freshness.py` and `tests/test_planner_stagewise.py` inside the real project environment that has `langgraph` and `llama_index`, so the freshness/planner-detail confidence gap closes.
+  - if the team wants stricter follow-up refinement semantics, promote the current heuristic (`no independent search axis`) into an explicit contract/example set in docs and golden tests.
+
 ## 2026-03-31T20:11:04.8410632+09:00 Improver
 - branch/head: `고도화` / `881265916b9900e4dd5e8425487ce47010a2506d`
 - inspected files:
@@ -1262,3 +1289,86 @@
 - next best task:
   - smallest implementation step: `apps/api/contracts/repo_manifest.py`에 additive `validation_profiles` metadata를 넣고, shared shell에서 이미 green인 source-reference / child-anchor / people-gate / groundedness snapshot 회귀를 `repo_minimal_contract`로 분리할 것
   - 그 다음 `scripts/run_baseline_checks.ps1`에 profile-aware readiness/blocked reporting을 추가하되, default full behavior는 바로 깨지지 않게 staged option으로 도입할 것
+
+## 2026-03-31T20:22:53.8040529+09:00 Watcher
+- branch/head: `고도화` / `e143313ca4a0e5ccd7207e22225f69be0441577d`
+- inspected files:
+  - production code static scan: `*.py`, `*.ps1`, `*.html` (tests / Markdown body excluded)
+  - `apps/api/services/view_state.py`
+  - `apps/api/services/planner_runtime.py`
+  - `apps/api/services/scope_resolver.py`
+  - `apps/api/services/request_facade.py`
+  - `apps/core/followup_resolution.py`
+  - `apps/api/contracts/answer_groundedness.py`
+  - `apps/core/retrieval.py`
+  - `apps/core/filters.py`
+  - `apps/core/llm_streaming.py`
+  - `templates/index.html`
+  - `scripts/run_baseline_checks.ps1`
+  - `docs/reports/watcher/2026-03-31-2022.md`
+- findings:
+  - comment corruption risk is currently low: production `py/ps1/html` scan found `0` UTF-8 decode failures and `0` replacement-character hits.
+  - the dominant risk is omission, not mojibake. Production Python now has `34 / 110` module docstrings (`30.9%`) and `721 / 1016` function docstrings (`71.0%`), but the lowest-coverage modules are exactly the branch-heavy follow-up / planner files.
+  - P1 hotspot: `apps/api/services/view_state.py` (`35` functions / `0` docstrings / `1` inline comment). `build_display_snapshot`, `focus_entity_from_detail`, `render_display_snapshot_text` all lack function-level contracts despite title precedence, child-ref synthesis, and display rendering policy.
+  - P1 hotspot: `apps/api/services/planner_runtime.py` (`27` functions / `0` docstrings / `1` inline comment). `_apply_deterministic_stage2_repair` and `run_stagewise_question_analysis` expose repair / retry / fallback policy only through code branches.
+  - P1 hotspot: `apps/api/services/scope_resolver.py` (`15` functions / `0` docstrings / `0` inline comments). `resolve_scope_decision` has no comment surface for reset / refinement / ambiguity order.
+  - P2 hotspot: `apps/api/services/request_facade.py`, `apps/core/followup_resolution.py`, `apps/api/contracts/answer_groundedness.py` still have comment coverage materially below the runtime complexity they carry.
+  - weak comments exist but are secondary: `templates/index.html` section-label comments (`A card`, `B card`, `MODEL_A / MODEL_B 처리`) are low-value compared with the Python omission hotspots.
+- changes:
+  - added watcher report `docs/reports/watcher/2026-03-31-2022.md` for the production-code comment-quality audit.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `e143313ca4a0e5ccd7207e22225f69be0441577d`
+  - static UTF-8 scan on production `py/ps1/html`: `112` files scanned, `0` decode failures, `0` replacement-character hits
+  - Python comment coverage scan: `110` files, `1016` functions/methods, `721` function docstrings, `34` module docstrings
+  - focused hotspot counts:
+    - `view_state.py`: `35` functions / `0` docstrings / `1` inline comment
+    - `planner_runtime.py`: `27` functions / `0` docstrings / `1` inline comment
+    - `scope_resolver.py`: `15` functions / `0` docstrings / `0` inline comments
+    - `request_facade.py`: `20` functions / `1` docstring / `2` inline comments
+    - `followup_resolution.py`: `17` functions / `0` docstrings / `1` inline comment
+    - `answer_groundedness.py`: `7` functions / `0` docstrings / `0` inline comments
+- next best task:
+  - safest next patch is doc-only: add module/public-entry docstrings to `view_state.py`, `planner_runtime.py`, `scope_resolver.py` first, then add a few reason-focused inline comments in the highest-branch functions
+  - if improver takes this, keep it as a documentation-only patch and do not alter runtime behavior or planner policy
+
+## 2026-04-01T15:31:00+09:00 Improver
+- branch/head: `고도화` / `e143313ca4a0e5ccd7207e22225f69be0441577d`
+- inspected files:
+  - `apps/api/services/request_facade.py`
+  - `apps/api/services/retrieval_workflow.py`
+  - `apps/api/services/followup_anchor.py`
+  - `apps/api/services/scope_resolver.py`
+  - `apps/api/services/view_state.py`
+  - `tests/test_request_facade_child_anchor.py`
+  - `tests/test_retrieval_workflow_detail_runtime.py`
+  - `tests/test_scope_resolver.py`
+  - `tests/test_scope_resolver_v2.py`
+  - `tests/test_followup_clarification_scope.py`
+  - `tests/test_view_state_active_scope.py`
+  - `tests/test_view_state_child_refs.py`
+  - `docs/02_실행계약과_전략규칙.md`
+  - `docs/GOLDEN_TESTS.md`
+  - `docs/SESSION_HANDOFF.md`
+- findings:
+  - 기존 follow-up 흐름은 `detail_*` child anchor만 공식 child subject로 취급해서, people/org/perf list 결과가 실질적으로 하나의 주체를 가리켜도 `active_scope.child_anchor`로 승격되지 않았다.
+  - explicit `pjt_id/pjt_no`가 질문 안에 있으면 broad history나 child-subject query라도 planner를 건너뛰어 project detail exact lookup으로 수축될 수 있었다.
+  - 이 문제는 연구자 전용 예외가 아니라 `child subject truth`와 `context seed truth`를 분리하지 못한 계약 문제였다.
+- changes:
+  - `followup_anchor.is_child_anchor_source()`를 추가하고 `detail_*`만 보던 child-anchor source 계약을 `detail_* | child_*`로 일반화했다.
+  - `request_facade`는 resolved child anchor의 `title_text`를 planner hint(`people_terms`, `org_terms`, `title`)로 보조 주입하고, explicit seed가 있어도 broad-history/list/child-subject cue가 있으면 planner를 계속 실행하도록 바꿨다.
+  - `retrieval_workflow`는 `context_kind=people|org|perf` list 결과에서 visible items가 하나의 논리 주체로 수렴하면 `active_scope.child_anchor`를 자동 승격하고 `FOLLOWUP.CHILD_ANCHOR.PROMOTED`를 남긴다.
+  - `docs/02_실행계약과_전략규칙.md`와 `docs/GOLDEN_TESTS.md`를 이번 일반화 계약에 맞게 갱신했다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `e143313ca4a0e5ccd7207e22225f69be0441577d`
+  - `python -m pytest tests/test_request_facade_child_anchor.py -q -p no:cacheprovider` passed (`3 passed`)
+  - `python -m pytest tests/test_retrieval_workflow_detail_runtime.py -q -p no:cacheprovider` passed (`18 passed`)
+  - `python -m pytest tests/test_scope_resolver_v2.py tests/test_followup_clarification_scope.py -q -p no:cacheprovider` passed (`8 passed`)
+  - `python -m pytest tests/test_scope_resolver.py tests/test_view_state_active_scope.py tests/test_view_state_child_refs.py -q -p no:cacheprovider` passed (`7 passed`)
+  - `python -m compileall apps/api/services/request_facade.py apps/api/services/retrieval_workflow.py apps/api/services/followup_anchor.py apps/api/services/scope_resolver.py` passed
+- remains risky:
+  - 사람/기관/성과 list 결과에서 name-only child anchor를 승격할 때, 서로 다른 동명이인/동기관이 한 화면에 섞인 edge case는 여전히 clarification으로 더 보수적으로 다뤄야 한다.
+  - explicit id + broad child-subject query의 golden path는 단위 테스트로 막았지만, 실제 end-to-end log replay harness는 아직 없다.
+  - 현재 `child_*` source 계약을 사용하는 생산 경로는 list promotion 하나뿐이라, 장기적으로는 source taxonomy와 metrics 집계를 한 번 더 정리할 필요가 있다.
+- next best task:
+  - multi-turn log replay 또는 golden transcript harness를 추가해 `반도체 관련 과제 3건 -> 2번 과제 연구자 -> 해당 연구자의 다른 활동` 같은 대화 체인을 end-to-end로 고정할 것
+  - `child_*` source별 observability panel을 정리해 list-promotion anchor와 detail-derived anchor의 성공률/clarification률을 구분해 볼 것
