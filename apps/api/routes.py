@@ -13,12 +13,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from apps.api.rag_mapper.schema_types import DataTag
-from apps.api.services.request_overrides import merge_request_overrides
+from apps.api.request_overrides import merge_request_overrides
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.api.streaming.sse_encoder import encode_sse_payload, encode_stream_event
-from apps.core.metrics import MetricSnapshot
-from apps.core.schemas import strategy_spec_to_response
+from apps.platform.metrics import MetricSnapshot
+from apps.platform.schemas import strategy_spec_to_response
 
 
 class QueryRequest(BaseModel):
@@ -156,6 +156,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
         selected_answer_meta = _state_get_dict(state, "selected_answer_meta")
         merge_debug = _state_get_dict(state, "merge_debug")
+        view_state = _state_get(state, "view_state")
+        visible_answer_manifest = selected_answer_meta.get("visible_answer_manifest")
+        if not isinstance(visible_answer_manifest, dict):
+            snapshot = getattr(view_state, "visible_answer_manifest", None)
+            if snapshot is not None:
+                visible_answer_manifest = snapshot.model_dump() if hasattr(snapshot, "model_dump") else dict(snapshot)
         return AnswerArtifact(
             text=final_text,
             answer_kind=_normalize_answer_kind(
@@ -163,6 +169,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             ),
             stream_metrics=selected_answer_meta,
             user_visible_final_required=bool(selected_answer_meta.get("user_visible_final_required", True)),
+            visible_answer_manifest=visible_answer_manifest if isinstance(visible_answer_manifest, dict) else None,
             meta={
                 "answer_source": merge_debug.get("selected_answer_source"),
                 "model_key": merge_debug.get("selected_model"),
@@ -243,44 +250,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         )
 
     def _emit_legacy_stream_event(event: StreamEvent) -> list[str]:
-        payloads = [encode_stream_event(event)]
-        meta = dict(event.meta or {})
-        if event.kind == "conversation":
-            payloads.append(_stream_data("conversation", conversationId=str(meta.get("conversation_id") or "")))
-        elif event.kind == "status":
-            payloads.append(_stream_data("status", **meta))
-        elif event.kind == "answer.chunk":
-            payloads.append(_stream_chunk(event.model_key or "unknown", event.content or ""))
-        elif event.kind == "answer.final":
-            if bool(meta.get("degraded")):
-                payloads.append(
-                    _stream_data(
-                        "answer",
-                        answer=event.content or "",
-                        error_code=str(meta.get("error_code") or "DEGRADED_FINAL"),
-                        reason=str(meta.get("reason") or "degraded_final_answer"),
-                        degraded=True,
-                    )
-                )
-        elif event.kind == "reference.set":
-            payloads.append(_stream_legacy_payload(reference=list(meta.get("references") or [])))
-        elif event.kind == "error":
-            payloads.append(
-                _stream_data(
-                    "error",
-                    error=str(meta.get("error") or ""),
-                    error_code=str(meta.get("error_code") or "INTERNAL_ERROR"),
-                    reason=str(meta.get("reason") or ""),
-                )
-            )
-        elif event.kind == "done":
-            payload = {"status": "done"}
-            if bool(meta.get("degraded")):
-                payload["degraded"] = True
-            if bool(meta.get("error")):
-                payload["error"] = True
-            payloads.append(_stream_data("status", **payload))
-        return payloads
+        return [encode_stream_event(event)]
 
     def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
         """reference payload와 원본 doc를 넘나들며 첫 유효 값을 찾는다."""
@@ -345,6 +315,32 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         result["id"] = _resolve_reference_id(result, doc)
         result["title"] = _resolve_reference_title(result, doc)
         return result
+
+    def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
+        """canonical evidence item을 reference payload 정규화 입력 형태로 바꾼다."""
+        if not isinstance(item, dict):
+            return {}
+        ids = item.get("ids")
+        facts = item.get("facts")
+        evidence = item.get("evidence")
+        source_type = str(item.get("source_type") or "").strip().lower()
+        tag = str(item.get("tag") or "").strip()
+        if not tag and source_type == "project":
+            tag = DataTag.PROJECT.value
+
+        doc: Dict[str, Any] = {"tag": tag}
+        if isinstance(ids, dict):
+            doc.update(ids)
+        if isinstance(facts, dict):
+            title = str(facts.get("title") or "").strip()
+            if title:
+                doc["title"] = title
+        if isinstance(evidence, dict):
+            for key in ("title", "title_text", "title1", "title2"):
+                value = evidence.get(key)
+                if value is not None:
+                    doc[key] = value
+        return doc
 
     def _validate_request_override_ranges(overrides: dict[str, Any]) -> None:
         """잘못된 LLM override 값이 provider backend까지 내려가기 전에 막는다."""
@@ -690,19 +686,37 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
                 ref_docs = []
                 seen_reference_keys = set()
-                for doc in documents_used:
-                    if not is_hit_source(doc):
-                        continue
-                    normalized = _normalize_reference_payload(doc)
-                    dedupe_key = (
-                        normalized.get("tag"),
-                        normalized.get("id"),
-                        normalized.get("title"),
-                    )
-                    if dedupe_key in seen_reference_keys:
-                        continue
-                    seen_reference_keys.add(dedupe_key)
-                    ref_docs.append(normalized)
+
+                def _append_reference_docs(candidates: list[dict[str, Any]]) -> None:
+                    for candidate in candidates:
+                        normalized = _normalize_reference_payload(candidate)
+                        dedupe_key = (
+                            normalized.get("tag"),
+                            normalized.get("id"),
+                            normalized.get("title"),
+                        )
+                        if dedupe_key in seen_reference_keys:
+                            continue
+                        seen_reference_keys.add(dedupe_key)
+                        ref_docs.append(normalized)
+
+                artifact_references = list(getattr(selected_artifact, "references", []) or [])
+                if artifact_references:
+                    _append_reference_docs([ref for ref in artifact_references if isinstance(ref, dict)])
+                else:
+                    canonical_evidence = _state_get_list(final_state, "canonical_evidence")
+                    canonical_reference_docs = [
+                        _canonical_evidence_to_reference_doc(item)
+                        for item in canonical_evidence
+                        if isinstance(item, dict)
+                    ]
+                    canonical_reference_docs = [doc for doc in canonical_reference_docs if doc]
+                    if canonical_reference_docs:
+                        _append_reference_docs(canonical_reference_docs)
+                    else:
+                        _append_reference_docs(
+                            [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
+                        )
 
                 ref_event = _next_route_event(
                     kind="reference.set",
@@ -970,4 +984,3 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 await asyncio.sleep(metrics_stream_interval_seconds)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
-

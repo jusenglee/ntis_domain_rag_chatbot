@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, Optional
+
+from apps.conversation.view_state import DisplaySnapshot, FocusEntity, SubjectIndexEntry, focus_entity_from_item, focus_entity_subject_id
+
+
+_ORDINAL_PATTERNS = (
+    re.compile("(?:제\\s*)?(\\d{1,3})\\s*번째"),
+    re.compile("(?:제\\s*)?(\\d{1,3})\\s*번"),
+    re.compile(r"\b(\d{1,3})(?:st|nd|rd|th)\b", re.IGNORECASE),
+)
+_SOURCE_REFERENCE_PATTERNS = (
+    re.compile("(?:출처|source)\\s*(\\d{1,3})"),
+    re.compile("(?:출처|source)\\s*(첫번째|첫\\s*번째|첫째|첫|두번째|두\\s*번째|둘째|두|세번째|세\\s*번째|셋째|세)"),
+    re.compile("참고\\s*(?:문헌|자료)\\s*(\\d{1,3})"),
+    re.compile("참고\\s*(?:문헌|자료)\\s*(첫번째|첫\\s*번째|첫째|첫|두번째|두\\s*번째|둘째|두|세번째|세\\s*번째|셋째|세)"),
+)
+_ORDINAL_WORDS = {
+    "\uccab": 1,
+    "\uccab\ubc88\uc9f8": 1,
+    "\uccab \ubc88\uc9f8": 1,
+    "\uccab\uc9f8": 1,
+    "\ub450": 2,
+    "\ub450\ubc88\uc9f8": 2,
+    "\ub450 \ubc88\uc9f8": 2,
+    "\ub458\uc9f8": 2,
+    "\uc138": 3,
+    "\uc138\ubc88\uc9f8": 3,
+    "\uc138 \ubc88\uc9f8": 3,
+    "\uc14b\uc9f8": 3,
+}
+_DEICTIC_PATTERNS = {
+    "project": (
+        re.compile("그\\s*과제"),
+        re.compile("이\\s*과제"),
+        re.compile("해당\\s*과제"),
+        re.compile("방금\\s*과제"),
+        re.compile(r"\b(?:that|this|the)\s+project\b", re.IGNORECASE),
+    ),
+    "perf": (
+        re.compile("그\\s*(?:성과|논문|특허|보고서|기술)"),
+        re.compile("이\\s*(?:성과|논문|특허|보고서|기술)"),
+        re.compile("해당\\s*(?:성과|논문|특허|보고서|기술)"),
+        re.compile(r"\b(?:that|this|the)\s+(?:performance|paper|patent|report|technology|result)\b", re.IGNORECASE),
+    ),
+    "people": (
+        re.compile("그\\s*(?:연구자|연구원|사람)"),
+        re.compile("이\\s*(?:연구자|연구원|사람)"),
+        re.compile("해당\\s*(?:연구자|연구원|사람)"),
+        re.compile(r"\b(?:that|this|the)\s+(?:researcher|research employee|person)\b", re.IGNORECASE),
+    ),
+    "org": (
+        re.compile("그\\s*(?:기관|회사|조직)"),
+        re.compile("이\\s*(?:기관|회사|조직)"),
+        re.compile("해당\\s*(?:기관|회사|조직)"),
+        re.compile(r"\b(?:that|this|the)\s+(?:organization|organisation|agency|company|institution)\b", re.IGNORECASE),
+    ),
+    "generic": (
+        re.compile("그\\s*(?:항목|결과|이거|이것)"),
+        re.compile("이\\s*(?:항목|결과|것)"),
+        re.compile(r"\b(?:that|this|the)\s+(?:item|result|entry|one)\b", re.IGNORECASE),
+    ),
+}
+_COUNT_PATTERNS = (
+    re.compile(r"\uc0c1\uc704\s*(\d{1,3})\s*\uac1c"),
+    re.compile(r"(\d{1,3})\s*(?:\uac1c|\uac74)"),
+    re.compile(r"(\ud55c|\ub450|\uc138)\s*\uac74"),
+)
+_KOREAN_COUNT = {"\ud55c": 1, "\ub450": 2, "\uc138": 3}
+_EXPLICIT_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+
+
+def _decode_token(token: str) -> str:
+    return token.encode("utf-8").decode("unicode_escape")
+
+
+def _resolve_ordinal_value(raw: str) -> Optional[int]:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        ordinal = int(token)
+        return ordinal if ordinal > 0 else None
+    compact = re.sub(r"\s+", "", token)
+    for candidate, ordinal in _ORDINAL_WORDS.items():
+        if _decode_token(candidate).replace(" ", "") == compact:
+            return ordinal
+    return None
+
+
+def parse_source_reference(question: str) -> Optional[int]:
+    text = str(question or "").strip()
+    if not text:
+        return None
+    for pattern in _SOURCE_REFERENCE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        resolved = _resolve_ordinal_value(match.group(1))
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def parse_ordinal_reference(question: str) -> Optional[int]:
+    text = str(question or "").strip()
+    if not text:
+        return None
+    source_reference = parse_source_reference(text)
+    if source_reference is not None:
+        return source_reference
+    for pattern in _ORDINAL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return _resolve_ordinal_value(match.group(1))
+    compact = re.sub(r"\s+", "", text)
+    for token, ordinal in _ORDINAL_WORDS.items():
+        decoded = _decode_token(token).replace(" ", "")
+        if len(decoded) <= 1:
+            continue
+        if decoded in compact:
+            return ordinal
+    return None
+
+
+def _entity_kind_matches_question(question: str, entity_kind: str) -> bool:
+    patterns = list(_DEICTIC_PATTERNS.get(entity_kind, ())) + list(_DEICTIC_PATTERNS["generic"])
+    return any(pattern.search(question) for pattern in patterns)
+
+
+def is_referential_followup(question: str, *, entity_kind: Optional[str] = None) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if entity_kind:
+        return _entity_kind_matches_question(text, str(entity_kind or "").strip().lower())
+    return any(pattern.search(text) for patterns in _DEICTIC_PATTERNS.values() for pattern in patterns)
+
+
+def parse_display_limit(question: str, *, default: int) -> int:
+    text = str(question or "").strip()
+    for pattern in _COUNT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        raw = str(match.group(1)).strip()
+        if raw.isdigit():
+            return max(1, int(raw))
+        raw_decoded = _decode_token(raw)
+        for token, count in _KOREAN_COUNT.items():
+            if raw_decoded == _decode_token(token):
+                return count
+    return max(1, int(default or 1))
+
+
+def _normalize_ids_map(values: Any) -> Dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: Dict[str, list[str]] = {}
+    for key, raw_values in values.items():
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        elif not isinstance(raw_values, (list, tuple, set)):
+            raw_values = [raw_values]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_values:
+            text = str(raw or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        if deduped:
+            normalized[str(key).strip()] = deduped
+    return normalized
+
+
+def is_child_anchor_source(source: Any) -> bool:
+    text = str(source or "").strip().lower()
+    return text.startswith("detail_") or text.startswith("child_")
+
+
+_CHILD_ANCHOR_SOURCES = {
+    "people": "detail_participant_match",
+    "org": "detail_org_match",
+    "perf": "detail_perf_match",
+}
+
+
+def _build_child_focus_anchor(*, kind: str, ids_map: Dict[str, list[str]], ref: Any, focus: FocusEntity) -> Optional[FocusEntity]:
+    if kind == "people":
+        person_ids = ids_map.get("person_no") or []
+        return FocusEntity(
+            kind="people",
+            source=_CHILD_ANCHOR_SOURCES["people"],
+            view_id=focus.view_id,
+            person_no=person_ids[0] if person_ids else None,
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    if kind == "org":
+        org_ids = ids_map.get("org_id") or []
+        org_codes = ids_map.get("org_code") or []
+        biz_nos = ids_map.get("biz_no") or []
+        return FocusEntity(
+            kind="org",
+            source=_CHILD_ANCHOR_SOURCES["org"],
+            view_id=focus.view_id,
+            org_id=org_ids[0] if org_ids else None,
+            org_code=org_codes[0] if org_codes else None,
+            biz_no=biz_nos[0] if biz_nos else None,
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    if kind == "perf":
+        rst_ids = ids_map.get("rst_id") or []
+        dois = ids_map.get("doi") or []
+        issns = ids_map.get("issn") or []
+        return FocusEntity(
+            kind="perf",
+            source=_CHILD_ANCHOR_SOURCES["perf"],
+            view_id=focus.view_id,
+            rst_id=rst_ids[0] if rst_ids else None,
+            doi=dois[0] if dois else None,
+            issn=issns[0] if issns else None,
+            title_text=str(getattr(ref, "display_name", "") or "").strip() or None,
+            pjt_id=focus.pjt_id,
+            pjt_no=focus.pjt_no,
+        )
+    return None
+
+
+def _resolve_named_child_anchor_from_focus(*, question: str, focus_entity: Optional[FocusEntity]) -> Optional[FocusEntity]:
+    if focus_entity is None:
+        return None
+    if str(focus_entity.kind or "").strip().lower() != "project":
+        return None
+
+    refs = list(getattr(focus_entity, "child_refs", []) or [])
+    if not refs:
+        return None
+
+    matches: list[FocusEntity] = []
+    seen_keys: set[str] = set()
+    text = str(question or "").strip()
+    if not text:
+        return None
+
+    for ref in refs:
+        kind = str(getattr(ref, "kind", "") or "").strip().lower()
+        if kind not in _CHILD_ANCHOR_SOURCES:
+            continue
+        display_name = str(getattr(ref, "display_name", "") or "").strip()
+        ids_map = _normalize_ids_map(getattr(ref, "ids_map", {}) or {})
+        if not display_name or display_name not in text:
+            continue
+        focus_anchor = _build_child_focus_anchor(kind=kind, ids_map=ids_map, ref=ref, focus=focus_entity)
+        if focus_anchor is None:
+            continue
+        identity = "|".join(
+            [
+                kind,
+                str(getattr(focus_anchor, "person_no", None) or ""),
+                str(getattr(focus_anchor, "org_id", None) or ""),
+                str(getattr(focus_anchor, "org_code", None) or ""),
+                str(getattr(focus_anchor, "biz_no", None) or ""),
+                str(getattr(focus_anchor, "rst_id", None) or ""),
+                str(getattr(focus_anchor, "doi", None) or ""),
+                str(getattr(focus_anchor, "issn", None) or ""),
+            ]
+        )
+        if identity in seen_keys:
+            continue
+        seen_keys.add(identity)
+        matches.append(focus_anchor)
+
+    if len(matches) != 1:
+        return None
+
+    return matches[0]
+
+
+def _iter_subject_index_entries(subject_index: Any) -> list[SubjectIndexEntry]:
+    if not isinstance(subject_index, dict):
+        return []
+    entries: list[SubjectIndexEntry] = []
+    for value in subject_index.values():
+        try:
+            entry = value if isinstance(value, SubjectIndexEntry) else SubjectIndexEntry.model_validate(value)
+        except Exception:
+            continue
+        entries.append(entry)
+    return entries
+
+
+def _build_subject_index_anchor(*, entry: SubjectIndexEntry, focus_entity: Optional[FocusEntity]) -> FocusEntity:
+    ids_map = _normalize_ids_map(entry.ids_map)
+    if entry.kind == "people":
+        person_ids = ids_map.get("person_no") or []
+        return FocusEntity(
+            kind="people",
+            source="child_subject_index_match",
+            view_id=getattr(focus_entity, "view_id", None),
+            person_no=person_ids[0] if person_ids else None,
+            title_text=entry.display_name or None,
+            pjt_id=getattr(focus_entity, "pjt_id", None),
+            pjt_no=getattr(focus_entity, "pjt_no", None),
+        )
+    if entry.kind == "org":
+        org_ids = ids_map.get("org_id") or []
+        org_codes = ids_map.get("org_code") or []
+        biz_nos = ids_map.get("biz_no") or []
+        return FocusEntity(
+            kind="org",
+            source="child_subject_index_match",
+            view_id=getattr(focus_entity, "view_id", None),
+            org_id=org_ids[0] if org_ids else None,
+            org_code=org_codes[0] if org_codes else None,
+            biz_no=biz_nos[0] if biz_nos else None,
+            title_text=entry.display_name or None,
+            pjt_id=getattr(focus_entity, "pjt_id", None),
+            pjt_no=getattr(focus_entity, "pjt_no", None),
+        )
+    rst_ids = ids_map.get("rst_id") or []
+    dois = ids_map.get("doi") or []
+    issns = ids_map.get("issn") or []
+    return FocusEntity(
+        kind="perf",
+        source="child_subject_index_match",
+        view_id=getattr(focus_entity, "view_id", None),
+        rst_id=rst_ids[0] if rst_ids else None,
+        doi=dois[0] if dois else None,
+        issn=issns[0] if issns else None,
+        title_text=entry.display_name or None,
+        pjt_id=getattr(focus_entity, "pjt_id", None),
+        pjt_no=getattr(focus_entity, "pjt_no", None),
+    )
+
+
+def _resolve_named_subject_from_index(
+    *,
+    question: str,
+    subject_index: Any,
+    focus_entity: Optional[FocusEntity],
+) -> Optional[FocusEntity]:
+    text = str(question or "").strip()
+    if not text:
+        return None
+    parent_subject_id = focus_entity_subject_id(focus_entity)
+    candidates: list[SubjectIndexEntry] = []
+    seen_subjects: set[str] = set()
+    for entry in _iter_subject_index_entries(subject_index):
+        aliases = [entry.display_name, *(entry.aliases or [])]
+        matched_alias = next((alias for alias in aliases if str(alias or "").strip() and str(alias).strip() in text), None)
+        if not matched_alias:
+            continue
+        if (
+            parent_subject_id
+            and entry.parent_subject_ids
+            and parent_subject_id not in set(entry.parent_subject_ids)
+        ):
+            continue
+        if entry.subject_id in seen_subjects:
+            continue
+        seen_subjects.add(entry.subject_id)
+        candidates.append(entry)
+    if len(candidates) == 1:
+        return _build_subject_index_anchor(entry=candidates[0], focus_entity=focus_entity)
+    if len(candidates) > 1:
+        first = candidates[0]
+        return FocusEntity(
+            kind=first.kind,
+            source="ambiguity_subject_index",
+            view_id=getattr(focus_entity, "view_id", None),
+            title_text=first.display_name or None,
+            pjt_id=getattr(focus_entity, "pjt_id", None),
+            pjt_no=getattr(focus_entity, "pjt_no", None),
+        )
+    return None
+
+
+def resolve_followup_anchor(
+    *,
+    question: str,
+    normalized_intent: Any,
+    display_snapshot: Optional[DisplaySnapshot],
+    focus_entity: Optional[FocusEntity],
+    scope_focus_entity: Optional[FocusEntity] = None,
+    subject_index: Any = None,
+) -> Optional[FocusEntity]:
+    active_focus = scope_focus_entity or focus_entity
+    child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=active_focus)
+    if child_anchor is not None:
+        return child_anchor
+
+    subject_anchor = _resolve_named_subject_from_index(
+        question=question,
+        subject_index=subject_index,
+        focus_entity=active_focus,
+    )
+    if subject_anchor is not None:
+        return subject_anchor
+
+    ids_map = _normalize_ids_map(getattr(normalized_intent, "ids_map", {}) or {})
+    for key in _EXPLICIT_ID_KEYS:
+        values = ids_map.get(key) or []
+        if not values:
+            continue
+        return FocusEntity(
+            kind=str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
+            source="explicit_id",
+            pjt_id=values[0] if key == "pjt_id" else None,
+            pjt_no=values[0] if key == "pjt_no" else None,
+            rst_id=values[0] if key == "rst_id" else None,
+            person_no=values[0] if key == "person_no" else None,
+            org_id=values[0] if key == "org_id" else None,
+            org_code=values[0] if key == "org_code" else None,
+            biz_no=values[0] if key == "biz_no" else None,
+            doi=values[0] if key == "doi" else None,
+            issn=values[0] if key == "issn" else None,
+        )
+
+    ordinal = parse_ordinal_reference(question)
+    if ordinal is not None and display_snapshot and 1 <= ordinal <= len(display_snapshot.items):
+        item = display_snapshot.items[ordinal - 1]
+        return focus_entity_from_item(item=item, kind=display_snapshot.context_kind, source="display_snapshot", view_id=display_snapshot.view_id)
+
+    if focus_entity is not None and is_referential_followup(question, entity_kind=focus_entity.kind):
+        return focus_entity
+
+    if scope_focus_entity is not None and is_referential_followup(question, entity_kind=scope_focus_entity.kind):
+        return scope_focus_entity
+
+    if is_referential_followup(question) and display_snapshot and len(display_snapshot.items) == 1:
+        item = display_snapshot.items[0]
+        return focus_entity_from_item(item=item, kind=display_snapshot.context_kind, source="display_snapshot", view_id=display_snapshot.view_id)
+    return None
+
+
+def anchor_to_seed_map(anchor: Optional[FocusEntity]) -> Dict[str, list[str]]:
+    if anchor is None:
+        return {}
+    seed_map = {
+        "pjt_id": [anchor.pjt_id] if anchor.pjt_id else [],
+        "pjt_no": [anchor.pjt_no] if anchor.pjt_no else [],
+        "rst_id": [anchor.rst_id] if anchor.rst_id else [],
+        "person_no": [anchor.person_no] if anchor.person_no else [],
+        "org_id": [anchor.org_id] if anchor.org_id else [],
+        "org_code": [anchor.org_code] if anchor.org_code else [],
+        "biz_no": [anchor.biz_no] if anchor.biz_no else [],
+        "doi": [anchor.doi] if anchor.doi else [],
+        "issn": [anchor.issn] if anchor.issn else [],
+    }
+    return {key: values for key, values in seed_map.items() if values}

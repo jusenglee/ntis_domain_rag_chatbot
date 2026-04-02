@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from apps.api.routes import RouteDeps, register_routes
-from apps.api.services.request_overrides import (
+from apps.api.request_overrides import (
     OracleRequestDefaultsLoader,
     merge_request_overrides,
     normalize_oracle_request_defaults,

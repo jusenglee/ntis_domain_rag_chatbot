@@ -25,6 +25,7 @@ BASELINE_INVENTORY = {
         "no:cacheprovider",
     ],
     "core_contract_subset": [
+        "tests/test_feature_package_architecture.py",
         "tests/test_planner_stagewise.py",
         "tests/test_retrieval_workflow_detail_runtime.py",
         "tests/test_rag_anchor_truth.py",

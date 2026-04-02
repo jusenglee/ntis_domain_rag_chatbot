@@ -29,12 +29,12 @@ planner(무엇을 어떻게 찾을지 정하는 단계), retrieval(실제 검색
 
 ## 2. 요청 1건은 이렇게 흐른다
 1. HTTP ingress: `apps/api/routes.py`
-2. memory load/save: `apps/api/services/conversation_store.py`
-3. intent assembly: `apps/api/services/request_facade.py`
-4. planner/runtime merge: `apps/api/services/planner_runtime.py`, `apps/api/services/planner_service.py`
-5. retrieval runtime: `apps/api/services/retrieval_workflow.py`, `apps/api/services/rag_retriever.py`, `apps/core/rag_pipeline.py`
-6. evidence shaping: `apps/core/canonical_evidence.py`, `apps/api/services/view_state.py`
-7. answer generation/merge: `apps/api/services/answer_generation.py`, `apps/api/services/answer_merge.py`
+2. memory load/save: `apps/conversation/conversation_store.py`
+3. intent assembly: `apps/conversation/request_facade.py`
+4. planner/runtime merge: `apps/planner/planner_runtime.py`, `apps/planner/planner_service.py`
+5. retrieval runtime: `apps/retrieval/retrieval_workflow.py`, `apps/retrieval/rag_retriever.py`, `apps/retrieval/rag_pipeline.py`
+6. evidence shaping: `apps/evidence/canonical_evidence.py`, `apps/conversation/view_state.py`
+7. answer generation/merge: `apps/chat/answer_generation.py`, `apps/chat/answer_merge.py`
 
 ## 3. 절대 흐리면 안 되는 규칙
 - `SEARCH`, `LOOKUP`, `JOIN` 의미를 runtime이 다시 정하지 않는다.
@@ -44,7 +44,7 @@ planner(무엇을 어떻게 찾을지 정하는 단계), retrieval(실제 검색
 
 ## 4. 빠르게 상태를 확인하려면
 ```bash
-python -m py_compile apps/api/services/request_facade.py apps/api/services/retrieval_workflow.py apps/api/services/answer_merge.py
+python -m py_compile apps/conversation/request_facade.py apps/retrieval/retrieval_workflow.py apps/chat/answer_merge.py
 powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1
 ```
 

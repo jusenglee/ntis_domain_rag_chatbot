@@ -4,11 +4,11 @@ import asyncio
 
 import pytest
 
-from apps.api.services.planner_context_cards import _CARD_FILES, _PROMPT_CARD_MANIFEST, build_planner_domain_cards
-from apps.api.services.planner_runtime import _render_prompt_template
-from apps.core.planner_stage15_types import PlannerEntityRolePlan
-from apps.core.planner_surface_signals import collect_surface_signals
-from apps.core.planner_validation import validate_stage2_slots
+from apps.planner.planner_context_cards import _CARD_FILES, _PROMPT_CARD_MANIFEST, build_planner_domain_cards
+from apps.planner.planner_runtime import _render_prompt_template
+from apps.planner.planner_stage15_types import PlannerEntityRolePlan
+from apps.planner.planner_surface_signals import collect_surface_signals
+from apps.planner.planner_validation import validate_stage2_slots
 
 
 def test_all_required_cards_are_registered():
@@ -167,4 +167,4 @@ def test_broad_history_validation_ignores_count_and_generic_history_must_keep_te
     )
 
     assert result.ok is True
-    assert "missing_must_keep_terms" not in result.errors
+    assert "missing_must_keep_terms" not in result.errors

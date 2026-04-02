@@ -1,5 +1,5 @@
 from apps.api.contracts.answer_groundedness import build_groundedness_snapshot_from_canonical_evidence
-from apps.api.services.answer_merge import select_final_answer
+from apps.chat.answer_merge import select_final_answer
 
 
 def _groundedness_snapshot(*, visible_count: int = 2):
@@ -219,3 +219,20 @@ def test_select_final_answer_skips_groundedness_for_bypass_answer_kind():
     assert result["selected_model"] == "solar"
     assert result["solar_failed"] is False
     assert result["solar_groundedness"]["status"] == "skipped_bypass_kind"
+
+
+def test_select_final_answer_prefers_supported_model_when_visible_order_is_protected():
+    result = select_final_answer(
+        answer_solar="PJT_ID=PJT-999, year=2025, 수행기관: 미등록기관",
+        answer_gemma="PJT_ID=PJT-123, year=2025, 수행기관: 한국전자통신연구원",
+        solar_meta={"answer_kind": "llm_collected", "answer_source": "solar"},
+        gemma_meta={"answer_kind": "llm_collected", "answer_source": "gemma"},
+        policy="solar_first",
+        fallback_message="fallback",
+        min_answer_chars=10,
+        evidence_snapshot=_groundedness_snapshot(),
+        protect_visible_order=True,
+    )
+
+    assert result["selected_model"] == "gemma"
+    assert result["selection_reason"] == "gemma_visible_order_safe"

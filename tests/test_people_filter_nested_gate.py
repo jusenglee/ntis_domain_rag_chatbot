@@ -1,5 +1,5 @@
-from apps.core import filters as filters_module
-from apps.core.filters import PeopleFilterInput, build_people_filter
+from apps.retrieval import filters as filters_module
+from apps.retrieval.filters import PeopleFilterInput, build_people_filter
 
 
 def test_build_people_filter_uses_same_nested_object_conjunctive_semantics_for_name_and_affiliation():

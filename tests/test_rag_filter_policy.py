@@ -1,5 +1,5 @@
-﻿from apps.core.filters import PeopleFilterInput, build_people_filter
-from apps.core.rag_filter_policy import CollectionFilterPolicyContext, resolve_collection_server_filter
+﻿from apps.retrieval.filters import PeopleFilterInput, build_people_filter
+from apps.retrieval.rag_filter_policy import CollectionFilterPolicyContext, resolve_collection_server_filter
 
 
 COL_PROJECT = "ntis_project_v1"
@@ -142,4 +142,4 @@ def test_build_people_filter_uses_same_nested_object_conjunctive_semantics_for_n
     assert org_gate.must is not None
     assert len(org_gate.must) == 1
     assert org_gate.must[0].should is not None
-    assert all(getattr(cond, "key", None) == "blng_org_nm" for cond in org_gate.must[0].should)
+    assert all(getattr(cond, "key", None) == "blng_org_nm" for cond in org_gate.must[0].should)

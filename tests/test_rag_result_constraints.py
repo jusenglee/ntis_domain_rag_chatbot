@@ -1,6 +1,6 @@
 ﻿from types import SimpleNamespace
 
-from apps.api.services.rag_result_assembly import apply_structured_result_constraint
+from apps.evidence.rag_result_assembly import apply_structured_result_constraint
 
 
 def test_apply_structured_result_constraint_keeps_same_member_match_only():
@@ -54,4 +54,4 @@ def test_apply_structured_result_constraint_filters_participant_org_role():
     )
 
     assert len(filtered) == 1
-    assert meta["output_count"] == 1
+    assert meta["output_count"] == 1

@@ -1,4 +1,4 @@
-from apps.core import filters
+from apps.retrieval import filters
 
 
 def test_build_project_id_filter_anchor_locked_prefers_pjt_id(monkeypatch):
