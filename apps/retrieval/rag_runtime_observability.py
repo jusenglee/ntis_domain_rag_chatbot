@@ -174,12 +174,12 @@ def log_kv(title: str, *, level: str = "info", tier: str = "normal", logger_obj:
     log_section(title, payload, level=level, tier=tier, logger_obj=logger_obj)
 
 
-def point_summary(point: Any, *, get_meta_fn: Callable[[dict], dict], resolve_collection_fn: Callable[[Any, dict], str]) -> Dict[str, Any]:
+def point_summary(point: Any, *, get_meta: Callable[[dict], dict], resolve_collection: Callable[[Any, dict], str]) -> Dict[str, Any]:
     """hit point에서 출처, doc_id, tag, score, title를 뽑아 로그용 요약을 만든다."""
     payload = getattr(point, "payload", None) or {}
     if not isinstance(payload, dict):
         payload = {}
-    meta = get_meta_fn(payload)
+    meta = get_meta(payload)
 
     def pick(*values: Any) -> str:
         """여러 후보 값 중 첫 번째 유효 문자열을 고른다."""
@@ -198,7 +198,7 @@ def point_summary(point: Any, *, get_meta_fn: Callable[[dict], dict], resolve_co
     except Exception:
         score = None
     return {
-        "col": pick(resolve_collection_fn(point, payload)),
+        "col": pick(resolve_collection(point, payload)),
         "doc_id": pick(payload.get("doc_id"), getattr(point, "id", None)),
         "tag": pick(payload.get("tag")),
         "score": score,
@@ -211,12 +211,12 @@ def point_summary(point: Any, *, get_meta_fn: Callable[[dict], dict], resolve_co
     }
 
 
-def log_top_points(title: str, points: List[Any], *, get_meta_fn: Callable[[dict], dict], resolve_collection_fn: Callable[[Any, dict], str], topn: int = None, level: str = "info", tier: str = "debug", logger_obj: Any = default_logger) -> None:
+def log_top_points(title: str, points: List[Any], *, get_meta: Callable[[dict], dict], resolve_collection: Callable[[Any, dict], str], topn: int = None, level: str = "info", tier: str = "debug", logger_obj: Any = default_logger) -> None:
     """상위 hit들을 point_summary 형태로 변환해 로그에 남긴다."""
     if not _rag_log_enabled(tier):
         return
     topn = int(topn) if topn is not None else int(os.getenv("RAG_LOG_TOPN", "8"))
-    arr = [point_summary(point, get_meta_fn=get_meta_fn, resolve_collection_fn=resolve_collection_fn) for point in (points or [])[: max(0, topn)]]
+    arr = [point_summary(point, get_meta=get_meta, resolve_collection=resolve_collection) for point in (points or [])[: max(0, topn)]]
     log_section(title, arr, level=level, tier=tier, logger_obj=logger_obj)
 
 

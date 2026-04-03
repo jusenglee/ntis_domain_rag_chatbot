@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 
 import logging
-import time
+import time
+from functools import wraps
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from langchain_core.messages import BaseMessage
@@ -384,7 +385,11 @@ class AgentState(BaseModel):
     stream_emitter: Optional[AsyncStreamEmitter] = None
     conversation_id: str = ""
     request_id: str = ""
-    request_started_at: Optional[float] = None
+    turn_id: str = ""
+    raw_payload_memory: Dict[str, Any] = Field(default_factory=dict)
+    anchor_hit: bool = False
+    followup_resolved_by_facts: bool = False
+    request_started_at: Optional[float] = None
     request_overrides: Dict[str, Any] = Field(default_factory=dict)
     question: str = ""
     rule_decision: Optional[RuleDecision] = None
@@ -413,7 +418,8 @@ def measure_latency(node_name: str, *, logger_obj: Any):
     """Create a decorator that records node latency and logs it."""
     def decorator(func):
         """Wrap an async node with latency measurement."""
-        async def wrapper(state: AgentState, *args, **kwargs):
+        @wraps(func)
+        async def wrapper(state: AgentState, *args, **kwargs):
             """Execute the coroutine, attach latency metadata, and return the result."""
             start = time.perf_counter()
             result = await func(state, *args, **kwargs)

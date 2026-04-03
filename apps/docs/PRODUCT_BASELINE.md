@@ -1,23 +1,18 @@
 # Product Baseline
 
-이 저장소의 상품화 게이트는 `전체 pytest` 하나로 끝나지 않는다. 아래 3축을 함께 만족해야 한다.
+이 문서는 historical product baseline 메모다.
 
-1. 수집/회귀 게이트
-   - collect-only arg, 핵심 회귀 목록, eval fixture 목록의 authoritative owner는 `apps/api/contracts/repo_manifest.py`의 `BASELINE_INVENTORY`다.
-   - `scripts/run_baseline_checks.ps1`는 이 manifest를 직접 읽어 같은 목록을 실행해야 한다.
-   - 기본 collect-only 경로와 `pytest-cache-files-*` 제외 규칙은 루트 `pytest.ini`를 따른다.
-2. 제품 품질 게이트
-   - `eval/sample_queries.jsonl` 또는 후속 골든 질의 세트가 존재
-   - 도메인별 검색 질의가 최소한 `project / perf / people / org / follow-up / id` 축을 포함
-   - planner 품질 baseline에는 추가로 `broad_history / quoted_title / source_ref / ordinal` 축이 포함
-   - fixture schema 테스트가 통과
-3. 운영 게이트
-   - baseline 스크립트가 수집, 핵심 회귀, eval fixture 존재 여부를 함께 확인
-   - baseline 스크립트의 `--ignore-glob`는 저장소 설정을 대체하는 규칙이 아니라 추가 방어막으로 유지한다.
+## 현재 상태
+- manifest-driven pytest baseline은 retired 상태다.
+- `scripts/run_baseline_checks.ps1`는 current release gate가 아니다.
+- 현재 worktree의 active gate는 smoke validation이다.
 
-운영 원칙:
+## current gate
+- `py_compile`
+- import smoke
+- `create_app()` smoke
+- optional workflow graph smoke when `langgraph` is available
 
-- planner / contract / runtime 의미가 바뀌면 관련 문서와 골든 질의도 같은 변경 세트에서 갱신한다.
-- 검색엔진형 상품성 기준은 `질문 의도 해석`, `전략 선택`, `근거 노출`, `후속질문 안정성`을 함께 본다.
-- `pjt_id / pjt_no`, `SEARCH / LOOKUP / JOIN`, `output_type`, canonical evidence 계약은 baseline 핵심 항목이다.
-
+## historical note
+- 과거 pytest/baseline 성공 기록은 `SESSION_HANDOFF.md`의 dated history를 참조한다.
+- baseline inventory를 다시 운영 기준으로 복구하려면, 먼저 새 tests tree와 새 validation owner를 별도 설계로 확정해야 한다.

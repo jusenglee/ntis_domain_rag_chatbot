@@ -1,51 +1,19 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$env:PYTHONPATH = "."
 
-function Invoke-PytestChecked {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string[]]$Arguments
-  )
+Write-Error @"
+scripts/run_baseline_checks.ps1 is a retired validation entrypoint.
 
-  & python @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "python exited with code $LASTEXITCODE"
-  }
-}
+Current repo state no longer treats manifest-driven pytest/baseline runs as the active gate:
+- the tracked tests tree is intentionally removed in this worktree
+- current validation is limited to py_compile, import smoke, create_app() smoke,
+  and optional workflow graph smoke when langgraph is available
 
-function Get-RepoManifestSection {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$Section
-  )
+See:
+- README.md
+- apps/docs/03_운영과_환경.md
+- apps/docs/04_회귀기준과_점검.md
+- apps/docs/SESSION_HANDOFF.md
+"@
 
-  $json = & python -m apps.api.contracts.repo_manifest --section $Section
-  if ($LASTEXITCODE -ne 0) {
-    throw "repo manifest lookup failed with code $LASTEXITCODE"
-  }
-  return $json | ConvertFrom-Json
-}
-
-$baseline = Get-RepoManifestSection -Section "baseline_inventory"
-$collectOnlyArgs = @($baseline.collect_only_pytest_args | ForEach-Object { [string]$_ })
-$sharedPytestArgs = @($baseline.shared_pytest_args | ForEach-Object { [string]$_ })
-$coreContractSubset = @($baseline.core_contract_subset | ForEach-Object { [string]$_ })
-$evalFixtureTests = @($baseline.eval_fixture_tests | ForEach-Object { [string]$_ })
-$requiredFiles = @($baseline.required_files | ForEach-Object { [string]$_ })
-
-Write-Host "[baseline] collect-only"
-Invoke-PytestChecked -Arguments (@("-m", "pytest") + $collectOnlyArgs)
-
-Write-Host "[baseline] core contract subset"
-Invoke-PytestChecked -Arguments (@("-m", "pytest", "-q") + $coreContractSubset + $sharedPytestArgs)
-
-Write-Host "[baseline] eval fixtures"
-foreach ($requiredPath in $requiredFiles) {
-  if (-not (Test-Path $requiredPath)) {
-    throw "missing $requiredPath"
-  }
-}
-Invoke-PytestChecked -Arguments (@("-m", "pytest", "-q") + $evalFixtureTests + $sharedPytestArgs)
-
-Write-Host "[baseline] ok"
+exit 1

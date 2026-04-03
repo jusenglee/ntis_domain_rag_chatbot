@@ -248,16 +248,17 @@ def _build_people_superlative_aggregation(
     }
 
 
-def build_people_superlative_aggregation(
+def build_people_superlative_aggregation(
     *,
     reranked: List[Any],
     intent: Any,
     hinted_limit: int,
     policy_limit: int,
-    payload_get_fn: Callable[[Dict[str, Any], str], Any],
-) -> Optional[Dict[str, Any]]:
+    payload_get: Callable[[Dict[str, Any], str], Any],
+) -> Optional[Dict[str, Any]]:
     """Build either legacy people ranking or project/perf comparison aggregation."""
-    wants_rank = bool(getattr(intent, "wants_rank", False))
+    payload_get_fn = payload_get
+    wants_rank = bool(getattr(intent, "wants_rank", False))
     stats_metric = str(getattr(intent, "stats_metric", "project_participation_count") or "project_participation_count")
     output_type = str(getattr(intent, "output_type", "") or "").strip().lower()
     supported_project_metrics = {"paper_count", "patent_count", "report_count", "perf_total_count"}
@@ -309,16 +310,17 @@ def _perf_type_from_tag(tag: str) -> str:
     return tag_norm.lower() or "perf"
 
 
-def build_project_series_payload(
+def build_project_series_payload(
     *,
     reranked: List[Any],
     intent: Any,
     hinted_limit: int,
     policy_limit: int,
-    payload_get_fn: Callable[[Dict[str, Any], str], Any],
-) -> Optional[Dict[str, Any]]:
+    payload_get: Callable[[Dict[str, Any], str], Any],
+) -> Optional[Dict[str, Any]]:
     """Build a project-series payload over project-group or year-window evidence."""
-    output_type = str(getattr(intent, "output_type", "") or "").strip().lower()
+    payload_get_fn = payload_get
+    output_type = str(getattr(intent, "output_type", "") or "").strip().lower()
     ids_map = getattr(intent, "ids_map", {}) or {}
     years = [str(v).strip() for v in (getattr(intent, "years", []) or []) if str(v).strip()]
     if output_type != "series" and not ids_map.get("pjt_no") and not years:
@@ -439,18 +441,19 @@ def _normalize_member_name(value: Any) -> str:
     return str(value or "").strip()
 
 
-def build_pattern_analysis_payload(
+def build_pattern_analysis_payload(
     *,
     reranked: List[Any],
     intent: Any,
     hinted_limit: int,
     policy_limit: int,
-    payload_get_fn: Callable[[Dict[str, Any], str], Any],
+    payload_get: Callable[[Dict[str, Any], str], Any],
     aggregation: Optional[Dict[str, Any]] = None,
     series: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Compute planner-selected pattern analysis from retrieval/runtime evidence only."""
-    pattern_kind = str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None
+    payload_get_fn = payload_get
+    pattern_kind = str(getattr(intent, "pattern_kind", "") or "").strip().lower() or None
     if not pattern_kind:
         return None
 
@@ -617,19 +620,20 @@ def build_pattern_analysis_payload(
 
 
 
-def build_multi_hop_bundle_payload(
+def build_multi_hop_bundle_payload(
     *,
     reranked: List[Any],
     intent: Any,
     hinted_limit: int,
     policy_limit: int,
-    payload_get_fn: Callable[[Dict[str, Any], str], Any],
+    payload_get: Callable[[Dict[str, Any], str], Any],
     project_points: Optional[List[Any]] = None,
     perf_points: Optional[List[Any]] = None,
     resolved_anchors: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a planner-first multi-hop bundle payload from project/perf evidence only."""
-    bundle_targets = [str(value).strip().lower() for value in (getattr(intent, "bundle_targets", None) or []) if str(value).strip()]
+    payload_get_fn = payload_get
+    bundle_targets = [str(value).strip().lower() for value in (getattr(intent, "bundle_targets", None) or []) if str(value).strip()]
     if not bundle_targets:
         return None
 

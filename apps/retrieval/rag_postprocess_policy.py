@@ -13,6 +13,30 @@ HydratePayloads = Callable[[Sequence[Any]], None]
 SoftTitleContains = Callable[[Dict[str, Any], List[str]], bool]
 
 
+_HYDRATE_TOPN_BY_MODE_OUTPUT_ROUTE: dict[tuple[str, str, str], int] = {
+    ("lookup", "detail", "project"): 6,
+    ("lookup", "detail", "perf"): 5,
+    ("lookup", "detail", "people"): 5,
+    ("lookup", "detail", "org"): 5,
+    ("join", "relation", "project"): 6,
+    ("join", "series", "project"): 6,
+    ("search", "stats", "project"): 8,
+}
+
+_HYDRATE_TOPN_BY_MODE_OUTPUT: dict[tuple[str, str], int] = {
+    ("lookup", "detail"): 5,
+    ("lookup", "summary"): 4,
+    ("lookup", "list"): 5,
+    ("join", "relation"): 6,
+    ("join", "series"): 6,
+    ("join", "summary"): 5,
+    ("search", "detail"): 5,
+    ("search", "summary"): 6,
+    ("search", "list"): 8,
+    ("search", "stats"): 8,
+}
+
+
 def prepare_title_post_rerank(
     merged_rrf: Sequence[Any],
     *,
@@ -78,6 +102,9 @@ def hydrate_reranked_payloads(
     hydrate_points_payload: HydratePayloads,
     logger: Any,
     timing_put: TimingPut,
+    mode: str = "",
+    output_type: Optional[str] = None,
+    base_route: str = "",
 ) -> None:
     """최종 rerank 상위 문서의 full payload를 수화한다.
 
@@ -86,18 +113,62 @@ def hydrate_reranked_payloads(
     if not reranked:
         return
 
+    mode_name = str(mode or "").strip().lower()
+    output_name = str(output_type or "").strip().lower() or "summary"
+    base_route_name = str(base_route or "").strip().lower() or "project"
     max_items = min(ctx_hard_limit, max(min_ctx_items, int(preset_max_ctx_items)))
     requested_limit = max(
         0,
         coerce_int(get_attr(intent_payload, "limit", 0), 0),
         coerce_int(hinted_limit, 0),
     )
-    hydrate_upper = min(ctx_hard_limit, max(max_items, requested_limit, 1))
-    reranked_for_hydrate = list(reranked[:hydrate_upper])
+
+    strategy_meta = get_attr(intent_payload, "strategy_meta", {}) or {}
+    normalized_intent = get_attr(intent_payload, "normalized_intent", None)
+    ids_map = get_attr(normalized_intent, "ids_map", None)
+    if ids_map is None and isinstance(normalized_intent, dict):
+        ids_map = normalized_intent.get("ids_map")
+    has_anchor_seed = bool(
+        isinstance(ids_map, dict)
+        and any(list(values or []) for values in ids_map.values())
+    ) or bool(str((strategy_meta or {}).get("anchor_source") or "").strip())
+
+    hydrate_topn = _HYDRATE_TOPN_BY_MODE_OUTPUT_ROUTE.get(
+        (mode_name, output_name, base_route_name),
+        _HYDRATE_TOPN_BY_MODE_OUTPUT.get((mode_name, output_name), max_items),
+    )
+    hydrate_topn = min(ctx_hard_limit, max(1, int(hydrate_topn), int(max_items)))
+    exact_lookup_topn = 0
+    if mode_name == "lookup":
+        exact_lookup_topn = min(ctx_hard_limit, max(1, min(3, requested_limit or 1)))
+
+    selected_points: List[Any] = []
+    seen_keys: set[str] = set()
+
+    def _append(points: Sequence[Any]) -> None:
+        for point in list(points or []):
+            point_id = getattr(point, "id", None)
+            key = str(point_id) if point_id is not None else str(id(point))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected_points.append(point)
+
+    _append(reranked[:hydrate_topn])
+    if exact_lookup_topn:
+        _append(reranked[:exact_lookup_topn])
+    if has_anchor_seed:
+        _append(reranked[: min(len(reranked), max(2, exact_lookup_topn or 0, 1))])
+
+    reranked_for_hydrate = list(selected_points)
 
     t0 = time.time()
     hydrate_points_payload(reranked_for_hydrate)
     timing_put("phase.hydrate_full_payload", time.time() - t0)
+    timing_put("info.hydrate_candidate_count", len(reranked_for_hydrate))
+    timing_put("info.hydrate_initial_topn", int(hydrate_topn))
+    timing_put("info.hydrate_exact_lookup_topn", int(exact_lookup_topn))
+    timing_put("info.hydrate_anchor_seed_present", int(has_anchor_seed))
 
     check_top_k = min(len(reranked), max(1, requested_limit))
     missing_kor = []
@@ -107,7 +178,8 @@ def hydrate_reranked_payloads(
         if not meta_basic.get("kor_pjt_nm"):
             missing_kor.append(rank)
     logger.info(
-        "[RAG.HYDRATE_CHECK] top_k=%s missing_meta_basic_kor_pjt_nm=%s",
+        "[RAG.HYDRATE_CHECK] hydrated=%s top_k=%s missing_meta_basic_kor_pjt_nm=%s",
+        len(reranked_for_hydrate),
         check_top_k,
         missing_kor or "none",
     )

@@ -10,7 +10,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from apps.api.runtime_helpers import log_event
 from apps.conversation.followup_resolution import strip_ordinal_reference_terms
+from apps.platform.log_keys import CHANGED_BY_PLANNER_MERGE
+from apps.platform.pipeline_steps import build_changed_fields
+from apps.planner.planner_contract import StrategyViolation
+from apps.planner.query_intent import normalize_org_terms
 
 def _planner_truthy_flag(value: Any) -> bool:
     """Normalize planner-emitted truthy flags without re-parsing the user query."""
@@ -121,10 +126,6 @@ def merge_planner_hints(
     *,
     request_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
-    log_event: Any = None,
-    normalize_org_terms: Any,
-    normalize_hint_terms: Any,
-    collect_researcher_name_terms: Any,
 ) -> Any:
     """Merge non-strategy planner hints into the existing intent."""
     if qa is None:
@@ -233,11 +234,6 @@ def apply_planner_strategy(
     *,
     request_id: Optional[str],
     conversation_id: Optional[str],
-    normalize_hint_terms: Any,
-    log_event: Any,
-    build_changed_fields: Any,
-    changed_by_planner_merge: str,
-    strategy_violation_cls: type[Exception],
 ) -> tuple[Any, bool]:
     """Apply planner-fixed strategy fields to the intent."""
     if qa is None:
@@ -291,7 +287,7 @@ def apply_planner_strategy(
                 error_code="PLANNER_ACTION_MODE_MISMATCH",
                 reason=mismatch_reason,
             )
-            raise strategy_violation_cls(error_code="PLANNER_ACTION_MODE_MISMATCH", reason=mismatch_reason)
+            raise StrategyViolation(error_code="PLANNER_ACTION_MODE_MISMATCH", reason=mismatch_reason)
 
     relation_map = {
         "project_perf": ("project", "perf"),
@@ -366,7 +362,7 @@ def apply_planner_strategy(
                 reason=reason,
                 policy_mode="strict",
             )
-            raise strategy_violation_cls(error_code="PLANNER_JOIN_FIELDS_MISSING", reason=reason)
+            raise StrategyViolation(error_code="PLANNER_JOIN_FIELDS_MISSING", reason=reason)
 
         has_instance_seed = bool(normalize_hint_terms(merged_ids_map.get("pjt_id")))
         has_candidate_project_key = bool((merged_candidate_keys.get("project_key") or []))
@@ -435,7 +431,7 @@ def apply_planner_strategy(
         output_type=planner_output_type,
     )
 
-    if log_event is not None and locked_owner_kind:
+    if locked_owner_kind:
         log_event(
             "FOLLOWUP.CONTEXT.OWNER_LOCKED",
             request_id=request_id,
@@ -450,8 +446,8 @@ def apply_planner_strategy(
         )
 
     after_snapshot = {k: getattr(patched, k, None) for k in tracked_fields}
-    changed_strategy_fields = build_changed_fields(before_snapshot, after_snapshot, strategy_fields, changed_by=changed_by_planner_merge)
-    changed_filter_fields = build_changed_fields(before_snapshot, after_snapshot, filter_fields, changed_by=changed_by_planner_merge)
+    changed_strategy_fields = build_changed_fields(before_snapshot, after_snapshot, strategy_fields, changed_by=CHANGED_BY_PLANNER_MERGE)
+    changed_filter_fields = build_changed_fields(before_snapshot, after_snapshot, filter_fields, changed_by=CHANGED_BY_PLANNER_MERGE)
     log_event(
         "PLANNER.PIPELINE",
         request_id=request_id,
@@ -461,7 +457,7 @@ def apply_planner_strategy(
         applied=int(bool({**changed_strategy_fields, **changed_filter_fields})),
         confidence=round(confidence, 3),
         strategy_mutation_stage="planner_merge",
-        changed_by=changed_by_planner_merge,
+        changed_by=CHANGED_BY_PLANNER_MERGE,
         original_mode=before_snapshot.get("mode"),
         final_mode=after_snapshot.get("mode"),
         original_join_key_mode=before_snapshot.get("join_key_mode"),
@@ -479,10 +475,6 @@ def apply_question_analysis_v3(
     *,
     request_id: Optional[str],
     conversation_id: Optional[str],
-    merge_planner_hints: Any,
-    normalize_hint_terms: Any,
-    apply_planner_strategy_fn: Any,
-    log_event: Any = None,
 ) -> tuple[Any, bool]:
     """Stagewise planner entry point used by runtime code."""
     sanitized_qa = qa
@@ -490,7 +482,7 @@ def apply_question_analysis_v3(
     if qa is not None:
         sanitized_filters, stripped_fields = _sanitize_planner_filters(dict(getattr(qa, "filters", {}) or {}))
         sanitized_qa = _clone_question_analysis_with_filters(qa, sanitized_filters)
-        if stripped_fields and log_event is not None:
+        if stripped_fields:
             for field_name, stripped_values in stripped_fields.items():
                 log_event(
                     "PLANNER.FILTER.ORDINAL_STRIPPED",
@@ -500,18 +492,14 @@ def apply_question_analysis_v3(
                     stripped_values=list(stripped_values),
                 )
 
-    try:
-        hinted_intent = merge_planner_hints(
+    hinted_intent = merge_planner_hints(
             intent,
             sanitized_qa,
             request_id=request_id,
             conversation_id=conversation_id,
-            log_event=log_event,
         )
-    except TypeError:
-        hinted_intent = merge_planner_hints(intent, sanitized_qa)
 
-    return apply_planner_strategy_fn(
+    return apply_planner_strategy(
         hinted_intent,
         sanitized_qa,
         request_id=request_id,

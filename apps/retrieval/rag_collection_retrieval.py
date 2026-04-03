@@ -27,11 +27,11 @@ def build_emb_map_for_collection(
     vector_names: Sequence[str],
     pre_vecs: Dict[str, Any],
     fallback_emb: Dict[str, Any],
-    named_vectors_in_collection_fn: Callable[[Any, str], Any],
+    named_vectors_in_collection: Callable[[Any, str], Any],
     logger: Any,
 ) -> Dict[str, Any]:
     """특정 컬렉션에서 실제로 쓸 수 있는 embedding만 골라 dense 검색 입력 맵을 만든다."""
-    vec_avail = named_vectors_in_collection_fn(qdr, col)
+    vec_avail = named_vectors_in_collection(qdr, col)
     expanded_names = expand_vector_names(list(vector_names))
     use_vecs = [v for v in expanded_names if (not isinstance(vec_avail, set) or v in vec_avail)]
     if isinstance(vec_avail, set) and not use_vecs and vector_names:
@@ -56,9 +56,9 @@ def retrieve_collections(
     vector_names: Sequence[str],
     pre_vecs: Dict[str, Any],
     fallback_emb: Dict[str, Any],
-    named_vectors_in_collection_fn: Callable[[Any, str], Any],
+    named_vectors_in_collection: Callable[[Any, str], Any],
     logger: Any,
-    server_filter_for_col_fn: Callable[[str], Any],
+    server_filter_for_col: Callable[[str], Any],
     mode: str,
     plan_mode: str,
     q: str,
@@ -70,16 +70,16 @@ def retrieve_collections(
     topk_dense: int,
     topk_lex_cand: int,
     topk_lex: int,
-    call_dense_retrieve_hybrid_multi_fn: Callable[..., Dict[str, Any]],
-    validate_lookup_join_hybrid_metrics_fn: Callable[..., None],
-    apply_dense_threshold_fn: Callable[..., None],
-    ensure_collection_mark_fn: Callable[[Any, str], None],
-    log_kv_fn: Callable[..., None],
-    log_section_fn: Callable[..., None],
-    log_top_points_fn: Callable[..., None],
-    serialize_filter_for_log_fn: Callable[[Any], Any],
-    resolve_sparse_hits_metric_fn: Callable[[Dict[str, float]], float],
-    record_col_timings_fn: Callable[..., None],
+    call_dense_retrieve_hybrid_multi: Callable[..., Dict[str, Any]],
+    validate_lookup_join_hybrid_metrics: Callable[..., None],
+    apply_dense_threshold: Callable[..., None],
+    ensure_collection_mark: Callable[[Any, str], None],
+    log_kv: Callable[..., None],
+    log_section: Callable[..., None],
+    log_top_points: Callable[..., None],
+    serialize_filter_for_log: Callable[[Any], Any],
+    resolve_sparse_hits_metric: Callable[[Dict[str, float]], float],
+    record_col_timings: Callable[..., None],
     action: str,
     base_route: str,
     relation: Any,
@@ -106,16 +106,16 @@ def retrieve_collections(
             vector_names=vector_names,
             pre_vecs=pre_vecs,
             fallback_emb=fallback_emb,
-            named_vectors_in_collection_fn=named_vectors_in_collection_fn,
+            named_vectors_in_collection=named_vectors_in_collection,
             logger=logger,
         )
         use_dense_k = topk_dense if emb_map_col else 0
 
-        qfilter = server_filter_for_col_fn(col)
+        qfilter = server_filter_for_col(col)
         if mode == "search":
             qfilter = None
 
-        log_kv_fn(
+        log_kv(
             "RAG.COL.RETRIEVE",
             col=col,
             execution_mode=mode,
@@ -136,7 +136,7 @@ def retrieve_collections(
             sparse_weight=float(sparse_weight_eff),
             qfilter=str(qfilter) if qfilter is not None else None,
             executed_filter_spec_json={
-                "qfilter": serialize_filter_for_log_fn(qfilter),
+                "qfilter": serialize_filter_for_log(qfilter),
                 "title_filter_server_applied": bool(title_filter_server_applied and col in (col_project, col_perf)),
             },
             lex_w_preview={k: float(lex_w_eff.get(k)) for k in list(lex_w_eff.keys())[:8]},
@@ -145,7 +145,7 @@ def retrieve_collections(
         )
 
         local_timings: Dict[str, float] = {}
-        sr = call_dense_retrieve_hybrid_multi_fn(
+        sr = call_dense_retrieve_hybrid_multi(
             qdr=qdr,
             emb_map=emb_map_col,
             qtext=q,
@@ -164,14 +164,14 @@ def retrieve_collections(
             violation_on_contract=(plan_mode in ("lookup", "join")),
         )
         if plan_mode in ("lookup", "join"):
-            validate_lookup_join_hybrid_metrics_fn(
+            validate_lookup_join_hybrid_metrics(
                 mode=plan_mode,
                 contract_scope=f"{plan_mode}:{col}",
                 timings=local_timings,
                 strict=False,
             )
 
-        apply_dense_threshold_fn(
+        apply_dense_threshold(
             sr,
             log_prefix="RAG.DENSE.THRESHOLD.COL",
             col=col,
@@ -182,11 +182,11 @@ def retrieve_collections(
 
         hybrid_points = sr.get("hybrid") or []
         if hybrid_points:
-            ensure_collection_mark_fn(hybrid_points, col)
+            ensure_collection_mark(hybrid_points, col)
         else:
-            ensure_collection_mark_fn((sr.get("lexical") or []), col)
+            ensure_collection_mark((sr.get("lexical") or []), col)
             for _, lst in (sr.get("dense") or {}).items():
-                ensure_collection_mark_fn(lst or [], col)
+                ensure_collection_mark(lst or [], col)
 
         sr_by_col[col] = sr
 
@@ -212,7 +212,7 @@ def retrieve_collections(
                 except Exception:
                     lex_top_score = None
 
-            log_section_fn(
+            log_section(
                 "RAG.COL.RESULTS",
                 {
                     "col": col,
@@ -230,7 +230,7 @@ def retrieve_collections(
                 top_score = float(getattr(hybrid_points[0], "score", 0.0))
             except Exception:
                 top_score = None
-            log_section_fn(
+            log_section(
                 "RAG.COL.RESULTS",
                 {
                     "col": col,
@@ -245,13 +245,13 @@ def retrieve_collections(
         dense_topn = int(os.getenv("RAG_LOG_TOPN_COL_DENSE", "4"))
         if not hybrid_points:
             for vname, lst in (sr.get("dense") or {}).items():
-                log_top_points_fn(f"RAG.COL.DENSE.TOP.{col}.{vname}", lst or [], topn=dense_topn)
+                log_top_points(f"RAG.COL.DENSE.TOP.{col}.{vname}", lst or [], topn=dense_topn)
 
         lex_topn = int(os.getenv("RAG_LOG_TOPN_COL_LEX", "4"))
         if not hybrid_points:
-            log_top_points_fn(f"RAG.COL.LEX.TOP.{col}", sr.get("lexical") or [], topn=lex_topn)
+            log_top_points(f"RAG.COL.LEX.TOP.{col}", sr.get("lexical") or [], topn=lex_topn)
         else:
-            log_top_points_fn(f"RAG.COL.HYBRID.TOP.{col}", hybrid_points, topn=lex_topn)
+            log_top_points(f"RAG.COL.HYBRID.TOP.{col}", hybrid_points, topn=lex_topn)
 
         if not hybrid_points:
             d_hit = sum(len(lst or []) for lst in (sr.get("dense") or {}).values())
@@ -269,14 +269,14 @@ def retrieve_collections(
                 "dense_hits": float(d_hit),
                 "lex_hits": float(l_hit),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": resolve_sparse_hits_metric_fn(local_timings),
+                "sparse_hits": resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "best_dense": float(best_dense) if best_dense is not None else -1.0,
                 "total": float(local_timings.get("total", 0.0)),
             }
 
-            log_kv_fn(
+            log_kv(
                 "RAG.COL.STATS",
                 tier="debug",
                 col=col,
@@ -288,7 +288,7 @@ def retrieve_collections(
                 best_dense=float(best_dense) if best_dense is not None else -1.0,
                 timings=local_timings,
             )
-            record_col_timings_fn(
+            record_col_timings(
                 timings,
                 col,
                 stats=per_col_stats[col],
@@ -298,12 +298,12 @@ def retrieve_collections(
             per_col_stats[col] = {
                 "hybrid_hits": float(len(hybrid_points)),
                 "dense_queries": float(local_timings.get("dense_queries", 0.0)),
-                "sparse_hits": resolve_sparse_hits_metric_fn(local_timings),
+                "sparse_hits": resolve_sparse_hits_metric(local_timings),
                 "hybrid_once_hits": float(local_timings.get("hybrid_once_hits", 0.0)),
                 "hybrid_mode_used": bool(float(local_timings.get("hybrid_once_hits", 0.0)) > 0.0),
                 "total": float(local_timings.get("total", 0.0)),
             }
-            log_kv_fn(
+            log_kv(
                 "RAG.COL.STATS",
                 tier="debug",
                 col=col,
@@ -313,7 +313,7 @@ def retrieve_collections(
                 hybrid_hits=int(len(hybrid_points)),
                 timings=local_timings,
             )
-            record_col_timings_fn(
+            record_col_timings(
                 timings,
                 col,
                 stats=per_col_stats[col],

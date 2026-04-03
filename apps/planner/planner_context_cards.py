@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+
+from apps.chat.llm_runtime import load_prompt_file
 
 
 _CARD_FILES = {
@@ -68,7 +69,7 @@ def required_cards_for(prompt_name: str) -> tuple[str, ...]:
         raise RuntimeError(f"unknown planner prompt manifest: {prompt_name}") from exc
 
 
-async def build_planner_domain_cards(*, load_prompt_file: Any, prompt_name: str) -> dict[str, str]:
+async def build_planner_domain_cards(*, prompt_name: str) -> dict[str, str]:
     cards: dict[str, str] = {}
     for key in required_cards_for(prompt_name):
         cards[key] = await load_prompt_file(_CARD_FILES[key])

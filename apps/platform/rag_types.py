@@ -24,3 +24,13 @@ class RagResult:
     debug_meta: Optional[Dict[str, Any]] = None
     canonical_evidence: Optional[List[Dict[str, Any]]] = None
     render_profile: Optional[Dict[str, Any]] = None
+    prompt_units: Optional[List[Dict[str, Any]]] = None
+    used_tokens: int = 0
+    kept_ctx: int = 0
+    discarded_ctx: int = 0
+    dropped_by_floor: int = 0
+    dropped_by_budget: int = 0
+    compressed_count: int = 0
+    lineages: Optional[List[Dict[str, Any]]] = None
+    anchor_hit: bool = False
+    followup_resolved_by_facts: bool = False

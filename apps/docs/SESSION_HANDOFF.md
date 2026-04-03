@@ -1,4 +1,229 @@
-﻿# SESSION_HANDOFF.md
+# SESSION_HANDOFF.md
+
+## 2026-04-03T12:05:00+09:00 Improver
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected files:
+  - `apps/api/contracts/workflow_models.py`
+  - `apps/api/workflow_nodes.py`
+  - `apps/conversation/request_facade.py`
+  - `apps/conversation/raw_payload_store.py`
+  - `apps/conversation/fact_followup_resolver.py`
+  - `apps/evidence/context_build_policy.py`
+  - `apps/evidence/context_packer.py`
+  - `apps/evidence/prompt_evidence_envelope.py`
+  - `apps/evidence/rag_result_assembly.py`
+  - `apps/retrieval/rag_postprocess_policy.py`
+  - `apps/retrieval/retrieval_workflow.py`
+  - `apps/platform/rag_types.py`
+  - `apps/platform/settings.py`
+  - `apps/platform/solar_tokenizer_adapter.py`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/README.md`
+  - `apps/docs/EVIDENCE_PROMPT_PACKING.md`
+  - `README.md`
+- findings:
+  - the repo already had the new evidence owners, but the final operational shape still needed three gaps closed: `turn_id`-scoped raw payload memory metadata, fact-first follow-up smoke, and hydrate candidate selection that was still too close to a fixed cutoff.
+  - prompt evidence had already moved to `prompt_units` + serialized `context`, but current docs did not yet say that `prompt_units` is the only internal truth source.
+  - follow-up fact resolution existed, but its question matcher needed a stable English/Korean-safe path for smoke verification in this worktree.
+- changes:
+  - added compressed raw payload memory handling in `apps/conversation/raw_payload_store.py` with stored expiry timestamps, bounded retention pruning, and `turn_id`-scoped record shape.
+  - rewrote `apps/conversation/fact_followup_resolver.py` so count/name/org follow-up questions resolve deterministically from raw payload facts before evidence packing.
+  - kept `turn_id` distinct from `request_id` through workflow state and request facade wiring.
+  - updated `apps/retrieval/rag_postprocess_policy.py` so hydration now uses a role-based candidate union policy driven by `mode` / `output_type` / `base_route` instead of only a fixed upper slice.
+  - kept prompt artifact truth in `prompt_units`, with `context` and `used_tokens` derived from serialization in the evidence path.
+  - synced `apps/docs/CODEX_CONTEXT.md`, `apps/docs/README.md`, `apps/docs/EVIDENCE_PROMPT_PACKING.md`, root `README.md`, and added `apps/docs/ADR/ADR-0008-canonical-raw-memory-and-additive-evidence-envelope.md`.
+- validations:
+  - `python -m py_compile apps/conversation/raw_payload_store.py apps/conversation/fact_followup_resolver.py apps/retrieval/rag_postprocess_policy.py apps/evidence/rag_result_assembly.py apps/api/workflow_nodes.py apps/conversation/request_facade.py apps/evidence/derived_facts_builder.py apps/evidence/prompt_evidence_envelope.py apps/evidence/context_packer.py apps/evidence/context_build_policy.py apps/retrieval/retrieval_workflow.py apps/platform/rag_types.py apps/platform/settings.py apps/platform/solar_tokenizer_adapter.py` passed
+  - import smoke passed for `apps.conversation.raw_payload_store`, `apps.conversation.fact_followup_resolver`, `apps.evidence.derived_facts_builder`, `apps.evidence.prompt_evidence_envelope`, `apps.evidence.context_packer`, `apps.evidence.context_build_policy`, `apps.retrieval.rag_postprocess_policy`, `apps.retrieval.retrieval_workflow`
+  - `python -c "from apps.api.app_factory import create_app; create_app(); print('create-app-ok')"` passed
+  - custom smoke passed:
+    - follow-up drift: anchor record stored, fact-based follow-up resolved, active anchor reset cleared `active` while recent raw record remained
+    - huge-array defense: `prtcp_mp 650`, `prtcp_org 120` payload produced facts/previews only and no raw array dump in prompt envelope
+    - hybrid verify safety: provisional insert undercount was caught by exact verify, overflowing candidate moved out, and a later short candidate still fit under budget
+- remains risky:
+  - Solar exact counting still falls back when `transformers` is unavailable in this shell; production should verify with a real `SOLAR_TOKENIZER_NAME_OR_PATH` asset.
+  - hydration candidate selection is now policy-based, but full role union parity for every downstream rerun path still depends on retrieval runtime evolution.
+  - active validation remains smoke-only until a real import-light or full test lane returns.
+- next best task:
+  - if the repo keeps this architecture, the next safe improvement is operator-facing observability for raw payload memory hit/miss, hydrate candidate window reasons, and follow-up fact short-circuit counts.
+
+## 2026-04-02T19:13:00+09:00 Architect
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected files:
+  - `README.md`
+  - `pytest.ini`
+  - `scripts/run_baseline_checks.ps1`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/04_회귀기준과_점검.md`
+  - `apps/docs/PRODUCT_BASELINE.md`
+  - `apps/docs/README.md`
+  - `apps/docs/README_NEXT_STEPS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+  - `apps/platform/runtime_strategy_policy.py`
+  - `apps/retrieval/result_contract.py`
+  - `apps/planner/planner_defaults.py`
+  - `apps/planner/planner_contract.py`
+  - `apps/planner/planner_runtime.py`
+  - `apps/retrieval/rag_filter_policy.py`
+  - `apps/retrieval/rag_compile_runtime.py`
+  - `apps/chat/answer_generation.py`
+  - `apps/chat/answer_merge.py`
+  - `apps/chat/llm_streaming.py`
+  - `apps/api/contracts/repo_manifest.py`
+- current_state_summary:
+  - planner/retrieval/answer contracts are still structurally present in code and docs, but active validation has collapsed to smoke-only checks.
+  - `pytest.ini` still points at `tests`, the tracked `tests/` tree is absent in this worktree, and `scripts/run_baseline_checks.ps1` is intentionally retired.
+  - `apps/docs/GOLDEN_TESTS.md` still names the required SEARCH / LOOKUP / JOIN, follow-up, groundedness, and streaming behavior, but `apps/api/contracts/repo_manifest.py` no longer exposes a validation ownership map beyond planner prompt defaults.
+- pain_points:
+  - contract coverage is now ambiguous: the repo can say a rule matters without saying whether it is executable, historical only, or environment-blocked.
+  - smoke checks do not cover raw-query fallback drift, SEARCH people/org hard-must bans, nested people/org gates, answer-state consistency, or streaming close/chunk/TTFT watchlist behavior.
+  - future automations cannot distinguish a real regression from "lane missing" because validation capability is not modeled explicitly.
+- proposed_target_state:
+  - introduce a capability-based validation registry with explicit `smoke`, `contract_import_light`, and `dependency_rich` profiles.
+  - keep `GOLDEN_TESTS.md` as the canonical contract inventory until executable coverage is restored.
+  - later extend `repo_manifest.py` so docs, automation, and repo inspection share the same validation truth.
+- staged_migration_plan:
+  - phase 0: document the capability model and classify current gaps.
+  - phase 1: restore a very small import-light contract lane for planner immutability, SEARCH/LOOKUP/JOIN gates, nested people/org filters, and streaming watchlist semantics.
+  - phase 2: expose validation profiles and commands through `repo_manifest.py` and sync `pytest.ini` + docs to that model.
+  - phase 3: add dependency-rich optional lanes only after the import-light lane is stable.
+- first_safe_step:
+  - one focused implementation wave should restore only the minimal import-light subset under `tests/`, update `pytest.ini`, add validation sections to `apps/api/contracts/repo_manifest.py`, and sync `apps/docs/04_회귀기준과_점검.md` + `apps/docs/PRODUCT_BASELINE.md` in the same change set.
+- files_to_create_or_update:
+  - created `apps/docs/ADR/ADR-0006-contract-regression-capability-registry.md`
+  - next implementation wave should touch `apps/api/contracts/repo_manifest.py`, `pytest.ini`, `apps/docs/04_회귀기준과_점검.md`, `apps/docs/PRODUCT_BASELINE.md`, `tests/conftest.py`, and a minimal import-light contract subset
+- risks_and_unknowns:
+  - the missing `tests/` tree may be an intentional transitional state, so restoration must confirm which historical tests still match current module ownership.
+  - streaming checks may not be fully import-light yet.
+  - the worktree is already dirty and should not mix this validation-architecture change with unrelated runtime cleanup.
+- changes:
+  - added `apps/docs/ADR/ADR-0006-contract-regression-capability-registry.md`
+  - recorded the validation-architecture proposal and first safe implementation step in this handoff entry
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+  - static inspection confirmed `pytest.ini` still references `tests`, `tests/` is absent in the worktree, and `scripts/run_baseline_checks.ps1` is intentionally retired
+  - static inspection confirmed current contract owners still exist in planner / retrieval / answer code paths and docs
+- next best task:
+  - restore the smallest import-light contract lane and publish it through `repo_manifest.py` before any further runtime refactor or prompt churn
+
+## 2026-04-02T18:34:32.8723857+09:00 Improver
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected files:
+  - `apps/retrieval/rag_pipeline.py`
+  - `apps/retrieval/rag_dispatch_runtime.py`
+  - `apps/retrieval/rag_join_orchestration.py`
+  - `apps/retrieval/rag_runtime_prelude.py`
+  - `apps/retrieval/rag_base_orchestration.py`
+  - `apps/evidence/rag_result_assembly.py`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - `rag_pipeline.py` was still in a mixed state after the earlier seam-cut: direct imports had been added, but runtime basket builders like `build_runtime_observability`, `build_executor_support`, `build_dispatch_runtime_support`, and `build_final_rerank_fn` were still referenced at runtime.
+  - `rag_dispatch_runtime.py` still imported the deleted `BaseOrchestrationRuntime` and carried the old giant dispatch basket definition, which meant `apps.retrieval.rag_pipeline` could compile but still fail during import/runtime.
+  - `rag_join_orchestration.py` was still calling `assemble_join_rag_result(...)` with removed DI-style arguments (`context_builder`, `timing_put`, `log_kv`) and was missing the new `people_org_terms` input.
+- changes:
+  - rewired `apps/retrieval/rag_pipeline.py` to use direct helper ownership for observability, executor support, dense runtime support, rerank creation, perf-followup resolution, join runtime construction, and base orchestration execution.
+  - removed the giant dispatch-basket implementation from `apps/retrieval/rag_dispatch_runtime.py` and left only the concrete helper builders that `rag_pipeline.py` still needs during the staged cleanup.
+  - added `run_runtime_prelude(...)` in `apps/retrieval/rag_runtime_prelude.py` so `rag_pipeline.py` no longer constructs `RuntimePreludeRuntime(...)` inline.
+  - updated `apps/retrieval/rag_join_orchestration.py` to the new `assemble_join_rag_result(...)` contract and passed `people_org_terms` explicitly.
+  - kept `apps/retrieval/rag_base_orchestration.py` and `apps/evidence/rag_result_assembly.py` as the source-of-truth service layers and verified the targeted modules are now free of `*_fn` / `*_cls` orchestration DI usage.
+- validations:
+  - `python -m py_compile apps/retrieval/rag_runtime_prelude.py apps/retrieval/rag_dispatch_runtime.py apps/retrieval/rag_join_orchestration.py apps/retrieval/rag_pipeline.py apps/retrieval/rag_base_orchestration.py apps/evidence/rag_result_assembly.py` passed
+  - import smoke passed for `apps.retrieval.rag_dispatch_runtime`, `apps.retrieval.rag_base_orchestration`, `apps.evidence.rag_result_assembly`, and `apps.retrieval.rag_pipeline`
+  - `python -c "from apps.api.app_factory import create_app; create_app()"` passed
+  - targeted grep on `apps/retrieval/rag_pipeline.py`, `apps/retrieval/rag_base_orchestration.py`, and `apps/evidence/rag_result_assembly.py` returned `0` matches for `*_fn` / `*_cls`
+- remains risky:
+  - this wave removed the pipeline-side callback basket, but `apps/retrieval/rag_join_orchestration.py` still relies on `JoinOrchestrationRuntime` / `PerfFollowupRuntime` dataclasses whose field names remain `*_fn`; the seam is now downstream-only rather than repo-wide removed.
+  - active validation is still smoke-only because `tests/` remains intentionally absent in this worktree.
+  - workflow graph construction smoke was not rerun here; if `langgraph` is missing, that check remains environment-blocked.
+- next best task:
+  - either stop here and slice the dirty worktree into reviewable commits, or continue one more focused cleanup wave that renames/removes the remaining `JoinOrchestrationRuntime` / `PerfFollowupRuntime` field-level callback seams inside `apps/retrieval/rag_join_orchestration.py`.
+
+## 2026-04-02T18:10:00+09:00 Improver
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected files:
+  - `apps/planner/planner_runtime.py`
+  - `apps/planner/query_analysis.py`
+  - `apps/planner/planner_context_cards.py`
+  - `apps/planner/planner_defaults.py`
+  - `apps/api/contracts/repo_manifest.py`
+  - `apps/api/app_factory.py`
+  - `apps/conversation/request_facade.py`
+  - `scripts/run_baseline_checks.ps1`
+  - `README.md`
+  - `apps/docs/README.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/04_회귀기준과_점검.md`
+  - `apps/docs/05_유지보수와_확장.md`
+  - `apps/docs/PRODUCT_BASELINE.md`
+- findings:
+  - `apps/planner/planner_runtime.py` still carried internal callback/class seams even after the entrypoint hard cut.
+  - planner prompt/version/runtime defaults were still split between planner and `apps/api/contracts/repo_manifest.py`.
+  - current docs still described pytest/baseline as active validation even though `tests/` is intentionally absent in this worktree.
+- changes:
+  - added `apps/planner/planner_defaults.py` and moved planner runtime defaults ownership there.
+  - simplified `apps/planner/planner_runtime.py` so stage helpers and `run_stagewise_question_analysis(...)` resolve collaborators by direct import instead of injected `*_cls`, `*_fn`, `log_event`, or builder parameters.
+  - simplified `apps/planner/query_analysis.py` to intent preparation plus a direct call into `run_stagewise_question_analysis(...)`.
+  - simplified `apps/planner/planner_context_cards.py` to load prompt cards directly without loader injection.
+  - rewired `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, and `apps/api/contracts/repo_manifest.py` to use planner-owned defaults rather than owning planner runtime defaults themselves.
+  - retired `scripts/run_baseline_checks.ps1` as an explicit non-active validation entrypoint.
+  - rewrote current guidance docs so active validation now reflects compile/import/app smoke and historical pytest/baseline results remain history-only.
+- validations:
+  - planner seam grep on `apps/planner/planner_runtime.py` shows no remaining `*_fn`, `*_cls`, or injected logger/log-event parameters
+  - `python -m py_compile apps/planner/planner_defaults.py apps/planner/planner_context_cards.py apps/planner/planner_runtime.py apps/planner/query_analysis.py apps/api/contracts/repo_manifest.py apps/api/app_factory.py apps/conversation/request_facade.py` passed
+  - import smoke passed for `apps.planner.query_analysis`, `apps.planner.planner_runtime`, `apps.api.app_factory`
+  - `python -c "from apps.api.app_factory import create_app; create_app()"` passed
+  - workflow graph construction smoke remains blocked if `langgraph` is missing
+- remains risky:
+  - `scripts/run_baseline_checks.ps1` is now intentionally retired, so any external automation that still invokes it must move to the smoke-based validation path.
+  - `tests/` deletion is treated as intentional in this wave; if that assumption changes later, the validation policy and docs must be revisited together.
+  - full workflow compile still depends on `langgraph` availability.
+- next best task:
+  - clean up any remaining current docs or runbooks that still present pytest/baseline as an active gate, then slice the dirty worktree into reviewable commits.
+
+## 2026-04-02T16:55:00+09:00 Improver
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected files:
+  - `apps/api/app_factory.py`
+  - `apps/api/runtime.py`
+  - `apps/api/runtime_helpers.py`
+  - `apps/api/workflow_builder.py`
+  - `apps/api/workflow_nodes.py`
+  - `apps/chat/answer_generation.py`
+  - `apps/chat/llm_runtime.py`
+  - `apps/chat/llm_json.py`
+  - `apps/conversation/request_facade.py`
+  - `apps/planner/query_analysis.py`
+  - `apps/planner/planner_service.py`
+  - `apps/retrieval/retrieval_workflow.py`
+  - `apps/docs/README.md`
+  - `apps/docs/05_*.md`
+- findings:
+  - Workflow, planner, retrieval, and chat entrypoints were still assembled through callback/class injection and `partial(...)`, which left `app_factory` acting like a business-logic owner.
+  - The latency decorator hid the public state-only signatures behind `wrapper(*args, **kwargs)`.
+  - The current worktree is still missing `tests/`, so the planned pytest/baseline validation set could not be rerun in this turn.
+- changes:
+  - Centralized `logger`, `measure_latency`, `log_event`, and `log_section` in `apps/api/runtime_helpers.py`.
+  - Removed `WorkflowNodes` and switched `apps/api/workflow_builder.py` to direct feature-owned wiring.
+  - Simplified workflow nodes in `apps/api/workflow_nodes.py`, `apps/retrieval/retrieval_workflow.py`, and `apps/chat/answer_generation.py` to state-only signatures.
+  - Removed `RequestUnderstandingFacade` and kept only top-level `build_intent_payload(...)` in `apps/conversation/request_facade.py`.
+  - Simplified `apps/planner/query_analysis.py`, `apps/planner/planner_service.py`, `apps/api/runtime.py`, and `apps/api/app_factory.py` to import collaborators directly.
+  - Simplified `apps/chat/llm_runtime.py` to `build_llm(model_name=...)`, and made `apps/chat/llm_json.py` use the module logger directly.
+  - Added `functools.wraps` to the latency decorator in `apps/api/contracts/workflow_models.py` so public signatures stay visible.
+  - Updated `apps/docs/README.md`, `apps/docs/05_?????_??.md`, and added `apps/docs/ADR/ADR-0005-parameter-injection-hard-cut.md`.
+- validations:
+  - `python -m py_compile apps/api/runtime_helpers.py apps/api/workflow_builder.py apps/api/workflow_nodes.py apps/api/runtime.py apps/api/app_factory.py apps/chat/llm_runtime.py apps/chat/llm_json.py apps/chat/answer_generation.py apps/conversation/request_facade.py apps/planner/query_analysis.py apps/planner/planner_service.py apps/retrieval/retrieval_workflow.py` passed
+  - import smoke passed for `apps.api.workflow_builder`, `apps.api.workflow_nodes`, `apps.api.runtime`, `apps.api.app_factory`, `apps.chat.answer_generation`, `apps.conversation.request_facade`, `apps.planner.query_analysis`, `apps.planner.planner_service`, `apps.retrieval.retrieval_workflow`
+  - `create_app()` smoke passed
+  - signature smoke confirmed state-only or simplified entrypoints for workflow, conversation, planner, retrieval, and chat owners
+  - `build_request_workflow()` graph construction smoke could not run because this shell still lacks `langgraph`
+- remains risky:
+  - The missing `tests/` tree blocked the planned pytest subsets and baseline script.
+  - Full startup/runtime smoke still needs a dependency-complete environment with `langgraph` and production runtime packages.
+  - `apps/planner/planner_runtime.py` still carries internal callback/class seams, so this wave should be read as an entrypoint hard cut rather than a full internal seam removal.
+- next best task:
+  - Restore or reconcile the missing test tree, then continue the same import-owned cleanup inside `apps/planner/planner_runtime.py` and recover patch-based regressions.
 
 ## 2026-04-02T15:41:10.7967342+09:00 Improver
 - branch/head: `고도화` / `bc84647bd815aa394126bba8f2510dc9a1cd2f8a`
@@ -408,7 +633,8 @@
 - next best task:
   - `rag_retriever.py`??anchor drift 蹂듦뎄瑜?`project/perf/people/org/refinement` 異뺤쑝濡??쇰컲?뷀븯怨?`WIDENING.BLOCKED` 濡쒓렇瑜?異붽???寃?
   - `org/perf child ref -> related projects/detail` golden flow瑜??ㅼ젣 retrieval runtime?먯꽌 ?ы쁽?섍퀬 `hm_id/org_id/rst_id must` filter path瑜?end-to-end 濡쒓렇濡??뺤씤??寃?
-
+
+
 ## ??以??붿빟
 - ??臾몄꽌???ㅼ쓬 猷⑦봽媛 諛붾줈 ?댁뼱諛쏆쓣 ???덇쾶 ?꾩옱 ?곹깭, ?대┛ 由ъ뒪?? ?ㅼ쓬 ?≪뀡, 理쒓렐 ?묒뾽 濡쒓렇瑜??④린???대? handoff 臾몄꽌??
 
@@ -452,7 +678,8 @@
 - validations
 - next best task
 - ?곸꽭 ?덉뒪?좊━??理쒖떊 ??ぉ遺???꾨옒???볥뒗??
-
+
+
 ---
 
 ### 2026-03-31T17:58:07.8388346+09:00 Improver
@@ -530,335 +757,663 @@
 - next best task:
   - real runtime?먯꽌 諛섎룄泥?source-reference follow-up 吏덈Ц???ㅼ떆 ?ы쁽??model prompt?먮뒗 `# 異쒖쿂 N.` 釉붾줉留??ㅼ뼱媛怨? logs?먮뒗 debug scaffold留??⑤뒗吏 ?뺤씤?쒕떎.
   - selector telemetry?먯꽌 `internal_context_leak`媛 parenthetical schema label/raw missing-field inventory?먮룄 ?덉젙?곸쑝濡?李랁엳?붿? ?뺤씤?쒕떎.
-
-### 2026-03-27 15:50:44 +09:00
-- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
-- inspected files:
-  - `apps/api/request_overrides.py`
-  - `apps/api/routes.py`
-  - `tests/test_oracle_request_overrides.py`
-  - `docs/03_??곸겫????띻펾.md`
-- findings:
-  - Oracle defaults loader??疫꿸퀣??癒?즲 `IRD_PARAM` 鈺곌퀬??野껋럥以덄몴?揶쏅쉰????됰?筌왖筌? ??뺤쒔 疫꿸퀡猷???connector ?遺용튋 嚥≪뮄??? ?遺욧퍕癰?lookup ?怨밴묶 嚥≪뮄?뉐첎? ??곷선 ??곸겫 餓??源껊궗/??쎈솭 ?癒???????醫딅뼄.
-  - `from_env()` ??덉삂?? env 沃섎챷苑????`None` 獄쏆꼹????袁⑤빍???꾨뗀諭?疫꿸퀡??첎?`ird` / `ird_12#$` / KNTIS DSN) ???????
-  - ?袁⑹삺 ?臾믩씜 Python ??띻펾?癒?뮉 `pytest`, `fastapi`揶쎛 ??곷선 route-level ???? 野꺜筌앹빘? 筌욊낯????쎈뻬??? 筌륁궢六??
-- changes:
-  - Oracle defaults loader??connector summary?? lookup meta(`oracle_lookup_status`, `oracle_loaded_keys` ?????곕떽???덈뼄.
-  - ??뺤쒔 疫꿸퀡猷???`[request_overrides] Oracle defaults connector configured ...` 嚥≪뮄?뉐첎? ??ㅻ즲嚥???덈뼄.
-  - `/query/stream`, `/query/debug`?癒?퐣 `REQ.ORACLE.DEFAULTS` ?닌듼??嚥≪뮄?뉒몴???ｋ┛?袁⑥쨯 ??덈뼄.
-  - ?온?????뮞?紐? 癰귣떯而??랁???곸겫 ?얜챷苑????嚥≪뮄????곴퐤 疫꿸퀣????곕떽???덈뼄.
-- validations:
-  - `python -m py_compile apps/api/request_overrides.py apps/api/routes.py tests/test_oracle_request_overrides.py`
-  - custom Python validation: `request_overrides_validation_ok`
-  - 沃섎챷??? `python -m pytest ...` (`pytest` 沃섎챷苑뺟㎉?, FastAPI TestClient 疫꿸퀡而?route smoke (`fastapi` 沃섎챷苑뺟㎉?
-- next best task:
-  - ??쇱젫 ??뺤쒔 ?怨???Python ??띻펾?癒?퐣 `/query/stream` 1???紐꾪뀱 ??`REQ.ORACLE.DEFAULTS`揶쎛 `loaded` ?癒?뮉 `query_failed`嚥???ㅻ뮉筌왖 ?類ㅼ뵥
-  - ?袁⑹뒄 ??Oracle lookup ??쎈솭 ??error code/latency繹먮슣? ??ｍ뜞 ??ｋ┛?袁⑥쨯 ?類ㅼ삢
-
-## 2026-03-27T16:02:41+09:00 Improver
-- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
-- inspected files: `apps/planner/planner_runtime.py`, `apps/retrieval/rag_retriever.py`, `apps/retrieval/retrieval_workflow.py`, `apps/planner/query_intent.py`, `apps/planner/planner_surface_signals.py`, `tests/test_planner_stagewise.py`, `tests/test_request_overrides.py`, `docs/SESSION_HANDOFF.md`
-- findings:
-  - project detail queries with identifier-like tokens such as `B555000149` can still be mis-promoted into `org_name` hard gates, which causes strict LOOKUP to return `no_reranked`.
-  - detail coverage still depends on raw payload axes that can disappear when reranked hits arrive in nested `payload` wrappers.
-- changes:
-  - `apps/planner/planner_runtime.py`: added a sanitization guard that drops identifier-like org gates for project-axis queries unless the query contains explicit org cues.
-  - `apps/retrieval/rag_retriever.py`: flattened nested hit payload wrappers and preserved raw detail fields such as `content1`, `content2`, `content_text`, `org_nm`, and project ids.
-  - `tests/test_planner_stagewise.py`: added a regression test for `B555000149 ?⑥눘????怨멸쉭?類ｋ궖`.
-  - `tests/test_request_overrides.py`: added a retriever regression test for nested payload unwrapping plus raw detail-field preservation.
-- validations:
-  - `python -m py_compile apps/planner/planner_runtime.py apps/retrieval/rag_retriever.py tests/test_planner_stagewise.py tests/test_request_overrides.py` passed
-  - pytest remains blocked in this shell because the shared Windows Python environment does not include the project test/runtime deps.
-- next best task: run the same strict debug requests in the real app runtime and confirm that `DETAIL.COVERAGE` now exposes `summary/goal/period/budget` and that `B555000149 ?⑥눘????怨멸쉭?類ｋ궖` no longer compiles an `org_nm` hard gate.
-
-## 2026-03-27T15:21:12+09:00 Improver
-- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
-- inspected files: `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/SESSION_HANDOFF.md`, `apps/evidence/detail_contract.py`, `apps/retrieval/retrieval_workflow.py`, `apps/conversation/view_state.py`, `apps/evidence/context_helpers.py`, `apps/evidence/canonical_evidence.py`, `tests/test_detail_contract.py`, `tests/test_retrieval_workflow_detail_runtime.py`
-- findings:
-  - strict detail coverage still let a polluted anchor/display label override the hydrated project title, which explains logs like `title: 1. 繹먃?딅맩?` in `[Reference Context]`.
-  - NTIS project detail coverage was not hydrating `summary/goal/period/budget` from raw `meta_basic/content_*` fields even when the payload clearly contained those values.
-  - helper/canonical title precedence had drifted from the documented contract because some paths still preferred `title_text` ahead of `title1`.
-- changes:
-  - `apps/evidence/detail_contract.py`: changed project detail title precedence to prefer hydrated/raw title axes before anchor fallback, and hydrated `summary/goal/period/budget` from `meta_basic` and `content_*`.
-  - `apps/evidence/context_helpers.py`: changed payload title preference to `title1 -> title_text -> title2`.
-  - `apps/evidence/canonical_evidence.py`: changed canonical fact title collection to `title1 -> title_text -> title2`.
-  - `tests/test_detail_contract.py`: added regression coverage for polluted anchor labels, NTIS `meta_basic` hydration, helper title preference, and canonical evidence title precedence.
-- validations:
-  - `python -m py_compile apps/evidence/detail_contract.py apps/evidence/context_helpers.py apps/evidence/canonical_evidence.py tests/test_detail_contract.py` passed
-  - `python -m pytest tests/test_detail_contract.py tests/test_retrieval_workflow_detail_runtime.py -q` failed in local shell: `No module named pytest`
-  - inline import/runtime validation could not run in local shell because project deps such as `pydantic` are absent from the shared Windows Python environment
-- next best task: run the touched detail tests inside the real app/runtime environment (the one that has `pytest` and `pydantic`), then capture one strict debug request to confirm `[Reference Context]` now shows the canonical project title plus hydrated `summary/goal/period/budget`.
-
-## 2026-03-27T15:17:38.4825738+09:00 Watcher
-- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
-- inspected files: `docs/CODEX_CONTEXT.md`, `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/planner/query_analysis.py`, `apps/planner/planner_runtime.py`, `apps/chat/llm_runtime.py`, `apps/chat/answer_merge.py`, `apps/api/runtime_helpers.py`, `apps/retrieval/result_contract.py`, `apps/conversation/request_facade.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_answer_merge_bypass.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_planner_prompt_cards.py`
-- findings:
-  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ??`PLANNER_STAGE1/2_PROMPT_VERSION=v1` ????됰뻻嚥???ｊ볼 ??筌??袁⑥뺘?봔?癒?뮉 V2 defaults????쇰뻻 ?醫롫섧??랁? smoke ??됰뻻????용뮉 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ??揶쎛?귐뗪텚??
-  - P1 coverage gap: `tests/test_eval_fixture_schema.py` ??axis list 鈺곕똻?깍쭕??類ㅼ뵥??뺣뼄. ?袁⑹삺 fixture揶쎛 ?怨쀫염??required axis????釉??롫쐭??곕즲 CI??baseline ???袁⑥뵭????? 筌륁궢釉??
-  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper default???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ???? ?袁⑹삺 app wiring?? explicit version????띻볼 active bug???袁⑤빍筌왖筌???沅????stale default揶쎛 ??쇰뻻 ??곷툡??????덈뼄.
-- changes: bootstrap facts?? ?袁⑹삺 ?袁る퓮 筌뤴뫖以??筌ㅼ뮇???꾨뗀諭?疫꿸퀣???곗쨮 揶쏄퉮???덈뼄.
-- validations:
-  - `python -m py_compile apps/api/routes.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_eval_fixture_schema.py tests/test_runtime_helpers_stream_bypass.py` ???궢
-  - `python -m pytest --collect-only -q` ??쎈솭: `No module named pytest`
-- next best task: `docs/03_??곸겫????띻펾.md` ??planner default / smoke ??됰뻻???袁⑹삺 ?꾨뗀諭?? baseline script??筌띿쉳苡??類ｂ봺??랁? ??곷선??`tests/test_eval_fixture_schema.py` ??required axis subset 野꺜筌앹빘???곕떽???뺣뼄.
-
-## 2026-03-27T16:08:00+09:00 Improver
-- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
-- inspected files: `apps/planner/planner_runtime.py`, `apps/planner/planner_validation.py`, `apps/retrieval/rag_retriever.py`, `apps/retrieval/retrieval_workflow.py`, `prompts/planner_stage15_v1.md`, `prompts/planner_stage2_v2.md`, `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`, `eval/sample_queries.jsonl`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`
-- findings:
-  - stage2 retry ??쎈솭 ??쇰퓠???ⓦ룗而?에?raw-question fallback筌???됰선 planner miss??deterministic??띿쓺 癰귣벀???野껋럥以덂첎? ??곷???
-  - `Stage2ValidationResult` ??`missing_must_keep_terms` ??野껉퀗?득에???블???삳빍筌왖 ??녿툡 quoted title 揶쏆늿? exact phrase 癰귣똻???runtime????묐뻬??????곷???
-  - eval fixture schema????planner ?袁る퓮 ??`broad_history`, `quoted_title`, `source_ref`, `ordinal`)??baseline??곗쨮 揶쏅벡???? 筌륁궢六??
-- changes:
-  - `apps/planner/planner_validation.py`: `missing_must_keep_terms` ??validation 野껉퀗????곕떽???덈뼄.
-  - `apps/planner/planner_runtime.py`: stage2 retry ??쎈솭 ??deterministic repair ??ｍ?? raw-query fallback reason log???곕떽???덈뼄.
-  - `apps/retrieval/retrieval_workflow.py`: retrieval query resolution log??`query_resolution_reason` ???곕떽???덈뼄.
-  - `prompts/planner_stage15_v1.md`, `prompts/planner_stage2_v2.md`: broad-history, quoted-title, ordinal/source-reference follow-up 癰귣똻??域뱀뮇?껅???됰뻻??揶쏅벤???덈뼄.
-  - `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`, `eval/sample_queries.jsonl`: deterministic repair, drift, fixture axis baseline ??????곕떽???덈뼄.
-  - ?온??contract/ops/regression/baseline ?얜챷苑뚨몴??袁⑹삺 ??덉삂??筌띿쉳苡?揶쏄퉮???덈뼄.
-- validations:
-  - pending
-- next best task: shared Windows Python ??띻펾?癒?퐣 `pytest` ?? app dependency揶쎛 餓Β??쑬留??怨??袁⑹몵嚥?planner subset ???????쇱젫 ??쎈뻬??deterministic repair 野껋럥以덂첎? green?紐? ?類ㅼ뵥??뺣뼄.
-
-## 2026-03-27T16:43:46+09:00 Watcher
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/GOLDEN_TESTS.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `eval/sample_queries.jsonl`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/planner/query_analysis.py`, `apps/planner/planner_runtime.py`, `apps/conversation/request_facade.py`, `apps/chat/answer_generation.py`, `apps/chat/answer_merge.py`, `apps/api/runtime_helpers.py`, `apps/retrieval/result_contract.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_answer_merge_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_runtime_helpers_stream_bypass.py`
-- findings:
-  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ???????`PLANNER_STAGE1/2_PROMPT_VERSION=v1` ??됰뻻?? `v2` 疫꿸퀡??첎誘れ뱽 ??ｍ뜞 ?怨댄? `python -m pytest -m smoke` 獄???용뮉 ???뮞?????뵬(`tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py`)??smoke baseline??곗쨮 ??덇땀??뺣뼄.
-  - P1 handoff drift: ?怨룸뼊 risk bullets????? ??욧퍙??eval/route-test 癰귣떯而????怨밴묶???④쑴??揶쎛?귐뗪텕????됰??? ??쇱젫嚥≪뮆??`tests/test_eval_fixture_schema.py` 揶쎛 required axis subset??揶쏅벡???랁? `tests/test_api_routes_reference_payload.py` 揶쎛 route terminal sequencing??`MISSING_FINAL_ANSWER` guard???⑥쥙???뺣뼄.
-  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper default???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ????
-  - P2 streaming coverage gap: `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곕돗筌?野꺜筌앹빜釉?? `derive_stream_error_code()` ??`TTFT_DEADLINE_EXCEEDED` / `GEN_DEADLINE_EXCEEDED` / `CHAR_LIMITED` / true empty-stream precedence???????筌욊낯???⑥쥙???? ??녿릭??
-  - P2 verifier weakness: answer-stage validity gate???????`apps/chat/answer_merge.py` ??refusal/internal-context heuristic?됰Ŋ???
-- changes:
-  - `docs/SESSION_HANDOFF.md` ?怨룸뼊 risk bullets???袁⑹삺 repo ?怨밴묶??筌띿쉳苡?揶쏄퉮???덈뼄.
-  - ??苡?watcher ?怨쀬벥 head, 域뱀눊援? ??? ?袁る퓮, ??쇱벉 ??ν뒄 ?袁⑤궖??handoff???곕떽???덈뼄.
-- validations:
-  - `python -m py_compile apps/api/routes.py apps/chat/answer_merge.py apps/conversation/request_facade.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py tests/test_runtime_helpers_stream_bypass.py` passed
-  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
-- next best task: `docs/03_??곸겫????띻펾.md` ??planner default / smoke 筌뤿굝議??`scripts/run_baseline_checks.ps1` ?? ?袁⑹삺 ???뮞?????뵬 疫꿸퀣???곗쨮 ?類ｂ봺??랁? ??곷선??`tests/test_runtime_helpers_stream_bypass.py` ??stream error-code precedence ??????곕떽???뺣뼄.
-
-## 2026-03-27T16:15:04.2889837+09:00 Improver
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- inspected files: `apps/conversation/followup_anchor.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/request_facade.py`, `tests/test_planner_stagewise.py`, `docs/GOLDEN_TESTS.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/SESSION_HANDOFF.md`
-- findings:
-  - `?곗뮇荑?2???怨뚮럡???類ｋ궖` 揶쏆늿? source-reference follow-up?? eval/golden ?곕벡肉????? ??쇰선揶쎛 ??됰?筌왖筌? ??쇱젫 follow-up anchor / reference-context parser??`?곗뮇荑?N`??ordinal嚥???곴퐤??? 筌륁궢鍮?`followup_resolution_status=none`??곗쨮 ??쥙彛?????됰???
-  - follow-up clarification wording??source-reference??癰귢쑬猷??곕벡?앮에???삼펷筌왖 ??녿툡, out-of-range ?怨뱀넺?癒?퐣 `?곗뮇荑?揶쎛 ?袁⑤빍????곗뺘 `?⑥눘???源껊궢` ?얜㈇?꾣에???롊???袁る퓮????됰???
-  - filter sanitization?? ordinal/deictic ?醫뤾쿃筌???볤탢??랁???됰선?? `?곗뮇荑?2`揶쎛 role/people/org term??곗쨮 ??덀늺 ?袁⑸꺗 retrieval drift??筌띾슢諭????揶쎛 ??됰???
-- changes:
-  - `apps/conversation/followup_anchor.py`: `parse_source_reference()`???곕떽???랁?`parse_ordinal_reference()`揶쎛 `?곗뮇荑?N` / `筌〓㈇?ц눧紐낅퓙 N` / `source N`??ordinal alias嚥???곴퐤??띿쓺 ??덈뼄.
-  - `apps/conversation/followup_resolution.py`: source-reference parser???곕떽???랁? `resolve_reference_context_followup()`揶쎛 `followup_reference_kind=source_reference`嚥?resolve/out_of_range??獄쏆꼹???띿쓺 ??덈뼄.
-  - `apps/conversation/followup_resolution.py`: clarification message/payload??source-reference ?袁⑹뒠 wording??`selection_hint=source_reference_or_entity_reference`???곕떽???뉙? `is_ordinal_reference_token()`??`?곗뮇荑?N`??strip ???怨몄몵嚥?癰귣떯而??덈뼄.
-  - `apps/conversation/request_facade.py`: display snapshot anchor嚥???곴퐤??follow-up??`followup_reference_kind=source_reference`嚥?筌롫??????ｋ┛?袁⑥쨯 筌띿쉸???
-  - `tests/test_planner_stagewise.py`: display-snapshot anchor, reference-context resolve, out-of-range clarification payload ??? ???뮞?紐? ?곕떽???덈뼄.
-  - ?얜챷苑?癰귣챶揆?? 癰궰野껋?釉?쭪? ??녿릭?? `docs/GOLDEN_TESTS.md`?? `docs/04_???疫꿸퀣????癒?.md`揶쎛 ??? `source_ref` follow-up????? ???怨몄몵嚥??類ㅼ벥??랁???됰선, ??苡???ν뒄???닌뗭겱??域??④쑴鍮??筌띿쉸???源껉봄????
-- validations:
-  - `python -m py_compile apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/request_facade.py tests/test_planner_stagewise.py` passed
-  - inline Python validation passed for `apps/conversation/followup_resolution.py`: `?곗뮇荑?2???怨뚮럡???類ｋ궖` -> `resolved/source_reference/{pjt_id:PJT-2}`, `?곗뮇荑?3???怨뚮럡???類ｋ궖` -> `out_of_range` + source-reference clarification wording
-  - inline import/runtime validation for `apps/conversation/request_facade.py` could not run in this shell because shared Windows Python lacks `pydantic`
-  - `python -m pytest -q tests/test_planner_stagewise.py -k source_reference` failed: `No module named pytest`
-- next best task: `pytest`?? `pydantic`揶쎛 餓Β??쑬留???쇱젫 ??runtime ??띻펾?癒?퐣 source-reference follow-up subset????쎈뻬??랁? `/query/stream` ??甕곕뜆?앮에?`clarification` payload?? `followup_reference_kind=source_reference`揶쎛 ??쇱젫 event/output繹먮슣? ?醫???롫뮉筌왖 ?類ㅼ뵥??뺣뼄.
-
-## 2026-03-27T17:08:00+09:00 Improver
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- inspected files: `logs/app (3).log`, `apps/evidence/canonical_evidence.py`, `apps/evidence/detail_contract.py`, `apps/retrieval/rag_retriever.py`, `tests/test_detail_contract.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `apps/api/rag_mapper/domains/project.py`
-- findings:
-  - ??쇱젫 ??곸겫 嚥≪뮄??癒?퐣 `1711135956` / `'??μ뵬 獄쏆꼶猷꾬㎗?窺筌?疫꿸퀡而?3筌???겸봺 野껊슣???揶쏆뮆而? ?⑥눘???怨멸쉭?類ｋ궖` ?遺욧퍕?? `DETAIL.COVERAGE`揶쎛 `summary/goal/period/budget/outputs`???袁? missing??곗쨮 筌〓씧????됰???
-  - ??쇱젫 payload?? `apps/api/rag_mapper/domains/project.py` ????鈺곌퀬釉?쭖??袁⑹뒄???⑥눘???怨멸쉭 ?곕벡? `pjt_prfrm_org_nm`, `rsch_abstract`, `rsch_goal_abstract`, `tot_rsch_start_dt`, `tot_rsch_end_dt`, `rndco_tot_amt` 筌잛럩肉???? 鈺곕똻???뺣뼄.
-  - `compute_detail_coverage()` ?癒?퍥??raw `meta_basic/content_*`?????筌? exact lookup?癒?퐣 ??쇰선??thin doc?癒?뮉 域??곕벡????쑴堉???뉙?canonical evidence fact??`summary/year/tag` ?類ｋ즲筌???쇰선 rich project detail??癰귣벀???? 筌륁궢六??
-  - 域?野껉퀗??detail contract context揶쎛 ??rich-field scaffold??筌띾슢諭얏? LLM??"??됯텦/筌뤴뫚紐?疫꿸퀗而??遺용튋 ?類ｋ궖揶쎛 ??볥궗??? ??낅뮉??????뱀몵嚥????릭野??癒?뼄.
-- changes:
-  - `apps/evidence/canonical_evidence.py`: `apps/api/rag_mapper/domains/project.py` 揶쎛 ?類ㅼ벥??NTIS project ???뼎 field ??`pjt_prfrm_org_nm`, `rsch_abstract`, `rsch_goal_abstract`, `tot_rsch_*`, `rndco_tot_amt`)???怨뺤뵬 canonical facts/roles ??묒넅???類ㅼ삢??뉙?`_x000D_` ??뽯뻼???類?뇣?酉六??
-  - `apps/evidence/detail_contract.py`: thin doc?????즲 canonical facts??`goal/period/budget/outputs/perf_type/affiliation`??detail coverage fallback??곗쨮 ??덈즲嚥?癰귣떯而??뉙?`_x000D_` ??뽯뻼??rich detail????? ??낅즲嚥??類?뇣?酉六??
-  - `tests/test_detail_contract.py`: canonical evidence rich-fact hydration??thin-doc + canonical-fact detail coverage ??????곕떽???덈뼄.
-  - `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`: project detail coverage揶쎛 canonical rich facts?癒?퐣 ??쇰뻻 ??묒넅??????됰선????뺣뼄???④쑴鍮??筌뤿굞???덈뼄.
-- validations:
-  - `python -m py_compile apps/evidence/canonical_evidence.py apps/evidence/detail_contract.py tests/test_detail_contract.py` passed
-  - inline Python validation with stubbed `apps.conversation.view_state` passed: `detail_mapping_validation_ok`
-  - `python -m pytest ...` remains blocked in this shell because shared Windows Python lacks `pytest` and runtime deps such as `pydantic`
-- next best task:
-  - ??쇱젫 app runtime?癒?퐣 ??덉뵬 ?⑥눘???怨멸쉭 筌욌뜆?썹몴???쇰뻻 ?紐꾪뀱??`DETAIL.COVERAGE.available_fields`??`summary/goal/period/budget`揶쎛 ??쇰선??삳뮉筌왖 ?類ㅼ뵥
+
+
+### 2026-03-27 15:50:44 +09:00
+
+- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
+
+- inspected files:
+
+  - `apps/api/request_overrides.py`
+
+  - `apps/api/routes.py`
+
+  - `tests/test_oracle_request_overrides.py`
+
+  - `docs/03_??곸겫????띻펾.md`
+
+- findings:
+
+  - Oracle defaults loader??疫꿸퀣??癒?즲 `IRD_PARAM` 鈺곌퀬??野껋럥以덄몴?揶쏅쉰????됰?筌왖筌? ??뺤쒔 疫꿸퀡猷???connector ?遺용튋 嚥≪뮄??? ?遺욧퍕癰?lookup ?怨밴묶 嚥≪뮄?뉐첎? ??곷선 ??곸겫 餓??源껊궗/??쎈솭 ?癒???????醫딅뼄.
+
+  - `from_env()` ??덉삂?? env 沃섎챷苑????`None` 獄쏆꼹????袁⑤빍???꾨뗀諭?疫꿸퀡??첎?`ird` / `ird_12#$` / KNTIS DSN) ???????
+
+  - ?袁⑹삺 ?臾믩씜 Python ??띻펾?癒?뮉 `pytest`, `fastapi`揶쎛 ??곷선 route-level ???? 野꺜筌앹빘? 筌욊낯????쎈뻬??? 筌륁궢六??
+
+- changes:
+
+  - Oracle defaults loader??connector summary?? lookup meta(`oracle_lookup_status`, `oracle_loaded_keys` ?????곕떽???덈뼄.
+
+  - ??뺤쒔 疫꿸퀡猷???`[request_overrides] Oracle defaults connector configured ...` 嚥≪뮄?뉐첎? ??ㅻ즲嚥???덈뼄.
+
+  - `/query/stream`, `/query/debug`?癒?퐣 `REQ.ORACLE.DEFAULTS` ?닌듼??嚥≪뮄?뉒몴???ｋ┛?袁⑥쨯 ??덈뼄.
+
+  - ?온?????뮞?紐? 癰귣떯而??랁???곸겫 ?얜챷苑????嚥≪뮄????곴퐤 疫꿸퀣????곕떽???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/api/request_overrides.py apps/api/routes.py tests/test_oracle_request_overrides.py`
+
+  - custom Python validation: `request_overrides_validation_ok`
+
+  - 沃섎챷??? `python -m pytest ...` (`pytest` 沃섎챷苑뺟㎉?, FastAPI TestClient 疫꿸퀡而?route smoke (`fastapi` 沃섎챷苑뺟㎉?
+
+- next best task:
+
+  - ??쇱젫 ??뺤쒔 ?怨???Python ??띻펾?癒?퐣 `/query/stream` 1???紐꾪뀱 ??`REQ.ORACLE.DEFAULTS`揶쎛 `loaded` ?癒?뮉 `query_failed`嚥???ㅻ뮉筌왖 ?類ㅼ뵥
+
+  - ?袁⑹뒄 ??Oracle lookup ??쎈솭 ??error code/latency繹먮슣? ??ｍ뜞 ??ｋ┛?袁⑥쨯 ?類ㅼ삢
+
+
+
+## 2026-03-27T16:02:41+09:00 Improver
+
+- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
+
+- inspected files: `apps/planner/planner_runtime.py`, `apps/retrieval/rag_retriever.py`, `apps/retrieval/retrieval_workflow.py`, `apps/planner/query_intent.py`, `apps/planner/planner_surface_signals.py`, `tests/test_planner_stagewise.py`, `tests/test_request_overrides.py`, `docs/SESSION_HANDOFF.md`
+
+- findings:
+
+  - project detail queries with identifier-like tokens such as `B555000149` can still be mis-promoted into `org_name` hard gates, which causes strict LOOKUP to return `no_reranked`.
+
+  - detail coverage still depends on raw payload axes that can disappear when reranked hits arrive in nested `payload` wrappers.
+
+- changes:
+
+  - `apps/planner/planner_runtime.py`: added a sanitization guard that drops identifier-like org gates for project-axis queries unless the query contains explicit org cues.
+
+  - `apps/retrieval/rag_retriever.py`: flattened nested hit payload wrappers and preserved raw detail fields such as `content1`, `content2`, `content_text`, `org_nm`, and project ids.
+
+  - `tests/test_planner_stagewise.py`: added a regression test for `B555000149 ?⑥눘????怨멸쉭?類ｋ궖`.
+
+  - `tests/test_request_overrides.py`: added a retriever regression test for nested payload unwrapping plus raw detail-field preservation.
+
+- validations:
+
+  - `python -m py_compile apps/planner/planner_runtime.py apps/retrieval/rag_retriever.py tests/test_planner_stagewise.py tests/test_request_overrides.py` passed
+
+  - pytest remains blocked in this shell because the shared Windows Python environment does not include the project test/runtime deps.
+
+- next best task: run the same strict debug requests in the real app runtime and confirm that `DETAIL.COVERAGE` now exposes `summary/goal/period/budget` and that `B555000149 ?⑥눘????怨멸쉭?類ｋ궖` no longer compiles an `org_nm` hard gate.
+
+
+
+## 2026-03-27T15:21:12+09:00 Improver
+
+- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
+
+- inspected files: `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/SESSION_HANDOFF.md`, `apps/evidence/detail_contract.py`, `apps/retrieval/retrieval_workflow.py`, `apps/conversation/view_state.py`, `apps/evidence/context_helpers.py`, `apps/evidence/canonical_evidence.py`, `tests/test_detail_contract.py`, `tests/test_retrieval_workflow_detail_runtime.py`
+
+- findings:
+
+  - strict detail coverage still let a polluted anchor/display label override the hydrated project title, which explains logs like `title: 1. 繹먃?딅맩?` in `[Reference Context]`.
+
+  - NTIS project detail coverage was not hydrating `summary/goal/period/budget` from raw `meta_basic/content_*` fields even when the payload clearly contained those values.
+
+  - helper/canonical title precedence had drifted from the documented contract because some paths still preferred `title_text` ahead of `title1`.
+
+- changes:
+
+  - `apps/evidence/detail_contract.py`: changed project detail title precedence to prefer hydrated/raw title axes before anchor fallback, and hydrated `summary/goal/period/budget` from `meta_basic` and `content_*`.
+
+  - `apps/evidence/context_helpers.py`: changed payload title preference to `title1 -> title_text -> title2`.
+
+  - `apps/evidence/canonical_evidence.py`: changed canonical fact title collection to `title1 -> title_text -> title2`.
+
+  - `tests/test_detail_contract.py`: added regression coverage for polluted anchor labels, NTIS `meta_basic` hydration, helper title preference, and canonical evidence title precedence.
+
+- validations:
+
+  - `python -m py_compile apps/evidence/detail_contract.py apps/evidence/context_helpers.py apps/evidence/canonical_evidence.py tests/test_detail_contract.py` passed
+
+  - `python -m pytest tests/test_detail_contract.py tests/test_retrieval_workflow_detail_runtime.py -q` failed in local shell: `No module named pytest`
+
+  - inline import/runtime validation could not run in local shell because project deps such as `pydantic` are absent from the shared Windows Python environment
+
+- next best task: run the touched detail tests inside the real app/runtime environment (the one that has `pytest` and `pydantic`), then capture one strict debug request to confirm `[Reference Context]` now shows the canonical project title plus hydrated `summary/goal/period/budget`.
+
+
+
+## 2026-03-27T15:17:38.4825738+09:00 Watcher
+
+- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
+
+- inspected files: `docs/CODEX_CONTEXT.md`, `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/planner/query_analysis.py`, `apps/planner/planner_runtime.py`, `apps/chat/llm_runtime.py`, `apps/chat/answer_merge.py`, `apps/api/runtime_helpers.py`, `apps/retrieval/result_contract.py`, `apps/conversation/request_facade.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_answer_merge_bypass.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_planner_prompt_cards.py`
+
+- findings:
+
+  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ??`PLANNER_STAGE1/2_PROMPT_VERSION=v1` ????됰뻻嚥???ｊ볼 ??筌??袁⑥뺘?봔?癒?뮉 V2 defaults????쇰뻻 ?醫롫섧??랁? smoke ??됰뻻????용뮉 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ??揶쎛?귐뗪텚??
+
+  - P1 coverage gap: `tests/test_eval_fixture_schema.py` ??axis list 鈺곕똻?깍쭕??類ㅼ뵥??뺣뼄. ?袁⑹삺 fixture揶쎛 ?怨쀫염??required axis????釉??롫쐭??곕즲 CI??baseline ???袁⑥뵭????? 筌륁궢釉??
+
+  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper default???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ???? ?袁⑹삺 app wiring?? explicit version????띻볼 active bug???袁⑤빍筌왖筌???沅????stale default揶쎛 ??쇰뻻 ??곷툡??????덈뼄.
+
+- changes: bootstrap facts?? ?袁⑹삺 ?袁る퓮 筌뤴뫖以??筌ㅼ뮇???꾨뗀諭?疫꿸퀣???곗쨮 揶쏄퉮???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/api/routes.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_eval_fixture_schema.py tests/test_runtime_helpers_stream_bypass.py` ???궢
+
+  - `python -m pytest --collect-only -q` ??쎈솭: `No module named pytest`
+
+- next best task: `docs/03_??곸겫????띻펾.md` ??planner default / smoke ??됰뻻???袁⑹삺 ?꾨뗀諭?? baseline script??筌띿쉳苡??類ｂ봺??랁? ??곷선??`tests/test_eval_fixture_schema.py` ??required axis subset 野꺜筌앹빘???곕떽???뺣뼄.
+
+
+
+## 2026-03-27T16:08:00+09:00 Improver
+
+- branch/head: `?⑥쥓猷?? / `224f3c3ec28474674535efdb21086723b371f005`
+
+- inspected files: `apps/planner/planner_runtime.py`, `apps/planner/planner_validation.py`, `apps/retrieval/rag_retriever.py`, `apps/retrieval/retrieval_workflow.py`, `prompts/planner_stage15_v1.md`, `prompts/planner_stage2_v2.md`, `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`, `eval/sample_queries.jsonl`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`
+
+- findings:
+
+  - stage2 retry ??쎈솭 ??쇰퓠???ⓦ룗而?에?raw-question fallback筌???됰선 planner miss??deterministic??띿쓺 癰귣벀???野껋럥以덂첎? ??곷???
+
+  - `Stage2ValidationResult` ??`missing_must_keep_terms` ??野껉퀗?득에???블???삳빍筌왖 ??녿툡 quoted title 揶쏆늿? exact phrase 癰귣똻???runtime????묐뻬??????곷???
+
+  - eval fixture schema????planner ?袁る퓮 ??`broad_history`, `quoted_title`, `source_ref`, `ordinal`)??baseline??곗쨮 揶쏅벡???? 筌륁궢六??
+
+- changes:
+
+  - `apps/planner/planner_validation.py`: `missing_must_keep_terms` ??validation 野껉퀗????곕떽???덈뼄.
+
+  - `apps/planner/planner_runtime.py`: stage2 retry ??쎈솭 ??deterministic repair ??ｍ?? raw-query fallback reason log???곕떽???덈뼄.
+
+  - `apps/retrieval/retrieval_workflow.py`: retrieval query resolution log??`query_resolution_reason` ???곕떽???덈뼄.
+
+  - `prompts/planner_stage15_v1.md`, `prompts/planner_stage2_v2.md`: broad-history, quoted-title, ordinal/source-reference follow-up 癰귣똻??域뱀뮇?껅???됰뻻??揶쏅벤???덈뼄.
+
+  - `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`, `eval/sample_queries.jsonl`: deterministic repair, drift, fixture axis baseline ??????곕떽???덈뼄.
+
+  - ?온??contract/ops/regression/baseline ?얜챷苑뚨몴??袁⑹삺 ??덉삂??筌띿쉳苡?揶쏄퉮???덈뼄.
+
+- validations:
+
+  - pending
+
+- next best task: shared Windows Python ??띻펾?癒?퐣 `pytest` ?? app dependency揶쎛 餓Β??쑬留??怨??袁⑹몵嚥?planner subset ???????쇱젫 ??쎈뻬??deterministic repair 野껋럥以덂첎? green?紐? ?類ㅼ뵥??뺣뼄.
+
+
+
+## 2026-03-27T16:43:46+09:00 Watcher
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/GOLDEN_TESTS.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `eval/sample_queries.jsonl`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/planner/query_analysis.py`, `apps/planner/planner_runtime.py`, `apps/conversation/request_facade.py`, `apps/chat/answer_generation.py`, `apps/chat/answer_merge.py`, `apps/api/runtime_helpers.py`, `apps/retrieval/result_contract.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_answer_merge_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_runtime_helpers_stream_bypass.py`
+
+- findings:
+
+  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ???????`PLANNER_STAGE1/2_PROMPT_VERSION=v1` ??됰뻻?? `v2` 疫꿸퀡??첎誘れ뱽 ??ｍ뜞 ?怨댄? `python -m pytest -m smoke` 獄???용뮉 ???뮞?????뵬(`tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py`)??smoke baseline??곗쨮 ??덇땀??뺣뼄.
+
+  - P1 handoff drift: ?怨룸뼊 risk bullets????? ??욧퍙??eval/route-test 癰귣떯而????怨밴묶???④쑴??揶쎛?귐뗪텕????됰??? ??쇱젫嚥≪뮆??`tests/test_eval_fixture_schema.py` 揶쎛 required axis subset??揶쏅벡???랁? `tests/test_api_routes_reference_payload.py` 揶쎛 route terminal sequencing??`MISSING_FINAL_ANSWER` guard???⑥쥙???뺣뼄.
+
+  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper default???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ????
+
+  - P2 streaming coverage gap: `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곕돗筌?野꺜筌앹빜釉?? `derive_stream_error_code()` ??`TTFT_DEADLINE_EXCEEDED` / `GEN_DEADLINE_EXCEEDED` / `CHAR_LIMITED` / true empty-stream precedence???????筌욊낯???⑥쥙???? ??녿릭??
+
+  - P2 verifier weakness: answer-stage validity gate???????`apps/chat/answer_merge.py` ??refusal/internal-context heuristic?됰Ŋ???
+
+- changes:
+
+  - `docs/SESSION_HANDOFF.md` ?怨룸뼊 risk bullets???袁⑹삺 repo ?怨밴묶??筌띿쉳苡?揶쏄퉮???덈뼄.
+
+  - ??苡?watcher ?怨쀬벥 head, 域뱀눊援? ??? ?袁る퓮, ??쇱벉 ??ν뒄 ?袁⑤궖??handoff???곕떽???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/api/routes.py apps/chat/answer_merge.py apps/conversation/request_facade.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py tests/test_runtime_helpers_stream_bypass.py` passed
+
+  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
+
+- next best task: `docs/03_??곸겫????띻펾.md` ??planner default / smoke 筌뤿굝議??`scripts/run_baseline_checks.ps1` ?? ?袁⑹삺 ???뮞?????뵬 疫꿸퀣???곗쨮 ?類ｂ봺??랁? ??곷선??`tests/test_runtime_helpers_stream_bypass.py` ??stream error-code precedence ??????곕떽???뺣뼄.
+
+
+
+## 2026-03-27T16:15:04.2889837+09:00 Improver
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- inspected files: `apps/conversation/followup_anchor.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/request_facade.py`, `tests/test_planner_stagewise.py`, `docs/GOLDEN_TESTS.md`, `docs/04_???疫꿸퀣????癒?.md`, `docs/SESSION_HANDOFF.md`
+
+- findings:
+
+  - `?곗뮇荑?2???怨뚮럡???類ｋ궖` 揶쏆늿? source-reference follow-up?? eval/golden ?곕벡肉????? ??쇰선揶쎛 ??됰?筌왖筌? ??쇱젫 follow-up anchor / reference-context parser??`?곗뮇荑?N`??ordinal嚥???곴퐤??? 筌륁궢鍮?`followup_resolution_status=none`??곗쨮 ??쥙彛?????됰???
+
+  - follow-up clarification wording??source-reference??癰귢쑬猷??곕벡?앮에???삼펷筌왖 ??녿툡, out-of-range ?怨뱀넺?癒?퐣 `?곗뮇荑?揶쎛 ?袁⑤빍????곗뺘 `?⑥눘???源껊궢` ?얜㈇?꾣에???롊???袁る퓮????됰???
+
+  - filter sanitization?? ordinal/deictic ?醫뤾쿃筌???볤탢??랁???됰선?? `?곗뮇荑?2`揶쎛 role/people/org term??곗쨮 ??덀늺 ?袁⑸꺗 retrieval drift??筌띾슢諭????揶쎛 ??됰???
+
+- changes:
+
+  - `apps/conversation/followup_anchor.py`: `parse_source_reference()`???곕떽???랁?`parse_ordinal_reference()`揶쎛 `?곗뮇荑?N` / `筌〓㈇?ц눧紐낅퓙 N` / `source N`??ordinal alias嚥???곴퐤??띿쓺 ??덈뼄.
+
+  - `apps/conversation/followup_resolution.py`: source-reference parser???곕떽???랁? `resolve_reference_context_followup()`揶쎛 `followup_reference_kind=source_reference`嚥?resolve/out_of_range??獄쏆꼹???띿쓺 ??덈뼄.
+
+  - `apps/conversation/followup_resolution.py`: clarification message/payload??source-reference ?袁⑹뒠 wording??`selection_hint=source_reference_or_entity_reference`???곕떽???뉙? `is_ordinal_reference_token()`??`?곗뮇荑?N`??strip ???怨몄몵嚥?癰귣떯而??덈뼄.
+
+  - `apps/conversation/request_facade.py`: display snapshot anchor嚥???곴퐤??follow-up??`followup_reference_kind=source_reference`嚥?筌롫??????ｋ┛?袁⑥쨯 筌띿쉸???
+
+  - `tests/test_planner_stagewise.py`: display-snapshot anchor, reference-context resolve, out-of-range clarification payload ??? ???뮞?紐? ?곕떽???덈뼄.
+
+  - ?얜챷苑?癰귣챶揆?? 癰궰野껋?釉?쭪? ??녿릭?? `docs/GOLDEN_TESTS.md`?? `docs/04_???疫꿸퀣????癒?.md`揶쎛 ??? `source_ref` follow-up????? ???怨몄몵嚥??類ㅼ벥??랁???됰선, ??苡???ν뒄???닌뗭겱??域??④쑴鍮??筌띿쉸???源껉봄????
+
+- validations:
+
+  - `python -m py_compile apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/request_facade.py tests/test_planner_stagewise.py` passed
+
+  - inline Python validation passed for `apps/conversation/followup_resolution.py`: `?곗뮇荑?2???怨뚮럡???類ｋ궖` -> `resolved/source_reference/{pjt_id:PJT-2}`, `?곗뮇荑?3???怨뚮럡???類ｋ궖` -> `out_of_range` + source-reference clarification wording
+
+  - inline import/runtime validation for `apps/conversation/request_facade.py` could not run in this shell because shared Windows Python lacks `pydantic`
+
+  - `python -m pytest -q tests/test_planner_stagewise.py -k source_reference` failed: `No module named pytest`
+
+- next best task: `pytest`?? `pydantic`揶쎛 餓Β??쑬留???쇱젫 ??runtime ??띻펾?癒?퐣 source-reference follow-up subset????쎈뻬??랁? `/query/stream` ??甕곕뜆?앮에?`clarification` payload?? `followup_reference_kind=source_reference`揶쎛 ??쇱젫 event/output繹먮슣? ?醫???롫뮉筌왖 ?類ㅼ뵥??뺣뼄.
+
+
+
+## 2026-03-27T17:08:00+09:00 Improver
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- inspected files: `logs/app (3).log`, `apps/evidence/canonical_evidence.py`, `apps/evidence/detail_contract.py`, `apps/retrieval/rag_retriever.py`, `tests/test_detail_contract.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `apps/api/rag_mapper/domains/project.py`
+
+- findings:
+
+  - ??쇱젫 ??곸겫 嚥≪뮄??癒?퐣 `1711135956` / `'??μ뵬 獄쏆꼶猷꾬㎗?窺筌?疫꿸퀡而?3筌???겸봺 野껊슣???揶쏆뮆而? ?⑥눘???怨멸쉭?類ｋ궖` ?遺욧퍕?? `DETAIL.COVERAGE`揶쎛 `summary/goal/period/budget/outputs`???袁? missing??곗쨮 筌〓씧????됰???
+
+  - ??쇱젫 payload?? `apps/api/rag_mapper/domains/project.py` ????鈺곌퀬釉?쭖??袁⑹뒄???⑥눘???怨멸쉭 ?곕벡? `pjt_prfrm_org_nm`, `rsch_abstract`, `rsch_goal_abstract`, `tot_rsch_start_dt`, `tot_rsch_end_dt`, `rndco_tot_amt` 筌잛럩肉???? 鈺곕똻???뺣뼄.
+
+  - `compute_detail_coverage()` ?癒?퍥??raw `meta_basic/content_*`?????筌? exact lookup?癒?퐣 ??쇰선??thin doc?癒?뮉 域??곕벡????쑴堉???뉙?canonical evidence fact??`summary/year/tag` ?類ｋ즲筌???쇰선 rich project detail??癰귣벀???? 筌륁궢六??
+
+  - 域?野껉퀗??detail contract context揶쎛 ??rich-field scaffold??筌띾슢諭얏? LLM??"??됯텦/筌뤴뫚紐?疫꿸퀗而??遺용튋 ?類ｋ궖揶쎛 ??볥궗??? ??낅뮉??????뱀몵嚥????릭野??癒?뼄.
+
+- changes:
+
+  - `apps/evidence/canonical_evidence.py`: `apps/api/rag_mapper/domains/project.py` 揶쎛 ?類ㅼ벥??NTIS project ???뼎 field ??`pjt_prfrm_org_nm`, `rsch_abstract`, `rsch_goal_abstract`, `tot_rsch_*`, `rndco_tot_amt`)???怨뺤뵬 canonical facts/roles ??묒넅???類ㅼ삢??뉙?`_x000D_` ??뽯뻼???類?뇣?酉六??
+
+  - `apps/evidence/detail_contract.py`: thin doc?????즲 canonical facts??`goal/period/budget/outputs/perf_type/affiliation`??detail coverage fallback??곗쨮 ??덈즲嚥?癰귣떯而??뉙?`_x000D_` ??뽯뻼??rich detail????? ??낅즲嚥??類?뇣?酉六??
+
+  - `tests/test_detail_contract.py`: canonical evidence rich-fact hydration??thin-doc + canonical-fact detail coverage ??????곕떽???덈뼄.
+
+  - `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`: project detail coverage揶쎛 canonical rich facts?癒?퐣 ??쇰뻻 ??묒넅??????됰선????뺣뼄???④쑴鍮??筌뤿굞???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/evidence/canonical_evidence.py apps/evidence/detail_contract.py tests/test_detail_contract.py` passed
+
+  - inline Python validation with stubbed `apps.conversation.view_state` passed: `detail_mapping_validation_ok`
+
+  - `python -m pytest ...` remains blocked in this shell because shared Windows Python lacks `pytest` and runtime deps such as `pydantic`
+
+- next best task:
+
+  - ??쇱젫 app runtime?癒?퐣 ??덉뵬 ?⑥눘???怨멸쉭 筌욌뜆?썹몴???쇰뻻 ?紐꾪뀱??`DETAIL.COVERAGE.available_fields`??`summary/goal/period/budget`揶쎛 ??쇰선??삳뮉筌왖 ?類ㅼ뵥
+
   - ?袁⑹뒄 ??project outputs揶쎛 raw payload????삘뀲 ??`meta_detail` ??癰귢쑬猷?field)??곗쨮 ??삳뮉 ?냈??곷뮞???곕떽? 筌띲끋釉?
-
-## 2026-03-27T17:05:10+09:00 Watcher
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/planner/planner_runtime.py`, `apps/planner/planner_context_cards.py`, `apps/conversation/entity_reference.py`, `apps/conversation/followup_resolution.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_planner_prompt_cards.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`
-- findings:
-  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ??stagewise triage ??됰뻻?癒?퐣 ?袁⑹춦 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄???됱몵筌? 疫꿸퀡??野꺜筌?筌뤿굝議??諭???`python -m pytest -m smoke` ?? ??용뮉 ???뵬 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀??뺣뼄. ??쇱젫 source of truth??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` ??
-  - P2 observability gap: `apps/conversation/followup_resolution.py` ??`followup_reference_kind='source_reference'` ??筌띾슢諭억쭪?筌?resolved 野껋럥以??`seed_source` ??`reference_context_ordinal` 嚥??臾믩선 ?節뗫뮉?? `apps/conversation/entity_reference.py` ??source-reference ?袁⑹뒠 source variant揶쎛 ??곷선 citation 疫꿸퀡而?follow-up????곗뺘 ordinal follow-up??揶쏆늿? provenance嚥?疫꿸퀡以??뺣뼄.
-  - P2 streaming coverage gap: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄??揶쏅쉼?筌? `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곕돗 1椰꾨?彛??⑥쥙???뺣뼄.
-  - P2 verifier weakness: `apps/chat/answer_merge.py` ??answer gate???????refusal/internal-context leak/too-short heuristic?됰Ŋ?좑쭖?evidence-grounded factuality ?癒?젟??援?verifier artifact????용뼄.
-  - prompt/path drift????苡??類ㅼ읅 ?癒??癒?퐣 ??덉쨮 獄쏆뮄猿??? ??녿릭?? `tests/test_llm_runtime_prompt_paths.py` ?? `tests/test_planner_prompt_cards.py` ???袁⑹삺 answer prompt path 獄?planner card manifest wiring???④쑴???⑥쥙???뺣뼄.
-  - SEARCH people-name hard-must, JOIN key mixing?? ??苡??類ㅼ읅 ??쇳떔?癒?퐣 ????? 域뱀눊援끿몴?筌≪뼚? 筌륁궢六?? ?온??guard??`apps/retrieval/filters.py` ?? ?얜챷苑????뮞???④쑴鍮????λ툡 ???筌? ??쇱젫 ??쎈뻬 野꺜筌앹빘? `pytest` ?봔??以?????紐낅릭筌왖 筌륁궢六??
-- changes:
-  - `docs/SESSION_HANDOFF.md` ?怨룸뼊 ?袁る퓮 筌뤴뫖以됪???苡?watcher ??疫꿸퀡以???袁⑹삺 域뱀눊援?疫꿸퀣???곗쨮 揶쏄퉮???덈뼄.
-- validations:
-  - `python -m py_compile apps/conversation/entity_reference.py apps/conversation/followup_resolution.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/conversation/request_facade.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_planner_stagewise.py` passed
-  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
-- next best task:
-  - 揶쎛????됱읈????쇱벉 ??ν뒄??`docs/03_??곸겫????띻펾.md` ??planner default / baseline 筌뤿굝議?/ smoke ??됰뻻??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` 疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
-  - 域???쇱벉 ??ν뒄 ?袁⑤궖??`apps/conversation/followup_resolution.py` ?? `apps/conversation/entity_reference.py` ??source-reference provenance???브쑬???랁? route ?癒?뮉 strategy-meta regression test 1椰꾨똻?앮에???? ?⑥쥙???롫뮉 野껉퍔???
-
-## 2026-03-27T17:31:40+09:00 Watcher
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_answer_merge_bypass.py`, `tests/test_eval_fixture_schema.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
-- findings:
-  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ???????stagewise triage ??됰뻻?癒?퐣 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄? 揶쏆늿? ?얜챷苑???롫뼊?癒?퐣??planner V2 defaults???怨룸뮉?? 疫꿸퀡??野꺜筌?筌뤿굝議??`python -m pytest -m smoke` ?? ??용뮉 ???뵬 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀???袁⑹삺 `apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` ?? ?겸뫖猷??뺣뼄.
-  - P2 observability gap: in-flight source-reference follow-up 癰궰野껋럩? `followup_reference_kind=source_reference` 繹먮슣?????ｋ┛筌왖筌? resolved `seed_source` ???????`reference_context_ordinal` 嚥??臾? ??쇰선揶쏄쑬?? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` literal??source-reference variant揶쎛 ??곷선 citation follow-up????곗뺘 ordinal follow-up provenance???브쑬???온筌β돧釉?????용뼄.
-  - P2 streaming coverage gap: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄???닌뗭겱???筌? `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곗쨮 ??삵뀋?쒖꼶由븝쭪? ??낅뮉 1椰꾨?彛??⑥쥙???뺣뼄.
-  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper signature???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ??疫꿸퀡??첎誘れ몵嚥??遺얜뼄. ??쇱젫 ??wiring?? `apps/api/app_factory.py` ?癒?퐣 `v2 / v1 / v2` ??筌뤿굞??雅뚯눘????嚥???뽮쉐 甕곌쑨????袁⑤빍筌왖筌? helper direct-call ???뮞?紐껉돌 ?袁⑸꺗 ??沅??밸퓠????쇰뻻 drift??筌띾슢諭?????덈뼄.
-  - P2 verifier weakness: `apps/chat/answer_merge.py` ?? `tests/test_answer_merge_bypass.py` ????쇰뻻 ?類ㅼ뵥???筌?answer-stage gate??refusal/internal-context leak/too-short heuristic?됰Ŋ?졿? evidence-grounded factuality verifier artifact?????????용뼄.
-  - ?온筌???볧? `logs/app.log` ???袁⑹삺 0 byte??욱?筌ㅼ뮄????쑴堉???덈뼄. ??곸읈 `logs/app (3).log` ?紐꾨퓠????苡?source-reference / stream error-code ?브쑨由겼첎? ??쇱젫 ??곸겫 嚥≪뮄?????堉멨칰???ㅻ뮉筌왖 ????紐낅막 筌ㅼ뮇??嚥≪뮄??域뱀눊援끻첎? ?봔鈺곌퉲釉??
-- changes:
-  - `docs/SESSION_HANDOFF.md` ????苡?watcher ???뤷칰? 疫꿸퀡以됵쭕??곕떽???덈뼄.
-- validations:
-  - `python -m py_compile apps/conversation/followup_resolution.py apps/conversation/request_facade.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py` passed
-  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
-- next best task:
-  - 揶쎛????됱읈????쇱벉 ??ν뒄??`docs/03_??곸겫????띻펾.md` ??planner default / baseline 筌뤿굝議?/ smoke ??됰뻻???袁⑹삺 ?꾨뗀諭?? ??쎄쾿?깆???疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
-  - 域???쇱벉 ??ν뒄 ?袁⑤궖??source-reference follow-up??`seed_source` / `ResolvedEntityRef.source` provenance??ordinal???브쑬???랁? strategy-meta ?癒?뮉 route-level ??? ???뮞??1椰꾨똻?앮에???? ?⑥쥙???롫뮉 野껉퍔???
-
-## 2026-03-27T19:04:08.6646233+09:00 Watcher
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`)
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/conversation/request_facade.py`, `apps/retrieval/retrieval_workflow.py`, `apps/chat/answer_generation.py`, `apps/chat/llm_runtime.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_eval_fixture_schema.py`, `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_request_facade_followup_seed_priority.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
-- findings:
-  - P1 docs drift persists with the same HEAD: `docs/03_??곸겫????띻펾.md` ??stagewise 亦낅슣????띻펾?癒?퐣 ?袁⑹춦 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄?`apps/api/app_factory.py` 疫꿸퀡??첎誘? `v2 / v1 / v2`), 疫꿸퀡??野꺜筌?筌뤿굝議?筌ㅼ뮇??smoke baseline??`scripts/run_baseline_checks.ps1`, `pytest.ini` ?? 筌띿쉸? ??낅뮉 `python -m pytest -m smoke`, `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀??뺣뼄.
-  - P2 observability gap persists: `apps/conversation/followup_resolution.py` ??source-reference??resolve??猷?`seed_source` ??`reference_context_ordinal` 嚥??臾믩선 ?節딇? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` literal ????source-reference variant揶쎛 ??곷선 ordinary ordinal follow-up??provenance???브쑬??疫꿸퀡以??? 筌륁궢釉?? ?袁⑹삺 `tests/test_planner_stagewise.py` ??deictic 野껋럥以??`seed_source` ???⑥쥙????筌?source-reference 野껋럥以??`followup_reference_kind` ?? clarification wording筌??類ㅼ뵥??뺣뼄.
-  - P2 streaming coverage gap persists: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄???닌뗭겱???筌?`tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곗쨮 ??삵뀋?쒖꼶由븝쭪? ??낅뮉 1椰꾨?彛?野꺜筌앹빜釉?? ??苡???쇳떔?癒?퐣 `TTFT_DEADLINE_EXCEEDED`, `GEN_DEADLINE_EXCEEDED`, `CHAR_LIMITED` ??筌욊낯???⑥쥙???롫뮉 ???뮞?紐껊뮉 筌≪뼚? 筌륁궢六??
-  - P2 verifier weakness persists: `apps/chat/answer_merge.py` ?? `tests/test_answer_merge_bypass.py` ????쇰뻻 癰귣???answer-stage gate?? ???揶쎛 refusal/internal-context leak/too-short 餓λ쵐????? ?얜챷苑????덈뮉 groundedness ?遺쎈럡?? ????evidence-grounded factuality ?癒?뮉 unsupported fact ??????袁⑹춦 ?꾨뗀諭????뮞?紐껋쨮 ?????? ??녿릭??
-  - P2 latent drift persists: `apps/conversation/request_facade.py` ??exported helper signature default???????`planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ???? ??쇱젫 app wiring?? explicit version????띻볼 ??뽮쉐 甕곌쑨????袁⑤빍筌왖筌? helper direct-call 野껋럥以?癒?퐣??stale default ??????袁る퓮????λ툡 ??덈뼄.
-  - Guard status rechecked: SEARCH people-name hard-must?? JOIN `pjt_id`/`pjt_no` ??노? 疫뀀뜆? guard??`apps/retrieval/filters.py` ?? `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py` ??域밸챶?嚥???λ툡 ??뉙???苡??類ㅼ읅 ??쇳떔?癒?퐣 ????? 域뱀눊援??癰귣똻? 筌륁궢六??
-  - Observability evidence is still thin: ?袁⑹삺 `logs/app.log` ??0 byte??욱? 筌ㅼ뮇???怨????遺우읅?? `logs/app (3).log` ?癒?춸 ??λ툡 ??덈뼄. ??苡?source-reference/stream-error-code ?귐딅뮞??? ??쇱젫 ??곸겫 嚥≪뮄?????堉멨칰?筌〓엨??遺???筌ㅼ뮇??嚥≪뮄?뉛쭕??몵嚥?????紐낅릭筌왖 筌륁궢六??
-- changes:
-  - `docs/SESSION_HANDOFF.md` ????苡?watcher ???筌?疫꿸퀡以됵쭕??곕떽???덈뼄. production code????륁젟??? ??녿릭??
-- validations:
-  - `python -m py_compile apps/api/app_factory.py apps/api/routes.py apps/conversation/request_facade.py apps/retrieval/retrieval_workflow.py apps/chat/answer_generation.py apps/chat/llm_runtime.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/retrieval/filters.py apps/platform/runtime_strategy_policy.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py tests/test_rag_filter_policy.py tests/test_contract_debt_paydown.py tests/test_llm_runtime_prompt_paths.py tests/test_request_facade_followup_seed_priority.py` passed
-  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
-  - `Get-Item logs/app.log, logs/app (3).log | Select Name,Length,LastWriteTime` ?類ㅼ뵥 野껉퀗??`app.log` ??`0 bytes`, `app (3).log` 筌?`256234 bytes` ????
-- next best task:
-  - 揶쎛????됱읈????쇱벉 ??ν뒄???????`docs/03_??곸겫????띻펾.md` ??planner defaults, baseline 筌뤿굝議? smoke ??됰뻻??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` 疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
-  - 域???쇱벉 ??밴텦?怨몄뵥 ??ν뒄 ?袁⑤궖??`tests/test_runtime_helpers_stream_bypass.py` ??stream error-code precedence ??????곕떽???띻탢?? source-reference follow-up??provenance(`seed_source`, `ResolvedEntityRef.source`)??ordinal???브쑬???롫뮉 野껉퍔???
-
-## 2026-03-27T20:06:00+09:00 Architect
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`)
-- inspected files:
-  - `docs/01_?袁り텕??우퓗??_?癒?カ.md`
-  - `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`
-  - `docs/04_???疫꿸퀣????癒?.md`
-  - `docs/SESSION_HANDOFF.md`
-  - `apps/conversation/followup_resolution.py`
-  - `apps/conversation/entity_reference.py`
-  - `apps/conversation/request_facade.py`
-  - `apps/retrieval/retrieval_workflow.py`
-  - `apps/retrieval/rag_retriever.py`
-  - `tests/test_planner_stagewise.py`
-  - `tests/test_request_facade_followup_seed_priority.py`
-- findings:
-  - source-reference follow-up?? parser/clarification ??ｍ?癒?퐣??`followup_reference_kind=source_reference` 嚥??브쑬????筌? resolved provenance??????????곕벡?앮에??臾볦뿺??
-  - `apps/conversation/followup_resolution.py` ??reference-context resolved source-reference??`seed_source=reference_context_ordinal` 嚥???ｋ┛?? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` ??source-reference variant ??곸뵠 ordinary ordinal/deictic 餓λ쵐??literal筌???됱뒠??뺣뼄.
-  - `apps/retrieval/retrieval_workflow.py` ?? `apps/retrieval/rag_retriever.py` ??downstream?癒?퐣 雅뚯눖以?`anchor_source` ????뚯몵沃샕嚥?citation follow-up??ordinary ordinal follow-up????곸겫 ?온筌β돦肉???브쑬???띾┛ ??議??
-  - ????곷뭼??execution semantics ?얜챷?ｅ첎? ?袁⑤빍??observability contract ?얜챷??? ?怨뺤뵬??planner strategy, retrieval mode, ids_map truth??椰꾨?諭띄뵳?? ??낅뮉 metadata-only migration??揶쎛????됱읈??롫뼄.
-- changes:
-  - `docs/ADR/ADR-0006-followup-reference-provenance-split.md` ???곕떽???덈뼄.
-  - `docs/SESSION_HANDOFF.md` ????苡?architect ??블?疫꿸퀡以???곕떽???덈뼄.
-- validations:
-  - `rg -n "source_reference|reference_context_ordinal|seed_source|followup_reference_kind"` 嚥??온???꾨뗀諭??얜챷苑????뮞????뺛늺??????紐낅뻥??
-  - ?얜챷苑??怨쀬뵠沃샕嚥?production code?????뮞?紐껊뮉 ??쎈뻬??? ??녿릭??
-- next best task:
-  - 揶쎛????됱읈????쇱벉 ?닌뗭겱 ??ν뒄??`apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/conversation/request_facade.py` ??additive provenance field/literal???節딇? `tests/test_planner_stagewise.py`, `tests/test_request_facade_followup_seed_priority.py` 嚥?source-reference provenance regression???⑥쥙???롫뮉 野껉퍔???
-  - 域???쇱벉 ??ｍ?癒?퐣 `apps/retrieval/retrieval_workflow.py` ?? `apps/retrieval/rag_retriever.py` 嚥≪뮄???`anchor_reference_kind` ???袁る솁??route/debug/ops ?온筌β돦??ordinary ordinal???브쑬???뺣뼄.
-
-## 2026-03-28T19:43:00+09:00 Architect
-- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`)
-- inspected files:
-  - `docs/README.md`
-  - `docs/01_?袁り텕??우퓗??_?癒?カ.md`
-  - `docs/03_??곸겫????띻펾.md`
-  - `docs/04_???疫꿸퀣????癒?.md`
-  - `docs/PRODUCT_BASELINE.md`
-  - `docs/SESSION_HANDOFF.md`
-  - `README.md`
-  - `apps/api/app_factory.py`
-  - `apps/conversation/request_facade.py`
-  - `pytest.ini`
-  - `scripts/run_baseline_checks.ps1`
-  - `tests/test_llm_runtime_prompt_paths.py`
-  - `tests/test_planner_prompt_cards.py`
-- findings:
-  - planner default?? baseline 野꺜筌??紐낅뱜??筌욊쑴??癒?뵠 ?꾨뗀諭? exported helper default, baseline script, ??곸겫 ?얜챷苑???브쑴沅????덈뼄.
-  - live runtime default??`apps/api/app_factory.py` ??`v2 / v1 / v2` ???筌?`apps/conversation/request_facade.py` exported helper default???????`v1` literal????? ?醫???뺣뼄.
-  - `docs/03_??곸겫????띻펾.md` ??獄쏆꼶????뺚봺?袁る뱜????μ뵬 ?얜챷苑???쇰땾揶쎛 ?袁⑤빍??single source of truth ?봔??肉????룸┛???닌듼???얜챷???
-  - `pytest.ini`, `scripts/run_baseline_checks.ps1`, `docs/PRODUCT_BASELINE.md`, `README.md` 揶쎛 baseline????뺤쨮 ??삘뀲 ??덇볼嚥???살구???筌? ??? ??甕곕뜆肉??⑥쥙???롫뮉 machine-readable owner揶쎛 ??용뼄.
-  - ????곷뭼??retrieval semantics ?얜챷?ｅ첎? ?袁⑤빍??repo-level config/docops contract ?얜챷????嚥? SEARCH/LOOKUP/JOIN ??덉삂??椰꾨?諭띄뵳?? ??낅뮉 additive migration??揶쎛????됱읈??롫뼄.
-- changes:
-  - `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md` ???곕떽???덈뼄.
-  - `docs/SESSION_HANDOFF.md` ????苡?architect ??블??癒?뼊???곕떽???덈뼄.
-- validations:
-  - `rg -n "PLANNER_STAGE1_PROMPT_VERSION|PLANNER_STAGE15_PROMPT_VERSION|PLANNER_STAGE2_PROMPT_VERSION|run_baseline_checks|pytest -m smoke|test_api_routes_runtime|test_request_facade_and_context"` 嚥?drift ??뺛늺??????紐낅뻥??
-  - ?얜챷苑?癰궰野껋럥彛???묐뻬??됱몵沃샕嚥?production code?? pytest????쎈뻬??? ??녿릭??
-- next best task:
-  - 揶쎛????됱읈????쇱벉 ?닌뗭겱 ??ν뒄??import-light contract artifact ??롪돌???곕떽???랁? `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `scripts/run_baseline_checks.ps1` ??planner defaults?? baseline inventory??域?artifact?癒?퐣 ??꾩쓺 筌띾슢諭??野껉퍔???
-  - 域???쇱벉 ??ν뒄?癒?퐣 `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `README.md` ??pointer-based wording??곗쨮 ?類ｂ봺??랁?`tests/test_repo_contract_defaults.py` 揶쏆늿? drift regression???곕떽???롫뮉 野껉퍔???ル뿫??
-
-## 2026-03-29T08:04:43+09:00 Watcher
-- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/watcher/`)
-- inspected files: `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `apps/conversation/followup_resolution.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_contract_debt_paydown.py`, `tests/test_eval_fixture_schema.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_planner_prompt_cards.py`, `tests/test_planner_stagewise.py`, `tests/test_rag_filter_policy.py`, `tests/test_runtime_helpers_stream_bypass.py`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
-- findings:
-  - P1 source-reference precedence is still wrong in the dirty worktree: `build_intent_payload()` still lets display anchoring run before reference-context follow-up resolution, `followup_anchor.py` lets `?곗뮇荑?source N` flow through ordinal parsing, and `tests/test_planner_stagewise.py` still codifies the wrong display-snapshot precedence for `?곗뮇荑?2???怨뚮럡???類ｋ궖`.
-  - P1 docs drift persists in `docs/03_??곸겫????띻펾.md`: it still recommends planner defaults `v1 / v1` and stale smoke commands, while live runtime defaults remain `v2 / v1 / v2` and the maintained baseline entrypoint is `scripts/run_baseline_checks.ps1`.
-  - P2 source-reference provenance still collapses into `reference_context_ordinal`; eval semantics for `source_ref`, stream error-code precedence coverage, heuristic-only answer verification, and exported helper default drift all remain open.
-  - No new evidence of fallback-chat reintroduction, SEARCH people-name hard-must drift, or JOIN `pjt_id` / `pjt_no` confusion surfaced in this pass.
-- changes:
-  - added `docs/reports/watcher/2026-03-29-0802.md`
-  - appended this watcher handoff entry only; no production code edits
-- validations:
-  - `python -m py_compile apps/conversation/request_facade.py apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/api/routes.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_api_routes_reference_payload.py tests/test_answer_merge_bypass.py` passed
-  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
-  - `Get-Item logs/app.log, logs/app (3).log | Select-Object Name,Length,LastWriteTime` confirmed `app.log` is still `0` bytes and the newest non-empty watcher-visible log is stale
-- next best task:
-  - in `apps/conversation/request_facade.py`, detect `parse_source_reference(question)` before `resolve_followup_anchor()` and bypass display anchoring for that case
-  - replace the dirty source-reference regression in `tests/test_planner_stagewise.py` with a coexistence test proving `?곗뮇荑?2 ...` resolves through reference context even when `latest_display_snapshot` is present
-## 2026-03-29T10:02:53.7775978+09:00 Watcher
-- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/`)
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/conversation/request_facade.py`, `apps/conversation/followup_anchor.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_eval_fixture_schema.py`, `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
-- findings:
-  - P1 source-reference precedence still fails in the current dirty worktree: `apps/conversation/request_facade.py` still calls `resolve_followup_anchor()` before `resolve_reference_context_followup()`, `apps/conversation/followup_anchor.py` still lets `parse_source_reference()` flow through `parse_ordinal_reference()`, and `tests/test_planner_stagewise.py` still locks in display-snapshot precedence for the `source N` follow-up case.
-  - P1 docs drift still persists in `docs/03_??곸겫????띻펾.md`: the stagewise section still recommends `PLANNER_STAGE1_PROMPT_VERSION=v1` and `PLANNER_STAGE2_PROMPT_VERSION=v1`, and its smoke example still points at missing `tests/test_api_routes_runtime.py` and `tests/test_request_facade_and_context.py`, while live runtime defaults remain `v2 / v1 / v2` in `apps/api/app_factory.py` and the maintained baseline entrypoint is `scripts/run_baseline_checks.ps1`.
-  - P2 streaming coverage is still thin: `apps/api/runtime_helpers.py` implements `TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM`, but `tests/test_runtime_helpers_stream_bypass.py` still covers only the non-empty-stream case.
-  - P2 verifier weakness still persists: `apps/chat/answer_merge.py` rejects refusal-like answers, internal-context leaks, fallback markers, and too-short answers, but this run still found no evidence-grounded factuality verdict artifact or unsupported-fact regression coverage.
-  - P2 provenance/default drift remains open: `apps/conversation/followup_resolution.py` still collapses resolved source-reference follow-ups into `reference_context_ordinal`, `apps/conversation/entity_reference.py` still has no source-reference literal, and the exported helper in `apps/conversation/request_facade.py` still defaults `planner_stage15_prompt_version='v1'` and `planner_stage2_prompt_version='v1'`.
-  - Guard status: no new evidence of fallback-chat reintroduction, SEARCH people-name hard-must drift, JOIN `pjt_id`/`pjt_no` confusion, or route terminal sequencing regressions surfaced in this pass.
-- changes:
-  - appended this watcher handoff entry only; no production code edits
-- validations:
-  - `python -m py_compile apps/conversation/request_facade.py apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/api/app_factory.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_answer_merge_bypass.py tests/test_contract_debt_paydown.py tests/test_rag_filter_policy.py` passed
-  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
-  - `Test-Path tests/test_api_routes_runtime.py` and `Test-Path tests/test_request_facade_and_context.py` both returned `False`
-  - `logs/app.log` is still `0` bytes and `logs/app (3).log` remains the newest non-empty watcher-visible log
-- next best task:
-  - in `apps/conversation/request_facade.py`, detect `parse_source_reference(question)` before display-anchor resolution and add a coexistence regression in `tests/test_planner_stagewise.py` proving reference-context precedence survives even when `latest_display_snapshot` exists
-  - after that, sync `docs/03_??곸겫????띻펾.md` to `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1`, then add direct precedence tests for `derive_stream_error_code()`
-## 2026-03-29T11:02:28+09:00 Watcher
-- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
-- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/`)
-- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/reports/watcher/2026-03-29-0903.md`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/entity_reference.py`, `apps/conversation/followup_resolution.py`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_answer_merge_bypass.py`, `logs/app.log`, `logs/app (3).log`
-- findings:
-  - P1 source-reference wording/tests progressed in the dirty tree, but the actual precedence bug remains: `apps/conversation/request_facade.py` still runs `resolve_followup_anchor()` before `resolve_reference_context_followup()`, `apps/conversation/followup_anchor.py` still maps `?곗뮇荑?N` through `parse_ordinal_reference()` into display rank selection, and `tests/test_planner_stagewise.py` now contains a regression that locks that display-snapshot behavior in.
-  - P1 docs drift still persists in `docs/03_??곸겫????띻펾.md`: the triage section still recommends `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1`, `python -m pytest -m smoke`, and missing smoke files, while `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1` remain the current source of truth.
-  - P2 provenance/default drift remains open: `apps/conversation/followup_resolution.py` still collapses resolved source references into `reference_context_ordinal`, `apps/conversation/entity_reference.py` still lacks a source-reference literal, and `apps/conversation/request_facade.py` still defaults `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'`.
-  - P2 stream/verifier gaps remain open: `tests/test_runtime_helpers_stream_bypass.py` still covers only the non-empty-stream bypass, and `tests/test_answer_merge_bypass.py` still does not protect against unsupported factual answers that avoid heuristic leak/refusal checks.
-  - Positive progress observed: the dirty detail-coverage patch now hydrates `summary/goal/period/budget/outputs` through canonical facts, adds `tests/test_detail_contract.py` coverage, and syncs the contract note in `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`.
-- changes:
-  - added `docs/reports/watcher/2026-03-29-1102.md`
-  - appended this watcher handoff entry only; no production code edits
-- validations:
-  - `python -m py_compile apps/evidence/detail_contract.py apps/conversation/followup_anchor.py apps/conversation/request_facade.py apps/evidence/canonical_evidence.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_detail_contract.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_answer_merge_bypass.py` passed
-  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
-  - `Get-Item logs/app.log, 'logs/app (3).log' | Select-Object Name,Length,LastWriteTime` confirmed `app.log` is still `0` bytes and the newest non-empty watcher-visible log remains stale
+
+
+## 2026-03-27T17:05:10+09:00 Watcher
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/planner/planner_runtime.py`, `apps/planner/planner_context_cards.py`, `apps/conversation/entity_reference.py`, `apps/conversation/followup_resolution.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_planner_prompt_cards.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_planner_stagewise.py`, `tests/test_eval_fixture_schema.py`
+
+- findings:
+
+  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ??stagewise triage ??됰뻻?癒?퐣 ?袁⑹춦 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄???됱몵筌? 疫꿸퀡??野꺜筌?筌뤿굝議??諭???`python -m pytest -m smoke` ?? ??용뮉 ???뵬 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀??뺣뼄. ??쇱젫 source of truth??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` ??
+
+  - P2 observability gap: `apps/conversation/followup_resolution.py` ??`followup_reference_kind='source_reference'` ??筌띾슢諭억쭪?筌?resolved 野껋럥以??`seed_source` ??`reference_context_ordinal` 嚥??臾믩선 ?節뗫뮉?? `apps/conversation/entity_reference.py` ??source-reference ?袁⑹뒠 source variant揶쎛 ??곷선 citation 疫꿸퀡而?follow-up????곗뺘 ordinal follow-up??揶쏆늿? provenance嚥?疫꿸퀡以??뺣뼄.
+
+  - P2 streaming coverage gap: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄??揶쏅쉼?筌? `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곕돗 1椰꾨?彛??⑥쥙???뺣뼄.
+
+  - P2 verifier weakness: `apps/chat/answer_merge.py` ??answer gate???????refusal/internal-context leak/too-short heuristic?됰Ŋ?좑쭖?evidence-grounded factuality ?癒?젟??援?verifier artifact????용뼄.
+
+  - prompt/path drift????苡??類ㅼ읅 ?癒??癒?퐣 ??덉쨮 獄쏆뮄猿??? ??녿릭?? `tests/test_llm_runtime_prompt_paths.py` ?? `tests/test_planner_prompt_cards.py` ???袁⑹삺 answer prompt path 獄?planner card manifest wiring???④쑴???⑥쥙???뺣뼄.
+
+  - SEARCH people-name hard-must, JOIN key mixing?? ??苡??類ㅼ읅 ??쇳떔?癒?퐣 ????? 域뱀눊援끿몴?筌≪뼚? 筌륁궢六?? ?온??guard??`apps/retrieval/filters.py` ?? ?얜챷苑????뮞???④쑴鍮????λ툡 ???筌? ??쇱젫 ??쎈뻬 野꺜筌앹빘? `pytest` ?봔??以?????紐낅릭筌왖 筌륁궢六??
+
+- changes:
+
+  - `docs/SESSION_HANDOFF.md` ?怨룸뼊 ?袁る퓮 筌뤴뫖以됪???苡?watcher ??疫꿸퀡以???袁⑹삺 域뱀눊援?疫꿸퀣???곗쨮 揶쏄퉮???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/conversation/entity_reference.py apps/conversation/followup_resolution.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/conversation/request_facade.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_planner_stagewise.py` passed
+
+  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
+
+- next best task:
+
+  - 揶쎛????됱읈????쇱벉 ??ν뒄??`docs/03_??곸겫????띻펾.md` ??planner default / baseline 筌뤿굝議?/ smoke ??됰뻻??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` 疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
+
+  - 域???쇱벉 ??ν뒄 ?袁⑤궖??`apps/conversation/followup_resolution.py` ?? `apps/conversation/entity_reference.py` ??source-reference provenance???브쑬???랁? route ?癒?뮉 strategy-meta regression test 1椰꾨똻?앮에???? ?⑥쥙???롫뮉 野껉퍔???
+
+
+
+## 2026-03-27T17:31:40+09:00 Watcher
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_answer_merge_bypass.py`, `tests/test_eval_fixture_schema.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
+
+- findings:
+
+  - P1 docs drift: `docs/03_??곸겫????띻펾.md` ???????stagewise triage ??됰뻻?癒?퐣 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄? 揶쏆늿? ?얜챷苑???롫뼊?癒?퐣??planner V2 defaults???怨룸뮉?? 疫꿸퀡??野꺜筌?筌뤿굝議??`python -m pytest -m smoke` ?? ??용뮉 ???뵬 `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀???袁⑹삺 `apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` ?? ?겸뫖猷??뺣뼄.
+
+  - P2 observability gap: in-flight source-reference follow-up 癰궰野껋럩? `followup_reference_kind=source_reference` 繹먮슣?????ｋ┛筌왖筌? resolved `seed_source` ???????`reference_context_ordinal` 嚥??臾? ??쇰선揶쏄쑬?? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` literal??source-reference variant揶쎛 ??곷선 citation follow-up????곗뺘 ordinal follow-up provenance???브쑬???온筌β돧釉?????용뼄.
+
+  - P2 streaming coverage gap: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄???닌뗭겱???筌? `tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곗쨮 ??삵뀋?쒖꼶由븝쭪? ??낅뮉 1椰꾨?彛??⑥쥙???뺣뼄.
+
+  - P2 latent drift: `apps/conversation/request_facade.py` ??exported helper signature???袁⑹춦 `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ??疫꿸퀡??첎誘れ몵嚥??遺얜뼄. ??쇱젫 ??wiring?? `apps/api/app_factory.py` ?癒?퐣 `v2 / v1 / v2` ??筌뤿굞??雅뚯눘????嚥???뽮쉐 甕곌쑨????袁⑤빍筌왖筌? helper direct-call ???뮞?紐껉돌 ?袁⑸꺗 ??沅??밸퓠????쇰뻻 drift??筌띾슢諭?????덈뼄.
+
+  - P2 verifier weakness: `apps/chat/answer_merge.py` ?? `tests/test_answer_merge_bypass.py` ????쇰뻻 ?類ㅼ뵥???筌?answer-stage gate??refusal/internal-context leak/too-short heuristic?됰Ŋ?졿? evidence-grounded factuality verifier artifact?????????용뼄.
+
+  - ?온筌???볧? `logs/app.log` ???袁⑹삺 0 byte??욱?筌ㅼ뮄????쑴堉???덈뼄. ??곸읈 `logs/app (3).log` ?紐꾨퓠????苡?source-reference / stream error-code ?브쑨由겼첎? ??쇱젫 ??곸겫 嚥≪뮄?????堉멨칰???ㅻ뮉筌왖 ????紐낅막 筌ㅼ뮇??嚥≪뮄??域뱀눊援끻첎? ?봔鈺곌퉲釉??
+
+- changes:
+
+  - `docs/SESSION_HANDOFF.md` ????苡?watcher ???뤷칰? 疫꿸퀡以됵쭕??곕떽???덈뼄.
+
+- validations:
+
+  - `python -m py_compile apps/conversation/followup_resolution.py apps/conversation/request_facade.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py` passed
+
+  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
+
+- next best task:
+
+  - 揶쎛????됱읈????쇱벉 ??ν뒄??`docs/03_??곸겫????띻펾.md` ??planner default / baseline 筌뤿굝議?/ smoke ??됰뻻???袁⑹삺 ?꾨뗀諭?? ??쎄쾿?깆???疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
+
+  - 域???쇱벉 ??ν뒄 ?袁⑤궖??source-reference follow-up??`seed_source` / `ResolvedEntityRef.source` provenance??ordinal???브쑬???랁? strategy-meta ?癒?뮉 route-level ??? ???뮞??1椰꾨똻?앮에???? ?⑥쥙???롫뮉 野껉퍔???
+
+
+
+## 2026-03-27T19:04:08.6646233+09:00 Watcher
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`)
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/03_??곸겫????띻펾.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/conversation/request_facade.py`, `apps/retrieval/retrieval_workflow.py`, `apps/chat/answer_generation.py`, `apps/chat/llm_runtime.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_eval_fixture_schema.py`, `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_request_facade_followup_seed_priority.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
+
+- findings:
+
+  - P1 docs drift persists with the same HEAD: `docs/03_??곸겫????띻펾.md` ??stagewise 亦낅슣????띻펾?癒?퐣 ?袁⑹춦 `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1` ???怨댄?`apps/api/app_factory.py` 疫꿸퀡??첎誘? `v2 / v1 / v2`), 疫꿸퀡??野꺜筌?筌뤿굝議?筌ㅼ뮇??smoke baseline??`scripts/run_baseline_checks.ps1`, `pytest.ini` ?? 筌띿쉸? ??낅뮉 `python -m pytest -m smoke`, `tests/test_api_routes_runtime.py`, `tests/test_request_facade_and_context.py` ????덇땀??뺣뼄.
+
+  - P2 observability gap persists: `apps/conversation/followup_resolution.py` ??source-reference??resolve??猷?`seed_source` ??`reference_context_ordinal` 嚥??臾믩선 ?節딇? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` literal ????source-reference variant揶쎛 ??곷선 ordinary ordinal follow-up??provenance???브쑬??疫꿸퀡以??? 筌륁궢釉?? ?袁⑹삺 `tests/test_planner_stagewise.py` ??deictic 野껋럥以??`seed_source` ???⑥쥙????筌?source-reference 野껋럥以??`followup_reference_kind` ?? clarification wording筌??類ㅼ뵥??뺣뼄.
+
+  - P2 streaming coverage gap persists: `apps/api/runtime_helpers.py` ??`TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM` ?怨쀪퐨??뽰맄???닌뗭겱???筌?`tests/test_runtime_helpers_stream_bypass.py` ??non-empty stream??`EMPTY_STREAM` ??곗쨮 ??삵뀋?쒖꼶由븝쭪? ??낅뮉 1椰꾨?彛?野꺜筌앹빜釉?? ??苡???쇳떔?癒?퐣 `TTFT_DEADLINE_EXCEEDED`, `GEN_DEADLINE_EXCEEDED`, `CHAR_LIMITED` ??筌욊낯???⑥쥙???롫뮉 ???뮞?紐껊뮉 筌≪뼚? 筌륁궢六??
+
+  - P2 verifier weakness persists: `apps/chat/answer_merge.py` ?? `tests/test_answer_merge_bypass.py` ????쇰뻻 癰귣???answer-stage gate?? ???揶쎛 refusal/internal-context leak/too-short 餓λ쵐????? ?얜챷苑????덈뮉 groundedness ?遺쎈럡?? ????evidence-grounded factuality ?癒?뮉 unsupported fact ??????袁⑹춦 ?꾨뗀諭????뮞?紐껋쨮 ?????? ??녿릭??
+
+  - P2 latent drift persists: `apps/conversation/request_facade.py` ??exported helper signature default???????`planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'` ???? ??쇱젫 app wiring?? explicit version????띻볼 ??뽮쉐 甕곌쑨????袁⑤빍筌왖筌? helper direct-call 野껋럥以?癒?퐣??stale default ??????袁る퓮????λ툡 ??덈뼄.
+
+  - Guard status rechecked: SEARCH people-name hard-must?? JOIN `pjt_id`/`pjt_no` ??노? 疫뀀뜆? guard??`apps/retrieval/filters.py` ?? `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py` ??域밸챶?嚥???λ툡 ??뉙???苡??類ㅼ읅 ??쇳떔?癒?퐣 ????? 域뱀눊援??癰귣똻? 筌륁궢六??
+
+  - Observability evidence is still thin: ?袁⑹삺 `logs/app.log` ??0 byte??욱? 筌ㅼ뮇???怨????遺우읅?? `logs/app (3).log` ?癒?춸 ??λ툡 ??덈뼄. ??苡?source-reference/stream-error-code ?귐딅뮞??? ??쇱젫 ??곸겫 嚥≪뮄?????堉멨칰?筌〓엨??遺???筌ㅼ뮇??嚥≪뮄?뉛쭕??몵嚥?????紐낅릭筌왖 筌륁궢六??
+
+- changes:
+
+  - `docs/SESSION_HANDOFF.md` ????苡?watcher ???筌?疫꿸퀡以됵쭕??곕떽???덈뼄. production code????륁젟??? ??녿릭??
+
+- validations:
+
+  - `python -m py_compile apps/api/app_factory.py apps/api/routes.py apps/conversation/request_facade.py apps/retrieval/retrieval_workflow.py apps/chat/answer_generation.py apps/chat/llm_runtime.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/retrieval/filters.py apps/platform/runtime_strategy_policy.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_answer_merge_bypass.py tests/test_api_routes_reference_payload.py tests/test_eval_fixture_schema.py tests/test_rag_filter_policy.py tests/test_contract_debt_paydown.py tests/test_llm_runtime_prompt_paths.py tests/test_request_facade_followup_seed_priority.py` passed
+
+  - `python -m pytest --collect-only -q --ignore-glob=pytest-cache-files-* --ignore-glob=tests/pytest-cache-files-* -p no:cacheprovider` failed: `No module named pytest`
+
+  - `Get-Item logs/app.log, logs/app (3).log | Select Name,Length,LastWriteTime` ?類ㅼ뵥 野껉퀗??`app.log` ??`0 bytes`, `app (3).log` 筌?`256234 bytes` ????
+
+- next best task:
+
+  - 揶쎛????됱읈????쇱벉 ??ν뒄???????`docs/03_??곸겫????띻펾.md` ??planner defaults, baseline 筌뤿굝議? smoke ??됰뻻??`apps/api/app_factory.py`, `pytest.ini`, `scripts/run_baseline_checks.ps1` 疫꿸퀣???곗쨮 ?類ｂ봺??롫뮉 野껉퍔???
+
+  - 域???쇱벉 ??밴텦?怨몄뵥 ??ν뒄 ?袁⑤궖??`tests/test_runtime_helpers_stream_bypass.py` ??stream error-code precedence ??????곕떽???띻탢?? source-reference follow-up??provenance(`seed_source`, `ResolvedEntityRef.source`)??ordinal???브쑬???롫뮉 野껉퍔???
+
+
+
+## 2026-03-27T20:06:00+09:00 Architect
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`)
+
+- inspected files:
+
+  - `docs/01_?袁り텕??우퓗??_?癒?カ.md`
+
+  - `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`
+
+  - `docs/04_???疫꿸퀣????癒?.md`
+
+  - `docs/SESSION_HANDOFF.md`
+
+  - `apps/conversation/followup_resolution.py`
+
+  - `apps/conversation/entity_reference.py`
+
+  - `apps/conversation/request_facade.py`
+
+  - `apps/retrieval/retrieval_workflow.py`
+
+  - `apps/retrieval/rag_retriever.py`
+
+  - `tests/test_planner_stagewise.py`
+
+  - `tests/test_request_facade_followup_seed_priority.py`
+
+- findings:
+
+  - source-reference follow-up?? parser/clarification ??ｍ?癒?퐣??`followup_reference_kind=source_reference` 嚥??브쑬????筌? resolved provenance??????????곕벡?앮에??臾볦뿺??
+
+  - `apps/conversation/followup_resolution.py` ??reference-context resolved source-reference??`seed_source=reference_context_ordinal` 嚥???ｋ┛?? `apps/conversation/entity_reference.py` ??`ResolvedEntityRef.source` ??source-reference variant ??곸뵠 ordinary ordinal/deictic 餓λ쵐??literal筌???됱뒠??뺣뼄.
+
+  - `apps/retrieval/retrieval_workflow.py` ?? `apps/retrieval/rag_retriever.py` ??downstream?癒?퐣 雅뚯눖以?`anchor_source` ????뚯몵沃샕嚥?citation follow-up??ordinary ordinal follow-up????곸겫 ?온筌β돦肉???브쑬???띾┛ ??議??
+
+  - ????곷뭼??execution semantics ?얜챷?ｅ첎? ?袁⑤빍??observability contract ?얜챷??? ?怨뺤뵬??planner strategy, retrieval mode, ids_map truth??椰꾨?諭띄뵳?? ??낅뮉 metadata-only migration??揶쎛????됱읈??롫뼄.
+
+- changes:
+
+  - `docs/ADR/ADR-0006-followup-reference-provenance-split.md` ???곕떽???덈뼄.
+
+  - `docs/SESSION_HANDOFF.md` ????苡?architect ??블?疫꿸퀡以???곕떽???덈뼄.
+
+- validations:
+
+  - `rg -n "source_reference|reference_context_ordinal|seed_source|followup_reference_kind"` 嚥??온???꾨뗀諭??얜챷苑????뮞????뺛늺??????紐낅뻥??
+
+  - ?얜챷苑??怨쀬뵠沃샕嚥?production code?????뮞?紐껊뮉 ??쎈뻬??? ??녿릭??
+
+- next best task:
+
+  - 揶쎛????됱읈????쇱벉 ?닌뗭겱 ??ν뒄??`apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/conversation/request_facade.py` ??additive provenance field/literal???節딇? `tests/test_planner_stagewise.py`, `tests/test_request_facade_followup_seed_priority.py` 嚥?source-reference provenance regression???⑥쥙???롫뮉 野껉퍔???
+
+  - 域???쇱벉 ??ｍ?癒?퐣 `apps/retrieval/retrieval_workflow.py` ?? `apps/retrieval/rag_retriever.py` 嚥≪뮄???`anchor_reference_kind` ???袁る솁??route/debug/ops ?온筌β돦??ordinary ordinal???브쑬???뺣뼄.
+
+
+
+## 2026-03-28T19:43:00+09:00 Architect
+
+- branch/head: `?⑥쥓猷?? / `f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`)
+
+- inspected files:
+
+  - `docs/README.md`
+
+  - `docs/01_?袁り텕??우퓗??_?癒?カ.md`
+
+  - `docs/03_??곸겫????띻펾.md`
+
+  - `docs/04_???疫꿸퀣????癒?.md`
+
+  - `docs/PRODUCT_BASELINE.md`
+
+  - `docs/SESSION_HANDOFF.md`
+
+  - `README.md`
+
+  - `apps/api/app_factory.py`
+
+  - `apps/conversation/request_facade.py`
+
+  - `pytest.ini`
+
+  - `scripts/run_baseline_checks.ps1`
+
+  - `tests/test_llm_runtime_prompt_paths.py`
+
+  - `tests/test_planner_prompt_cards.py`
+
+- findings:
+
+  - planner default?? baseline 野꺜筌??紐낅뱜??筌욊쑴??癒?뵠 ?꾨뗀諭? exported helper default, baseline script, ??곸겫 ?얜챷苑???브쑴沅????덈뼄.
+
+  - live runtime default??`apps/api/app_factory.py` ??`v2 / v1 / v2` ???筌?`apps/conversation/request_facade.py` exported helper default???????`v1` literal????? ?醫???뺣뼄.
+
+  - `docs/03_??곸겫????띻펾.md` ??獄쏆꼶????뺚봺?袁る뱜????μ뵬 ?얜챷苑???쇰땾揶쎛 ?袁⑤빍??single source of truth ?봔??肉????룸┛???닌듼???얜챷???
+
+  - `pytest.ini`, `scripts/run_baseline_checks.ps1`, `docs/PRODUCT_BASELINE.md`, `README.md` 揶쎛 baseline????뺤쨮 ??삘뀲 ??덇볼嚥???살구???筌? ??? ??甕곕뜆肉??⑥쥙???롫뮉 machine-readable owner揶쎛 ??용뼄.
+
+  - ????곷뭼??retrieval semantics ?얜챷?ｅ첎? ?袁⑤빍??repo-level config/docops contract ?얜챷????嚥? SEARCH/LOOKUP/JOIN ??덉삂??椰꾨?諭띄뵳?? ??낅뮉 additive migration??揶쎛????됱읈??롫뼄.
+
+- changes:
+
+  - `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md` ???곕떽???덈뼄.
+
+  - `docs/SESSION_HANDOFF.md` ????苡?architect ??블??癒?뼊???곕떽???덈뼄.
+
+- validations:
+
+  - `rg -n "PLANNER_STAGE1_PROMPT_VERSION|PLANNER_STAGE15_PROMPT_VERSION|PLANNER_STAGE2_PROMPT_VERSION|run_baseline_checks|pytest -m smoke|test_api_routes_runtime|test_request_facade_and_context"` 嚥?drift ??뺛늺??????紐낅뻥??
+
+  - ?얜챷苑?癰궰野껋럥彛???묐뻬??됱몵沃샕嚥?production code?? pytest????쎈뻬??? ??녿릭??
+
+- next best task:
+
+  - 揶쎛????됱읈????쇱벉 ?닌뗭겱 ??ν뒄??import-light contract artifact ??롪돌???곕떽???랁? `apps/api/app_factory.py`, `apps/conversation/request_facade.py`, `scripts/run_baseline_checks.ps1` ??planner defaults?? baseline inventory??域?artifact?癒?퐣 ??꾩쓺 筌띾슢諭??野껉퍔???
+
+  - 域???쇱벉 ??ν뒄?癒?퐣 `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `README.md` ??pointer-based wording??곗쨮 ?類ｂ봺??랁?`tests/test_repo_contract_defaults.py` 揶쏆늿? drift regression???곕떽???롫뮉 野껉퍔???ル뿫??
+
+
+
+## 2026-03-29T08:04:43+09:00 Watcher
+
+- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/watcher/`)
+
+- inspected files: `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/PRODUCT_BASELINE.md`, `docs/03_??곸겫????띻펾.md`, `docs/04_???疫꿸퀣????癒?.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `apps/conversation/followup_resolution.py`, `apps/platform/runtime_strategy_policy.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_contract_debt_paydown.py`, `tests/test_eval_fixture_schema.py`, `tests/test_llm_runtime_prompt_paths.py`, `tests/test_planner_prompt_cards.py`, `tests/test_planner_stagewise.py`, `tests/test_rag_filter_policy.py`, `tests/test_runtime_helpers_stream_bypass.py`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
+
+- findings:
+
+  - P1 source-reference precedence is still wrong in the dirty worktree: `build_intent_payload()` still lets display anchoring run before reference-context follow-up resolution, `followup_anchor.py` lets `?곗뮇荑?source N` flow through ordinal parsing, and `tests/test_planner_stagewise.py` still codifies the wrong display-snapshot precedence for `?곗뮇荑?2???怨뚮럡???類ｋ궖`.
+
+  - P1 docs drift persists in `docs/03_??곸겫????띻펾.md`: it still recommends planner defaults `v1 / v1` and stale smoke commands, while live runtime defaults remain `v2 / v1 / v2` and the maintained baseline entrypoint is `scripts/run_baseline_checks.ps1`.
+
+  - P2 source-reference provenance still collapses into `reference_context_ordinal`; eval semantics for `source_ref`, stream error-code precedence coverage, heuristic-only answer verification, and exported helper default drift all remain open.
+
+  - No new evidence of fallback-chat reintroduction, SEARCH people-name hard-must drift, or JOIN `pjt_id` / `pjt_no` confusion surfaced in this pass.
+
+- changes:
+
+  - added `docs/reports/watcher/2026-03-29-0802.md`
+
+  - appended this watcher handoff entry only; no production code edits
+
+- validations:
+
+  - `python -m py_compile apps/conversation/request_facade.py apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/api/routes.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_api_routes_reference_payload.py tests/test_answer_merge_bypass.py` passed
+
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
+
+  - `Get-Item logs/app.log, logs/app (3).log | Select-Object Name,Length,LastWriteTime` confirmed `app.log` is still `0` bytes and the newest non-empty watcher-visible log is stale
+
+- next best task:
+
+  - in `apps/conversation/request_facade.py`, detect `parse_source_reference(question)` before `resolve_followup_anchor()` and bypass display anchoring for that case
+
+  - replace the dirty source-reference regression in `tests/test_planner_stagewise.py` with a coexistence test proving `?곗뮇荑?2 ...` resolves through reference context even when `latest_display_snapshot` is present
+
+## 2026-03-29T10:02:53.7775978+09:00 Watcher
+
+- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/`)
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/03_??곸겫????띻펾.md`, `docs/PRODUCT_BASELINE.md`, `apps/api/app_factory.py`, `apps/api/routes.py`, `apps/conversation/request_facade.py`, `apps/conversation/followup_anchor.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/conversation/followup_resolution.py`, `apps/conversation/entity_reference.py`, `apps/retrieval/filters.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_answer_merge_bypass.py`, `tests/test_api_routes_reference_payload.py`, `tests/test_eval_fixture_schema.py`, `tests/test_rag_filter_policy.py`, `tests/test_contract_debt_paydown.py`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `logs/app.log`, `logs/app (3).log`
+
+- findings:
+
+  - P1 source-reference precedence still fails in the current dirty worktree: `apps/conversation/request_facade.py` still calls `resolve_followup_anchor()` before `resolve_reference_context_followup()`, `apps/conversation/followup_anchor.py` still lets `parse_source_reference()` flow through `parse_ordinal_reference()`, and `tests/test_planner_stagewise.py` still locks in display-snapshot precedence for the `source N` follow-up case.
+
+  - P1 docs drift still persists in `docs/03_??곸겫????띻펾.md`: the stagewise section still recommends `PLANNER_STAGE1_PROMPT_VERSION=v1` and `PLANNER_STAGE2_PROMPT_VERSION=v1`, and its smoke example still points at missing `tests/test_api_routes_runtime.py` and `tests/test_request_facade_and_context.py`, while live runtime defaults remain `v2 / v1 / v2` in `apps/api/app_factory.py` and the maintained baseline entrypoint is `scripts/run_baseline_checks.ps1`.
+
+  - P2 streaming coverage is still thin: `apps/api/runtime_helpers.py` implements `TTFT_DEADLINE_EXCEEDED -> GEN_DEADLINE_EXCEEDED -> DEADLINE_EXCEEDED -> CHAR_LIMITED -> EMPTY_STREAM`, but `tests/test_runtime_helpers_stream_bypass.py` still covers only the non-empty-stream case.
+
+  - P2 verifier weakness still persists: `apps/chat/answer_merge.py` rejects refusal-like answers, internal-context leaks, fallback markers, and too-short answers, but this run still found no evidence-grounded factuality verdict artifact or unsupported-fact regression coverage.
+
+  - P2 provenance/default drift remains open: `apps/conversation/followup_resolution.py` still collapses resolved source-reference follow-ups into `reference_context_ordinal`, `apps/conversation/entity_reference.py` still has no source-reference literal, and the exported helper in `apps/conversation/request_facade.py` still defaults `planner_stage15_prompt_version='v1'` and `planner_stage2_prompt_version='v1'`.
+
+  - Guard status: no new evidence of fallback-chat reintroduction, SEARCH people-name hard-must drift, JOIN `pjt_id`/`pjt_no` confusion, or route terminal sequencing regressions surfaced in this pass.
+
+- changes:
+
+  - appended this watcher handoff entry only; no production code edits
+
+- validations:
+
+  - `python -m py_compile apps/conversation/request_facade.py apps/conversation/followup_anchor.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py apps/api/app_factory.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_answer_merge_bypass.py tests/test_contract_debt_paydown.py tests/test_rag_filter_policy.py` passed
+
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
+
+  - `Test-Path tests/test_api_routes_runtime.py` and `Test-Path tests/test_request_facade_and_context.py` both returned `False`
+
+  - `logs/app.log` is still `0` bytes and `logs/app (3).log` remains the newest non-empty watcher-visible log
+
+- next best task:
+
+  - in `apps/conversation/request_facade.py`, detect `parse_source_reference(question)` before display-anchor resolution and add a coexistence regression in `tests/test_planner_stagewise.py` proving reference-context precedence survives even when `latest_display_snapshot` exists
+
+  - after that, sync `docs/03_??곸겫????띻펾.md` to `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1`, then add direct precedence tests for `derive_stream_error_code()`
+
+## 2026-03-29T11:02:28+09:00 Watcher
+
+- branch/head: `?⑥쥓猷??/ f601ddfa81dab2729743bb95ec42751adaf77073`
+
+- worktree: dirty (`apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/followup_resolution.py`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/SESSION_HANDOFF.md`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `docs/ADR/ADR-0005-answer-pipeline-verifier-regression-hardening.md`, `docs/ADR/ADR-0006-followup-reference-provenance-split.md`, `docs/ADR/ADR-0007-planner-defaults-and-baseline-truth-manifest.md`, `docs/reports/`)
+
+- inspected files: `docs/SESSION_HANDOFF.md`, `docs/CODEX_CONTEXT.md`, `docs/GOLDEN_TESTS.md`, `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`, `docs/03_??곸겫????띻펾.md`, `docs/reports/watcher/2026-03-29-0903.md`, `eval/sample_queries.jsonl`, `pytest.ini`, `scripts/run_baseline_checks.ps1`, `apps/api/app_factory.py`, `apps/evidence/detail_contract.py`, `apps/conversation/followup_anchor.py`, `apps/conversation/request_facade.py`, `apps/api/runtime_helpers.py`, `apps/chat/answer_merge.py`, `apps/evidence/canonical_evidence.py`, `apps/conversation/entity_reference.py`, `apps/conversation/followup_resolution.py`, `tests/test_detail_contract.py`, `tests/test_planner_stagewise.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_eval_fixture_schema.py`, `tests/test_answer_merge_bypass.py`, `logs/app.log`, `logs/app (3).log`
+
+- findings:
+
+  - P1 source-reference wording/tests progressed in the dirty tree, but the actual precedence bug remains: `apps/conversation/request_facade.py` still runs `resolve_followup_anchor()` before `resolve_reference_context_followup()`, `apps/conversation/followup_anchor.py` still maps `?곗뮇荑?N` through `parse_ordinal_reference()` into display rank selection, and `tests/test_planner_stagewise.py` now contains a regression that locks that display-snapshot behavior in.
+
+  - P1 docs drift still persists in `docs/03_??곸겫????띻펾.md`: the triage section still recommends `PLANNER_STAGE1_PROMPT_VERSION=v1`, `PLANNER_STAGE2_PROMPT_VERSION=v1`, `python -m pytest -m smoke`, and missing smoke files, while `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1` remain the current source of truth.
+
+  - P2 provenance/default drift remains open: `apps/conversation/followup_resolution.py` still collapses resolved source references into `reference_context_ordinal`, `apps/conversation/entity_reference.py` still lacks a source-reference literal, and `apps/conversation/request_facade.py` still defaults `planner_stage15_prompt_version='v1'`, `planner_stage2_prompt_version='v1'`.
+
+  - P2 stream/verifier gaps remain open: `tests/test_runtime_helpers_stream_bypass.py` still covers only the non-empty-stream bypass, and `tests/test_answer_merge_bypass.py` still does not protect against unsupported factual answers that avoid heuristic leak/refusal checks.
+
+  - Positive progress observed: the dirty detail-coverage patch now hydrates `summary/goal/period/budget/outputs` through canonical facts, adds `tests/test_detail_contract.py` coverage, and syncs the contract note in `docs/02_??쎈뻬?④쑴鍮잍??袁⑥셽域뱀뮇??md`.
+
+- changes:
+
+  - added `docs/reports/watcher/2026-03-29-1102.md`
+
+  - appended this watcher handoff entry only; no production code edits
+
+- validations:
+
+  - `python -m py_compile apps/evidence/detail_contract.py apps/conversation/followup_anchor.py apps/conversation/request_facade.py apps/evidence/canonical_evidence.py apps/conversation/followup_resolution.py apps/conversation/entity_reference.py apps/api/runtime_helpers.py apps/chat/answer_merge.py tests/test_detail_contract.py tests/test_planner_stagewise.py tests/test_runtime_helpers_stream_bypass.py tests/test_eval_fixture_schema.py tests/test_answer_merge_bypass.py` passed
+
+  - `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed with `No module named pytest`
+
+  - `Get-Item logs/app.log, 'logs/app (3).log' | Select-Object Name,Length,LastWriteTime` confirmed `app.log` is still `0` bytes and the newest non-empty watcher-visible log remains stale
+
 - next best task:
   - in `apps/conversation/request_facade.py`, short-circuit `parse_source_reference(question)` before display-anchor resolution and replace the dirty display-snapshot regression in `tests/test_planner_stagewise.py` with a coexistence test that proves reference-context precedence
   - after that, sync `docs/03_??곸겫????띻펾.md` to `apps/api/app_factory.py`, `pytest.ini`, and `scripts/run_baseline_checks.ps1`, then add direct precedence tests for `derive_stream_error_code()` and a source-reference provenance regression
@@ -1645,7 +2200,8 @@
   - explicit id + broad child-subject query??golden path???⑥쐞 ?뚯뒪?몃줈 留됱븯吏留? ?ㅼ젣 end-to-end log replay harness???꾩쭅 ?녿떎.
   - ?꾩옱 `child_*` source 怨꾩빟???ъ슜?섎뒗 ?앹궛 寃쎈줈??list promotion ?섎굹肉먯씠?? ?κ린?곸쑝濡쒕뒗 source taxonomy? metrics 吏묎퀎瑜???踰????뺣━???꾩슂媛 ?덈떎.
 - next best task:
-  - multi-turn log replay ?먮뒗 golden transcript harness瑜?異붽???`諛섎룄泥?愿??怨쇱젣 3嫄?-> 2踰?怨쇱젣 ?곌뎄??-> ?대떦 ?곌뎄?먯쓽 ?ㅻⅨ ?쒕룞` 媛숈? ???泥댁씤??end-to-end濡?怨좎젙??寃?  - `child_*` source蹂?observability panel???뺣━??list-promotion anchor? detail-derived anchor???깃났瑜?clarification瑜좎쓣 援щ텇??蹂?寃?
+  - multi-turn log replay ?먮뒗 golden transcript harness瑜?異붽???`諛섎룄泥?愿??怨쇱젣 3嫄?-> 2踰?怨쇱젣 ?곌뎄??-> ?대떦 ?곌뎄?먯쓽 ?ㅻⅨ ?쒕룞` 媛숈? ???泥댁씤??end-to-end濡?怨좎젙??寃?  - `child_*` source蹂?observability panel???뺣━??list-promotion anchor? detail-derived anchor???깃났瑜?clarification瑜좎쓣 援щ텇??蹂?寃?
+
 ## 2026-04-01T18:38:16+09:00 Watcher
 - branch/head: `고도화` / `bc84647bd815aa394126bba8f2510dc9a1cd2f8a`
 - inspected files:
@@ -1730,3 +2286,100 @@
 - next best task:
   - safest implementation step: add additive truth-surface vocabulary to debug/log payloads in `request_facade.py` and `answer_generation.py` so the winning owner, promotion gate, and invalidation reason are explicit without changing behavior.
   - after that, sync `docs/02`, `docs/03`, `docs/04` and baseline ownership so follow-up/answer regressions can be grouped by truth plane instead of ad hoc feature names.
+
+## 2026-04-02T18:40:51.1315070+09:00 Watcher
+- branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected_files:
+  - `README.md`
+  - `pytest.ini`
+  - `scripts/run_baseline_checks.ps1`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/04_회귀기준과_점검.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+  - `apps/api/contracts/repo_manifest.py`
+  - `apps/planner/planner_defaults.py`
+  - `apps/prompts/planner_stage1_v2.md`
+  - `apps/prompts/planner_stage2_v2.md`
+  - `apps/prompts/ntis_chatbot.md`
+  - `apps/chat/answer_generation.py`
+  - `apps/chat/answer_merge.py`
+  - `apps/chat/llm_streaming.py`
+  - `apps/platform/runtime_strategy_policy.py`
+  - `apps/retrieval/result_contract.py`
+  - `apps/retrieval/rag_filter_policy.py`
+  - staged deletion check: `git diff --cached --name-status -- tests`
+- architecture_map:
+  - ingress/runtime: `apps/api/app_factory.py`가 앱을 조립하고, `create_app()` smoke는 현재도 통과한다.
+  - planner truth: prompt default owner는 `apps/planner/planner_defaults.py`, manifest surface는 `apps/api/contracts/repo_manifest.py`, prompt asset은 `apps/prompts/planner_stage*.md`와 `apps/prompts/cards/*`다.
+  - retrieval contract: SEARCH/LOOKUP/JOIN gate는 `apps/retrieval/rag_filter_policy.py`, `apps/retrieval/result_contract.py`, `apps/retrieval/filters.py`가 맡는다.
+  - answer/streaming: groundedness와 visible-order gate는 `apps/chat/answer_generation.py`, 선택 정책은 `apps/chat/answer_merge.py`, stream metric/close/TTFT는 `apps/chat/llm_streaming.py`가 맡는다.
+  - validation/docs: 현재 실행 가능한 gate는 README와 `apps/docs/03_운영과_환경.md`, `apps/docs/04_회귀기준과_점검.md`가 말하는 smoke lane뿐이고, `pytest.ini`와 `scripts/run_baseline_checks.ps1`는 그 상태와 긴장 관계에 있다.
+- findings_by_priority:
+  - P0: 없음. 이번 정적/스모크 점검 범위에서는 planner prompt default(`v2 / v1 / v2`), fallback response 정책, SEARCH people-name hard-must ban, JOIN `instance -> pjt_id` / `group -> pjt_no` split이 즉시 깨진 증거는 못 찾았다.
+  - P1: executable regression surface가 사실상 사라졌다. `Test-Path tests`가 `False`였고, staged diff에는 `tests/test_planner_stagewise.py`, `tests/test_rag_filter_policy.py`, `tests/test_people_filter_nested_gate.py`, `tests/test_runtime_helpers_stream_bypass.py`, `tests/test_request_overrides.py`, `tests/test_llm_runtime_prompt_paths.py`를 포함한 핵심 회귀 세트 삭제가 잡힌다. 동시에 `apps/api/contracts/repo_manifest.py`는 이제 `planner_prompt_defaults`만 노출하고, `scripts/run_baseline_checks.ps1`는 retired entrypoint로 즉시 `exit 1` 한다. 결과적으로 non-negotiable을 반복 확인하는 실행 가능한 owner가 없다.
+  - P1: `pytest.ini`가 현재 validation posture와 어긋난다. `pytest.ini`는 아직 `testpaths = tests`를 강제하지만 실제 `tests/` tree가 없어서 `python -m pytest -q -p no:cacheprovider`가 `PytestConfigWarning: No files were found in testpaths`와 함께 `exit 1`로 끝났다. smoke-only 운영을 택했다면 이 설정도 같이 정리되어야 한다.
+  - P2: streaming policy 문서 앵커가 부분적으로 고아가 됐다. `apps/chat/llm_streaming.py` 주석은 아직 삭제된 `ADR-0001`을 가리키고, 현재 `apps/docs/ADR/`에는 `ADR-0005`만 남아 있다. 동시에 streaming watchlist를 직접 검증하던 `tests/test_runtime_helpers_stream_bypass.py`도 staged deletion 상태라, awaited close / emitted chunk / TTFT semantics가 코드와 GOLDEN_TESTS에만 남는다.
+  - P2: fallback chat 금지 규약은 정적 읽기상 유지되지만, `apps/platform/runtime_strategy_policy.py`와 `apps/retrieval/result_contract.py`에는 여전히 `RAG_FORCE_FALLBACK_CHAT` response fallback footgun이 남아 있다. 기본값은 `0`이라 즉시 위반은 아니지만, 현재는 이를 잡아줄 회귀 테스트도 없다.
+- user_quality_risks:
+  - planner/retrieval/answer contract가 앞으로 drift해도 현재 gate는 `py_compile`와 `create_app()` smoke만으로는 조기 탐지가 어렵다.
+  - 개발자나 자동화가 습관적으로 `pytest`를 실행하면 stale config failure를 먼저 맞게 되어, 실제 회귀와 설정 문제를 구분하기 어려워진다.
+  - streaming 경로는 사용자 체감 품질에 직접 연결되는데, 현재 상태에서는 `run_llm_streaming()`의 close/TTFT/chunk metric 회귀를 executable하게 막는 장치가 없다.
+- recommended_next_patch:
+  - 가장 작은 안전 패치는 minimal import-light regression lane을 복구하는 것이다. `tests/` tree와 `conftest.py`를 되살리고, `test_planner_stagewise.py`, `test_rag_filter_policy.py`, `test_people_filter_nested_gate.py`, `test_runtime_helpers_stream_bypass.py` 정도의 핵심 세트만 먼저 복구한 뒤 `pytest.ini`와 `apps/api/contracts/repo_manifest.py`를 그 lane 기준으로 다시 맞춘다. retired script를 부활시키는 것보다 이쪽이 더 작고 안전하다.
+- recommended_new_tests:
+  - `tests/test_planner_stagewise.py`: planner immutable contract, prompt default `v2 / v1 / v2`, broad-history deterministic repair 유지.
+  - `tests/test_rag_filter_policy.py`: SEARCH people-name hard-must 금지, LOOKUP/JOIN hard gate 유지.
+  - `tests/test_people_filter_nested_gate.py`: `participant_researcher_name + people_affiliation_org_name` same-object nested gate와 `min_should=1` 보존.
+  - `tests/test_runtime_helpers_stream_bypass.py` 또는 새 `tests/test_llm_streaming.py`: `run_llm_streaming()`의 awaited `aclose()`, `emitted_chunks`, `ttft_any_ms/ttft_content_ms`, partial timeout 메시지.
+  - `tests/test_request_overrides.py`: request override가 planner/retrieval contract를 우회하지 않는지 확인.
+  - `tests/test_llm_runtime_prompt_paths.py`: 현재 prompt asset 경로와 fallback prompt resolution 유지.
+- docs_to_sync:
+  - minimal regression lane가 복구되면 `README.md`, `apps/docs/03_운영과_환경.md`, `apps/docs/04_회귀기준과_점검.md`, `apps/docs/PRODUCT_BASELINE.md`를 같은 change set에서 다시 맞춘다.
+  - streaming policy를 계속 문서화할 생각이면 새 ADR을 복구하거나, 아니면 `apps/chat/llm_streaming.py`의 `ADR-0001` 참조를 현재 살아 있는 문서로 바꿔야 한다.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+  - `python -m apps.api.contracts.repo_manifest --section planner_prompt_defaults` passed and returned `{"stage1":"v2","stage15":"v1","stage2":"v2"}`
+  - `python -m py_compile apps/api/app_factory.py apps/api/runtime.py apps/planner/query_analysis.py apps/planner/planner_runtime.py` passed
+  - `python -c "from apps.api.app_factory import create_app; create_app()"` passed
+  - `python -c "from apps.api.workflow_builder import build_request_workflow; build_request_workflow().compile()"` failed with `ModuleNotFoundError: No module named 'langgraph'`
+- `python -m pytest -q -p no:cacheprovider` failed with `PytestConfigWarning: No files were found in testpaths`, then exited `1`
+- `powershell -ExecutionPolicy Bypass -File scripts/run_baseline_checks.ps1` failed as designed with `scripts/run_baseline_checks.ps1 is a retired validation entrypoint.`
+
+## 2026-04-03T09:55:00+09:00 Improver
+- branch/head: `고도화` / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+- inspected_files:
+  - `apps/evidence/context_build_policy.py`
+  - `apps/evidence/rag_result_assembly.py`
+  - `apps/evidence/canonical_evidence.py`
+  - `apps/chat/answer_generation.py`
+  - `apps/platform/settings.py`
+  - `apps/platform/rag_types.py`
+  - `apps/retrieval/retrieval.py`
+  - `apps/retrieval/rag_join_runtime.py`
+- findings:
+  - evidence path still depended on approximate token counting, line-oriented list context, and `build_context_mixed()` docstyle rendering.
+  - result assembly had no first-class prompt artifact telemetry surface for exact evidence packing.
+  - Solar answer generation still char-clipped evidence-derived context, which violated zero-truncation evidence policy.
+- changes:
+  - added `apps/platform/solar_tokenizer_adapter.py` and new evidence owners: `context_score_gate.py`, `prompt_evidence_envelope.py`, `context_packer.py`, `context_compression_service.py`, `evidence_integrity.py`, `evidence_lineage.py`.
+  - replaced `apps/evidence/context_build_policy.py` with `gate -> envelope -> exact pack -> compress -> re-pack` orchestration and stopped using `build_context_mixed()` for evidence prompt assembly.
+  - extended `apps/platform/rag_types.py` and `apps/evidence/rag_result_assembly.py` so `RagResult` now carries `prompt_units`, `used_tokens`, `kept_ctx`, `discarded_ctx`, `dropped_by_floor`, `dropped_by_budget`, `compressed_count`, `lineages`.
+  - removed Solar evidence char clipping from `apps/chat/answer_generation.py`.
+  - added doc addendum `apps/docs/EVIDENCE_PROMPT_PACKING.md` and ADR `apps/docs/ADR/ADR-0007-solar-exact-evidence-packing.md`.
+- validations:
+  - preflight passed: `git rev-parse --show-toplevel` -> `D:/Project/python_project/ntis_domain_rag_chatbot`, `git rev-parse --abbrev-ref HEAD` -> `고도화`, `git rev-parse HEAD` -> `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
+  - `python -m py_compile apps/platform/solar_tokenizer_adapter.py apps/evidence/context_score_gate.py apps/evidence/evidence_integrity.py apps/evidence/evidence_lineage.py apps/evidence/prompt_evidence_envelope.py apps/evidence/context_compression_service.py apps/evidence/context_packer.py apps/evidence/context_build_policy.py apps/evidence/rag_result_assembly.py apps/chat/answer_generation.py apps/platform/settings.py apps/platform/rag_types.py` passed
+  - `python -c "import apps.platform.solar_tokenizer_adapter, apps.evidence.context_score_gate, apps.evidence.prompt_evidence_envelope, apps.evidence.context_packer, apps.evidence.context_build_policy, apps.evidence.rag_result_assembly, apps.chat.answer_generation; print('import-ok')"` passed
+  - `python -c "from apps.api.app_factory import create_app; create_app(); print('create-app-ok')"` passed
+  - custom smoke passed for exact packing and re-pack: final evidence context stayed within configured budget, floor-dropped hits never entered the prompt, overflow scan continued past long docs, compressed lineage preserved immutable identity, and overflow queue stayed within `4`
+  - custom smoke passed for projection policy: `prtcp_mp` / `prtcp_org` stayed projected (`<=2` items) and `output_type=list` dropped `content_candidate` while `output_type=detail` kept it
+  - custom smoke passed for answer generation: evidence-derived `answer_context_text` / `debug_answer_context_text` were no longer char-clipped on Solar path
+- remains_risky:
+  - this worktree still lacks `tests/`, so executable regression coverage remains smoke-only.
+  - `SOLAR_TOKENIZER_NAME_OR_PATH` currently falls back when `transformers` is unavailable; production exact packing still needs a real Solar tokenizer asset in the runtime environment.
+  - JOIN special context composition still prepends join scaffolding around hop context, so `used_tokens` tracks the evidence array budget and not the extra join wrapper text.
+- next_best_task:
+  - wire the same prompt-unit telemetry through `RetrievalBundle` / result-set surfaces if operators need prompt artifact visibility outside `RagResult`.
+  - if/when `tests/` returns, add parity tests for exact packing, overflow compression lineage, and Solar no-char-cut answer context handling.

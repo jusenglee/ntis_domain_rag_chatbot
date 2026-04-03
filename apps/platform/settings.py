@@ -80,6 +80,7 @@ TOKENIZER_MAP = {
     "gemma_triton_0": "../../Models/gemma-3-27b-it",
     "gpt_triton_0": "./Models/gpt-oss-120b",
 }
+SOLAR_TOKENIZER_NAME_OR_PATH = _get_env_str("SOLAR_TOKENIZER_NAME_OR_PATH", _get_env_str("SOLAR_VLLM_MODEL", "/model"))
 
 # 하이퍼파라미터
 TOP_K_BASE       = 300
@@ -95,6 +96,16 @@ MAX_DOC_SENTENCES = _get_env_int("MAX_DOC_SENTENCES", 12, min_value=1)
 MAX_DOC_TOKENS = _get_env_int("MAX_DOC_TOKENS", 800, min_value=1)
 SUMMARY_DOC_SENTENCES = _get_env_int("SUMMARY_DOC_SENTENCES", 6, min_value=1)
 SUMMARY_DOC_TOKENS = _get_env_int("SUMMARY_DOC_TOKENS", 240, min_value=1)
+RAG_EVIDENCE_TOKEN_BUDGET = _get_env_int("RAG_EVIDENCE_TOKEN_BUDGET", 20000, min_value=1)
+RAG_OVERFLOW_QUEUE_SIZE = _get_env_int("RAG_OVERFLOW_QUEUE_SIZE", 4, min_value=0)
+RAG_CONTEXT_COMPRESS_MIN_SCORE = _get_env_float("RAG_CONTEXT_COMPRESS_MIN_SCORE", 0.0)
+RAG_CONTEXT_COMPRESS_MAX_DOCS = _get_env_int("RAG_CONTEXT_COMPRESS_MAX_DOCS", 4, min_value=0)
+RAG_CONTEXT_BODY_MAX_SHARE = _get_env_float("RAG_CONTEXT_BODY_MAX_SHARE", 0.6, min_value=0.0)
+RAG_EVIDENCE_EXACT_VERIFY_FLOOR = _get_env_int("RAG_EVIDENCE_EXACT_VERIFY_FLOOR", 512, min_value=1)
+RAG_EVIDENCE_EXACT_VERIFY_RATIO = _get_env_float("RAG_EVIDENCE_EXACT_VERIFY_RATIO", 0.1, min_value=0.0)
+RAW_PAYLOAD_RECENT_ANCHOR_LIMIT = _get_env_int("RAW_PAYLOAD_RECENT_ANCHOR_LIMIT", 3, min_value=1)
+RAW_PAYLOAD_SCHEMA_VERSION = _get_env_str("RAW_PAYLOAD_SCHEMA_VERSION", "v1")
+RAW_PAYLOAD_COMPRESSION_CODEC = _get_env_str("RAW_PAYLOAD_COMPRESSION_CODEC", "gzip")
 
 # Redis / 검색 제한 설정
 # REDIS_URL: Redis 연결 문자열 (예: redis://localhost:6379)

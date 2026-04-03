@@ -11,14 +11,14 @@ class DenseRuntimeSupport:
     """dense 검색 실행에 필요한 callback과 설정값을 묶어 두는 컨테이너다.
     pipeline은 이 구조를 통해 dense retrieve, metric validation, threshold gate를 선택적으로 호출한다.
     """
-    precomputed_embedding_cls: type
-    call_dense_retrieve_hybrid_multi_fn: Callable[..., Dict[str, Any]]
-    validate_lookup_join_hybrid_metrics_fn: Callable[..., None]
-    resolve_sparse_hits_metric_fn: Callable[[Mapping[str, Any]], float]
-    ensure_collection_mark_fn: Callable[[List[Any], str], None]
-    apply_dense_threshold_fn: Callable[..., None]
-    use_dense_score_weight_fn: Callable[[], bool]
-    dense_score_weight_fn: Callable[[List[Any]], float]
+    precomputed_embedding_type: type
+    call_dense_retrieve_hybrid_multi: Callable[..., Dict[str, Any]]
+    validate_lookup_join_hybrid_metrics: Callable[..., None]
+    resolve_sparse_hits_metric: Callable[[Mapping[str, Any]], float]
+    ensure_collection_mark: Callable[[List[Any], str], None]
+    apply_dense_threshold: Callable[..., None]
+    use_dense_score_weight: Callable[[], bool]
+    dense_score_weight: Callable[[List[Any]], float]
 
 
 class PrecomputedEmbedding:
@@ -114,13 +114,13 @@ def dense_score_weight(points: List[Any]) -> float:
     return sum(norm_scores) / float(len(norm_scores))
 
 
-def build_dense_runtime_support(*, dense_retrieve_hybrid_multi_fn: Callable[..., Dict[str, Any]], strategy_violation_cls: type, log_kv_fn: Callable[..., None]) -> DenseRuntimeSupport:
+def build_dense_runtime_support(*, dense_retrieve_hybrid_multi: Callable[..., Dict[str, Any]], strategy_violation_type: type, log_kv: Callable[..., None]) -> DenseRuntimeSupport:
     """dense 검색 지원이 가능한 현재 runtime에 맞는 callback 들을 조립한다.
     embedding client, dense retriever, metric policy, threshold gate를 동일한 구조로 넘기는 엔트리 포인트다.
     """
     dense_multi_sig = None
     try:
-        dense_multi_sig = inspect.signature(dense_retrieve_hybrid_multi_fn)
+        dense_multi_sig = inspect.signature(dense_retrieve_hybrid_multi)
     except Exception:
         dense_multi_sig = None
 
@@ -156,20 +156,20 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi_fn: Callable[...,
                 code = "LOOKUP_JOIN_DENSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
                 msg = f"dense disabled for {contract_scope or collection}: top_k_dense={top_k_dense_int} emb_map={bool(emb_map)}"
                 if violation_on_contract:
-                    raise strategy_violation_cls(error_code=code, reason=msg)
+                    raise strategy_violation_type(error_code=code, reason=msg)
                 raise RuntimeError(f"[{code}] {msg}")
             if not sparse_enabled:
                 code = "LOOKUP_JOIN_SPARSE_REQUIRED" if violation_on_contract else "RAG.CONTRACT"
                 msg = f"sparse disabled for {contract_scope or collection}: sparse_topk={sparse_topk_int} sparse_vector_name={sparse_vector_name!r}"
                 if violation_on_contract:
-                    raise strategy_violation_cls(error_code=code, reason=msg)
+                    raise strategy_violation_type(error_code=code, reason=msg)
                 raise RuntimeError(f"[{code}] {msg}")
 
         if "client" in params and "collection_name" in params:
-            return dense_retrieve_hybrid_multi_fn(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
+            return dense_retrieve_hybrid_multi(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
         if "qdr" in params and "collection" in params:
-            return dense_retrieve_hybrid_multi_fn(qdr=qdr, collection=collection, query_text=qtext, keywords=kws, filter_obj=query_filter, **common_kwargs)
-        return dense_retrieve_hybrid_multi_fn(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
+            return dense_retrieve_hybrid_multi(qdr=qdr, collection=collection, query_text=qtext, keywords=kws, filter_obj=query_filter, **common_kwargs)
+        return dense_retrieve_hybrid_multi(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
 
     def validate_lookup_join_hybrid_metrics(*, mode: str, contract_scope: str, timings: Mapping[str, Any], strict: bool = True) -> None:
         """lookup/join 모드에서 hybrid dense 히트가 exact-match 히트를 망치지 않는지 검사한다.
@@ -181,11 +181,11 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi_fn: Callable[...,
         sparse_hits = resolve_sparse_hits_metric(timings)
         hybrid_once_hits = float(timings.get("hybrid_once_hits", 0.0) or 0.0)
         hybrid_mode_used = hybrid_once_hits > 0
-        log_kv_fn("RAG.LOOKUP_JOIN.HYBRID.METRICS", tier="debug", mode=mode, contract_scope=contract_scope, dense_queries=dense_queries, sparse_hits=sparse_hits, hybrid_once_hits=hybrid_once_hits, hybrid_mode_used=hybrid_mode_used)
+        log_kv("RAG.LOOKUP_JOIN.HYBRID.METRICS", tier="debug", mode=mode, contract_scope=contract_scope, dense_queries=dense_queries, sparse_hits=sparse_hits, hybrid_once_hits=hybrid_once_hits, hybrid_mode_used=hybrid_mode_used)
         if hybrid_mode_used:
             return
         if dense_queries == 0 or sparse_hits == 0:
-            log_kv_fn("RAG.LOOKUP_JOIN.HYBRID.METRICS.ZERO_HIT", tier="debug", level="warning" if not strict else "info", mode=mode, contract_scope=contract_scope, dense_queries=dense_queries, sparse_hits=sparse_hits, hybrid_once_hits=hybrid_once_hits, strict=int(bool(strict)))
+            log_kv("RAG.LOOKUP_JOIN.HYBRID.METRICS.ZERO_HIT", tier="debug", level="warning" if not strict else "info", mode=mode, contract_scope=contract_scope, dense_queries=dense_queries, sparse_hits=sparse_hits, hybrid_once_hits=hybrid_once_hits, strict=int(bool(strict)))
 
     def apply_dense_threshold(sr: Dict[str, Any], *, use_dense_threshold: bool, min_dense_score: float, log_prefix: str, col: Optional[str] = None, action: Optional[str] = None, base_route: Optional[str] = None, relation: Optional[Tuple[str, str]] = None) -> None:
         """dense 점수가 임계치를 넘지 못하는 hit를 추려내어 잡음을 줄인다.
@@ -210,7 +210,7 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi_fn: Callable[...,
                 dense_map[vname] = filtered
             reduced = before - len(filtered)
             reduced_ratio = (float(reduced) / float(before)) if before else 0.0
-            log_kv_fn(log_prefix, col=col, vec=str(vname), action=action, base_route=base_route, relation=str(relation) if relation else None, applied=bool(use_dense_threshold), before=before, after=len(filtered), reduced=reduced, reduced_ratio=round(reduced_ratio, 4), min_dense_score=float(min_dense_score), tier="debug")
+            log_kv(log_prefix, col=col, vec=str(vname), action=action, base_route=base_route, relation=str(relation) if relation else None, applied=bool(use_dense_threshold), before=before, after=len(filtered), reduced=reduced, reduced_ratio=round(reduced_ratio, 4), min_dense_score=float(min_dense_score), tier="debug")
 
             score_values: List[float] = []
             for point in filtered:
@@ -246,12 +246,12 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi_fn: Callable[...,
                 log_kv_fn("RAG.DENSE.SCORE.STATS", col=col, vec=str(vname), count=len(score_values), min=float(min_score), max=float(max_score), p50=float(_percentile(score_values, 50.0)), p90=float(_percentile(score_values, 90.0)), p99=float(_percentile(score_values, 99.0)), top3_avg=float(topn_avg), tier="debug")
 
     return DenseRuntimeSupport(
-        precomputed_embedding_cls=PrecomputedEmbedding,
-        call_dense_retrieve_hybrid_multi_fn=call_dense_retrieve_hybrid_multi,
-        validate_lookup_join_hybrid_metrics_fn=validate_lookup_join_hybrid_metrics,
-        resolve_sparse_hits_metric_fn=resolve_sparse_hits_metric,
-        ensure_collection_mark_fn=ensure_collection_mark,
-        apply_dense_threshold_fn=apply_dense_threshold,
-        use_dense_score_weight_fn=use_dense_score_weight,
-        dense_score_weight_fn=dense_score_weight,
+        precomputed_embedding_type=PrecomputedEmbedding,
+        call_dense_retrieve_hybrid_multi=call_dense_retrieve_hybrid_multi,
+        validate_lookup_join_hybrid_metrics=validate_lookup_join_hybrid_metrics,
+        resolve_sparse_hits_metric=resolve_sparse_hits_metric,
+        ensure_collection_mark=ensure_collection_mark,
+        apply_dense_threshold=apply_dense_threshold,
+        use_dense_score_weight=use_dense_score_weight,
+        dense_score_weight=dense_score_weight,
     )

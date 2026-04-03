@@ -5,12 +5,37 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
-from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
+from apps.api.contracts.workflow_models import RuleDecision
+from apps.api.runtime_helpers import (
+    _state_log_summary_fields,
+    compute_total_ms_from_start,
+    log_event,
+    logger,
+    truncate_text,
+)
 from apps.api.streaming.contracts import AnswerArtifact
+from apps.conversation.conversation_store import (
+    build_save_history_payload,
+    load_conversation_memory_from_store,
+    save_conversation_memory,
+)
+from apps.conversation.raw_payload_store import (
+    build_turn_id,
+    load_raw_payload_memory_from_store,
+    save_raw_payload_memory,
+    sync_active_anchor_record,
+)
+from apps.conversation.request_facade import build_intent_payload
+from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
+from apps.platform.settings import REDIS_TTL
+
+_MAX_HISTORY_TURNS = 10
+_HISTORY_PREVIEW_LIMIT = 100
 
 
 def is_short_query_exception(raw_query: str) -> bool:
-    """짧은 질의라도 identifier 형태면 direct reject하지 않는다."""
+    """Treat identifier-like short queries as valid instead of rejecting them."""
+
     text = str(raw_query or "").strip()
     if not text:
         return False
@@ -23,20 +48,30 @@ def is_short_query_exception(raw_query: str) -> bool:
     return False
 
 
-async def node_load_memory(
-    state: Any,
-    *,
-    load_conversation_memory_fn: Any,
-    log_event: Any,
-) -> Dict[str, Any]:
-    """conversation memory를 workflow state 입력 형태로 복원한다."""
+async def node_load_memory(state: Any) -> Dict[str, Any]:
+    """Restore conversation memory into the workflow-state shape."""
+
     cid = state.conversation_id
-    loaded_history, canonical_evidence, render_profile, view_state = await load_conversation_memory_fn(
+    loaded_history, canonical_evidence, render_profile, view_state = await load_conversation_memory_from_store(
         cid,
         kv_store=getattr(state, "kv_store", None),
+        logger=logger,
+        truncate_text=lambda value, limit=_HISTORY_PREVIEW_LIMIT: truncate_text(value, limit),
     )
+    raw_payload_memory = await load_raw_payload_memory_from_store(
+        cid,
+        kv_store=getattr(state, "kv_store", None),
+        logger=logger,
+        truncate_text=lambda value, limit=_HISTORY_PREVIEW_LIMIT: truncate_text(value, limit),
+    )
+    raw_payload_memory = sync_active_anchor_record(raw_payload_memory, view_state)
     effective_prev_context = rehydrate_prev_context_from_canonical_evidence(canonical_evidence)
     current_full_history = loaded_history + [state.messages[-1]]
+    turn_id = str(getattr(state, "turn_id", "") or "").strip() or build_turn_id(
+        conversation_id=cid,
+        loaded_history=loaded_history,
+        question=state.messages[-1].content,
+    )
 
     log_event(
         "LOAD.MEMORY",
@@ -45,6 +80,7 @@ async def node_load_memory(
         stage="load_memory",
         history_turns=len(loaded_history),
         prev_context_docs=len(effective_prev_context),
+        turn_id=turn_id,
     )
     return {
         "question": state.messages[-1].content,
@@ -53,32 +89,30 @@ async def node_load_memory(
         "canonical_evidence": canonical_evidence,
         "render_profile": render_profile,
         "view_state": view_state,
+        "raw_payload_memory": raw_payload_memory,
+        "turn_id": turn_id,
     }
 
 
-async def node_rule_precheck(
-    state: Any,
-    *,
-    rule_decision_cls: Any,
-    is_short_query_exception_fn: Any = is_short_query_exception,
-) -> Dict[str, Any]:
-    """인사와 너무 짧은 질의만 rule 단계에서 바로 처리한다."""
+async def node_rule_precheck(state: Any) -> Dict[str, Any]:
+    """Handle greetings and underspecified ultra-short queries directly."""
+
     raw_user_msg = state.messages[-1].content.strip()
     user_msg = raw_user_msg.lower()
 
     greetings = ["안녕", "hello", "hi", "여보", "반가", "헤이"]
     if any(g in user_msg for g in greetings) and len(user_msg) < 10:
         return {
-            "rule_decision": rule_decision_cls(
+            "rule_decision": RuleDecision(
                 action="direct_answer",
                 direct_response="안녕하세요. 무엇을 도와드릴까요?",
                 reason="Simple greeting detected",
             )
         }
 
-    if len(raw_user_msg) < 5 and not is_short_query_exception_fn(raw_user_msg):
+    if len(raw_user_msg) < 5 and not is_short_query_exception(raw_user_msg):
         return {
-            "rule_decision": rule_decision_cls(
+            "rule_decision": RuleDecision(
                 action="direct_answer",
                 direct_response="질문을 조금 더 구체적으로 작성해 주세요.",
                 reason="Query too short",
@@ -86,26 +120,23 @@ async def node_rule_precheck(
         }
 
     return {
-        "rule_decision": rule_decision_cls(
+        "rule_decision": RuleDecision(
             action="proceed",
             reason="Standard query - proceed to analysis",
         )
     }
 
 
-async def node_analyze_question(
-    state: Any,
-    *,
-    build_intent_payload_fn: Any,
-) -> Dict[str, Any]:
-    """question analysis가 없으면 intent payload와 planner 결과를 생성한다."""
+async def node_analyze_question(state: Any) -> Dict[str, Any]:
+    """Build intent payload and planner output when they are not already present."""
+
     if state.question_analysis and state.intent_payload:
         return {
             "question_analysis": state.question_analysis,
             "intent_payload": state.intent_payload,
         }
 
-    intent_payload, question_analysis = await build_intent_payload_fn(
+    intent_payload, question_analysis = await build_intent_payload(
         question=state.messages[-1].content,
         conversation_id=state.conversation_id,
         chat_history=state.chat_history,
@@ -113,6 +144,7 @@ async def node_analyze_question(
         canonical_evidence=getattr(state, "canonical_evidence", None) or [],
         view_state=getattr(state, "view_state", None),
         request_id=getattr(state, "request_id", None),
+        turn_id=getattr(state, "turn_id", None),
     )
     return {
         "question_analysis": question_analysis,
@@ -121,7 +153,8 @@ async def node_analyze_question(
 
 
 async def node_direct_answer(state: Any) -> Dict[str, Any]:
-    """rule precheck에서 즉시 응답이 결정된 경우 동일한 shape의 artifact를 만든다."""
+    """Return a direct-answer artifact when the rule precheck short-circuits."""
+
     response_text = state.rule_decision.direct_response
     artifact = AnswerArtifact(
         text=response_text,
@@ -148,40 +181,39 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
     }
 
 
-async def node_save_history(
-    state: Any,
-    *,
-    build_save_history_payload_fn: Any,
-    save_conversation_memory_fn: Any,
-    logger: Any,
-    log_event: Any,
-    state_log_summary_fields_fn: Any,
-    compute_total_ms_from_start_fn: Any,
-    max_history_turns: int,
-    history_ttl_seconds: int,
-) -> Dict[str, Any]:
-    """요청 종료 시 history, canonical evidence, render profile을 저장한다."""
-    kv_store = getattr(state, "kv_store", None)
-    save_payload = build_save_history_payload_fn(
-        state,
-        max_history_turns=max_history_turns,
-    )
-    cid = str(save_payload["conversation_id"] or "")
+async def node_save_history(state: Any) -> Dict[str, Any]:
+    """Persist conversation history, canonical evidence, render profile, and view state."""
 
-    saved = await save_conversation_memory_fn(
+    kv_store = getattr(state, "kv_store", None)
+    save_payload = build_save_history_payload(state, max_history_turns=_MAX_HISTORY_TURNS)
+    cid = str(save_payload["conversation_id"] or "")
+    raw_payload_memory = sync_active_anchor_record(
+        getattr(state, "raw_payload_memory", None) or {},
+        save_payload["view_state"],
+    )
+
+    saved = await save_conversation_memory(
         kv_store=kv_store,
         conversation_id=cid,
         history=save_payload["history"],
         canonical_evidence=save_payload["canonical_evidence"],
         render_profile=save_payload["render_profile"],
         view_state=save_payload["view_state"],
-        history_ttl_seconds=history_ttl_seconds,
+        history_ttl_seconds=REDIS_TTL,
+    )
+    raw_saved = await save_raw_payload_memory(
+        kv_store=kv_store,
+        conversation_id=cid,
+        raw_payload_memory=raw_payload_memory,
+        history_ttl_seconds=REDIS_TTL,
     )
     if not saved:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
+    if not raw_saved:
+        logger.debug("[memory] kv_store unavailable: skip raw payload save (cid=%s)", cid)
 
-    total_ms = compute_total_ms_from_start_fn(getattr(state, "request_started_at", None))
-    summary_fields = state_log_summary_fields_fn(state, total_ms=total_ms)
+    total_ms = compute_total_ms_from_start(getattr(state, "request_started_at", None))
+    summary_fields = _state_log_summary_fields(state, total_ms=total_ms)
     log_event("REQ.SUMMARY", **summary_fields)
     log_event(
         "REQ.END",
@@ -191,10 +223,10 @@ async def node_save_history(
         total_ms=total_ms,
         selected_model=(getattr(state, "merge_debug", None) or {}).get("selected_model"),
     )
-
     return {}
 
 
 def node_join_answers(state: Any) -> Dict[str, Any]:
-    """join 전용 no-op node."""
+    """Explicit no-op join node kept for graph readability."""
+
     return {}

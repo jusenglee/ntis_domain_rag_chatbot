@@ -1,9 +1,15 @@
-﻿from __future__ import annotations
-
-import asyncio
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
-
+from __future__ import annotations
+
+
+
+import asyncio
+
+from dataclasses import dataclass
+
+from typing import Any, Dict, Optional
+
+
+
 from apps.evidence.canonical_context import build_prev_context_canonical_text
 from apps.evidence.canonical_evidence import build_canonical_evidence
 from apps.conversation.followup_anchor import is_child_anchor_source, parse_display_limit
@@ -15,7 +21,8 @@ from apps.evidence.detail_contract import (
     extract_requested_fields,
     make_entity_cache_key,
 )
-from apps.evidence.result_set import ResultItem, RetrievalBundle
+from apps.evidence.result_set import ResultItem, RetrievalBundle
+
 from apps.conversation.view_state import (
     DETAIL_CACHE_SCHEMA_VERSION,
     DetailCacheEntry,
@@ -29,37 +36,79 @@ from apps.conversation.view_state import (
     set_active_focus_scope,
     set_active_result_scope,
 )
-from apps.retrieval.rag_retriever import has_active_anchor_seed
-from apps.api.streaming.contracts import AnswerArtifact
-from apps.conversation.entity_reference import ClarificationRequest, ResolvedEntityRef
-from apps.conversation.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, resolve_entity_ref_from_strategy_meta, should_short_circuit_followup_clarification
-
-
-def _get_normalized_intent(state: Any) -> Any:
-    """workflow state에서 normalized_intent만 안전하게 꺼낸다."""
-    payload = getattr(state, "intent_payload", None)
-    return getattr(payload, "normalized_intent", None) if payload else None
-
-
-def _get_strategy(state: Any) -> Any:
-    """workflow state에서 현재 strategy 객체를 반환한다."""
-    return getattr(state, "strategy", None)
-
-
-def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
-    """여러 source를 순서대로 보며 key에 해당하는 첫 non-None 값을 고른다."""
-    for source in sources:
-        if source is None:
-            continue
-        if isinstance(source, dict):
-            value = source.get(key)
-        else:
-            value = getattr(source, key, None)
-        if value is not None:
-            return value
-    return default
-
-
+from apps.retrieval.rag_retriever import CustomRAGRetriever, has_active_anchor_seed, resolve_rag_queries
+
+from apps.api.contracts.workflow_models import KnowledgeSufficiency
+from apps.api.runtime_helpers import log_event, logger, measure_latency
+from apps.api.streaming.contracts import AnswerArtifact
+
+from apps.conversation.entity_reference import ClarificationRequest, ResolvedEntityRef
+from apps.conversation.fact_followup_resolver import resolve_followup_from_facts
+
+from apps.conversation.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, resolve_entity_ref_from_strategy_meta, should_short_circuit_followup_clarification
+from apps.conversation.raw_payload_store import sync_active_anchor_record, upsert_raw_payload_records
+from apps.chat.llm_json import sanitize_llm_json
+from apps.chat.llm_runtime import build_llm
+from apps.planner.planner_contract import StrategyViolation
+from apps.platform.settings import MAX_TOP_K_SIZE
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import Tool
+
+
+
+
+
+def _get_normalized_intent(state: Any) -> Any:
+
+    """workflow state에서 normalized_intent만 안전하게 꺼낸다."""
+
+    payload = getattr(state, "intent_payload", None)
+
+    return getattr(payload, "normalized_intent", None) if payload else None
+
+
+
+
+
+def _get_strategy(state: Any) -> Any:
+
+    """workflow state에서 현재 strategy 객체를 반환한다."""
+
+    return getattr(state, "strategy", None)
+
+
+
+
+
+def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
+
+    """여러 source를 순서대로 보며 key에 해당하는 첫 non-None 값을 고른다."""
+
+    for source in sources:
+
+        if source is None:
+
+            continue
+
+        if isinstance(source, dict):
+
+            value = source.get(key)
+
+        else:
+
+            value = getattr(source, key, None)
+
+        if value is not None:
+
+            return value
+
+    return default
+
+
+
+
+
 _DISPLAY_LIMIT_SENTINEL = 10**9
 _DETAIL_SYNTHETIC_TITLE_PRIMARY_TYPES = {
     "aggregation",
@@ -68,13 +117,19 @@ _DETAIL_SYNTHETIC_TITLE_PRIMARY_TYPES = {
     "reverse_trace",
     "multi_hop_bundle",
 }
-
-
+
+
+
+
 def _coerce_positive_int(value: Any) -> Optional[int]:
-    try:
-        number = int(value)
-    except Exception:
-        return None
+    try:
+
+        number = int(value)
+
+    except Exception:
+
+        return None
+
     return number if number >= 1 else None
 
 
@@ -181,8 +236,10 @@ def _resolve_detail_coverage_title(
         meta_detail.get("eng_pjt_nm"),
         doc.get("title"),
     )
-
-
+
+
+
+
 def _resolve_retrieval_budget(question_analysis: Any, *, max_top_k_size: int) -> int:
     """Use the assembled question-analysis limit as the retrieval budget source of truth."""
     planner_limit = _coerce_positive_int(getattr(question_analysis, "limit", None))
@@ -196,33 +253,60 @@ def _resolve_runtime_top_k(question_analysis: Any, *, max_top_k_size: int, exact
     visible_limit = _resolve_display_request(question_analysis)
     overfetch_budget = max(visible_limit, visible_limit * 3)
     return min(max(retrieval_budget, overfetch_budget), max_top_k_size)
-
-
-def _resolve_display_request(question_analysis: Any) -> int:
-    requested = _coerce_positive_int(getattr(question_analysis, "display_limit", None))
-    if requested is None:
-        requested = _coerce_positive_int(getattr(question_analysis, "limit", None)) or 1
-    return requested
-
-
-def _extract_explicit_count(question: Any) -> Optional[int]:
-    count = parse_display_limit(str(question or ""), default=_DISPLAY_LIMIT_SENTINEL)
-    return None if count == _DISPLAY_LIMIT_SENTINEL else int(count)
-
-
-def _classify_docs_kind(docs: list[dict[str, Any]]) -> str:
-    if not docs:
-        return "item_list"
-    source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
-    source_types.discard("")
-    item_like_types = {"hit", "canonical_item", "item", "document"}
-    if source_types and source_types.issubset(item_like_types):
-        return "item_list"
-    if "aggregation" in source_types:
-        return "collection_wrapper"
-    return "item_list"
-
-
+
+
+
+
+def _resolve_display_request(question_analysis: Any) -> int:
+
+    requested = _coerce_positive_int(getattr(question_analysis, "display_limit", None))
+
+    if requested is None:
+
+        requested = _coerce_positive_int(getattr(question_analysis, "limit", None)) or 1
+
+    return requested
+
+
+
+
+
+def _extract_explicit_count(question: Any) -> Optional[int]:
+
+    count = parse_display_limit(str(question or ""), default=_DISPLAY_LIMIT_SENTINEL)
+
+    return None if count == _DISPLAY_LIMIT_SENTINEL else int(count)
+
+
+
+
+
+def _classify_docs_kind(docs: list[dict[str, Any]]) -> str:
+
+    if not docs:
+
+        return "item_list"
+
+    source_types = {str(item.get("source_type") or "").strip().lower() for item in docs if isinstance(item, dict)}
+
+    source_types.discard("")
+
+    item_like_types = {"hit", "canonical_item", "item", "document"}
+
+    if source_types and source_types.issubset(item_like_types):
+
+        return "item_list"
+
+    if "aggregation" in source_types:
+
+        return "collection_wrapper"
+
+    return "item_list"
+
+
+
+
+
 def _build_retrieval_bundle(
     *,
     docs: list[dict[str, Any]],
@@ -235,12 +319,18 @@ def _build_retrieval_bundle(
     debug_answer_context_text: str = "",
     context_source: str = "pipeline_context",
 ) -> RetrievalBundle:
-    items: list[ResultItem] = []
-    max_len = max(len(docs or []), len(canonical_evidence or []))
-    for index in range(max_len):
-        display = docs[index] if index < len(docs) and isinstance(docs[index], dict) else {}
-        canonical = canonical_evidence[index] if index < len(canonical_evidence) and isinstance(canonical_evidence[index], dict) else {}
-        items.append(ResultItem(canonical=dict(canonical), display=dict(display), raw_hit=dict(display)))
+    items: list[ResultItem] = []
+
+    max_len = max(len(docs or []), len(canonical_evidence or []))
+
+    for index in range(max_len):
+
+        display = docs[index] if index < len(docs) and isinstance(docs[index], dict) else {}
+
+        canonical = canonical_evidence[index] if index < len(canonical_evidence) and isinstance(canonical_evidence[index], dict) else {}
+
+        items.append(ResultItem(canonical=dict(canonical), display=dict(display), raw_hit=dict(display)))
+
     return RetrievalBundle(
         items=items,
         render_profile=dict(render_profile or {}),
@@ -252,8 +342,10 @@ def _build_retrieval_bundle(
         debug_answer_context_text=str(debug_answer_context_text or ""),
         context_source=str(context_source or "pipeline_context"),
     )
-
-
+
+
+
+
 def _build_answer_artifact(*, text: str, answer_kind: str, answer_source: str, clarification: ClarificationRequest | None = None) -> AnswerArtifact:
     return AnswerArtifact(
         text=str(text or ""),
@@ -343,24 +435,37 @@ def _resolve_detail_entity_ref(
         display_rank=getattr(focus_entity, "display_rank", None),
         anchor_fields={"title_text": getattr(focus_entity, "title_text", None)},
     )
-
-
+
+
+
+
 def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     synthetic_docs: list[dict[str, Any]] = []
     for index, item in enumerate(canonical_evidence, start=1):
         if not isinstance(item, dict):
             continue
-        ids = item.get("ids") or {}
-        facts = item.get("facts") or {}
-        synthetic_docs.append(
-            {
-                "title": facts.get("title"),
-                "title_text": facts.get("title"),
-                "source_index": index,
-                "source_type": "canonical_item",
-                "doc_id": ids.get("doc_id"),
-                "pjt_id": ids.get("pjt_id"),
-                "pjt_no": ids.get("pjt_no"),
+        ids = item.get("ids") or {}
+
+        facts = item.get("facts") or {}
+
+        synthetic_docs.append(
+
+            {
+
+                "title": facts.get("title"),
+
+                "title_text": facts.get("title"),
+
+                "source_index": index,
+
+                "source_type": "canonical_item",
+
+                "doc_id": ids.get("doc_id"),
+
+                "pjt_id": ids.get("pjt_id"),
+
+                "pjt_no": ids.get("pjt_no"),
+
             }
         )
     return synthetic_docs
@@ -617,27 +722,44 @@ def _promote_unique_list_subject_anchor(*, snapshot: Any, parent_focus: Any) -> 
         "title_text": getattr(anchor, "title_text", None),
         "identity_key": _subject_identity(subject_kind, display_name=getattr(anchor, "title_text", None), ids_map=ids_map),
     }
-
-
-@dataclass(frozen=True)
-class DisplayPayloadBundle:
-    snapshot_documents: list[dict[str, Any]]
-    snapshot_canonical_evidence: list[dict[str, Any]]
-    docs_count: int
-    canonical_count: int
-    docs_kind: str
-    canonical_kind: str
-    display_source: str
-
-
-def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
-    keys = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn", "doc_id")
-    current_values = tuple(str(getattr(current, key, "") or "").strip() for key in keys)
-    incoming_values = tuple(str(getattr(incoming, key, "") or "").strip() for key in keys)
+
+
+
+
+@dataclass(frozen=True)
+
+class DisplayPayloadBundle:
+
+    snapshot_documents: list[dict[str, Any]]
+
+    snapshot_canonical_evidence: list[dict[str, Any]]
+
+    docs_count: int
+
+    canonical_count: int
+
+    docs_kind: str
+
+    canonical_kind: str
+
+    display_source: str
+
+
+
+
+
+def _is_equivalent_focus_entity(current: Any, incoming: Any) -> bool:
+
+    keys = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn", "doc_id")
+
+    current_values = tuple(str(getattr(current, key, "") or "").strip() for key in keys)
+
+    incoming_values = tuple(str(getattr(incoming, key, "") or "").strip() for key in keys)
+
     return any(current_values) and current_values == incoming_values
 
 
-def _log_scope_transition(log_event: Any, *, state: Any, view_state: Any) -> None:
+def _log_scope_transition(*, state: Any, view_state: Any) -> None:
     active_scope = getattr(view_state, "active_scope", None)
     parent_chain = getattr(active_scope, "parent_chain", None) or []
     if not parent_chain:
@@ -666,26 +788,46 @@ def _build_detail_coverage_input(
     merged = dict(document or {}) if isinstance(document, dict) else {}
     if not isinstance(canonical_item, dict):
         return merged
-
-    ids = dict(canonical_item.get("ids") or {})
-    facts = dict(canonical_item.get("facts") or {})
-    roles = dict(canonical_item.get("roles") or {})
-
-    if ids and not isinstance(merged.get("ids"), dict):
-        merged["ids"] = ids
-    elif ids:
-        merged["ids"] = {**ids, **dict(merged.get("ids") or {})}
-
-    if facts and not isinstance(merged.get("facts"), dict):
-        merged["facts"] = facts
-    elif facts:
-        merged["facts"] = {**facts, **dict(merged.get("facts") or {})}
-
-    if roles and not isinstance(merged.get("roles"), dict):
-        merged["roles"] = roles
-    elif roles:
-        merged["roles"] = {**roles, **dict(merged.get("roles") or {})}
-
+
+
+    ids = dict(canonical_item.get("ids") or {})
+
+    facts = dict(canonical_item.get("facts") or {})
+
+    roles = dict(canonical_item.get("roles") or {})
+
+
+
+    if ids and not isinstance(merged.get("ids"), dict):
+
+        merged["ids"] = ids
+
+    elif ids:
+
+        merged["ids"] = {**ids, **dict(merged.get("ids") or {})}
+
+
+
+    if facts and not isinstance(merged.get("facts"), dict):
+
+        merged["facts"] = facts
+
+    elif facts:
+
+        merged["facts"] = {**facts, **dict(merged.get("facts") or {})}
+
+
+
+    if roles and not isinstance(merged.get("roles"), dict):
+
+        merged["roles"] = roles
+
+    elif roles:
+
+        merged["roles"] = {**roles, **dict(merged.get("roles") or {})}
+
+
+
     resolved_title = _resolve_detail_coverage_title(merged, canonical_item, anchor_title=anchor_title)
     if resolved_title:
         merged["title"] = resolved_title
@@ -693,92 +835,177 @@ def _build_detail_coverage_input(
     elif facts.get("title") and not str(merged.get("title") or merged.get("title_text") or "").strip():
         merged["title"] = facts.get("title")
         merged["title_text"] = facts.get("title")
-    if facts.get("year") and not str(merged.get("stan_yr") or "").strip():
-        merged["stan_yr"] = facts.get("year")
-    if ids.get("pjt_id") and not str(merged.get("pjt_id") or "").strip():
-        merged["pjt_id"] = ids.get("pjt_id")
-    if ids.get("pjt_no") and not str(merged.get("pjt_no") or "").strip():
-        merged["pjt_no"] = ids.get("pjt_no")
-    if ids.get("rst_id") and not str(merged.get("rst_id") or "").strip():
-        merged["rst_id"] = ids.get("rst_id")
-    if ids.get("person_no") and not str(merged.get("person_no") or merged.get("hm_id") or "").strip():
-        merged["person_no"] = ids.get("person_no")
-    if ids.get("org_id") and not str(merged.get("org_id") or "").strip():
-        merged["org_id"] = ids.get("org_id")
-    if ids.get("org_code") and not str(merged.get("org_code") or merged.get("org_cd") or "").strip():
-        merged["org_code"] = ids.get("org_code")
-    if ids.get("biz_no") and not str(merged.get("biz_no") or merged.get("org_no") or "").strip():
-        merged["biz_no"] = ids.get("biz_no")
-    if ids.get("doi") and not str(merged.get("doi") or "").strip():
-        merged["doi"] = ids.get("doi")
-    if ids.get("issn") and not str(merged.get("issn") or "").strip():
-        merged["issn"] = ids.get("issn")
-    lead_org = ((roles.get("lead_org_name") or [None])[0]) if isinstance(roles.get("lead_org_name"), list) else None
-    if lead_org and not str(merged.get("org_nm") or "").strip():
-        merged["org_nm"] = lead_org
-    if (roles.get("participant_org_name") or []) and not isinstance(merged.get("prtcp_org"), list):
-        merged["prtcp_org"] = [{"org_nm": value} for value in (roles.get("participant_org_name") or []) if str(value).strip()]
-    if (roles.get("participant_researcher_name") or []) and not isinstance(merged.get("prtcp_mp"), list):
-        merged["prtcp_mp"] = [{"hm_nm": value} for value in (roles.get("participant_researcher_name") or []) if str(value).strip()]
-    if isinstance(merged.get("prtcp_mp"), list) and (roles.get("people_affiliation_org_name") or []):
-        for item, affiliation in zip(merged.get("prtcp_mp") or [], roles.get("people_affiliation_org_name") or []):
-            if isinstance(item, dict) and affiliation and not str(item.get("blng_org_nm") or "").strip():
-                item["blng_org_nm"] = affiliation
-    return merged
-
-def _detail_anchor_active(*, query_intent: Any) -> bool:
-    ids_map = getattr(query_intent, "ids_map", None) or {}
-    if isinstance(query_intent, dict):
-        ids_map = query_intent.get("ids_map") or {}
-    return any(
-        ids_map.get(key)
-        for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
-    )
-
-
-def _normalize_display_payloads(
-    *,
-    docs: list[dict[str, Any]],
-    canonical_evidence: list[dict[str, Any]],
-    base_route: str,
-    output_type: str,
-    requested_count: int,
-    explicit_count: Optional[int],
-    log_event: Any,
-    request_id: str,
-    conversation_id: str,
-) -> DisplayPayloadBundle:
-    """Normalize display inputs and choose the snapshot source of truth."""
-    normalized_docs = [item for item in (docs or []) if isinstance(item, dict)]
-    normalized_canonical = [item for item in (canonical_evidence or []) if isinstance(item, dict)]
-
-    if len(normalized_canonical) < len(normalized_docs):
-        canonical_before = len(normalized_canonical)
-        for rank, item in enumerate(normalized_docs[canonical_before:], start=canonical_before + 1):
-            normalized_canonical.append(
-                build_canonical_evidence(
-                    item,
-                    rank=rank,
-                    base_route=base_route,
-                    output_type=output_type,
-                ).to_dict()
-            )
-        derived_count = len(normalized_canonical) - canonical_before
-        if derived_count > 0:
-            log_event(
-                "RAG.CANONICAL_EVIDENCE.DERIVED",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                docs_count=len(normalized_docs),
-                canonical_count_before=canonical_before,
-                canonical_count_after=len(normalized_canonical),
-                derived_count=derived_count,
-                base_route=base_route,
-                output_type=output_type,
-            )
-
-    docs_kind = _classify_docs_kind(normalized_docs)
-    canonical_kind = "item_list"
+    if facts.get("year") and not str(merged.get("stan_yr") or "").strip():
+
+        merged["stan_yr"] = facts.get("year")
+
+    if ids.get("pjt_id") and not str(merged.get("pjt_id") or "").strip():
+
+        merged["pjt_id"] = ids.get("pjt_id")
+
+    if ids.get("pjt_no") and not str(merged.get("pjt_no") or "").strip():
+
+        merged["pjt_no"] = ids.get("pjt_no")
+
+    if ids.get("rst_id") and not str(merged.get("rst_id") or "").strip():
+
+        merged["rst_id"] = ids.get("rst_id")
+
+    if ids.get("person_no") and not str(merged.get("person_no") or merged.get("hm_id") or "").strip():
+
+        merged["person_no"] = ids.get("person_no")
+
+    if ids.get("org_id") and not str(merged.get("org_id") or "").strip():
+
+        merged["org_id"] = ids.get("org_id")
+
+    if ids.get("org_code") and not str(merged.get("org_code") or merged.get("org_cd") or "").strip():
+
+        merged["org_code"] = ids.get("org_code")
+
+    if ids.get("biz_no") and not str(merged.get("biz_no") or merged.get("org_no") or "").strip():
+
+        merged["biz_no"] = ids.get("biz_no")
+
+    if ids.get("doi") and not str(merged.get("doi") or "").strip():
+
+        merged["doi"] = ids.get("doi")
+
+    if ids.get("issn") and not str(merged.get("issn") or "").strip():
+
+        merged["issn"] = ids.get("issn")
+
+    lead_org = ((roles.get("lead_org_name") or [None])[0]) if isinstance(roles.get("lead_org_name"), list) else None
+
+    if lead_org and not str(merged.get("org_nm") or "").strip():
+
+        merged["org_nm"] = lead_org
+
+    if (roles.get("participant_org_name") or []) and not isinstance(merged.get("prtcp_org"), list):
+
+        merged["prtcp_org"] = [{"org_nm": value} for value in (roles.get("participant_org_name") or []) if str(value).strip()]
+
+    if (roles.get("participant_researcher_name") or []) and not isinstance(merged.get("prtcp_mp"), list):
+
+        merged["prtcp_mp"] = [{"hm_nm": value} for value in (roles.get("participant_researcher_name") or []) if str(value).strip()]
+
+    if isinstance(merged.get("prtcp_mp"), list) and (roles.get("people_affiliation_org_name") or []):
+
+        for item, affiliation in zip(merged.get("prtcp_mp") or [], roles.get("people_affiliation_org_name") or []):
+
+            if isinstance(item, dict) and affiliation and not str(item.get("blng_org_nm") or "").strip():
+
+                item["blng_org_nm"] = affiliation
+
+    return merged
+
+
+
+def _detail_anchor_active(*, query_intent: Any) -> bool:
+
+    ids_map = getattr(query_intent, "ids_map", None) or {}
+
+    if isinstance(query_intent, dict):
+
+        ids_map = query_intent.get("ids_map") or {}
+
+    return any(
+
+        ids_map.get(key)
+
+        for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+
+    )
+
+
+
+
+
+def _normalize_display_payloads(
+
+    *,
+
+    docs: list[dict[str, Any]],
+
+    canonical_evidence: list[dict[str, Any]],
+
+    base_route: str,
+
+    output_type: str,
+
+    requested_count: int,
+
+    explicit_count: Optional[int],
+
+
+    request_id: str,
+
+    conversation_id: str,
+
+) -> DisplayPayloadBundle:
+
+    """Normalize display inputs and choose the snapshot source of truth."""
+
+    normalized_docs = [item for item in (docs or []) if isinstance(item, dict)]
+
+    normalized_canonical = [item for item in (canonical_evidence or []) if isinstance(item, dict)]
+
+
+
+    if len(normalized_canonical) < len(normalized_docs):
+
+        canonical_before = len(normalized_canonical)
+
+        for rank, item in enumerate(normalized_docs[canonical_before:], start=canonical_before + 1):
+
+            normalized_canonical.append(
+
+                build_canonical_evidence(
+
+                    item,
+
+                    rank=rank,
+
+                    base_route=base_route,
+
+                    output_type=output_type,
+
+                ).to_dict()
+
+            )
+
+        derived_count = len(normalized_canonical) - canonical_before
+
+        if derived_count > 0:
+
+            log_event(
+
+                "RAG.CANONICAL_EVIDENCE.DERIVED",
+
+                request_id=request_id,
+
+                conversation_id=conversation_id,
+
+                docs_count=len(normalized_docs),
+
+                canonical_count_before=canonical_before,
+
+                canonical_count_after=len(normalized_canonical),
+
+                derived_count=derived_count,
+
+                base_route=base_route,
+
+                output_type=output_type,
+
+            )
+
+
+
+    docs_kind = _classify_docs_kind(normalized_docs)
+
+    canonical_kind = "item_list"
+
     fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
     promoted_canonical_axis = False
     if (
@@ -793,22 +1020,38 @@ def _normalize_display_payloads(
         normalized_docs = _build_display_docs_from_canonical(normalized_canonical)
         docs_kind = _classify_docs_kind(normalized_docs)
         promoted_canonical_axis = True
-        log_event(
-            "RAG.DISPLAY_CANONICAL_AXIS.PROMOTED",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            docs_count_before=len(docs or []),
-            canonical_count=len(normalized_canonical),
-            output_type=output_type,
-        )
-
-    docs_count = len(normalized_docs)
-    canonical_count = len(normalized_canonical)
-    display_source = "canonical_axis" if promoted_canonical_axis else "docs"
-
-    if docs_count != canonical_count:
-        aligned_count = min(docs_count, canonical_count)
-        fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+        log_event(
+
+            "RAG.DISPLAY_CANONICAL_AXIS.PROMOTED",
+
+            request_id=request_id,
+
+            conversation_id=conversation_id,
+
+            docs_count_before=len(docs or []),
+
+            canonical_count=len(normalized_canonical),
+
+            output_type=output_type,
+
+        )
+
+
+
+    docs_count = len(normalized_docs)
+
+    canonical_count = len(normalized_canonical)
+
+    display_source = "canonical_axis" if promoted_canonical_axis else "docs"
+
+
+
+    if docs_count != canonical_count:
+
+        aligned_count = min(docs_count, canonical_count)
+
+        fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+
         prefer_canonical = (
             str(output_type or "").strip().lower() == "list"
             and canonical_count > docs_count
@@ -818,71 +1061,105 @@ def _normalize_display_payloads(
             )
             and (docs_kind == "collection_wrapper" or docs_count < max(1, fallback_threshold))
         )
-        if prefer_canonical:
-            display_source = "synthetic_from_canonical"
-            snapshot_documents = _build_display_docs_from_canonical(normalized_canonical)
-            snapshot_canonical = normalized_canonical
-        else:
-            snapshot_documents = normalized_docs[:aligned_count]
-            snapshot_canonical = normalized_canonical[:aligned_count]
-        log_event(
-            "RAG.DISPLAY_INPUT_MISMATCH",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            docs_count=docs_count,
-            canonical_count=canonical_count,
-            aligned_count=aligned_count,
-            base_route=base_route,
-            output_type=output_type,
-            docs_kind=docs_kind,
-            canonical_kind=canonical_kind,
-            display_source=display_source,
-        )
-    else:
-        snapshot_documents = normalized_docs
-        snapshot_canonical = normalized_canonical
-
-    return DisplayPayloadBundle(
-        snapshot_documents=snapshot_documents,
-        snapshot_canonical_evidence=snapshot_canonical,
-        docs_count=docs_count,
-        canonical_count=canonical_count,
-        docs_kind=docs_kind,
-        canonical_kind=canonical_kind,
-        display_source=display_source,
-    )
-
-
-async def node_knowledge_sufficiency(
-    state: Any,
-    *,
-    build_llm_fn: Any,
-    pydantic_output_parser_cls: Any,
-    chat_prompt_template_cls: Any,
-    knowledge_sufficiency_cls: Any,
-    sanitize_llm_json_fn: Any,
-    refine_documents_rule_based_fn: Any,
-    priority_context_fields: tuple[str, ...],
-    max_field_sentences: int,
-    max_field_tokens: int,
-    default_max_doc_sentences: int,
-    default_max_doc_tokens: int,
-    logger: Any,
-    log_event: Any,
-) -> Dict[str, Any]:
-    """이전 문맥만으로 답할 수 있는지 판단하고, 필요하면 retrieval 의도를 만든다.
-
-    planner/strategy 신호가 이미 충분히 강하면 LLM 판단을 건너뛰고 즉시 high로 고정해
-    불안정한 우회를 줄인다.
-    """
-    history = state.chat_history[-6:]
-    history_str = "\n".join([f"{type(message).__name__}: {message.content}" for message in history])
-
-    qa = state.question_analysis
-    query_intent = _get_normalized_intent(state)
-    strategy = _get_strategy(state)
-    intent_payload = getattr(state, "intent_payload", None)
-    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
+        if prefer_canonical:
+
+            display_source = "synthetic_from_canonical"
+
+            snapshot_documents = _build_display_docs_from_canonical(normalized_canonical)
+
+            snapshot_canonical = normalized_canonical
+
+        else:
+
+            snapshot_documents = normalized_docs[:aligned_count]
+
+            snapshot_canonical = normalized_canonical[:aligned_count]
+
+        log_event(
+
+            "RAG.DISPLAY_INPUT_MISMATCH",
+
+            request_id=request_id,
+
+            conversation_id=conversation_id,
+
+            docs_count=docs_count,
+
+            canonical_count=canonical_count,
+
+            aligned_count=aligned_count,
+
+            base_route=base_route,
+
+            output_type=output_type,
+
+            docs_kind=docs_kind,
+
+            canonical_kind=canonical_kind,
+
+            display_source=display_source,
+
+        )
+
+    else:
+
+        snapshot_documents = normalized_docs
+
+        snapshot_canonical = normalized_canonical
+
+
+
+    return DisplayPayloadBundle(
+
+        snapshot_documents=snapshot_documents,
+
+        snapshot_canonical_evidence=snapshot_canonical,
+
+        docs_count=docs_count,
+
+        canonical_count=canonical_count,
+
+        docs_kind=docs_kind,
+
+        canonical_kind=canonical_kind,
+
+        display_source=display_source,
+
+    )
+
+
+
+
+
+@measure_latency("knowledge_sufficiency")
+async def node_knowledge_sufficiency(state: Any) -> Dict[str, Any]:
+
+    """이전 문맥만으로 답할 수 있는지 판단하고, 필요하면 retrieval 의도를 만든다.
+
+
+
+    planner/strategy 신호가 이미 충분히 강하면 LLM 판단을 건너뛰고 즉시 high로 고정해
+
+    불안정한 우회를 줄인다.
+
+    """
+
+    history = state.chat_history[-6:]
+
+    history_str = "\n".join([f"{type(message).__name__}: {message.content}" for message in history])
+
+
+
+    qa = state.question_analysis
+
+    query_intent = _get_normalized_intent(state)
+
+    strategy = _get_strategy(state)
+
+    intent_payload = getattr(state, "intent_payload", None)
+
+    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
+
     if should_short_circuit_followup_clarification(strategy_meta):
         no_result_message = build_followup_clarification_message(strategy_meta)
         clarification = build_followup_clarification_payload(strategy_meta)
@@ -893,24 +1170,38 @@ async def node_knowledge_sufficiency(
             clarification_type=(clarification or {}).get("clarification_type") if isinstance(clarification, dict) else None,
             reason=dict(strategy_meta.get("clarification_payload") or {}).get("reason"),
         )
-        result = knowledge_sufficiency_cls(
+        result = KnowledgeSufficiency(
             requires_new_knowledge="low",
                 search_intent="followup clarification required",
                 retrieval_query=state.messages[-1].content,
-            confidence=1.0,
-        )
-        log_event(
-            "KS.RESULT",
-            request_id=state.request_id,
-            conversation_id=state.conversation_id,
-            stage="knowledge_sufficiency",
-            requires_new_knowledge=result.requires_new_knowledge,
-            retrieval_query=result.retrieval_query,
-            confidence=round(float(result.confidence), 2),
-            followup_resolution_status=strategy_meta.get("followup_resolution_status"),
-            early_exit_reason="followup_clarification",
-        )
-        return {"knowledge_sufficiency": result, "no_result_message": no_result_message, "clarification": clarification}
+            confidence=1.0,
+
+        )
+
+        log_event(
+
+            "KS.RESULT",
+
+            request_id=state.request_id,
+
+            conversation_id=state.conversation_id,
+
+            stage="knowledge_sufficiency",
+
+            requires_new_knowledge=result.requires_new_knowledge,
+
+            retrieval_query=result.retrieval_query,
+
+            confidence=round(float(result.confidence), 2),
+
+            followup_resolution_status=strategy_meta.get("followup_resolution_status"),
+
+            early_exit_reason="followup_clarification",
+
+        )
+
+        return {"knowledge_sufficiency": result, "no_result_message": no_result_message, "clarification": clarification}
+
     retrieval_query = _pick_attr(query_intent, qa, key="retrieval_query", default=state.messages[-1].content)
     action = _pick_attr(query_intent, strategy, qa, key="action")
     detail_followup_freshness_probe = _should_probe_llm_freshness_for_detail_followup(
@@ -924,33 +1215,50 @@ async def node_knowledge_sufficiency(
         "list",
         "detail",
         "relation",
-        "stats",
-        "id_exact",
-        "id_fuzzy",
-        "topic",
-        "content",
+        "stats",
+
+        "id_exact",
+
+        "id_fuzzy",
+
+        "topic",
+
+        "content",
+
     }
 
     if (query_intent or strategy or qa) and not state.prev_context and not detail_followup_freshness_probe:
-        result = knowledge_sufficiency_cls(
+        result = KnowledgeSufficiency(
             requires_new_knowledge="high",
-            search_intent="이전 문맥이 없어 새로운 검색이 필요합니다.",
-            retrieval_query=retrieval_query,
-            confidence=1.0,
-        )
-        log_event(
-            "KS.RESULT",
-            request_id=state.request_id,
-            conversation_id=state.conversation_id,
-            stage="knowledge_sufficiency",
-            requires_new_knowledge=result.requires_new_knowledge,
-            retrieval_query=result.retrieval_query,
-            confidence=round(float(result.confidence), 2),
+            search_intent="이전 문맥이 없어 새로운 검색이 필요합니다.",
+
+            retrieval_query=retrieval_query,
+
+            confidence=1.0,
+
+        )
+
+        log_event(
+
+            "KS.RESULT",
+
+            request_id=state.request_id,
+
+            conversation_id=state.conversation_id,
+
+            stage="knowledge_sufficiency",
+
+            requires_new_knowledge=result.requires_new_knowledge,
+
+            retrieval_query=result.retrieval_query,
+
+            confidence=round(float(result.confidence), 2),
+
         )
         return {"knowledge_sufficiency": result}
 
     if action in search_required_actions and not detail_followup_freshness_probe:
-        result = knowledge_sufficiency_cls(
+        result = KnowledgeSufficiency(
             requires_new_knowledge="high",
             search_intent=f"query_intent action={action} requires retrieval",
             retrieval_query=retrieval_query,
@@ -960,7 +1268,8 @@ async def node_knowledge_sufficiency(
         log_event(
             "KS.RESULT",
             request_id=state.request_id,
-            conversation_id=state.conversation_id,
+            conversation_id=state.conversation_id,
+
             stage="knowledge_sufficiency",
             requires_new_knowledge=result.requires_new_knowledge,
             retrieval_query=result.retrieval_query,
@@ -970,45 +1279,82 @@ async def node_knowledge_sufficiency(
         )
         return {"knowledge_sufficiency": result}
 
-    llm = build_llm_fn(model_name="gemma_triton_0")
-    parser = pydantic_output_parser_cls(pydantic_object=knowledge_sufficiency_cls)
-
-    render_profile = getattr(state, "render_profile", None) or {}
-    base_route = str(
-        _pick_attr(render_profile, query_intent, qa, key="context_kind")
-        or _pick_attr(query_intent, qa, key="base_route")
-        or _pick_attr(qa, key="head")
-        or "project"
-    ).strip().lower() or "project"
-    output_type = str(
-        _pick_attr(render_profile, query_intent, qa, key="name")
-        or _pick_attr(query_intent, qa, key="output_type")
-        or "summary"
-    ).strip().lower() or "summary"
-    prev_context_str = build_prev_context_canonical_text(
-        state.prev_context,
-        base_route=base_route,
-        output_type=output_type,
-        render_profile_name=output_type,
-        render_profile_kind=base_route,
-        max_chars=0,
-    )
-
-    system_prompt = (
-        "당신은 추가 검색 필요성을 판단하는 분석기입니다.\n"
-        "이 시스템에서 사용하는 용어는 모두 국내 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
-        "[이전 대화]와 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
-        "판단 기준:\n"
-        "1. requires_new_knowledge:\n"
-        "   - low: [참고 문서]만으로 충분히 답할 수 있음\n"
-        "   - medium: [참고 문서]로 일부 답은 가능하나 보강 검색이 필요함\n"
-        "   - high: [참고 문서]로 답변이 부족하거나 새로운 정보가 필요함\n\n"
-        "2. search_intent: 검색이 필요한 경우, 무엇을 찾아야 하는지 설명\n"
-        "3. retrieval_query:\n"
-        "   - search_intent 기반 벡터 검색에 적합한 질의형 쿼리\n"
-        "   - 짧고 명확한 자연어 구문 형태\n"
-        "   - 핵심 개념 5개 이내\n"
-        "   - 최대 120자 이내\n"
+    llm = build_llm(model_name="gemma_triton_0")
+    parser = PydanticOutputParser(pydantic_object=KnowledgeSufficiency)
+
+
+    render_profile = getattr(state, "render_profile", None) or {}
+
+    base_route = str(
+
+        _pick_attr(render_profile, query_intent, qa, key="context_kind")
+
+        or _pick_attr(query_intent, qa, key="base_route")
+
+        or _pick_attr(qa, key="head")
+
+        or "project"
+
+    ).strip().lower() or "project"
+
+    output_type = str(
+
+        _pick_attr(render_profile, query_intent, qa, key="name")
+
+        or _pick_attr(query_intent, qa, key="output_type")
+
+        or "summary"
+
+    ).strip().lower() or "summary"
+
+    prev_context_str = build_prev_context_canonical_text(
+
+        state.prev_context,
+
+        base_route=base_route,
+
+        output_type=output_type,
+
+        render_profile_name=output_type,
+
+        render_profile_kind=base_route,
+
+        max_chars=0,
+
+    )
+
+
+
+    system_prompt = (
+
+        "당신은 추가 검색 필요성을 판단하는 분석기입니다.\n"
+
+        "이 시스템에서 사용하는 용어는 모두 국내 연구개발(R&D) 행정 및 제도 맥락으로 해석합니다.\n"
+
+        "[이전 대화]와 [참고 문서]를 기반으로, [현재 질문]에 답하기 위해 새로운 검색이 필요한지 판단하세요.\n\n"
+
+        "판단 기준:\n"
+
+        "1. requires_new_knowledge:\n"
+
+        "   - low: [참고 문서]만으로 충분히 답할 수 있음\n"
+
+        "   - medium: [참고 문서]로 일부 답은 가능하나 보강 검색이 필요함\n"
+
+        "   - high: [참고 문서]로 답변이 부족하거나 새로운 정보가 필요함\n\n"
+
+        "2. search_intent: 검색이 필요한 경우, 무엇을 찾아야 하는지 설명\n"
+
+        "3. retrieval_query:\n"
+
+        "   - search_intent 기반 벡터 검색에 적합한 질의형 쿼리\n"
+
+        "   - 짧고 명확한 자연어 구문 형태\n"
+
+        "   - 핵심 개념 5개 이내\n"
+
+        "   - 최대 120자 이내\n"
+
         "4. confidence: 판단 신뢰도 (0.0~1.0)\n\n"
         "5. prefer_fresh_retrieval:\n"
         "   - true: 이전 문맥과 관련된 대상이라도, 현재 질문이 더 최신이거나 갱신된 상태를 다시 확인하려는 뜻이어서 기존 문맥/캐시만 재사용하면 오래된 답이 될 위험이 큼\n"
@@ -1019,19 +1365,32 @@ async def node_knowledge_sufficiency(
         "- [참고 문서]만으로 충분하고 다시 조회할 필요가 없을 때만 prefer_fresh_retrieval=false 로 두세요.\n\n"
         "{format_instructions}"
     )
-
-    prompt = chat_prompt_template_cls.from_messages(
-        [
-            ("system", system_prompt),
-            (
-                "human",
-                "[이전 대화]\n{history}\n\n[참고 문서]\n{prev_context}\n\n[현재 질문]\n{question}",
-            ),
-        ]
-    )
-
-    try:
-        chain = prompt | llm | sanitize_llm_json_fn | parser
+
+
+    prompt = ChatPromptTemplate.from_messages(
+
+        [
+
+            ("system", system_prompt),
+
+            (
+
+                "human",
+
+                "[이전 대화]\n{history}\n\n[참고 문서]\n{prev_context}\n\n[현재 질문]\n{question}",
+
+            ),
+
+        ]
+
+    )
+
+
+
+    try:
+
+        chain = prompt | llm | sanitize_llm_json | parser
+
         result = await chain.ainvoke(
             {
                 "format_instructions": parser.get_format_instructions(),
@@ -1041,7 +1400,7 @@ async def node_knowledge_sufficiency(
             }
         )
         if action in search_required_actions:
-            result = knowledge_sufficiency_cls(
+            result = KnowledgeSufficiency(
                 requires_new_knowledge="high",
                 search_intent=str(getattr(result, "search_intent", "") or f"query_intent action={action} requires retrieval"),
                 retrieval_query=str(getattr(result, "retrieval_query", "") or retrieval_query or state.messages[-1].content),
@@ -1063,7 +1422,7 @@ async def node_knowledge_sufficiency(
     except Exception as exc:
         logger.error("Knowledge Sufficiency Error: %s", exc)
         return {
-            "knowledge_sufficiency": knowledge_sufficiency_cls(
+            "knowledge_sufficiency": KnowledgeSufficiency(
                 requires_new_knowledge="high",
                 search_intent="knowledge fallback",
                 retrieval_query=state.messages[-1].content,
@@ -1071,29 +1430,31 @@ async def node_knowledge_sufficiency(
                 confidence=0.5,
             )
         }
-
-
-async def node_rag_search(
-    state: Any,
-    *,
-    resolve_rag_queries_fn: Any,
-    custom_rag_retriever_cls: Any,
-    tool_cls: Any,
-    max_top_k_size: int,
-    strategy_violation_cls: type[Exception],
-    logger: Any,
-    log_event: Any,
-) -> Dict[str, Any]:
-    """knowledge sufficiency 단계가 정한 query로 실제 RAG 검색을 수행한다.
-
-    retriever 결과에서 문서, canonical_evidence, render_profile만 꺼내 workflow state로 넘겨
-    후속 답변 생성이 raw payload에 직접 의존하지 않게 한다.
-    """
-    ks = state.knowledge_sufficiency
+
+
+
+
+@measure_latency("rag_search")
+async def node_rag_search(state: Any) -> Dict[str, Any]:
+
+    """knowledge sufficiency 단계가 정한 query로 실제 RAG 검색을 수행한다.
+
+
+
+    retriever 결과에서 문서, canonical_evidence, render_profile만 꺼내 workflow state로 넘겨
+
+    후속 답변 생성이 raw payload에 직접 의존하지 않게 한다.
+
+    """
+
+    ks = state.knowledge_sufficiency
+
     qa = state.question_analysis
     query_intent = _get_normalized_intent(state)
     view_state = getattr(state, "view_state", None)
+    turn_id = str(getattr(state, "turn_id", None) or getattr(state, "request_id", None) or "").strip()
     strategy_meta = dict(getattr(state.intent_payload, "strategy_meta", None) or {})
+    raw_payload_memory = sync_active_anchor_record(getattr(state, "raw_payload_memory", None) or {}, view_state)
     prefer_fresh_retrieval = bool(
         getattr(ks, "prefer_fresh_retrieval", False)
         and str(getattr(ks, "requires_new_knowledge", "") or "").strip().lower() != "low"
@@ -1112,14 +1473,14 @@ async def node_rag_search(
                         view_state = set_active_child_anchor_scope(
                             view_state,
                             anchor=restored_focus_entity,
-                            turn_id=getattr(state, "request_id", None),
+                            turn_id=turn_id,
                             reason="followup_anchor_restore",
                         )
                     else:
                         view_state = set_active_focus_scope(
                             view_state,
                             focus=restored_focus_entity,
-                            turn_id=getattr(state, "request_id", None),
+                            turn_id=turn_id,
                             scope_kind="detail",
                             reason="followup_anchor_restore",
                         )
@@ -1136,13 +1497,16 @@ async def node_rag_search(
                         org_code=getattr(get_active_subject_entity(view_state), "org_code", None),
                         biz_no=getattr(get_active_subject_entity(view_state), "biz_no", None),
                     )
-                    _log_scope_transition(log_event, state=state, view_state=view_state)
+                    _log_scope_transition(state=state, view_state=view_state)
             except Exception:
                 pass
         focus_entity = get_active_subject_entity(view_state)
-        ids_map_for_detail = getattr(query_intent, "ids_map", None) or {}
-        if isinstance(query_intent, dict):
-            ids_map_for_detail = query_intent.get("ids_map") or {}
+        ids_map_for_detail = getattr(query_intent, "ids_map", None) or {}
+
+        if isinstance(query_intent, dict):
+
+            ids_map_for_detail = query_intent.get("ids_map") or {}
+
         preferred_entity_kind = str(
             getattr(query_intent, "context_owner_lock", None)
             or getattr(query_intent, "base_route", None)
@@ -1174,23 +1538,65 @@ async def node_rag_search(
                 "clarification": clarification_payload,
                 "no_result_message": resolved_entity_ref.message,
                 "answer_artifact": _build_answer_artifact(
-                    text=resolved_entity_ref.message,
-                    answer_kind="clarification",
-                    answer_source="followup_clarification",
-                    clarification=resolved_entity_ref,
-                ),
-                "view_state": view_state,
-            }
+                    text=resolved_entity_ref.message,
+
+                    answer_kind="clarification",
+
+                    answer_source="followup_clarification",
+
+                    clarification=resolved_entity_ref,
+
+                ),
+
+                "view_state": view_state,
+                "raw_payload_memory": raw_payload_memory,
+
+            }
+
+        fact_followup = resolve_followup_from_facts(
+            question=str(getattr(state, "question", "") or state.messages[-1].content or ""),
+            view_state=view_state,
+            raw_payload_memory=raw_payload_memory,
+            base_route=str(_pick_attr(query_intent, qa, key="base_route", default="project") or "project"),
+        )
+        if fact_followup is not None and bool(
+            strategy_meta.get("explicit_followup")
+            or strategy_meta.get("anchor_source")
+            or str(strategy_meta.get("followup_resolution_status") or "").strip().lower() == "resolved"
+        ):
+            artifact = fact_followup["answer_artifact"]
+            log_event(
+                "FOLLOWUP.FACT_RESOLVED",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                turn_id=turn_id,
+                anchor_key=((fact_followup.get("raw_payload_record") or {}).get("anchor_key")),
+            )
+            return {
+                "view_state": view_state,
+                "raw_payload_memory": raw_payload_memory,
+                "answer_artifact": artifact,
+                "answer_context_text": "",
+                "debug_answer_context_text": "",
+                "anchor_hit": bool(fact_followup.get("anchor_hit")),
+                "followup_resolved_by_facts": bool(fact_followup.get("followup_resolved_by_facts")),
+            }
+
         detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
         if output_type == "detail" and not detail_anchor_active:
             if bool(
                 strategy_meta.get("explicit_followup")
                 or strategy_meta.get("anchor_source")
-                or str(strategy_meta.get("followup_resolution_status") or "").strip().lower() == "resolved"
-            ):
-                log_event(
-                    "RAG.DETAIL.ANCHOR.SEED_MISSING",
-                    request_id=state.request_id,
+                or str(strategy_meta.get("followup_resolution_status") or "").strip().lower() == "resolved"
+
+            ):
+
+                log_event(
+
+                    "RAG.DETAIL.ANCHOR.SEED_MISSING",
+
+                    request_id=state.request_id,
+
                     conversation_id=state.conversation_id,
                     reason="detail follow-up signal exists but ids_map has no active anchor seed",
                 )
@@ -1259,15 +1665,22 @@ async def node_rag_search(
                     "clarification": None,
                     "view_state": view_state,
                     "answer_artifact": None,
+                    "raw_payload_memory": raw_payload_memory,
+                    "anchor_hit": False,
+                    "followup_resolved_by_facts": False,
                 }
             log_event(
                 "DETAIL.CACHE.MISS",
                 request_id=state.request_id,
                 conversation_id=state.conversation_id,
-                entity_key=cache_key,
-                requested_fields=sorted(requested_fields),
-            )
-
+                entity_key=cache_key,
+
+                requested_fields=sorted(requested_fields),
+
+            )
+
+
+
         exact_detail_lookup = bool(
             output_type == "detail"
             and detail_anchor_active
@@ -1276,8 +1689,9 @@ async def node_rag_search(
             and resolved_entity_ref.seed_map
         )
         focus_seed_map: dict[str, list[str]] = dict(resolved_entity_ref.seed_map) if isinstance(resolved_entity_ref, ResolvedEntityRef) else {}
-
-        raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries_fn(
+
+
+        raw_query, planner_query, search_query, query_confidence, drift_detected, drift_reasons, fallback_applied = resolve_rag_queries(
             state=state,
             qa=qa,
             ks=ks,
@@ -1328,14 +1742,19 @@ async def node_rag_search(
         explicit_count = _extract_explicit_count(getattr(state, "question", ""))
         search_num = _resolve_runtime_top_k(
             qa,
-            max_top_k_size=max_top_k_size,
+            max_top_k_size=MAX_TOP_K_SIZE,
             exact_detail_lookup=exact_detail_lookup,
         )
-        planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
-        planner_display_limit = _coerce_positive_int(getattr(qa, "display_limit", None))
-        log_event(
-            "RAG.RETRIEVAL_QUERY.RESOLUTION",
-            request_id=state.request_id,
+        planner_limit = _coerce_positive_int(getattr(qa, "limit", None))
+
+        planner_display_limit = _coerce_positive_int(getattr(qa, "display_limit", None))
+
+        log_event(
+
+            "RAG.RETRIEVAL_QUERY.RESOLUTION",
+
+            request_id=state.request_id,
+
             conversation_id=state.conversation_id,
             raw_query=raw_query,
             planner_query=planner_query,
@@ -1352,11 +1771,16 @@ async def node_rag_search(
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
             anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
             anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
-        )
-        log_event(
-            "RAG.COUNT_PIPELINE",
-            request_id=state.request_id,
-            conversation_id=state.conversation_id,
+        )
+
+        log_event(
+
+            "RAG.COUNT_PIPELINE",
+
+            request_id=state.request_id,
+
+            conversation_id=state.conversation_id,
+
             explicit_count=explicit_count,
             planner_limit=planner_limit,
             planner_display_limit=planner_display_limit,
@@ -1374,28 +1798,45 @@ async def node_rag_search(
             anchor_entity_key=anchor_query_meta.get("anchor_entity_key"),
             anchor_query_repaired=anchor_query_meta.get("anchor_query_repaired"),
             anchor_repair_reason=anchor_query_meta.get("anchor_repair_reason"),
-        )
-
-        if exact_detail_lookup:
-            log_event(
-                "RAG.DETAIL.ANCHOR.EXACT_LOOKUP",
+        )
+
+
+
+        if exact_detail_lookup:
+
+            log_event(
+
+                "RAG.DETAIL.ANCHOR.EXACT_LOOKUP",
+
                 request_id=state.request_id,
                 conversation_id=state.conversation_id,
                 anchor_seed_map=focus_seed_map,
                 selected_search_query=resolved_retrieval_query,
             )
-        retriever = custom_rag_retriever_cls(
-            top_k=search_num,
-            model_name="gemma_triton_0",
-            intent_payload=state.intent_payload,
-            request_overrides=getattr(state, "request_overrides", None) or {},
-        )
-        rag_tool = tool_cls(
-            name="RAG_Search",
-            description="Search the NTIS/IRIS knowledge base.",
-            func=retriever.retrieve,
-        )
-
+        retriever = CustomRAGRetriever(
+
+            top_k=search_num,
+
+            model_name="gemma_triton_0",
+
+            intent_payload=state.intent_payload,
+
+            request_overrides=getattr(state, "request_overrides", None) or {},
+
+        )
+
+        rag_tool = Tool(
+
+            name="RAG_Search",
+
+            description="Search the NTIS/IRIS knowledge base.",
+
+            func=retriever.retrieve,
+
+        )
+
+
+
         retrieve_result = await asyncio.to_thread(rag_tool.func, resolved_retrieval_query)
         actual_retrieval_query = str((retrieve_result or {}).get("actual_retrieval_query") or resolved_retrieval_query or "")
         log_event(
@@ -1413,8 +1854,10 @@ async def node_rag_search(
                 resolved_retrieval_query=resolved_retrieval_query,
                 actual_retrieval_query=actual_retrieval_query,
             )
-        docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
-        canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
+        docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
+
+        canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
+
         render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
         no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
         clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
@@ -1436,39 +1879,65 @@ async def node_rag_search(
             debug_answer_context_text=debug_answer_context_text,
             context_source=("pipeline_context" if answer_context_text else "derived_canonical_evidence"),
         )
-
-        context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
-        list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
-        display_limit = _resolve_display_request(qa)
-        requested_count_source = "question_analysis.display_limit" if _coerce_positive_int(getattr(qa, "display_limit", None)) is not None else "question_analysis.limit"
-        if list_like_output and docs:
-            display_bundle = _normalize_display_payloads(
-                docs=docs,
-                canonical_evidence=canonical_evidence,
-                base_route=context_kind or "project",
-                output_type=output_type,
-                requested_count=display_limit,
-                explicit_count=explicit_count,
-                log_event=log_event,
-                request_id=state.request_id,
-                conversation_id=state.conversation_id,
-            )
-        else:
-            display_bundle = DisplayPayloadBundle(
-                snapshot_documents=docs,
-                snapshot_canonical_evidence=canonical_evidence,
-                docs_count=len(docs),
-                canonical_count=len(canonical_evidence),
-                docs_kind=_classify_docs_kind(docs),
-                canonical_kind="item_list",
-                display_source="docs",
-            )
+
+
+        context_kind = str((render_profile or {}).get("context_kind") or _pick_attr(query_intent, qa, key="base_route", default="project") or "project").strip().lower()
+
+        list_like_output = output_type in {"list", "relation", "comparison", "series", "stats"}
+
+        display_limit = _resolve_display_request(qa)
+
+        requested_count_source = "question_analysis.display_limit" if _coerce_positive_int(getattr(qa, "display_limit", None)) is not None else "question_analysis.limit"
+
+        if list_like_output and docs:
+
+            display_bundle = _normalize_display_payloads(
+
+                docs=docs,
+
+                canonical_evidence=canonical_evidence,
+
+                base_route=context_kind or "project",
+
+                output_type=output_type,
+
+                requested_count=display_limit,
+
+                explicit_count=explicit_count,
+
+
+                request_id=state.request_id,
+
+                conversation_id=state.conversation_id,
+
+            )
+
+        else:
+
+            display_bundle = DisplayPayloadBundle(
+
+                snapshot_documents=docs,
+
+                snapshot_canonical_evidence=canonical_evidence,
+
+                docs_count=len(docs),
+
+                canonical_count=len(canonical_evidence),
+
+                docs_kind=_classify_docs_kind(docs),
+
+                canonical_kind="item_list",
+
+                display_source="docs",
+
+            )
+
         if list_like_output and docs and view_state is not None:
             docs_count_before_snapshot = display_bundle.docs_count
             canonical_count_before_snapshot = display_bundle.canonical_count
             snapshot = build_display_snapshot(
                 conversation_id=state.conversation_id,
-                turn_id=state.request_id,
+                turn_id=turn_id,
                 context_kind=context_kind or "project",
                 requested_count=display_limit,
                 items=retrieval_bundle.items,
@@ -1480,14 +1949,14 @@ async def node_rag_search(
                 snapshot=snapshot,
                 output_type=output_type,
                 context_kind=context_kind or "project",
-                turn_id=getattr(state, "request_id", None),
+                turn_id=turn_id,
                 scope_kind=scope_kind,
                 reason="retrieval_list_result",
             )
             view_state = index_snapshot_subjects(
                 view_state,
                 snapshot=snapshot,
-                turn_id=getattr(state, "request_id", None),
+                turn_id=turn_id,
             )
             view_state.last_query_contract = {
                 "action": str(_pick_attr(query_intent, qa, key="action", default="") or ""),
@@ -1499,55 +1968,100 @@ async def node_rag_search(
                 "actual_retrieval_query": actual_retrieval_query,
                 "query_mismatch": bool(actual_retrieval_query != resolved_retrieval_query),
             }
-            view_state.refinement_history.append({
-                "turn_id": state.request_id,
-                "output_type": output_type,
-                "context_kind": context_kind or "project",
-                "view_id": snapshot.view_id,
-            })
-            if len(view_state.refinement_history) > 10:
-                view_state.refinement_history = view_state.refinement_history[-10:]
-            view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in display_bundle.snapshot_documents[: min(len(display_bundle.snapshot_documents), 20)] if isinstance(item, dict)]
-            docs = display_bundle.snapshot_documents[: snapshot.visible_count]
-            canonical_evidence = display_bundle.snapshot_canonical_evidence[: snapshot.visible_count]
-            log_event(
-                "DISPLAY.SNAPSHOT.BUILT",
-                request_id=state.request_id,
-                conversation_id=state.conversation_id,
-                view_id=snapshot.view_id,
-                requested_count=display_limit,
-                docs_count=docs_count_before_snapshot,
-                canonical_count=canonical_count_before_snapshot,
-                visible_count=snapshot.visible_count,
-                raw_count=snapshot.raw_count,
-                docs_kind=display_bundle.docs_kind,
-                canonical_kind=display_bundle.canonical_kind,
-                display_source=display_bundle.display_source,
-                requested_count_source=requested_count_source,
-            )
-            log_event(
-                "RAG.COUNT_PIPELINE.RESULT",
-                request_id=state.request_id,
-                conversation_id=state.conversation_id,
-                explicit_count=explicit_count,
-                planner_limit=planner_limit,
-                planner_display_limit=planner_display_limit,
-                runtime_top_k=search_num,
+            view_state.refinement_history.append({
+
+                "turn_id": turn_id,
+
+                "output_type": output_type,
+
+                "context_kind": context_kind or "project",
+
+                "view_id": snapshot.view_id,
+
+            })
+
+            if len(view_state.refinement_history) > 10:
+
+                view_state.refinement_history = view_state.refinement_history[-10:]
+
+            view_state.raw_candidates_cache[snapshot.view_id] = [dict(item) for item in display_bundle.snapshot_documents[: min(len(display_bundle.snapshot_documents), 20)] if isinstance(item, dict)]
+
+            docs = display_bundle.snapshot_documents[: snapshot.visible_count]
+
+            canonical_evidence = display_bundle.snapshot_canonical_evidence[: snapshot.visible_count]
+
+            log_event(
+
+                "DISPLAY.SNAPSHOT.BUILT",
+
+                request_id=state.request_id,
+
+                conversation_id=state.conversation_id,
+
+                view_id=snapshot.view_id,
+
+                requested_count=display_limit,
+
+                docs_count=docs_count_before_snapshot,
+
+                canonical_count=canonical_count_before_snapshot,
+
+                visible_count=snapshot.visible_count,
+
+                raw_count=snapshot.raw_count,
+
+                docs_kind=display_bundle.docs_kind,
+
+                canonical_kind=display_bundle.canonical_kind,
+
+                display_source=display_bundle.display_source,
+
+                requested_count_source=requested_count_source,
+
+            )
+
+            log_event(
+
+                "RAG.COUNT_PIPELINE.RESULT",
+
+                request_id=state.request_id,
+
+                conversation_id=state.conversation_id,
+
+                explicit_count=explicit_count,
+
+                planner_limit=planner_limit,
+
+                planner_display_limit=planner_display_limit,
+
+                runtime_top_k=search_num,
+
                 raw_query=raw_query,
                 planner_query=planner_query,
                 selected_search_query=resolved_retrieval_query,
                 drift_detected=drift_detected,
-                fallback_applied=fallback_applied,
-                requested_count=display_limit,
-                docs_count=docs_count_before_snapshot,
-                canonical_count=canonical_count_before_snapshot,
-                visible_count=snapshot.visible_count,
-                raw_count=snapshot.raw_count,
-                docs_kind=display_bundle.docs_kind,
-                canonical_kind=display_bundle.canonical_kind,
-                display_source=display_bundle.display_source,
-                requested_count_source=requested_count_source,
-            )
+                fallback_applied=fallback_applied,
+
+                requested_count=display_limit,
+
+                docs_count=docs_count_before_snapshot,
+
+                canonical_count=canonical_count_before_snapshot,
+
+                visible_count=snapshot.visible_count,
+
+                raw_count=snapshot.raw_count,
+
+                docs_kind=display_bundle.docs_kind,
+
+                canonical_kind=display_bundle.canonical_kind,
+
+                display_source=display_bundle.display_source,
+
+                requested_count_source=requested_count_source,
+
+            )
+
             log_event(
                 "DISPLAY.SNAPSHOT.SAVED",
                 request_id=state.request_id,
@@ -1562,7 +2076,7 @@ async def node_rag_search(
                 view_state = set_active_child_anchor_scope(
                     view_state,
                     anchor=promoted_child_anchor,
-                    turn_id=getattr(state, "request_id", None),
+                    turn_id=turn_id,
                     reason="result_list_unique_subject",
                 )
                 log_event(
@@ -1584,8 +2098,9 @@ async def node_rag_search(
                     candidate_count=promotion_meta.get("candidate_count"),
                     identity_key=promotion_meta.get("identity_key"),
                 )
-            _log_scope_transition(log_event, state=state, view_state=view_state)
-
+            _log_scope_transition(state=state, view_state=view_state)
+
+
         answer_artifact = None
         if output_type == "detail" and docs and view_state is not None:
             focus_entity = focus_entity_from_detail(
@@ -1598,7 +2113,7 @@ async def node_rag_search(
                 view_state = set_active_focus_scope(
                     view_state,
                     focus=focus_entity,
-                    turn_id=getattr(state, "request_id", None),
+                    turn_id=turn_id,
                     scope_kind="detail",
                     reason="detail_lookup",
                     preserve_child_anchor=True,
@@ -1606,38 +2121,49 @@ async def node_rag_search(
                 view_state = index_focus_subjects(
                     view_state,
                     focus=focus_entity,
-                    turn_id=getattr(state, "request_id", None),
+                    turn_id=turn_id,
                 )
                 log_event(
                     "FOCUS.ENTITY.SET",
                     request_id=state.request_id,
                     conversation_id=state.conversation_id,
                     source=getattr(focus_entity, "source", None),
-                    pjt_id=getattr(focus_entity, "pjt_id", None),
-                    pjt_no=getattr(focus_entity, "pjt_no", None),
-                    rst_id=getattr(focus_entity, "rst_id", None),
-                    person_no=getattr(focus_entity, "person_no", None),
-                    org_id=getattr(focus_entity, "org_id", None),
-                    org_code=getattr(focus_entity, "org_code", None),
-                    biz_no=getattr(focus_entity, "biz_no", None),
-                )
+                    pjt_id=getattr(focus_entity, "pjt_id", None),
+
+                    pjt_no=getattr(focus_entity, "pjt_no", None),
+
+                    rst_id=getattr(focus_entity, "rst_id", None),
+
+                    person_no=getattr(focus_entity, "person_no", None),
+
+                    org_id=getattr(focus_entity, "org_id", None),
+
+                    org_code=getattr(focus_entity, "org_code", None),
+
+                    biz_no=getattr(focus_entity, "biz_no", None),
+
+                )
+
                 coverage_input = _build_detail_coverage_input(
                     docs[0],
                     canonical_evidence[0] if canonical_evidence else None,
                     anchor_title=getattr(focus_entity, "title_text", None),
                 )
-                coverage = compute_detail_coverage(coverage_input, anchor=focus_entity)
-                cache_key = make_entity_cache_key(focus_entity)
-                requested_fields = extract_requested_fields(state.messages[-1].content)
+                coverage = compute_detail_coverage(coverage_input, anchor=focus_entity)
+
+                cache_key = make_entity_cache_key(focus_entity)
+
+                requested_fields = extract_requested_fields(state.messages[-1].content)
+
                 view_state.detail_cache[cache_key] = DetailCacheEntry(
                     entity_key=cache_key,
                     anchor=focus_entity,
                     coverage=coverage,
                     hydrated_fields=sorted(set(coverage.available_fields)),
-                    source_turn_id=state.request_id,
+                    source_turn_id=turn_id,
                     schema_version=DETAIL_CACHE_SCHEMA_VERSION,
                 )
-                _log_scope_transition(log_event, state=state, view_state=view_state)
+                _log_scope_transition(state=state, view_state=view_state)
                 detail_prompt_context = build_detail_prompt_context(
                     coverage,
                     requested_fields=requested_fields,
@@ -1662,15 +2188,29 @@ async def node_rag_search(
                 log_event(
                     "DETAIL.COVERAGE",
                     request_id=state.request_id,
-                    conversation_id=state.conversation_id,
-                    entity_found=int(coverage.entity_found),
+                    conversation_id=state.conversation_id,
+
+                    entity_found=int(coverage.entity_found),
+
                     detail_level=coverage.detail_level,
                     available_fields=coverage.available_fields,
                     missing_fields=coverage.missing_fields,
                 )
 
+        if docs:
+            raw_payload_memory = upsert_raw_payload_records(
+                raw_payload_memory,
+                conversation_id=state.conversation_id,
+                turn_id=turn_id,
+                entity_type=context_kind or "project",
+                payloads=[dict(item) for item in docs[:4] if isinstance(item, dict)],
+                activate_first=bool(output_type == "detail"),
+            )
+            raw_payload_memory = sync_active_anchor_record(raw_payload_memory, view_state)
+
         log_event(
-            "RAG.RESULT",
+            "RAG.RESULT",
+
             request_id=state.request_id,
             conversation_id=state.conversation_id,
             stage="rag_search",
@@ -1678,7 +2218,8 @@ async def node_rag_search(
             query_len=len(str(resolved_retrieval_query or "")),
             canonical_evidence_found=len(canonical_evidence),
         )
-
+
+
         return {
             "context": docs,
             "canonical_evidence": canonical_evidence,
@@ -1691,21 +2232,42 @@ async def node_rag_search(
             "no_result_message": no_result_message,
             "clarification": clarification,
             "view_state": view_state,
-            "answer_artifact": answer_artifact,
-        }
-    except strategy_violation_cls:
-        raise
-    except Exception as exc:
-        logger.error("RAG Error: %s", exc)
-        log_event(
-            "RAG.ERROR",
-            request_id=state.request_id,
-            conversation_id=state.conversation_id,
-            stage="rag_search",
-            error_type=type(exc).__name__,
-            reason=str(exc),
-        )
-        raise
-
-
-
+            "answer_artifact": answer_artifact,
+            "raw_payload_memory": raw_payload_memory,
+            "anchor_hit": False,
+            "followup_resolved_by_facts": False,
+
+        }
+
+    except StrategyViolation:
+
+        raise
+
+    except Exception as exc:
+
+        logger.error("RAG Error: %s", exc)
+
+        log_event(
+
+            "RAG.ERROR",
+
+            request_id=state.request_id,
+
+            conversation_id=state.conversation_id,
+
+            stage="rag_search",
+
+            error_type=type(exc).__name__,
+
+            reason=str(exc),
+
+        )
+
+        raise
+
+
+
+
+
+
+

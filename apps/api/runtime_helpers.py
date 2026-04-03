@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import hashlib
+import hashlib
+import json
 import logging
 import logging.handlers
 import os
 import re
-import time
+import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from apps.planner.query_intent import SUPERLATIVE_CUES
+from apps.api.contracts.workflow_models import measure_latency as measure_latency_impl
+from apps.planner.query_intent import SUPERLATIVE_CUES
+from apps.retrieval.rag_runtime_observability import get_code_fingerprint_fields
 
 _CONTRACT_REASON_PATTERN = re.compile(
     r"reason=(?P<contract_fail_reason>[a-z_]+),\s*"
@@ -57,7 +61,22 @@ def setup_file_logging(*, logger_name: str, log_path: str = "logs/app.log") -> l
     return app_logger
 
 
-def has_superlative_cue(text: str) -> bool:
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+logger = setup_file_logging(logger_name="Chatbot_Server")
+measure_latency = partial(measure_latency_impl, logger_obj=logger)
+_SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "4096"))
+_FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "4096"))
+_APP_MAIN_FILE_PATH = Path(__file__).resolve().parent / "app_factory.py"
+_CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
+    "app_main_sha256": sha256_file(_APP_MAIN_FILE_PATH),
+    **get_code_fingerprint_fields(),
+}
+
+
+def has_superlative_cue(text: str) -> bool:
     """질의에 최고·최다·최신 같은 superlative cue가 있는지 검사한다.
     후속 모드 선택이나 max token hint가 짧은 답변 위주로 가야 하는지 판단할 때 쓴다.
     """
@@ -65,7 +84,7 @@ def has_superlative_cue(text: str) -> bool:
     return any(cue in query for cue in SUPERLATIVE_CUES)
 
 
-def select_max_tokens_hint(
+def select_max_tokens_hint(
     qa: Any,
     *,
     short_answer_max_tokens_hint: int,
@@ -95,11 +114,22 @@ def truncate_text(value: Optional[str], limit: int) -> str:
     return text
 
 
-def is_debug_logging_enabled() -> bool:
+def is_debug_logging_enabled() -> bool:
     """`RAG_DEBUG` 환경변수로 디버그 로깅 상태를 판정한다.
     여러 truthy 표현을 허용해 운영 환경과 로컬 환경의 설정 차이를 흡수한다.
     """
-    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def log_section(title: str, content: str) -> None:
+    """Emit colored section logs only when debug logging is enabled."""
+
+    if not is_debug_logging_enabled():
+        return
+
+    header = f"\n\033[96m{'=' * 10} [{title}] {'=' * 10}\033[0m"
+    footer = f"\033[96m{'=' * 30}\033[0m\n"
+    logger.info("%s\n%s\n%s", header, content, footer)
 
 
 def mask_query_for_log(query: str, *, max_len: int = 80) -> str:
@@ -203,6 +233,23 @@ def has_payload_index(client: Any, collection_name: str, field_name: str) -> boo
     if not isinstance(payload_schema, dict):
         return False
     return field_name in payload_schema
+
+
+def log_event(name: str, **fields: Any) -> None:
+    """Log an operations event with shared fingerprint and policy metadata."""
+
+    payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
+    if fields.get("policy_mode") is None:
+        payload["policy_mode"] = (
+            "strict"
+            if str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in {"1", "true", "yes", "y"}
+            else "compat"
+        )
+    for key, value in fields.items():
+        if value is None:
+            continue
+        payload[key] = value
+    logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:

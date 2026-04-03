@@ -270,8 +270,25 @@ def must_contain_terms(point: Any, terms: List[str], *, runtime: RerankSupportRu
     return True
 
 
-def build_final_rerank_fn(*, runtime: RerankSupportRuntime) -> Callable[..., List[Any]]:
-    """runtime 의존성을 고정한 final rerank 함수를 생성합니다."""
+def build_final_rerank(
+    *,
+    payload_get: Callable[..., Any],
+    get_meta: Callable[[dict], dict],
+    payload_title: Callable[[Dict[str, Any], Dict[str, Any]], str],
+    clip_text: Callable[[object, int], str],
+    log_kv: Callable[..., None],
+    log_section: Callable[..., None],
+) -> Callable[..., List[Any]]:
+    """final rerank가 필요한 collaborator를 직접 묶어 실행 함수를 생성합니다."""
+
+    runtime = RerankSupportRuntime(
+        payload_get_fn=payload_get,
+        get_meta_fn=get_meta,
+        payload_title_fn=payload_title,
+        clip_text_fn=clip_text,
+        log_kv_fn=log_kv,
+        log_section_fn=log_section,
+    )
 
     def _final_rerank(cands: List[Any], *, it: Any, kws: List[str], lex_w: Dict[str, float], base_route: str, mode: str, keep: int, tag_boost: float = 0.0, tag_mismatch_penalty: float = 0.0, title_soft_terms: List[str] | None = None, title_soft_boost: float = 0.0) -> List[Any]:
         """고정된 runtime 의존성으로 final rerank를 실행합니다."""

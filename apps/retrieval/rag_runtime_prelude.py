@@ -7,9 +7,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from apps.platform.pipeline_steps import NormalizedIntent
 from apps.conversation.anchor_resolution import build_anchor_execution_inputs
 from apps.platform.schemas import ExecutionContext, StrategySpec, summarize_anchor_set
-from apps.platform.settings import get_ctx_token_budget, get_model_max_output_tokens
-from apps.planner.query_intent import get_relation_route, normalize_categories, normalize_org_terms, pick_perf_tag_filters
-from apps.planner.planner_locking import resolve_planner_locked_plan
+from apps.platform.settings import get_ctx_token_budget, get_model_max_output_tokens, logger
+from apps.planner.query_intent import get_relation_route, normalize_categories, normalize_org_terms, pick_perf_tag_filters
+from apps.planner.planner_locking import resolve_planner_locked_plan
 from apps.retrieval.rag_strategy_guard import (
     derive_planner_locks,
     normalize_strategy_target_cols,
@@ -19,8 +19,10 @@ from apps.retrieval.rag_strategy_guard import (
 )
 from apps.retrieval.rag_compile_runtime import assemble_runtime_compile_policy
 from apps.retrieval.rag_search_policy import build_rerank_spec as _build_rerank_spec, build_search_preset as _build_search_preset, build_topk_spec as _build_topk_spec, resolve_sparse_vector_name as _resolve_sparse_vector_name
-from apps.planner.planner_contract import validate_planner_contract, StrategyViolation
-from apps.retrieval.rag_join_runtime import normalize_relation_hint as _normalize_relation_hint
+from apps.planner.planner_contract import validate_planner_contract, StrategyViolation
+from apps.retrieval.rag_join_runtime import normalize_relation_hint as _normalize_relation_hint
+from apps.retrieval.rag_rerank_support import _flatten_ids_from_intent
+from apps.retrieval.rag_runtime_observability import log_kv, log_section, timing_put
 from apps.retrieval.filters import (
     TITLE_MATCH_MODE_EXACT,
     TITLE_MATCH_MODE_TEXT,
@@ -162,7 +164,31 @@ def build_runtime_prelude_result(**kwargs: Any) -> RuntimePreludeResult:
     테스트나 보조 조립 코드가 dataclass 생성 규칙을 그대로 따르면서도
     호출부 표현을 간단하게 유지할 수 있도록 둔 얇은 팩토리다.
     """
-    return RuntimePreludeResult(**kwargs)
+    return RuntimePreludeResult(**kwargs)
+
+
+def run_runtime_prelude(
+    *,
+    request: RuntimePreludeRequest,
+    timings: Dict[str, Any],
+    diff_filter_spec: Callable[..., Dict[str, Any]],
+    has_relation_join_ids: Callable[[NormalizedIntent], bool],
+) -> RuntimePreludeResult:
+    """Build runtime prelude with module-owned collaborators instead of caller-side DI baskets."""
+
+    return build_runtime_prelude(
+        request=request,
+        runtime=RuntimePreludeRuntime(
+            logger=logger,
+            log_kv_fn=log_kv,
+            log_section_fn=log_section,
+            timing_put_fn=timing_put,
+            diff_filter_spec_fn=diff_filter_spec,
+            flatten_ids_from_intent_fn=_flatten_ids_from_intent,
+            has_relation_join_ids_fn=has_relation_join_ids,
+        ),
+        timings=timings,
+    )
 
 
 def _normalize_hint_terms(values: Any) -> List[str]:
