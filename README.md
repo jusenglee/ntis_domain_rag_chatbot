@@ -52,10 +52,10 @@ uvicorn apps.api.main:app --host 0.0.0.0 --port 8011 --reload
 ## 문서 안내
 
 세부 동작 방식 및 관련 설정은 `docs/` 디렉토리 하위 문서에 작성되어 있습니다.
-- [서비스 동작 원리 (SERVICE_FLOW.md)](docs/SERVICE_FLOW.md) : 검색 전처리 로직 및 추천 시스템 흐름
-- [운영 관리 (RUNBOOK.md)](docs/RUNBOOK.md) : 데이터 반입 및 시스템 무결성 점검 시나리오
-- [환경 변수 (ENVIRONMENT.md)](docs/ENVIRONMENT.md) : 프로젝트 실행 모드 및 부가 설정 항목
-- [데이터 명세 (CONTRACT.md)](docs/CONTRACT.md) : 기준 모델 스키마 및 입출력 API 구조
+- [서비스 동작 원리 (SERVICE_FLOW.md)](apps/docs/SERVICE_FLOW.md) : 검색 전처리 로직 및 추천 시스템 흐름
+- [운영 관리 (RUNBOOK.md)](apps/docs/RUNBOOK.md) : 데이터 반입 및 시스템 무결성 점검 시나리오
+- [환경 변수 (ENVIRONMENT.md)](apps/docs/ENVIRONMENT.md) : 프로젝트 실행 모드 및 부가 설정 항목
+- [데이터 명세 (CONTRACT.md)](apps/docs/CONTRACT.md) : 기준 모델 스키마 및 입출력 API 구조
 
 ## 기술 스택
 
