@@ -63,6 +63,7 @@ from apps.retrieval.rag_executor_support import count_missing_join_keys, get_met
 from apps.retrieval.rag_rerank_support import build_final_rerank
 from apps.retrieval.rag_runtime_observability import clean_one_line, clip_text, init_timings, log_kv, log_section, log_top_points as runtime_log_top_points, merge_log_fields, point_summary as runtime_point_summary, record_col_timings, resolve_env_topn, timing_put
 from apps.retrieval.rag_dispatch_runtime import build_join_runtime, resolve_perf_followup_join_ids_for_request
+from apps.retrieval.rag_hydration_runtime import hydrate_points_payload
 from apps.retrieval.rag_runtime_safety import (
     build_multi_hop_bundle_payload as _build_multi_hop_bundle_payload,
     build_pattern_analysis_payload as _build_pattern_analysis_payload,
@@ -80,7 +81,7 @@ from apps.retrieval.rag_join_orchestration import (
 from apps.evidence.context_build_policy import (
     build_context_with_output_type,
     normalize_output_type,
-    resolve_output_fieldset, _pick_first,
+    resolve_output_fieldset,
 )
 
 # -------------------------
@@ -138,6 +139,17 @@ def _validate_intent_payload_version(intent_payload: Any) -> None:
     version = _extract_intent_payload_version(intent_payload)
     if version != "v3":
         raise ValueError(f"intent_payload_version must be 'v3', got {version!r}")
+
+
+def _pick_first(*values: Any) -> str:
+    """Return the first non-empty value as a trimmed string."""
+    for value in values:
+        if value is None:
+            continue
+        text = value.strip() if isinstance(value, str) else str(value).strip()
+        if text:
+            return text
+    return ""
 
 
 from apps.retrieval.rag_rank_runtime import (

@@ -53,7 +53,7 @@ def _resolve_fastembed_cache_dir() -> Optional[str]:
     raw = str(os.getenv("RAG_FASTEMBED_CACHE_DIR", "")).strip()
     cache_dir = raw or "../../Models/hub/"
     try:
-        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs("../../Models/hub/", exist_ok=True)
         return cache_dir
     except Exception as e:
         logger.warning("[retrieval] fastembed cache dir unavailable (%s): %s", cache_dir, e)

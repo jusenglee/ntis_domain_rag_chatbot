@@ -1,5 +1,133 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-09T01:00:00+09:00 Improver
+- branch/head: expected branch `고도화` / not re-verified this session
+- inspected files:
+  - `apps/conversation/followup_anchor.py`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - `_resolve_named_child_anchor_from_focus`와 `_resolve_named_subject_from_index` 모두 `display_name in text` / `alias in text` 단순 포함 비교를 사용하고 있었다.
+  - 1자 이름("이", "김" 등 성씨자만의 미가 등록되는 경우)이 subject_index에 있으면 "이 연구자의 과제는?"같은 지시사를 포함한 질문에서 false positive 연결이 발생할 수 있는 구조적 리스크.
+  - 또한 "홍김철수박사"만은되는 연속 문자열 안에 "김철수"가 포함될 때, 더 긴 단어의 일부인데도 매칭이 일어나는 문제.
+- changes:
+  - `apps/conversation/followup_anchor.py`에 `_is_hangul_syllable(ch)` 헬퍼 추가.
+  - `_is_name_match_in_text(name, text)` 헬퍼 추가:
+    - `len(name) < 2` 조건으로 1자 이하 이름을 항상 False 반환.
+    - 매칭 직전 문자가 한글 음절이면 더 긴 단어의 일부로 판단하여 False 반환 (loop 진행).
+  - `_resolve_named_child_anchor_from_focus`의 `display_name not in text` → `not _is_name_match_in_text(display_name, text)`로 교체.
+  - `_resolve_named_subject_from_index`의 `str(alias).strip() in text` → `_is_name_match_in_text(str(alias or "").strip(), text)`로 교체.
+- validations:
+  - `python -m py_compile apps/conversation/followup_anchor.py` passed
+  - unit smoke (`_is_hangul_syllable`, `_is_name_match_in_text`):
+    - 1자 이름 → False 확인
+    - 2자가 이상 정상 이름 → True 확인
+    - 더 긴 단어에 포함된 이름 → False 확인
+  - end-to-end smoke (scope_resolver + subject_index):
+    - 1자 성씨 subject_index 엔트리 있어도 child_entity_followup로 해석 안 됨 확인
+    - 2자가 이상 이름 정상 child_entity_followup + person_no 표함 확인
+    - 연속 한글 안에 포함된 이름 매칬 안 됨 확인
+- docs:
+  - `apps/docs/SESSION_HANDOFF.md` 갱신
+- remains risky:
+  - `scope_resolver.py`의 `_inspect_named_child_reference`도 동일한 `display_name not in text` 포함 비교를 사용 중. 클러스 child_refs 이름은 직접 사용자 입력 이름보다 유지 빈도 낙아 당장 리스크는 낙지만, 테스트후 동일 헬퍼로 통일 권장.
+  - 2자는 pass되지만 여전히 일부 한국어 조사("은", "를" 등)와 같은 길이의 2자 일반 명사가 false positive를 낼 수 있음. 추후 부지로 조사 필터 리스트 추가 검토.
+- next best task:
+  - `scope_resolver.py`의 `_inspect_named_child_reference`에도 `_is_name_match_in_text`를 적용하여 헬퍼를 통일하고 false positive 위험을 제거.
+  - `scope_resolver.py` + `followup_anchor.py` 대상 import-light 회귀 레인 추가.
+
+## 2026-04-09T00:00:00+09:00 Improver
+- branch/head: expected branch `고도화` / not re-verified this session
+- inspected files:
+  - `apps/conversation/scope_resolver.py`
+  - `apps/conversation/followup_anchor.py`
+  - `apps/conversation/followup_resolution.py`
+  - `apps/conversation/fact_followup_resolver.py`
+  - `apps/conversation/request_facade.py`
+  - `apps/conversation/view_state.py` (subject_index 필드 확인)
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - `ConversationViewState.subject_index`는 `index_focus_subjects` / `index_snapshot_subjects`를 통해 이전 턴에 노드된 주체를 이름으로 재참조할 수 있도록 설계된 핵심 인덱스다.
+  - `scope_resolver.py`의 `resolve_scope_decision()`이 `resolve_followup_anchor()`를 호출할 때 `subject_index` 파라미터를 전달하지 않아 `_resolve_named_subject_from_index` 경로가 전체 dead code 상태였다.
+  - 결과: 사용자가 이전 턴에 등장한 연구자/기관을 이름으로 다시 질문해도 subject_index 경유 해석이 전혀 작동하지 않았다.
+- changes:
+  - `apps/conversation/scope_resolver.py`에 `_get_subject_index(view_state)` 헬퍼를 추가했다.
+  - `resolve_scope_decision()`에서 `subject_index = _get_subject_index(view_state)`를 추출하여 `resolve_followup_anchor(subject_index=subject_index)`로 전달하도록 바렌다.
+  - anchor 반환 후 `source == "ambiguity_subject_index"` 케이스를 `clarification_type="subject_index_ambiguity"` clarification으로 처리하여 잘못된 anchor가 downstream으로 흐르지 않도록 막는다.
+- validations:
+  - `python -m py_compile apps/conversation/scope_resolver.py` passed
+  - import smoke `import apps.conversation.scope_resolver` passed
+  - functional smoke:
+    - empty subject_index 에서 `_get_subject_index` 빈 dict 반환 확인
+    - subject_index에 단일 연구자 이름 매칬 때 `child_entity_followup` + anchor `person_no` 포함 확인
+    - 동일 이름 두 후보 시 `ambiguous_followup` + `clarification_type="subject_index_ambiguity"` 확인
+- docs:
+  - `apps/docs/SESSION_HANDOFF.md` 갱신
+- remains risky:
+  - `resolution_state="provisional"` 주체를 반환할 때 ids_map이 비어 있으면 downstream 제약 컴파일러가 name-based lookup으로 흐르는 점은 의도된 동작이지만 모니터링 필요.
+  - `display_name in text` 포함 비교는 짧은 이름(2자 등) false positive 가능성.
+  - import-light regression lane 여전히 미존재.
+- next best task:
+  - subject_index 매칭 구체성 강화: `display_name in text` 대신 word-boundary 또는 연속행 매칬으로 교체하여 짧은 이름 false positive 제거.
+  - `scope_resolver.py` / `followup_anchor.py` 대상 import-light 회귀 레인 추가.
+
+## 2026-04-03T14:33:35.0698334+09:00 Improver
+- branch/head: expected branch verified / `2b721069fb7fbd460e606c9fc2d1740bc11466e0`
+- inspected files:
+  - `apps/retrieval/rag_pipeline.py`
+  - `apps/retrieval/rag_dense_runtime_support.py`
+  - `apps/retrieval/rag_join_runtime.py`
+  - `apps/retrieval/rag_retriever.py`
+  - `apps/docs/README.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - repo-wide static review after the earlier follow-up hydration typo fix found two more runtime name-resolution defects of the same class.
+  - `apps/retrieval/rag_pipeline.py` imported `_pick_first` from `apps.evidence.context_build_policy`, but that symbol does not exist there; because `apps.retrieval.rag_retriever` lazy-loads `rag_pipeline`, this could break retrieval import/runtime before any query execution.
+  - `apps/retrieval/rag_dense_runtime_support.py` closed over `log_kv` but emitted dense score stats through `log_kv_fn`, which is undefined and would raise `NameError` when dense threshold stats are logged.
+- changes:
+  - removed the nonexistent `_pick_first` import from `apps.evidence.context_build_policy` and restored a local `_pick_first(*values)` helper in `apps/retrieval/rag_pipeline.py` that returns the first non-empty candidate as a trimmed string for join-key hydration.
+  - replaced the stray `log_kv_fn(...)` call with `log_kv(...)` in `apps/retrieval/rag_dense_runtime_support.py` so dense threshold score stats use the same logger binding as the rest of the closure.
+- validations:
+  - `python -m py_compile apps/retrieval/rag_pipeline.py apps/retrieval/rag_dense_runtime_support.py apps/retrieval/rag_hydration_runtime.py apps/retrieval/rag_dispatch_runtime.py` passed
+  - `python -c "import apps.retrieval.rag_pipeline as m; print('rag-pipeline-import-ok')"` passed
+  - repo-local `from ... import ...` static scan over all tracked `apps/**/*.py` returned `TOTAL=0` unresolved imports
+  - unresolved bare call-name static scan over all tracked `apps/**/*.py` returned no remaining findings after the `log_kv_fn` fix
+- docs:
+  - no contract/runbook doc change was needed because behavior did not change; `apps/docs/SESSION_HANDOFF.md` records the code fix and the repo-wide review result.
+- remains risky:
+  - validation in this worktree is still smoke-first; no maintained pytest lane is available here for these retrieval paths.
+- next best task:
+  - add a small import-light regression lane that covers `rag_pipeline` import, follow-up perf hydration wiring, and dense threshold score logging so unresolved-name regressions fail earlier than runtime.
+
+## 2026-04-03T14:07:05.4636530+09:00 Improver
+- branch/head: expected branch verified / `2b721069fb7fbd460e606c9fc2d1740bc11466e0`
+- inspected files:
+  - `apps/retrieval/rag_pipeline.py`
+  - `apps/retrieval/rag_hydration_runtime.py`
+  - `apps/retrieval/rag_dispatch_runtime.py`
+  - `apps/docs/README.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - the non-`join` `project -> perf` follow-up path in `apps/retrieval/rag_pipeline.py` had a typoed hydration callback name, `hydrate_poi_pick_firstnts_payload`, which is not defined anywhere in the repo.
+  - the same file also lacked the explicit `hydrate_points_payload` import even though another join wiring path already depends on that helper name.
+  - current docs already describe the intended project/perf follow-up contract; this change only restores the existing runtime wiring and does not alter retrieval policy, observability, defaults, or validation posture.
+- changes:
+  - restored the `project -> perf` follow-up hydration callback in `apps/retrieval/rag_pipeline.py` to the real helper, `hydrate_points_payload`.
+  - added the missing `from apps.retrieval.rag_hydration_runtime import hydrate_points_payload` import so both follow-up and join hydration call sites resolve the same runtime helper.
+- validations:
+  - `python -m py_compile apps/retrieval/rag_pipeline.py apps/retrieval/rag_hydration_runtime.py apps/retrieval/rag_dispatch_runtime.py` passed
+  - `python -c "from apps.retrieval.rag_hydration_runtime import hydrate_points_payload; print('helper-import-ok')"` passed
+  - `python -c "from pathlib import Path; s=Path('apps/retrieval/rag_pipeline.py').read_text(encoding='utf-8'); assert 'from apps.retrieval.rag_hydration_runtime import hydrate_points_payload' in s; assert 'hydrate_poi_pick_firstnts_payload(' not in s; print('wiring-text-ok')"` passed
+  - `python -c "import apps.retrieval.rag_pipeline as m; print('import-ok')"` failed before runtime execution with `ImportError: cannot import name '_pick_first' from 'apps.evidence.context_build_policy'`; treated as an existing worktree blocker outside this patch
+- docs:
+  - no authoritative contract/runbook doc update was needed because behavior did not change; `apps/docs/SESSION_HANDOFF.md` was updated to record the bug fix and the no-doc-drift decision.
+- remains risky:
+  - this shell still does not have an active pytest lane configured in the current worktree, so validation for this fix is limited to static/import smoke unless a richer environment is used.
+  - full `apps.retrieval.rag_pipeline` import smoke is currently blocked by the unrelated `_pick_first` import error in `apps.evidence.context_build_policy`, so end-to-end module loading could not be re-verified here.
+- next best task:
+  - add or restore a minimal retrieval regression lane that exercises `project -> perf` follow-up hydration so this callback wiring cannot regress silently again.
+
 ## 2026-04-03T12:05:00+09:00 Improver
 - branch/head: expected branch verified / `5a398fafc6e500c5947c25dc5a6d8b11b4806a35`
 - inspected files:

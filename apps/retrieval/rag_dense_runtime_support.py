@@ -243,7 +243,7 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi: Callable[..., Di
                     frac = pos - lo
                     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
-                log_kv_fn("RAG.DENSE.SCORE.STATS", col=col, vec=str(vname), count=len(score_values), min=float(min_score), max=float(max_score), p50=float(_percentile(score_values, 50.0)), p90=float(_percentile(score_values, 90.0)), p99=float(_percentile(score_values, 99.0)), top3_avg=float(topn_avg), tier="debug")
+                log_kv("RAG.DENSE.SCORE.STATS", col=col, vec=str(vname), count=len(score_values), min=float(min_score), max=float(max_score), p50=float(_percentile(score_values, 50.0)), p90=float(_percentile(score_values, 90.0)), p99=float(_percentile(score_values, 99.0)), top3_avg=float(topn_avg), tier="debug")
 
     return DenseRuntimeSupport(
         precomputed_embedding_type=PrecomputedEmbedding,

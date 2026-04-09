@@ -115,6 +115,13 @@ def _active_anchor_entity(view_state: Optional[ConversationViewState]) -> Option
     return get_active_child_anchor(view_state)
 
 
+def _get_subject_index(view_state: Optional[ConversationViewState]) -> Any:
+    """view_state에서 subject_index를 추출한다. None이면 빈 dict를 반환한다."""
+    if view_state is None:
+        return {}
+    return getattr(view_state, "subject_index", {}) or {}
+
+
 def _extract_refinement_filters(normalized_intent: Any) -> Dict[str, Any]:
     filters: Dict[str, Any] = {}
     for field in _REFINEMENT_FIELDS:
@@ -278,6 +285,7 @@ def resolve_scope_decision(
     scope_focus_entity = _scope_focus_entity(view_state)
     latest_anchor_entity = _active_anchor_entity(view_state)
     has_active_scope_target = _has_active_scope_target(view_state)
+    subject_index = _get_subject_index(view_state)
 
     if _has_reset_cue(question):
         return ScopeDecision(followup_type="scope_reset", reset_requested=True)
@@ -291,8 +299,23 @@ def resolve_scope_decision(
         display_snapshot=latest_snapshot,
         focus_entity=latest_anchor_entity,
         scope_focus_entity=scope_focus_entity,
+        subject_index=subject_index,
     )
     if anchor is not None:
+        # subject_index í´ì ê²°ê³¼ê° ambiguousì¸ ê²½ì° clarificationì¼ë¡ ì²ë¦¬íë¤.
+        if str(getattr(anchor, "source", "") or "").strip() == "ambiguity_subject_index":
+            return ScopeDecision(
+                followup_type="ambiguous_followup",
+                needs_clarification=True,
+                clarification_payload=_build_clarification_payload(
+                    clarification_type="subject_index_ambiguity",
+                    reason="subject_index_ambiguity",
+                    message='ì\x9d´ì\xa0\x84 ë\x8c\x80í\x99\x94ì\x97\x90ì\x84\x9c ì\x96¸ê¸\x89ë\x90\x9c ë\x8c\x80ì\x83\x81ì\x9d´ ì\x97¬ë\x9f¿ì\x9e\x85ë\x8b\x88ë\x8b¤. ì\x96´ë\x96¤ ë\x8c\x80ì\x83\x81ì\x9d\x84 ê°\x80ë¦¬í\x82¤ë\x8a\x94ì§\x80 ë\x8b¤ì\x8b\x9c ì§\x80ì\xa0\x95í\x95´ ì£¼ì\x84¸ì\x9a\x94.',
+                    latest_snapshot=latest_snapshot,
+                    candidates=[],
+                    focus_entity=scope_focus_entity,
+                ),
+            )
         followup_type = "child_entity_followup" if is_child_anchor_source(getattr(anchor, "source", None)) else "reference_followup"
         return ScopeDecision(
             followup_type=followup_type,

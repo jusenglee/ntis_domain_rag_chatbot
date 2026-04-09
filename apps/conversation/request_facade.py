@@ -1408,9 +1408,9 @@ async def build_intent_payload(
         planner_failed=int(planner_failed),
 
         planner_stagewise_enabled=int(True),
-        planner_stage1_prompt_version=_PLANNER_STAGE1_PROMPT_VERSION,
-        planner_stage15_prompt_version=_PLANNER_STAGE15_PROMPT_VERSION,
-        planner_stage2_prompt_version=_PLANNER_STAGE2_PROMPT_VERSION,
+        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
+        planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
     )
     return (

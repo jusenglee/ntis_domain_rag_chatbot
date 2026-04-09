@@ -20,7 +20,6 @@ _OUTPUT_TYPE_FIELDSETS: Dict[str, Tuple[str, ...]] = {
     "series": ("title_text", "year", "relation", "meta_basic", "summary"),
 }
 
-
 def normalize_output_type(output_type: Optional[str]) -> Optional[str]:
     text = str(output_type or "").strip().lower()
     return text or None

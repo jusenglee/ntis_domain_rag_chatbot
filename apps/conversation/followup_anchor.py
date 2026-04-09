@@ -76,6 +76,28 @@ def _decode_token(token: str) -> str:
     return token.encode("utf-8").decode("unicode_escape")
 
 
+def _is_hangul_syllable(ch: str) -> bool:
+    """ch가 한글 음절 문자인지 확인한다."""
+    return ('\uac00' <= ch <= '\ud7a3') or ('\u1100' <= ch <= '\u11ff') or ('\u3130' <= ch <= '\u318f')
+
+
+def _is_name_match_in_text(name: str, text: str) -> bool:
+    """name이 text 안에서 독립 토큰으로 등장하는지 확인한다."""
+    if not name or len(name) < 2:
+        # 1자 이하 이름은 조사/지시사 등과 비교하여 false positive 위험이 높아 처리하지 않는다.
+        return False
+    pos = 0
+    while True:
+        idx = text.find(name, pos)
+        if idx < 0:
+            return False
+        if idx > 0 and _is_hangul_syllable(text[idx - 1]):
+            # 매칭 직전 문자가 한글 음절이면 더 긴 단어의 일부이므로 건너맰다.
+            pos = idx + 1
+            continue
+        return True
+
+
 def _resolve_ordinal_value(raw: str) -> Optional[int]:
     token = str(raw or "").strip()
     if not token:
@@ -256,7 +278,7 @@ def _resolve_named_child_anchor_from_focus(*, question: str, focus_entity: Optio
             continue
         display_name = str(getattr(ref, "display_name", "") or "").strip()
         ids_map = _normalize_ids_map(getattr(ref, "ids_map", {}) or {})
-        if not display_name or display_name not in text:
+        if not display_name or not _is_name_match_in_text(display_name, text):
             continue
         focus_anchor = _build_child_focus_anchor(kind=kind, ids_map=ids_map, ref=ref, focus=focus_entity)
         if focus_anchor is None:
@@ -355,7 +377,7 @@ def _resolve_named_subject_from_index(
     seen_subjects: set[str] = set()
     for entry in _iter_subject_index_entries(subject_index):
         aliases = [entry.display_name, *(entry.aliases or [])]
-        matched_alias = next((alias for alias in aliases if str(alias or "").strip() and str(alias).strip() in text), None)
+        matched_alias = next((alias for alias in aliases if _is_name_match_in_text(str(alias or "").strip(), text)), None)
         if not matched_alias:
             continue
         if (
