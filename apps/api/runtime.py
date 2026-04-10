@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+import inspect
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 import httpx
 from fastapi import FastAPI
 
-from apps.platform.storage import KVStore
+from apps.platform.storage import FileKVStore, KVStore
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,7 @@ class AppRuntimeConfig:
     """Startup contract passed from the composition root."""
 
     redis_url: str
+    file_kv_root: str
     planner_stagewise_enabled: bool
     planner_stage1_prompt_version: str
     planner_stage15_prompt_version: str
@@ -54,6 +57,54 @@ class RedisKVStore(KVStore):
 
     async def close(self) -> None:
         await self.client.close()
+
+
+async def _close_async_resource(resource: Any) -> None:
+    """Best-effort async close for resources that may expose close/aclose."""
+
+    if resource is None:
+        return
+    close_fn = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close_fn is None:
+        return
+    result = close_fn()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _initialize_kv_store_with_fallback(
+    *,
+    redis_url: str,
+    file_kv_root: str,
+    logger_obj: Any,
+    redis_from_url: Callable[..., Any],
+    file_store_factory: Callable[[str], KVStore] = FileKVStore,
+) -> Optional[KVStore]:
+    """Prefer Redis, but fall back to the file-backed KV store on startup failure."""
+
+    redis_client: Any = None
+    try:
+        redis_client = redis_from_url(redis_url, encoding="utf-8", decode_responses=True)
+        await redis_client.ping()
+        logger_obj.info("Redis connected: %s", redis_url)
+        return RedisKVStore(redis_client)
+    except Exception as exc:
+        try:
+            await _close_async_resource(redis_client)
+        except Exception:
+            logger_obj.warning("Redis cleanup after failed startup connect also failed", exc_info=True)
+        logger_obj.error("Redis connection failed: %s", exc, exc_info=True)
+
+    fallback_root = str(Path(file_kv_root or "local_kvstore").resolve())
+    try:
+        file_store = file_store_factory(fallback_root)
+        await file_store.ping()
+        logger_obj.warning("KV backend falling back to file store: %s", fallback_root)
+        logger_obj.info("File KV backend ready: %s", fallback_root)
+        return file_store
+    except Exception as fallback_exc:
+        logger_obj.error("File KV fallback failed: %s", fallback_exc, exc_info=True)
+        return None
 
 
 async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> None:
@@ -237,14 +288,12 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     else:
         logger.info("[startup][fastembed] skipped by config")
 
-    try:
-        client = redis.from_url(config.redis_url, encoding="utf-8", decode_responses=True)
-        await client.ping()
-        app.state.kv_store = RedisKVStore(client)
-        logger.info("Redis connected: %s", config.redis_url)
-    except Exception as exc:
-        app.state.kv_store = None
-        logger.error("Redis connection failed: %s", exc, exc_info=True)
+    app.state.kv_store = await _initialize_kv_store_with_fallback(
+        redis_url=config.redis_url,
+        file_kv_root=config.file_kv_root,
+        logger_obj=logger,
+        redis_from_url=redis.from_url,
+    )
 
     metrics_timeout = httpx.Timeout(config.metrics_timeout_seconds)
     app.state.metrics_http = httpx.AsyncClient(timeout=metrics_timeout)

@@ -25,7 +25,7 @@ SSE_RETRY_MS = int(os.getenv("SSE_RETRY_MS", "3000"))
 VLLM_QUERY = os.getenv("VLLM_QUERY", "vllm:num_requests_running")
 GPU_UTIL_QUERY = os.getenv(
     "GPU_UTIL_QUERY",
-    'avg(DCGM_FI_DEV_GPU_UTIL{job=~"$dcgm_job", gpu=~"0|2"})',
+    'avg(DCGM_FI_DEV_GPU_UTIL{job="dcgm-ntis3", gpu=~"0|2"})',
 )
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ async def fetch_dcgm_gpu_util_avg(client: httpx.AsyncClient) -> float | None:
 
     data = await _prometheus_instant_query(client, GPU_UTIL_QUERY)
     values = _extract_numeric_values(data.get("resultType", ""), data.get("result", []))
-    return round(sum(values) / len(values), 4) if values else None
+    return round(sum(values) / len(values), 4) if values else 0.0
 
 
 async def _safe_value(name: str, coro: Any) -> float | None:
@@ -134,7 +134,7 @@ async def collect_snapshot(client: httpx.AsyncClient) -> MetricSnapshot:
         _safe_value("requestCount", fetch_vllm_num_requests_running(client)),
         _safe_value("gpuUtilPercent", fetch_dcgm_gpu_util_avg(client)),
     )
-    return MetricSnapshot(request_count=request_count, gpu_util_percent=gpu_util)
+    return MetricSnapshot(request_count=request_count, gpu_util_percent=gpu_util if gpu_util is not None else 0.0)
 
 
 @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)

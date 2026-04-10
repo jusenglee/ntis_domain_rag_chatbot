@@ -1,5 +1,218 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-10T12:36:21.3481785+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/chat/answer_generation.py`
+  - `apps/chat/answer_merge.py`
+  - `apps/api/contracts/answer_state_consistency.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `README.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - 실제 로그에서 `selected_model="fallback"`가 반복 발생했는데, 대표 원인은 `selection_reason=both_models_state_inconsistent`였다.
+  - 그런데 최종 사용자에게는 state-consistency 차단과 무관한 empty-answer placeholder(`The generated answer was empty. Please try again.`)가 그대로 노출될 수 있었다.
+  - `degraded` 플래그도 fallback 모델 선택이 아니라 placeholder 문자열 일치 여부에 기대고 있어, 원인별 degraded 메시지로 바꾸면 같이 틀어질 여지가 있었다.
+- changes:
+  - `apps/chat/answer_generation.py`: selector용 internal fallback placeholder는 유지하되, `merge_answers()`에서 fallback이 실제 선택되면 원인별 사용자용 degraded message로 교체하도록 변경했다.
+  - `apps/chat/answer_generation.py`: `both_models_state_inconsistent`는 state-consistency 차단을 설명하는 메시지로, `unsupported_groundedness`는 groundedness 차단을 설명하는 메시지로 내려가게 했다.
+  - `apps/chat/answer_generation.py`: `degraded` 판정을 placeholder 문자열 비교가 아니라 `selected_model == "fallback"` 기준으로 바꾸고, fallback artifact meta에 `selection_reason`과 `degraded`를 남기도록 했다.
+  - `tests/test_answer_merge_state_diagnostics.py`: state-inconsistent fallback이 진단형 degraded final answer와 artifact meta를 남기는지 고정했다.
+  - `apps/docs/02_실행계약과_전략규칙.md`, `apps/docs/GOLDEN_TESTS.md`: fallback이 empty-answer notice가 아니라 reason-specific degraded message여야 한다는 현재 계약을 반영했다.
+- validations:
+  - `python -m py_compile apps/chat/answer_generation.py tests/test_answer_merge_state_diagnostics.py` passed
+  - `python -c "import apps.chat.answer_generation; print('answer-generation-import-ok')"` passed
+  - `python -m pytest tests/test_answer_merge_state_diagnostics.py -q -p no:cacheprovider` passed (`3 passed`)
+- docs:
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/GOLDEN_TESTS.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `README.md`, `apps/docs/03_운영과_환경.md` were reviewed but not changed because this patch does not alter log field names, triage order, or the active validation posture; it only changes the user-visible degraded fallback wording and artifact metadata.
+- remains risky:
+  - state-consistency gate 자체는 그대로라서, people/org broad-history 답변이 부분 목록이나 free-form 요약으로 나오면 여전히 fallback으로 강등될 수 있다.
+  - groundedness/state-consistency 원인별 degraded 메시지는 추가됐지만, selector를 자주 fallback으로 몰아넣는 prompt-format drift 자체는 아직 줄이지 못했다.
+- next best task:
+  - `activities/history` 계열 list answer가 visible count와 item identity를 더 안정적으로 맞추도록 answer prompt 또는 renderer를 좁게 조정하고, 실제 실패 transcript를 replay fixture로 고정한다.
+
+## 2026-04-10T00:35:00+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/api/contracts/answer_groundedness.py`
+  - `apps/chat/answer_merge.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - `answer_groundedness.py`의 structured-claim regex가 깨진 한국어 패턴 문자열에 묶여 있어 `연도는 2023년입니다`, `주관기관은 KIST입니다`, `총 2건입니다` 같은 명시적 claim도 `no_structured_claims`로 빠지고 있었다.
+  - 그 결과 selector는 unsupported id/year/org/count answer도 기존 heuristic만 통과하면 그대로 유효 후보로 취급할 수 있었고, 사용자에게 unsupported 답변이 노출될 위험이 남아 있었다.
+  - `apps/docs/GOLDEN_TESTS.md`는 이미 unsupported id/year/org/count 금지와 groundedness 진단 축 자체는 문서화하고 있었으므로, 이번 패치에서 새로 바뀐 것은 claim extraction 복구와 selector-enforced blocking이다.
+- changes:
+  - `apps/api/contracts/answer_groundedness.py`: project/perf/year/org/count claim regex를 ASCII-safe Unicode escape 패턴으로 다시 작성하고, 자연어형 `2023년 수행`, `주관기관은 ...`, `총 2건입니다` 케이스를 인식하도록 복구했다.
+  - `apps/chat/answer_merge.py`: `llm_streamed`/`llm_collected` answer의 groundedness verdict가 `unsupported`면 `unsupported_groundedness` fail reason으로 후보에서 탈락시키도록 바꿨다.
+  - `tests/test_answer_groundedness_verdict.py`: supported/unsupported 자연어 claim 회귀를 추가했다.
+  - `tests/test_answer_merge_state_diagnostics.py`: unsupported groundedness answer가 alternate valid model로 대체되거나, 둘 다 unsupported면 fallback으로 강등되는 선택기 회귀를 추가했다.
+- validations:
+  - `python -m py_compile apps/api/contracts/answer_groundedness.py apps/chat/answer_merge.py tests/test_answer_groundedness_verdict.py tests/test_answer_merge_state_diagnostics.py` passed
+  - `python -m pytest tests/test_answer_groundedness_verdict.py tests/test_answer_merge_state_diagnostics.py -q -p no:cacheprovider` passed (`5 passed`)
+- docs:
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `apps/docs/GOLDEN_TESTS.md` was reviewed but not changed because item 18 already states that unsupported ids/years/orgs/counts must not appear in answers; the new code now catches up to that existing contract.
+- remains risky:
+  - groundedness claim extraction is still intentionally conservative. unlabeled bare ids/org mentions embedded in freer prose can still evade this detector if they do not match the structured patterns restored here.
+  - fallback answer text is still the generic dual-model fallback string, so when both models are blocked for unsupported claims the degradation is safe but not yet user-friendly.
+- next best task:
+  - add one narrow answer-generation integration test that proves `merge_answers()` preserves the new `unsupported_groundedness` fail reason and emits a user-visible degraded final artifact when both model answers are unsupported.
+
+## 2026-04-09T18:35:00+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/retrieval/rag_base_orchestration.py`
+  - `apps/retrieval/rag_collection_retrieval.py`
+  - `apps/retrieval/rag_dense_runtime_support.py`
+  - `apps/retrieval/rag_pipeline.py`
+  - `apps/docs/README.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+  - `tests/test_base_orchestration_dense_threshold_binding.py`
+- findings:
+  - `retrieve_collections()` expects an `apply_dense_threshold(...)` collaborator whose policy fields are already bound, but `execute_base_orchestration()` still passed the raw `DENSE_SUPPORT.apply_dense_threshold` closure.
+  - the shared dense runtime helper now requires keyword-only `use_dense_threshold` and `min_dense_score`, so the base orchestration path raised `TypeError` during `rag_search` before any dense threshold filtering or per-collection merge could finish.
+  - `rag_pipeline.py` already had the correct contract by wrapping `_apply_dense_threshold(...)` with a lambda that injects the current policy values, so the drift was isolated to the non-join base orchestration path.
+- changes:
+  - added `_bind_dense_threshold_policy(...)` in `apps/retrieval/rag_base_orchestration.py` to bind per-request `use_dense_threshold` and `min_dense_score` into the shared dense-threshold helper once per orchestration run.
+  - updated `execute_base_orchestration()` to pass the bound callable into `retrieve_collections(...)` instead of the raw runtime helper.
+  - added `tests/test_base_orchestration_dense_threshold_binding.py` covering that the wrapper injects the request-level dense-threshold policy and preserves the downstream call kwargs shape.
+- validations:
+  - `python -m py_compile apps/retrieval/rag_base_orchestration.py tests/test_base_orchestration_dense_threshold_binding.py` passed
+  - `python -m pytest tests/test_base_orchestration_dense_threshold_binding.py -q -p no:cacheprovider` passed
+  - `python -c "from apps.retrieval.rag_base_orchestration import _bind_dense_threshold_policy; ..."` smoke passed and confirmed the wrapper injects the bound policy values without raising missing-keyword errors
+- docs:
+  - updated `apps/docs/03_운영과_환경.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `apps/docs/README.md` was reviewed but not changed because this patch fixes runtime collaborator wiring only; no retrieval contract, API surface, or operator workflow changed beyond the new targeted regression command.
+- remains risky:
+  - other retrieval collaborators still rely on call-site binding conventions, so future raw handoffs of keyword-only helpers can regress independently if they bypass the established wrapper pattern.
+  - this regression test locks the binding seam, not the full end-to-end `retrieve_collections()` path, so a future refactor could still break base orchestration through a different collaborator mismatch.
+- next best task:
+  - add one slightly broader import-light retrieval smoke that exercises `execute_base_orchestration()` with stubbed collaborators so runtime-wiring mismatches across dense/sparse helpers fail before live request traffic hits them.
+
+## 2026-04-09T18:20:00+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/planner/planner_context_cards.py`
+  - `apps/planner/planner_runtime.py`
+  - `apps/planner/prompt_asset_paths.py`
+  - `apps/chat/llm_runtime.py`
+  - `apps/prompts/cards/collections_card.md`
+  - `apps/prompts/planner_stage1_v2.md`
+  - `apps/docs/README.md`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - planner domain cards still used working-directory-relative paths like `prompts/cards/collections_card.md`, while the actual assets in this worktree live under `apps/prompts/cards/*`.
+  - planner stage prompt loads in `planner_runtime.py` used the same `Path("prompts/planner_stage*.md")` pattern, so fixing only `collections_card.md` would still leave stage prompts vulnerable to the same cwd-dependent failure class.
+  - `load_prompt_file()` already has the right contract for this repository: it reads the exact `Path` it is given. The safe fix is to normalize planner asset paths at the call sites instead of teaching the shared loader repo-specific fallback rules.
+- changes:
+  - added `apps/planner/prompt_asset_paths.py` with module-relative helpers that resolve planner prompt assets under `apps/prompts` and planner cards under `apps/prompts/cards`.
+  - updated `apps/planner/planner_context_cards.py` so every domain card path is resolved through the shared helper instead of cwd-relative `Path("prompts/...")`.
+  - updated `apps/planner/planner_runtime.py` so stage1, stage1.5, and stage2 system prompt assets use the same helper-backed absolute path contract.
+  - added `tests/test_planner_prompt_asset_paths.py` covering both domain-card loading and stage-prompt loading after changing cwd away from the repo root.
+- validations:
+  - `python -m py_compile apps/planner/prompt_asset_paths.py apps/planner/planner_context_cards.py apps/planner/planner_runtime.py tests/test_planner_prompt_asset_paths.py` passed
+  - `python -m pytest tests/test_planner_prompt_asset_paths.py -q -p no:cacheprovider` passed
+  - `python -c "import asyncio, os, shutil; ... build_planner_domain_cards(prompt_name='planner_stage1_v2') ..."` smoke passed after changing cwd into a worktree-local temp directory, confirming cards load outside the repo root cwd
+  - `python -c "import apps.planner.planner_runtime; print('planner-runtime-import-ok')"` passed
+- docs:
+  - updated `apps/docs/03_운영과_환경.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `apps/docs/README.md`, `apps/docs/02_실행계약과_전략규칙.md`, and `apps/docs/GOLDEN_TESTS.md` were reviewed but not changed because this patch fixes prompt asset path resolution only; planner strategy, contract semantics, and golden retrieval behavior remain the same.
+- remains risky:
+  - other prompt loaders outside the planner path could still hide cwd-relative assumptions; this patch only normalizes the planner prompt/card surface verified here.
+  - the existing shared prompt loader still trusts the caller-supplied `Path` blindly by design, so any future caller that reintroduces cwd-relative paths can regress independently.
+- next best task:
+  - add a small shared prompt-asset helper or lint-style regression check for all `load_prompt_file(Path(...))` call sites so future prompt surfaces cannot silently reintroduce cwd-relative prompt paths.
+
+## 2026-04-09T18:05:00+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/platform/settings.py`
+  - `apps/retrieval/retrieval.py`
+  - `apps/retrieval/rag_store.py`
+  - `apps/platform/triton_client.py`
+  - `apps/platform/solar_tokenizer_adapter.py`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/README.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - embedding defaults still pointed at relative strings like `../../Models/multilingual-e5-large-instruct`, but the real local assets in this worktree live under `D:\Project\python_project\ntis_domain_rag_chatbot\Models` using Hugging Face cache layout (`models--.../refs/main -> snapshots/<sha>`).
+  - current relative defaults are brittle across working directories and already caused the same class of failure in tokenizer loading (`../../Models/gemma-3-27b-it` treated as a repo id instead of a local path).
+  - retrieval sparse cache default also still wrote to a relative `../../Models/hub/`, so local offline model/cache ownership was split across multiple path conventions.
+- changes:
+  - added repo-root/local-model helpers in `apps/platform/settings.py` so the default model asset root resolves to `NTIS_LOCAL_MODELS_ROOT` or the repo-local `Models` directory.
+  - changed `EMBED_MODEL` and `EMBED_MODEL_B` defaults to resolve the active local snapshot directory from the Hugging Face cache layout under `Models\models--intfloat--*`.
+  - normalized `TOKENIZER_MAP` local paths to absolute paths under the same `Models` root to remove the same relative-path failure mode from Triton tokenizer loading.
+  - updated `apps/retrieval/retrieval.py` so the default fastembed cache dir also resolves to the repo-local `Models\hub`.
+  - added `tests/test_settings_local_model_paths.py` covering local embedding snapshot resolution and fastembed/tokenizer default roots.
+  - updated `apps/docs/03_운영과_환경.md` with the local model root contract and the new targeted validation command.
+- validations:
+  - `python -m py_compile apps/platform/settings.py apps/retrieval/retrieval.py tests/test_settings_local_model_paths.py` passed
+  - `python -m pytest tests/test_settings_local_model_paths.py -q -p no:cacheprovider` passed
+  - `python -c "from apps.platform import settings; print(settings.EMBED_MODEL); print(settings.EMBED_MODEL_B)"` confirmed both defaults resolve inside `D:\Project\python_project\ntis_domain_rag_chatbot\Models`
+- docs:
+  - updated `apps/docs/03_운영과_환경.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `apps/docs/README.md` was reviewed but not changed because the top-level document inventory/ownership did not change; only the operator-facing local model default did.
+- remains risky:
+  - if a future local model refresh updates `refs/main` or prunes snapshots incorrectly, settings will follow the new snapshot automatically; operators still need the on-disk cache to stay internally consistent.
+  - `SOLAR_TOKENIZER_NAME_OR_PATH` remains environment-owned and was not redirected to the repo-local `Models` root in this patch.
+- next best task:
+  - add one import-light smoke that instantiates the dual `HuggingFaceEmbedding` resources from `rag_store.py` and fails fast when the local snapshot layout drifts or a required asset disappears.
+
+## 2026-04-09T17:55:00+09:00 Improver
+- branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected files:
+  - `apps/api/runtime.py`
+  - `apps/api/app_factory.py`
+  - `apps/platform/storage.py`
+  - `apps/platform/settings.py`
+  - `apps/planner/planner_defaults.py`
+  - `apps/chat/answer_generation.py`
+  - `apps/platform/runtime_strategy_policy.py`
+  - `apps/retrieval/rag_compile_runtime.py`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - startup KV wiring still treated Redis as all-or-nothing. `apps/api/runtime.py` set `app.state.kv_store = None` whenever `redis.from_url(...).ping()` failed, even though `apps/platform/storage.py` already shipped a usable `FileKVStore`.
+  - recent runtime logs showed repeated `Redis connection failed` events alongside manual `File KV backend ready` messages, which meant the repository had the fallback backend implementation but not the authoritative bootstrap path.
+  - planner/answer/retrieval contract surfaces inspected in this run (`planner_defaults`, `answer_generation`, `runtime_strategy_policy`, `rag_compile_runtime`, golden docs) do not need policy changes for this task; the safe patch is isolated to startup storage bootstrapping.
+- changes:
+  - added `_initialize_kv_store_with_fallback(...)` in `apps/api/runtime.py` so startup now prefers Redis, cleans up a failed Redis client best-effort, and falls back to `FileKVStore` rooted at `FILE_KVSTORE_ROOT` or `local_kvstore`.
+  - extended `AppRuntimeConfig` and `apps/api/app_factory.py` so the file-backed fallback root is an explicit runtime setting instead of an implicit constructor default.
+  - added `tests/test_runtime_kv_fallback.py` covering both Redis-success and Redis-failure-to-file-fallback bootstrap behavior without requiring a live Redis server.
+  - updated `apps/docs/03_운영과_환경.md` with the new startup fallback contract, expected log sequence, and the targeted pytest regression command.
+- validations:
+  - `python -m py_compile apps/api/runtime.py apps/api/app_factory.py tests/test_runtime_kv_fallback.py` passed
+  - `python -m pytest tests/test_runtime_kv_fallback.py -q -p no:cacheprovider` passed
+  - `python -c "from apps.api.app_factory import create_app; create_app(); print('create-app-ok')"` passed
+- docs:
+  - updated `apps/docs/03_운영과_환경.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `README.md` was not changed because this task does not alter retrieval/answer contracts or the top-level architecture summary; the authoritative operator-facing drift lives in the runbook.
+- remains risky:
+  - the fallback only covers startup connection/bootstrap failure. If Redis becomes unhealthy after a successful boot, current request paths still keep using the already-selected backend and do not hot-swap to file storage mid-process.
+  - File KV is process-local filesystem persistence, so multi-instance/session-sharing semantics remain weaker than Redis and should stay an availability fallback rather than the primary clustered backend.
+- next best task:
+  - add lightweight runtime observability for the selected KV backend on `REQ.START`/`REQ.SUMMARY` so operators can confirm which storage path served a conversation without reading startup logs only.
+
 ## 2026-04-09T01:00:00+09:00 Improver
 - branch/head: expected branch `고도화` / not re-verified this session
 - inspected files:
@@ -2511,3 +2724,54 @@
 - next_best_task:
   - wire the same prompt-unit telemetry through `RetrievalBundle` / result-set surfaces if operators need prompt artifact visibility outside `RagResult`.
   - if/when `tests/` returns, add parity tests for exact packing, overflow compression lineage, and Solar no-char-cut answer context handling.
+
+## 2026-04-09T19:15:00+09:00 Improver
+- branch/head: `고도화` / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected_files:
+  - `apps/api/routes.py`
+  - `apps/chat/answer_generation.py`
+  - `apps/api/rag_mapper/rag_mapper.py`
+  - `apps/docs/03_운영과_환경.md`
+- findings:
+  - `AnswerArtifact.references` can contain already-normalized `tag/id/title` dicts, but route finalization was still passing them through `rag_mapper.get_references()`, which expects raw schema-backed payloads.
+  - invalid or tag-less references could therefore raise after `answer.final`, producing a late `error` event and empty `reference.set`.
+  - canonical evidence fallback only inferred `project` tags, so source-type-backed refs like `paper` were also brittle in the route layer.
+- changes:
+  - `apps/chat/answer_generation.py`: reference normalization now accepts only supported `DataTag` values (or source-type-derived equivalents) and drops tag-less / unsupported references before they enter `AnswerArtifact.references`.
+  - `apps/api/routes.py`: stream finalization now fail-opens for reference normalization, skips invalid refs with a warning, and handles already-normalized artifact refs plus canonical-evidence source-type tag inference without calling mapper as a hard requirement.
+  - added `tests/test_answer_generation_reference_payloads.py` and `tests/test_api_routes_reference_payloads.py` to lock both the producer-side filtering and the `/query/stream` SSE regression.
+  - `apps/docs/03_운영과_환경.md` validation commands now include the new reference payload regression files.
+- validations:
+  - `python -m py_compile apps/api/routes.py apps/chat/answer_generation.py tests/test_answer_generation_reference_payloads.py tests/test_api_routes_reference_payloads.py`
+  - `python -m pytest tests/test_answer_generation_reference_payloads.py tests/test_api_routes_reference_payloads.py -q -p no:cacheprovider`
+- remains_risky:
+  - route finalization now prefers resilience over strict mapper failure, so malformed reference payloads are dropped instead of surfacing as terminal errors; warning logs are the only runtime signal.
+  - the separate `apps/prompts/ntis_chatbot.md` prompt-path issue reported earlier is not addressed by this patch.
+- next_best_task:
+  - add one targeted regression for mixed raw retrieval docs plus artifact references in the same stream if that merge path becomes active again.
+  - fix the remaining answer system-prompt path drift so `ntis_chatbot.md` resolves from `apps/prompts/` without relying on environment overrides.
+
+## 2026-04-10T11:39:51+09:00 Improver
+- branch/head: `고도화` / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
+- inspected_files:
+  - `apps/platform/metrics.py`
+  - `tests/test_platform_metrics.py`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - the default GPU PromQL still used the Grafana-style variable `$dcgm_job`, but this service sends raw queries to the Prometheus HTTP API and does not expand dashboard variables.
+  - when the GPU query returned no numeric samples or collection failed, `gpuUtilPercent` could surface as `null` instead of the operator-facing fallback `0`.
+- changes:
+  - `apps/platform/metrics.py`: changed the default `GPU_UTIL_QUERY` to `avg(DCGM_FI_DEV_GPU_UTIL{job="dcgm-ntis3", gpu=~"0|2"})`.
+  - `apps/platform/metrics.py`: changed GPU fallback behavior so empty vectors return `0.0`, and `collect_snapshot()` coalesces failed GPU collection to `0.0`.
+  - added `tests/test_platform_metrics.py` to lock the concrete default query and the zero-fallback behavior.
+  - `apps/docs/03_운영과_환경.md`: updated validation commands and recorded the GPU metrics default/fallback behavior.
+- validations:
+  - `python -m py_compile apps/platform/metrics.py tests/test_platform_metrics.py`
+  - `python -m pytest tests/test_platform_metrics.py -q -p no:cacheprovider`
+  - import smoke confirmed `GPU_UTIL_QUERY=avg(DCGM_FI_DEV_GPU_UTIL{job="dcgm-ntis3", gpu=~"0|2"})`
+- remains_risky:
+  - the default job label is now concrete for `dcgm-ntis3`; deployments with a different Prometheus job label must override `GPU_UTIL_QUERY`.
+  - `requestCount` still preserves `null` on collection failure; this patch only normalizes GPU metrics.
+- next_best_task:
+  - validate the patched `/metrics` response against the live Prometheus target and confirm `gpuUtilPercent` is now numeric for the current deployment.

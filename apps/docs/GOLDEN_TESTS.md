@@ -126,6 +126,7 @@
 - setup: 두 모델 answer 모두 현재 `active_scope.result_set`와 item order/title이 다르다.
 - expected keep: `selection_reason=both_models_state_inconsistent`
 - expected keep: `visible_answer_manifest_status=blocked_state_consistency`
+- expected keep: 최종 사용자 answer는 state-consistency 차단을 설명하는 degraded message이며, empty-answer notice가 아니어야 한다.
 - expected keep: current turn 이후 `visible_answer_manifest`는 비워진다.
 - expected ban: blocked turn 뒤 `2번째`, `출처 2`, `그 항목` follow-up이 stale manifest로 resolve되는 것
 

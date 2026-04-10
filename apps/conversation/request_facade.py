@@ -11,6 +11,7 @@ else:
     BaseMessage = Any
 
 from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
+from apps.conversation.context_router import ContextRouterDecision, route_context
 from apps.conversation.followup_anchor import anchor_to_seed_map, is_child_anchor_source, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
 from apps.conversation.scope_resolver import resolve_scope_decision
 from apps.conversation.followup_resolution import resolve_reference_context_followup
@@ -37,6 +38,7 @@ from apps.conversation.view_state import (
     clear_view_state_scope,
     get_active_child_anchor,
     get_active_focus_entity,
+    get_recent_mentions,
 )
 
 
@@ -433,6 +435,184 @@ def _has_role_scoped_org_request(normalized_intent: Any, question: str) -> bool:
     return False
 
 
+
+
+
+def _resolve_child_detail_anchor(
+
+    anchor: Any,
+
+    *,
+
+    followup_resolution: Optional[Dict[str, Any]] = None,
+
+) -> tuple[str | None, str | None]:
+
+    resolution = dict(followup_resolution or {})
+
+    status = str(resolution.get("followup_resolution_status") or "").strip().lower()
+
+    if status != "resolved":
+
+        return None, None
+
+    anchor_kind = str(getattr(anchor, "kind", "") or "").strip().lower()
+
+    anchor_source = str(getattr(anchor, "source", "") or "").strip().lower()
+
+    if is_child_anchor_source(anchor_source) and anchor_kind in {"people", "org", "perf"}:
+
+        return anchor_kind, anchor_source or None
+
+    followup_kind = str(resolution.get("followup_reference_kind") or "").strip().lower()
+
+    if followup_kind != "child_entity":
+
+        return None, None
+
+    focus_entity = dict(resolution.get("focus_entity") or {})
+
+    selected_prev_item = dict(resolution.get("selected_prev_item") or {})
+
+    resolved_kind = _first_text(
+
+        focus_entity.get("kind"),
+
+        selected_prev_item.get("context_kind"),
+
+    ).lower()
+
+    if resolved_kind not in {"people", "org", "perf"}:
+
+        return None, None
+
+    resolved_source = _first_text(
+
+        resolution.get("anchor_source"),
+
+        resolution.get("seed_source"),
+
+    ).lower()
+
+    return resolved_kind, resolved_source or None
+
+
+
+def _coerce_child_anchor_detail_followup(
+
+    normalized_intent: Any,
+
+    question_analysis: Any,
+
+    *,
+
+    anchor: Any = None,
+
+    question: str,
+
+    followup_resolution: Dict[str, Any],
+
+    request_id: Optional[str],
+
+    conversation_id: str,
+
+) -> tuple[Any, Any]:
+
+    anchor_kind, anchor_source = _resolve_child_detail_anchor(
+
+        anchor,
+
+        followup_resolution=followup_resolution,
+
+    )
+
+    if not anchor_kind:
+
+        return normalized_intent, question_analysis
+
+    intent_needs_update = (
+
+        str(_get_field(normalized_intent, "base_route", "") or "").strip().lower() != anchor_kind
+
+        or str(_get_field(normalized_intent, "action", "") or "").strip().lower() != "detail"
+
+        or str(_get_field(normalized_intent, "output_type", "") or "").strip().lower() != "detail"
+
+    )
+
+    if intent_needs_update:
+
+        normalized_intent = _replace_fields(
+
+            normalized_intent,
+
+            base_route=anchor_kind,
+
+            action="detail",
+
+            output_type="detail",
+
+        )
+
+    qa_needs_update = bool(
+
+        question_analysis is not None
+
+        and (
+
+            str(_get_field(question_analysis, "head", "") or "").strip().lower() != anchor_kind
+
+            or str(_get_field(question_analysis, "action", "") or "").strip().lower() != "detail"
+
+            or str(_get_field(question_analysis, "output_type", "") or "").strip().lower() != "detail"
+
+            or _coerce_positive_int(_get_field(question_analysis, "limit", None)) != 1
+
+            or _coerce_positive_int(_get_field(question_analysis, "display_limit", None)) != 1
+
+        )
+
+    )
+
+    if qa_needs_update:
+
+        question_analysis = _replace_fields(
+
+            question_analysis,
+
+            head=anchor_kind,
+
+            action="detail",
+
+            output_type="detail",
+
+            limit=1,
+
+            display_limit=1,
+
+            retrieval_query=str(question or "").strip() or _get_field(question_analysis, "retrieval_query", None),
+
+        )
+
+    if intent_needs_update or qa_needs_update:
+
+        log_event(
+
+            "FOLLOWUP.CHILD_DETAIL.COERCED",
+
+            request_id=request_id,
+
+            conversation_id=conversation_id,
+
+            anchor_kind=anchor_kind,
+
+            anchor_source=anchor_source,
+
+            followup_reference_kind=(followup_resolution or {}).get("followup_reference_kind"),
+
+        )
+
+    return normalized_intent, question_analysis
 
 
 
@@ -1121,6 +1301,7 @@ async def build_intent_payload(
                     focus_entity=active_anchor_entity,
                     scope_focus_entity=scope_focus_entity,
                     subject_index=subject_index,
+                    recent_mentions=get_recent_mentions(active_view_state),
                 )
             if str(getattr(anchor, "source", "") or "").strip().lower() == "ambiguity_subject_index":
                 followup_resolution = {
@@ -1153,6 +1334,7 @@ async def build_intent_payload(
             focus_entity=active_anchor_entity,
             scope_focus_entity=scope_focus_entity,
             subject_index=subject_index,
+            recent_mentions=get_recent_mentions(active_view_state),
         )
         if str(getattr(anchor, "source", "") or "").strip().lower() == "ambiguity_subject_index":
             followup_resolution = {
@@ -1184,6 +1366,58 @@ async def build_intent_payload(
                 prev_context=prev_context,
                 default_context_kind=base_route,
             )
+    # --- context_router fallback: clarification 직전에 recent_mentions 기반 복원 시도 ---
+    context_router_decision: Optional[ContextRouterDecision] = None
+    _recent_mentions = get_recent_mentions(active_view_state)
+    if (
+        anchor is None
+        and scope_decision.needs_clarification
+        and _recent_mentions
+        and not has_explicit_seed
+        and str(followup_resolution.get("followup_resolution_status") or "").strip().lower() in {"none", "missing_context"}
+    ):
+        context_router_decision = route_context(
+            question=question,
+            recent_mentions=_recent_mentions,
+            active_scope_summary={
+                "scope_kind": getattr(getattr(active_view_state, "active_scope", None), "scope_kind", None),
+                "has_focus": scope_focus_entity is not None,
+                "has_snapshot": visible_answer_manifest is not None,
+            },
+        )
+        if context_router_decision.status == "resolved" and context_router_decision.selected_candidate_index is not None:
+            selected_mention = _recent_mentions[context_router_decision.selected_candidate_index]
+            # FocusEntity로 변환하여 anchor 확정 — _apply_resolved_anchor_seed만 수행
+            from apps.conversation.followup_anchor import _focus_entity_from_mention
+            anchor = _focus_entity_from_mention(selected_mention)
+            followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
+            log_event(
+                "CONTEXT_ROUTER.RESOLVED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                source=context_router_decision.source,
+                confidence=context_router_decision.confidence,
+                reason=context_router_decision.reason,
+                selected_index=context_router_decision.selected_candidate_index,
+                entity_kind=selected_mention.entity_kind,
+                pjt_id=selected_mention.pjt_id,
+                pjt_no=selected_mention.pjt_no,
+                rewritten_query_hint=context_router_decision.rewritten_query_hint,
+                recent_mention_count=len(_recent_mentions),
+                clarification_avoided=True,
+            )
+        else:
+            log_event(
+                "CONTEXT_ROUTER.FALLBACK",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=context_router_decision.status,
+                source=context_router_decision.source,
+                reason=context_router_decision.reason,
+                recent_mention_count=len(_recent_mentions),
+                clarification_avoided=False,
+            )
+
     if (
         anchor is None
         and scope_decision.needs_clarification
@@ -1269,6 +1503,15 @@ async def build_intent_payload(
             request_id=request_id,
             conversation_id=conversation_id,
         )
+        normalized_intent_base, question_analysis = _coerce_child_anchor_detail_followup(
+            normalized_intent_base,
+            question_analysis,
+            anchor=anchor,
+            question=question,
+            followup_resolution=followup_resolution,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
     elif not has_explicit_seed and str(followup_resolution.get("followup_resolution_status") or "") == "resolved":
         normalized_intent_base = _apply_anchor_lock(normalized_intent_base, followup_resolution.get("seed_map") or {})
         normalized_intent_base = _apply_followup_context_lock(normalized_intent_base, followup_resolution)
@@ -1277,6 +1520,14 @@ async def build_intent_payload(
             followup_resolution=followup_resolution,
         )
         normalized_intent_base, question_analysis = _coerce_project_anchor_role_followup(
+            normalized_intent_base,
+            question_analysis,
+            question=question,
+            followup_resolution=followup_resolution,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+        normalized_intent_base, question_analysis = _coerce_child_anchor_detail_followup(
             normalized_intent_base,
             question_analysis,
             question=question,
@@ -1342,6 +1593,24 @@ async def build_intent_payload(
             conversation_id=conversation_id,
 
         )
+        normalized_intent_base, question_analysis = _coerce_child_anchor_detail_followup(
+
+            normalized_intent_base,
+
+            question_analysis,
+
+            anchor=anchor,
+
+            question=question,
+
+            followup_resolution=followup_resolution,
+
+
+            request_id=request_id,
+
+            conversation_id=conversation_id,
+
+        )
 
         _resolve_question_analysis_count(
 
@@ -1390,6 +1659,15 @@ async def build_intent_payload(
         conversation_id=conversation_id,
 
     )
+    normalized_intent, question_analysis = _coerce_child_anchor_detail_followup(
+        normalized_intent,
+        question_analysis,
+        anchor=anchor,
+        question=question,
+        followup_resolution=followup_resolution,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
 
     log_event(
 
@@ -1413,6 +1691,14 @@ async def build_intent_payload(
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
     )
+    # context_router 메타데이터를 followup_resolution에 추가 (strategy_meta에 전파)
+    if context_router_decision is not None:
+        followup_resolution["context_router_status"] = context_router_decision.status
+        followup_resolution["context_router_source"] = context_router_decision.source
+        followup_resolution["context_router_confidence"] = context_router_decision.confidence
+        followup_resolution["recent_mention_count"] = len(_recent_mentions)
+        followup_resolution["rewritten_query_hint"] = context_router_decision.rewritten_query_hint
+
     return (
         _build_intent_payload_object(
             normalized_intent,

@@ -28,6 +28,7 @@ from apps.chat.answer_merge import select_final_answer
 from apps.chat.llm_runtime import build_llm, load_system_prompt, resolve_system_prompt_path
 from apps.chat.llm_streaming import run_llm_streaming
 from apps.evidence.context_renderer import split_sentences
+from apps.planner.prompt_asset_paths import planner_card_path, planner_prompt_path
 from apps.platform.settings import MAX_DOC_SENTENCES, MAX_DOC_TOKENS
 
 
@@ -39,9 +40,22 @@ _SOLAR_TTFT_DEADLINE_MS = int(os.getenv("SOLAR_TTFT_DEADLINE_MS", str(_SOLAR_DEA
 _SOLAR_GEN_DEADLINE_MS = int(os.getenv("SOLAR_GEN_DEADLINE_MS", "15000"))
 _SOLAR_STREAM_MAX_CHARS = int(os.getenv("SOLAR_STREAM_MAX_CHARS", "10000"))
 _DUAL_MODEL_MERGE_POLICY = os.getenv("DUAL_MODEL_MERGE_POLICY", "solar_first").strip().lower()
+# Internal selector placeholder. When fallback wins, merge_answers() replaces this
+# with a user-visible degraded message that matches the failure reason.
 _DUAL_MODEL_FALLBACK_MESSAGE = "The generated answer was empty. Please try again."
+_GENERIC_DEGRADED_FALLBACK_MESSAGE = (
+    "현재 근거 기반 답변을 안정적으로 생성하지 못했습니다. 질문 범위를 조금 더 좁혀 다시 질문해 주세요."
+)
+_STATE_CONSISTENCY_DEGRADED_FALLBACK_MESSAGE = (
+    "검색된 항목의 대상·순서·개수를 답변과 안정적으로 맞추지 못해 답변을 보류합니다. "
+    "대상이나 범위를 더 구체적으로 지정해 다시 질문해 주세요."
+)
+_GROUNDEDNESS_DEGRADED_FALLBACK_MESSAGE = (
+    "검색 근거로 확인되지 않은 정보가 포함돼 답변을 보류합니다. "
+    "대상 과제명, 기관명, 연도 등을 더 구체적으로 지정해 다시 질문해 주세요."
+)
 _SOLAR_MIN_ANSWER_CHARS = int(os.getenv("SOLAR_MIN_ANSWER_CHARS", "60"))
-_DEFAULT_SYSTEM_PROMPT_PATH = Path(os.getenv("DEFAULT_SYSTEM_PROMPT_PATH", "prompts/ntis_chatbot.md").strip() or "prompts/ntis_chatbot.md")
+_DEFAULT_SYSTEM_PROMPT_PATH = Path(os.getenv("DEFAULT_SYSTEM_PROMPT_PATH", planner_prompt_path("ntis_chatbot.md")))
 _GEMMA_SYSTEM_PROMPT_PATH_RAW = os.getenv("GEMMA_SYSTEM_PROMPT_PATH", "").strip()
 _GEMMA_SYSTEM_PROMPT_PATH = Path(_GEMMA_SYSTEM_PROMPT_PATH_RAW) if _GEMMA_SYSTEM_PROMPT_PATH_RAW else None
 _SOLAR_SYSTEM_PROMPT_PATH_RAW = os.getenv("SOLAR_SYSTEM_PROMPT_PATH", "").strip()
@@ -136,6 +150,16 @@ def _reference_tag_from_source_type(source_type: Any) -> Optional[str]:
     return mapping.get(normalized)
 
 
+def _normalize_reference_tag(tag_value: Any, *, source_type: Any = None) -> Optional[str]:
+    normalized = str(tag_value or "").strip()
+    if normalized:
+        try:
+            return DataTag(normalized).value
+        except ValueError:
+            return None
+    return _reference_tag_from_source_type(source_type)
+
+
 def _normalize_reference_id(reference: dict[str, Any]) -> Optional[str]:
     tag = str(reference.get("tag") or "").strip()
     source_type = str(reference.get("source_type") or "").strip().lower()
@@ -153,14 +177,14 @@ def _normalize_reference_id(reference: dict[str, Any]) -> Optional[str]:
 
 
 def _normalize_reference_payload(reference: dict[str, Any]) -> Optional[dict[str, Any]]:
-    tag = str(reference.get("tag") or "").strip() or None
+    tag = _normalize_reference_tag(reference.get("tag"), source_type=reference.get("source_type"))
     title = str(reference.get("title") or reference.get("title_text") or "").strip() or None
     normalized = {
         "tag": tag,
         "id": _normalize_reference_id(reference),
         "title": title,
     }
-    if not any(normalized.values()):
+    if tag is None or not (normalized["id"] or normalized["title"]):
         return None
     return normalized
 
@@ -241,6 +265,59 @@ def _with_references(artifact: AnswerArtifact, references: list[dict[str, Any]])
         error=artifact.error,
         meta=dict(artifact.meta or {}),
     )
+
+
+def _state_consistency_diag(verdict: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(verdict or {})
+    return {
+        "status": str(payload.get("status") or "").strip().lower() or "not_applicable",
+        "reason_codes": list(payload.get("reason_codes") or []),
+        "snapshot_visible_count": int(payload.get("snapshot_visible_count") or 0),
+        "parsed_item_count": int(payload.get("parsed_item_count") or 0),
+        "declared_count": payload.get("declared_count"),
+        "mismatch_reason": payload.get("mismatch_reason"),
+        "parsed_titles_preview": list(payload.get("parsed_titles_preview") or []),
+        "snapshot_titles_preview": list(payload.get("snapshot_titles_preview") or []),
+    }
+
+
+def _state_snapshot_diag(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(snapshot or {})
+    ordered_items = payload.get("ordered_items") if isinstance(payload.get("ordered_items"), list) else []
+    titles_preview: list[str] = []
+    for item in ordered_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title_text") or "").strip()
+        if not title:
+            continue
+        titles_preview.append(title)
+        if len(titles_preview) >= 3:
+            break
+    return {
+        "available": bool(payload.get("available")),
+        "snapshot_source": str(payload.get("snapshot_source") or "none"),
+        "context_kind": str(payload.get("context_kind") or "").strip().lower() or "project",
+        "visible_count": int(payload.get("visible_count") or 0),
+        "titles_preview": titles_preview,
+    }
+
+
+def _build_user_visible_fallback_message(selection: dict[str, Any]) -> str:
+    selection_reason = str(selection.get("selection_reason") or "").strip().lower()
+    fail_reasons = {
+        str(reason or "").strip().lower()
+        for reason in [
+            *(selection.get("solar_fail_reasons") or []),
+            *(selection.get("gemma_fail_reasons") or []),
+        ]
+        if str(reason or "").strip()
+    }
+    if selection_reason == "both_models_state_inconsistent":
+        return _STATE_CONSISTENCY_DEGRADED_FALLBACK_MESSAGE
+    if "unsupported_groundedness" in fail_reasons:
+        return _GROUNDEDNESS_DEGRADED_FALLBACK_MESSAGE
+    return _GENERIC_DEGRADED_FALLBACK_MESSAGE
 
 
 
@@ -933,9 +1010,14 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     gemma_groundedness = dict(selection.get("gemma_groundedness") or {})
     solar_state_consistency = dict(selection.get("solar_state_consistency") or {})
     gemma_state_consistency = dict(selection.get("gemma_state_consistency") or {})
+    solar_state_diag = _state_consistency_diag(solar_state_consistency)
+    gemma_state_diag = _state_consistency_diag(gemma_state_consistency)
+    state_snapshot_diag = _state_snapshot_diag(state_consistency_snapshot)
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
-    degraded = bool(getattr(state, "degraded", False)) or (selected_answer == _DUAL_MODEL_FALLBACK_MESSAGE)
+    if selected_model == "fallback":
+        selected_answer = _build_user_visible_fallback_message(selection)
+    degraded = bool(getattr(state, "degraded", False)) or (selected_model == "fallback")
     selected_meta = {}
     if selected_model == "solar":
         selected_meta = solar_meta
@@ -961,7 +1043,12 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             stream_metrics=dict(selected_meta or {}),
             user_visible_final_required=True,
             references=_collect_state_references(state),
-            meta={"answer_source": selected_answer_source, "model_key": selected_model},
+            meta={
+                "answer_source": selected_answer_source,
+                "model_key": selected_model,
+                "selection_reason": selection["selection_reason"],
+                "degraded": selected_model == "fallback",
+            },
         )
     if selected_model == "solar":
         selected_groundedness = solar_groundedness
@@ -986,6 +1073,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_state_consistency = AnswerStateConsistencyVerdict(
             status="not_applicable",
         ).model_dump()
+    selected_state_diag = _state_consistency_diag(selected_state_consistency)
     if isinstance(selected_artifact, AnswerArtifact):
         enriched_meta = dict(selected_artifact.meta or {})
         enriched_meta.setdefault("answer_source", selected_answer_source)
@@ -1059,9 +1147,13 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "gemma_groundedness": gemma_groundedness,
         "selected_groundedness": selected_groundedness,
         "state_consistency_snapshot": state_consistency_snapshot,
+        "state_consistency_snapshot_diag": state_snapshot_diag,
         "solar_state_consistency": solar_state_consistency,
+        "solar_state_diag": solar_state_diag,
         "gemma_state_consistency": gemma_state_consistency,
+        "gemma_state_diag": gemma_state_diag,
         "selected_state_consistency": selected_state_consistency,
+        "selected_state_diag": selected_state_diag,
         "visible_answer_manifest_status": (
             (selected_artifact.meta or {}).get("visible_answer_manifest_status")
             if isinstance(selected_artifact, AnswerArtifact)
@@ -1089,6 +1181,11 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         groundedness_reason_codes=list(selected_groundedness.get("reason_codes") or []),
         state_consistency_status=selected_state_consistency.get("status"),
         state_consistency_reason_codes=list(selected_state_consistency.get("reason_codes") or []),
+        state_snapshot_visible_count=state_snapshot_diag.get("visible_count"),
+        solar_state_status=solar_state_diag.get("status"),
+        solar_state_reason_codes=list(solar_state_diag.get("reason_codes") or []),
+        gemma_state_status=gemma_state_diag.get("status"),
+        gemma_state_reason_codes=list(gemma_state_diag.get("reason_codes") or []),
         visible_answer_manifest_status=(
             (selected_artifact.meta or {}).get("visible_answer_manifest_status")
             if isinstance(selected_artifact, AnswerArtifact)
@@ -1096,6 +1193,19 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         ),
         selection_reason=selection["selection_reason"],
     )
+    if protect_visible_order:
+        log_event(
+            "ANSWER.STATE_DIAG",
+            request_id=getattr(state, "request_id", None),
+            conversation_id=getattr(state, "conversation_id", None),
+            stage="merge_answers",
+            selection_reason=selection["selection_reason"],
+            selected_model=selected_model,
+            state_snapshot=state_snapshot_diag,
+            solar_state=solar_state_diag,
+            gemma_state=gemma_state_diag,
+            selected_state=selected_state_diag,
+        )
     logger.info(
 
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",

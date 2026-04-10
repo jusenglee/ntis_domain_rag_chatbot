@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any, Optional
 
 from apps.api.contracts.runtime_contracts import sanitize_ids_map_semantics
@@ -42,6 +41,7 @@ from apps.planner.planner_defaults import (
     PLANNER_STAGEWISE_ENABLED,
     PLANNER_TEMPERATURE,
 )
+from apps.planner.prompt_asset_paths import planner_prompt_path
 from apps.planner.planner_stage15_types import PlannerEntityRolePlan
 from apps.planner.planner_staged import (
     DeterministicGateStrategy,
@@ -569,7 +569,7 @@ async def run_planner_stage1(
         display_snapshot=display_snapshot,
     )
     system_prompt = _render_prompt_template(
-        await load_prompt_file(Path(f"prompts/planner_stage1_{PLANNER_STAGE1_PROMPT_VERSION}.md")),
+        await load_prompt_file(planner_prompt_path(f"planner_stage1_{PLANNER_STAGE1_PROMPT_VERSION}.md")),
         **cards,
     )
     prompt = ChatPromptTemplate.from_messages(
@@ -626,7 +626,7 @@ async def run_planner_stage15(
     llm = build_llm(model_name="solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=PlannerEntityRolePlan)
     system_prompt = _render_prompt_template(
-        await load_prompt_file(Path(f"prompts/planner_stage15_{PLANNER_STAGE15_PROMPT_VERSION}.md")),
+        await load_prompt_file(planner_prompt_path(f"planner_stage15_{PLANNER_STAGE15_PROMPT_VERSION}.md")),
         **cards,
     )
     prompt = ChatPromptTemplate.from_messages(
@@ -738,7 +738,7 @@ async def run_planner_stage2(
     llm = build_llm(model_name="solar_vllm_0")
     parser = PydanticOutputParser(pydantic_object=PlannerStage2Slots)
     system_prompt = _render_prompt_template(
-        await load_prompt_file(Path(f"prompts/planner_stage2_{PLANNER_STAGE2_PROMPT_VERSION}.md")),
+        await load_prompt_file(planner_prompt_path(f"planner_stage2_{PLANNER_STAGE2_PROMPT_VERSION}.md")),
         **cards,
     )
     prompt = ChatPromptTemplate.from_messages(

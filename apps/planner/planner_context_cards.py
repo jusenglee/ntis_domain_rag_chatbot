@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from apps.chat.llm_runtime import load_prompt_file
+from apps.planner.prompt_asset_paths import planner_card_path
 
 
 _CARD_FILES = {
-    "collections_card": Path("prompts/cards/collections_card.md"),
-    "relationship_semantics_card": Path("prompts/cards/relationship_semantics_card.md"),
-    "id_semantics_card": Path("prompts/cards/id_semantics_card.md"),
-    "filter_semantics_card": Path("prompts/cards/filter_semantics_card.md"),
-    "perf_tag_card": Path("prompts/cards/perf_tag_card.md"),
-    "field_reliability_card": Path("prompts/cards/field_reliability_card.md"),
-    "semantic_disambiguation_card": Path("prompts/cards/semantic_disambiguation_card.md"),
+    "collections_card": planner_card_path("collections_card.md"),
+    "relationship_semantics_card": planner_card_path("relationship_semantics_card.md"),
+    "id_semantics_card": planner_card_path("id_semantics_card.md"),
+    "filter_semantics_card": planner_card_path("filter_semantics_card.md"),
+    "perf_tag_card": planner_card_path("perf_tag_card.md"),
+    "field_reliability_card": planner_card_path("field_reliability_card.md"),
+    "semantic_disambiguation_card": planner_card_path("semantic_disambiguation_card.md"),
 }
 
 _PROMPT_CARD_MANIFEST = {

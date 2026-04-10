@@ -270,6 +270,35 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 return text
         return None
 
+    def _reference_tag_from_source_type(source_type: Any) -> Optional[str]:
+        normalized = str(source_type or "").strip().lower()
+        mapping = {
+            "project": DataTag.PROJECT.value,
+            "paper": DataTag.PAPER.value,
+            "patent": DataTag.PATENT.value,
+            "report": DataTag.REPORT.value,
+            "software": DataTag.SOFTWARE.value,
+            "standard": DataTag.STANDARD.value,
+            "compound": DataTag.COMPOUND.value,
+            "equipment": DataTag.EQUIPMENT.value,
+            "organism_info": DataTag.ORGANISM_INFO.value,
+            "organism_resource": DataTag.ORGANISM_RESOURCE.value,
+            "manual": DataTag.MANUAL.value,
+            "tech_summary": DataTag.TECH_SUMMARY.value,
+            "variety": DataTag.VARIETY.value,
+            "qna": DataTag.QNA.value,
+        }
+        return mapping.get(normalized)
+
+    def _normalize_reference_tag(tag_value: Any, *, source_type: Any = None) -> Optional[str]:
+        normalized = str(tag_value or "").strip()
+        if normalized:
+            try:
+                return DataTag(normalized).value
+            except ValueError:
+                return None
+        return _reference_tag_from_source_type(source_type)
+
     def _is_project_reference_source(reference: Dict[str, Any], doc: Dict[str, Any]) -> bool:
         """현재 reference가 프로젝트 원본인지 판별한다.
 
@@ -327,6 +356,53 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         tag = str(item.get("tag") or "").strip()
         if not tag and source_type == "project":
             tag = DataTag.PROJECT.value
+
+        doc: Dict[str, Any] = {"tag": tag}
+        if isinstance(ids, dict):
+            doc.update(ids)
+        if isinstance(facts, dict):
+            title = str(facts.get("title") or "").strip()
+            if title:
+                doc["title"] = title
+        if isinstance(evidence, dict):
+            for key in ("title", "title_text", "title1", "title2"):
+                value = evidence.get(key)
+                if value is not None:
+                    doc[key] = value
+        return doc
+
+    def _normalize_reference_payload(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Fail-open reference normalization for route finalization."""
+        tag = _normalize_reference_tag(doc.get("tag"), source_type=doc.get("source_type"))
+        if tag is None:
+            return None
+
+        source_doc = dict(doc)
+        source_doc["tag"] = tag
+        mapped: Dict[str, Any] = {}
+        try:
+            raw_mapped = rag_mapper.get_references(source_doc)
+        except Exception:
+            raw_mapped = {}
+        if isinstance(raw_mapped, dict):
+            mapped = dict(raw_mapped)
+
+        result = dict(mapped)
+        result["tag"] = tag
+        result["id"] = _resolve_reference_id(result, source_doc)
+        result["title"] = _resolve_reference_title(result, source_doc)
+        if not (result["id"] or result["title"]):
+            return None
+        return result
+
+    def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
+        """canonical evidence item??reference payload ?뺢퇋???낅젰 ?뺥깭濡?諛붽씔??"""
+        if not isinstance(item, dict):
+            return {}
+        ids = item.get("ids")
+        facts = item.get("facts")
+        evidence = item.get("evidence")
+        tag = _normalize_reference_tag(item.get("tag"), source_type=item.get("source_type"))
 
         doc: Dict[str, Any] = {"tag": tag}
         if isinstance(ids, dict):
@@ -690,6 +766,18 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 def _append_reference_docs(candidates: list[dict[str, Any]]) -> None:
                     for candidate in candidates:
                         normalized = _normalize_reference_payload(candidate)
+                        if normalized is None:
+                            logger.warning(
+                                "Skipping invalid reference payload during stream finalization",
+                                extra={
+                                    "request_id": request_id,
+                                    "conversation_id": conversation_id,
+                                    "raw_tag": candidate.get("tag"),
+                                    "source_type": candidate.get("source_type"),
+                                    "keys": sorted(candidate.keys()),
+                                },
+                            )
+                            continue
                         dedupe_key = (
                             normalized.get("tag"),
                             normalized.get("id"),

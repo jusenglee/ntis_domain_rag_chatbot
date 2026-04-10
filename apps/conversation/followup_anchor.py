@@ -1,11 +1,11 @@
-from __future__ import annotations
-
-import re
+from __future__ import annotations
+
+import re
 from typing import Any, Dict, Optional
 
-from apps.conversation.view_state import DisplaySnapshot, FocusEntity, SubjectIndexEntry, focus_entity_from_item, focus_entity_subject_id
-
-
+from apps.conversation.view_state import DisplaySnapshot, FocusEntity, RecentMentionRecord, SubjectIndexEntry, focus_entity_from_item, focus_entity_subject_id
+
+
 _ORDINAL_PATTERNS = (
     re.compile("(?:제\\s*)?(\\d{1,3})\\s*번째"),
     re.compile("(?:제\\s*)?(\\d{1,3})\\s*번"),
@@ -21,17 +21,17 @@ _ORDINAL_WORDS = {
     "\uccab": 1,
     "\uccab\ubc88\uc9f8": 1,
     "\uccab \ubc88\uc9f8": 1,
-    "\uccab\uc9f8": 1,
-    "\ub450": 2,
-    "\ub450\ubc88\uc9f8": 2,
-    "\ub450 \ubc88\uc9f8": 2,
-    "\ub458\uc9f8": 2,
-    "\uc138": 3,
-    "\uc138\ubc88\uc9f8": 3,
-    "\uc138 \ubc88\uc9f8": 3,
-    "\uc14b\uc9f8": 3,
-}
-_DEICTIC_PATTERNS = {
+    "\uccab\uc9f8": 1,
+    "\ub450": 2,
+    "\ub450\ubc88\uc9f8": 2,
+    "\ub450 \ubc88\uc9f8": 2,
+    "\ub458\uc9f8": 2,
+    "\uc138": 3,
+    "\uc138\ubc88\uc9f8": 3,
+    "\uc138 \ubc88\uc9f8": 3,
+    "\uc14b\uc9f8": 3,
+}
+_DEICTIC_PATTERNS = {
     "project": (
         re.compile("그\\s*과제"),
         re.compile("이\\s*과제"),
@@ -63,15 +63,15 @@ _DEICTIC_PATTERNS = {
         re.compile(r"\b(?:that|this|the)\s+(?:item|result|entry|one)\b", re.IGNORECASE),
     ),
 }
-_COUNT_PATTERNS = (
-    re.compile(r"\uc0c1\uc704\s*(\d{1,3})\s*\uac1c"),
-    re.compile(r"(\d{1,3})\s*(?:\uac1c|\uac74)"),
-    re.compile(r"(\ud55c|\ub450|\uc138)\s*\uac74"),
-)
-_KOREAN_COUNT = {"\ud55c": 1, "\ub450": 2, "\uc138": 3}
+_COUNT_PATTERNS = (
+    re.compile(r"\uc0c1\uc704\s*(\d{1,3})\s*\uac1c"),
+    re.compile(r"(\d{1,3})\s*(?:\uac1c|\uac74)"),
+    re.compile(r"(\ud55c|\ub450|\uc138)\s*\uac74"),
+)
+_KOREAN_COUNT = {"\ud55c": 1, "\ub450": 2, "\uc138": 3}
 _EXPLICIT_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
-
-
+
+
 def _decode_token(token: str) -> str:
     return token.encode("utf-8").decode("unicode_escape")
 
@@ -145,57 +145,57 @@ def parse_ordinal_reference(question: str) -> Optional[int]:
         if decoded in compact:
             return ordinal
     return None
-
-
-def _entity_kind_matches_question(question: str, entity_kind: str) -> bool:
-    patterns = list(_DEICTIC_PATTERNS.get(entity_kind, ())) + list(_DEICTIC_PATTERNS["generic"])
-    return any(pattern.search(question) for pattern in patterns)
-
-
-def is_referential_followup(question: str, *, entity_kind: Optional[str] = None) -> bool:
-    text = str(question or "").strip()
-    if not text:
-        return False
-    if entity_kind:
-        return _entity_kind_matches_question(text, str(entity_kind or "").strip().lower())
-    return any(pattern.search(text) for patterns in _DEICTIC_PATTERNS.values() for pattern in patterns)
-
-
-def parse_display_limit(question: str, *, default: int) -> int:
-    text = str(question or "").strip()
-    for pattern in _COUNT_PATTERNS:
-        match = pattern.search(text)
-        if not match:
-            continue
-        raw = str(match.group(1)).strip()
-        if raw.isdigit():
-            return max(1, int(raw))
-        raw_decoded = _decode_token(raw)
-        for token, count in _KOREAN_COUNT.items():
-            if raw_decoded == _decode_token(token):
-                return count
-    return max(1, int(default or 1))
-
-
+
+
+def _entity_kind_matches_question(question: str, entity_kind: str) -> bool:
+    patterns = list(_DEICTIC_PATTERNS.get(entity_kind, ())) + list(_DEICTIC_PATTERNS["generic"])
+    return any(pattern.search(question) for pattern in patterns)
+
+
+def is_referential_followup(question: str, *, entity_kind: Optional[str] = None) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if entity_kind:
+        return _entity_kind_matches_question(text, str(entity_kind or "").strip().lower())
+    return any(pattern.search(text) for patterns in _DEICTIC_PATTERNS.values() for pattern in patterns)
+
+
+def parse_display_limit(question: str, *, default: int) -> int:
+    text = str(question or "").strip()
+    for pattern in _COUNT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        raw = str(match.group(1)).strip()
+        if raw.isdigit():
+            return max(1, int(raw))
+        raw_decoded = _decode_token(raw)
+        for token, count in _KOREAN_COUNT.items():
+            if raw_decoded == _decode_token(token):
+                return count
+    return max(1, int(default or 1))
+
+
 def _normalize_ids_map(values: Any) -> Dict[str, list[str]]:
-    if not isinstance(values, dict):
-        return {}
-    normalized: Dict[str, list[str]] = {}
-    for key, raw_values in values.items():
-        if isinstance(raw_values, str):
-            raw_values = [raw_values]
-        elif not isinstance(raw_values, (list, tuple, set)):
-            raw_values = [raw_values]
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for raw in raw_values:
-            text = str(raw or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            deduped.append(text)
-        if deduped:
-            normalized[str(key).strip()] = deduped
+    if not isinstance(values, dict):
+        return {}
+    normalized: Dict[str, list[str]] = {}
+    for key, raw_values in values.items():
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        elif not isinstance(raw_values, (list, tuple, set)):
+            raw_values = [raw_values]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_values:
+            text = str(raw or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        if deduped:
+            normalized[str(key).strip()] = deduped
     return normalized
 
 
@@ -405,6 +405,141 @@ def _resolve_named_subject_from_index(
     return None
 
 
+_RELATIVE_LAST_PATTERNS = (
+    re.compile(r"마지막\s*(?:과제|프로젝트|논문|특허|성과|보고서|결과|항목|것)?"),
+    re.compile(r"맨\s*마지막"),
+    re.compile(r"최근\s*(?:과제|프로젝트|논문|특허|성과|보고서|결과|항목|것)?"),
+    re.compile(r"방금\s*(?:본|검색한|조회한|과제|프로젝트)?\s*(?:과제|프로젝트|논문|것)?"),
+)
+_RELATIVE_FIRST_PATTERNS = (
+    re.compile(r"(?:제\s*)?첫\s*(?:번째)?\s*(?:과제|프로젝트|논문|성과|결과|항목)?"),
+)
+_RELATIVE_ORDINAL_PATTERNS = (
+    re.compile(r"(?:제\s*)?(\d{1,3})\s*번째\s*(?:과제|프로젝트|논문|성과|결과|항목)"),
+)
+
+
+def parse_relative_reference(question: str) -> Optional[Dict[str, Any]]:
+    """'마지막', '최근', '방금', '첫 번째' 등 상대적 참조를 파싱한다.
+
+    Returns:
+        None: 상대 참조 없음
+        {"position": "last"}: 마지막 항목 참조
+        {"position": "first"}: 첫 번째 항목 참조
+        {"position": "ordinal", "index": N}: N번째 항목 참조
+    """
+    text = str(question or "").strip()
+    if not text:
+        return None
+    for pattern in _RELATIVE_LAST_PATTERNS:
+        if pattern.search(text):
+            return {"position": "last"}
+    for pattern in _RELATIVE_FIRST_PATTERNS:
+        if pattern.search(text):
+            return {"position": "first"}
+    for pattern in _RELATIVE_ORDINAL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return {"position": "ordinal", "index": int(match.group(1))}
+    return None
+
+
+def _detect_entity_kind_from_question(question: str) -> Optional[str]:
+    """질문에서 참조 대상의 entity_kind를 추론한다."""
+    text = str(question or "").strip()
+    if not text:
+        return None
+    for kind, patterns in _DEICTIC_PATTERNS.items():
+        if kind == "generic":
+            continue
+        for pattern in patterns:
+            if pattern.search(text):
+                return kind
+    # keyword fallback
+    if any(kw in text for kw in ("과제", "프로젝트")):
+        return "project"
+    if any(kw in text for kw in ("성과", "논문", "특허", "보고서")):
+        return "perf"
+    if any(kw in text for kw in ("연구자", "연구원", "사람")):
+        return "people"
+    if any(kw in text for kw in ("기관", "회사", "조직")):
+        return "org"
+    return None
+
+
+def _focus_entity_from_mention(mention: RecentMentionRecord) -> FocusEntity:
+    """RecentMentionRecord를 FocusEntity로 변환한다."""
+    kind = str(mention.entity_kind or "project").strip().lower() or "project"
+    year_int = None
+    if mention.year is not None:
+        try:
+            year_int = int(mention.year)
+        except (ValueError, TypeError):
+            pass
+    return FocusEntity(
+        kind=kind,
+        source="recent_mention",
+        pjt_id=mention.pjt_id,
+        pjt_no=mention.pjt_no,
+        rst_id=mention.rst_id,
+        doi=mention.doi,
+        issn=mention.issn,
+        title_text=mention.title_text,
+        year=year_int,
+        lead_org=mention.lead_org,
+        participant_org=list(mention.participant_org or []),
+        researchers=list(mention.researchers or []),
+        display_rank=mention.display_rank,
+    )
+
+
+def resolve_from_recent_mentions(
+    *,
+    question: str,
+    recent_mentions: Optional[list[RecentMentionRecord]],
+) -> Optional[FocusEntity]:
+    """recent_mentions에서 상대적/직시적 참조를 해석하여 FocusEntity를 반환한다.
+
+    entity_kind를 먼저 좁혀서 project/perf 혼합 해석을 금지한다.
+    """
+    if not recent_mentions:
+        return None
+
+    relative_ref = parse_relative_reference(question)
+    is_deictic = is_referential_followup(question)
+
+    if not relative_ref and not is_deictic:
+        return None
+
+    # entity_kind 좁히기
+    target_kind = _detect_entity_kind_from_question(question)
+    if target_kind:
+        candidates = [m for m in recent_mentions if str(m.entity_kind or "").strip().lower() == target_kind]
+    else:
+        candidates = list(recent_mentions)
+
+    if not candidates:
+        return None
+
+    if relative_ref:
+        pos = relative_ref.get("position")
+        if pos == "last":
+            return _focus_entity_from_mention(candidates[-1])
+        if pos == "first":
+            return _focus_entity_from_mention(candidates[0])
+        if pos == "ordinal":
+            idx = relative_ref.get("index", 1)
+            if 1 <= idx <= len(candidates):
+                return _focus_entity_from_mention(candidates[idx - 1])
+            return None
+
+    # deictic fallback: 후보가 1개면 즉시 확정
+    if is_deictic and len(candidates) == 1:
+        return _focus_entity_from_mention(candidates[0])
+
+    return None
+
+
 def resolve_followup_anchor(
     *,
     question: str,
@@ -413,6 +548,7 @@ def resolve_followup_anchor(
     focus_entity: Optional[FocusEntity],
     scope_focus_entity: Optional[FocusEntity] = None,
     subject_index: Any = None,
+    recent_mentions: Optional[list[RecentMentionRecord]] = None,
 ) -> Optional[FocusEntity]:
     active_focus = scope_focus_entity or focus_entity
     child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=active_focus)
@@ -430,21 +566,21 @@ def resolve_followup_anchor(
     ids_map = _normalize_ids_map(getattr(normalized_intent, "ids_map", {}) or {})
     for key in _EXPLICIT_ID_KEYS:
         values = ids_map.get(key) or []
-        if not values:
-            continue
-        return FocusEntity(
-            kind=str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
-            source="explicit_id",
-            pjt_id=values[0] if key == "pjt_id" else None,
-            pjt_no=values[0] if key == "pjt_no" else None,
-            rst_id=values[0] if key == "rst_id" else None,
-            person_no=values[0] if key == "person_no" else None,
-            org_id=values[0] if key == "org_id" else None,
-            org_code=values[0] if key == "org_code" else None,
-            biz_no=values[0] if key == "biz_no" else None,
-            doi=values[0] if key == "doi" else None,
-            issn=values[0] if key == "issn" else None,
-        )
+        if not values:
+            continue
+        return FocusEntity(
+            kind=str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
+            source="explicit_id",
+            pjt_id=values[0] if key == "pjt_id" else None,
+            pjt_no=values[0] if key == "pjt_no" else None,
+            rst_id=values[0] if key == "rst_id" else None,
+            person_no=values[0] if key == "person_no" else None,
+            org_id=values[0] if key == "org_id" else None,
+            org_code=values[0] if key == "org_code" else None,
+            biz_no=values[0] if key == "biz_no" else None,
+            doi=values[0] if key == "doi" else None,
+            issn=values[0] if key == "issn" else None,
+        )
 
     ordinal = parse_ordinal_reference(question)
     if ordinal is not None and display_snapshot and 1 <= ordinal <= len(display_snapshot.items):
@@ -460,21 +596,30 @@ def resolve_followup_anchor(
     if is_referential_followup(question) and display_snapshot and len(display_snapshot.items) == 1:
         item = display_snapshot.items[0]
         return focus_entity_from_item(item=item, kind=display_snapshot.context_kind, source="display_snapshot", view_id=display_snapshot.view_id)
+
+    # --- 5단계: recent_mentions 기반 상대적/직시적 참조 해석 ---
+    mention_anchor = resolve_from_recent_mentions(
+        question=question,
+        recent_mentions=recent_mentions,
+    )
+    if mention_anchor is not None:
+        return mention_anchor
+
     return None
-
-
-def anchor_to_seed_map(anchor: Optional[FocusEntity]) -> Dict[str, list[str]]:
-    if anchor is None:
-        return {}
-    seed_map = {
-        "pjt_id": [anchor.pjt_id] if anchor.pjt_id else [],
-        "pjt_no": [anchor.pjt_no] if anchor.pjt_no else [],
-        "rst_id": [anchor.rst_id] if anchor.rst_id else [],
-        "person_no": [anchor.person_no] if anchor.person_no else [],
-        "org_id": [anchor.org_id] if anchor.org_id else [],
-        "org_code": [anchor.org_code] if anchor.org_code else [],
-        "biz_no": [anchor.biz_no] if anchor.biz_no else [],
-        "doi": [anchor.doi] if anchor.doi else [],
-        "issn": [anchor.issn] if anchor.issn else [],
-    }
-    return {key: values for key, values in seed_map.items() if values}
+
+
+def anchor_to_seed_map(anchor: Optional[FocusEntity]) -> Dict[str, list[str]]:
+    if anchor is None:
+        return {}
+    seed_map = {
+        "pjt_id": [anchor.pjt_id] if anchor.pjt_id else [],
+        "pjt_no": [anchor.pjt_no] if anchor.pjt_no else [],
+        "rst_id": [anchor.rst_id] if anchor.rst_id else [],
+        "person_no": [anchor.person_no] if anchor.person_no else [],
+        "org_id": [anchor.org_id] if anchor.org_id else [],
+        "org_code": [anchor.org_code] if anchor.org_code else [],
+        "biz_no": [anchor.biz_no] if anchor.biz_no else [],
+        "doi": [anchor.doi] if anchor.doi else [],
+        "issn": [anchor.issn] if anchor.issn else [],
+    }
+    return {key: values for key, values in seed_map.items() if values}

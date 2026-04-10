@@ -52,6 +52,7 @@ _RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT = str(os.getenv("RAG_ENSURE_PAYLOAD_INDEX_ON_B
 
 APP_RUNTIME_CONFIG = AppRuntimeConfig(
     redis_url=REDIS_URL,
+    file_kv_root=str(os.getenv("FILE_KVSTORE_ROOT", "local_kvstore") or "local_kvstore").strip() or "local_kvstore",
     planner_stagewise_enabled=PLANNER_STAGEWISE_ENABLED,
     planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
     planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,

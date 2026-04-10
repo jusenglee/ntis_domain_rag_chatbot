@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -17,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, get_ori
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-
+os.getenv("RAG_DEBUG", "0")
 _ARRAY_PART_RE = re.compile(r"^(?P<k>.+)\[\]$")
 # ---------------------------------------------------------------------
 # Sparse (BM25) query support
@@ -50,10 +51,11 @@ def _safe_query_preview(text: str, *, max_len: int = 80) -> str:
 
 def _resolve_fastembed_cache_dir() -> Optional[str]:
     """fastembed 캐시 경로를 확보하고 생성 실패 시 None을 돌려준다."""
+    from apps.platform.settings import LOCAL_MODELS_ROOT
     raw = str(os.getenv("RAG_FASTEMBED_CACHE_DIR", "")).strip()
-    cache_dir = raw or "../../Models/hub/"
+    cache_dir = raw or str((Path(LOCAL_MODELS_ROOT) / "hub").resolve())
     try:
-        os.makedirs("../../Models/hub/", exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
     except Exception as e:
         logger.warning("[retrieval] fastembed cache dir unavailable (%s): %s", cache_dir, e)

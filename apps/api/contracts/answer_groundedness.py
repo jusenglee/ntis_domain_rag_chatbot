@@ -29,21 +29,42 @@ ClaimKind = Literal["project_id", "perf_id", "year", "org_name", "count"]
 BYPASS_ANSWER_KINDS = {"detail_cache", "detail_profile", "no_result", "clarification", "direct_answer", "error"}
 
 _PROJECT_ID_PATTERNS = (
-    re.compile(r"(?:pjt[_\s-]?id|project[_\s-]?id|과제\s*(?:id|번호))\s*(?:은|는|:|=)?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
+    re.compile(r"(?:pjt[_\s-]?id|project[_\s-]?id)\s*(?:[:=]\s*|\()\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
+    re.compile(r"(?:\uACFC\uC81C)\s*(?:id|\uBC88\uD638)\s*(?:\uC740|\uB294|[:=])?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
 )
 _PERF_ID_PATTERNS = (
-    re.compile(r"(?:rst[_\s-]?id|perf[_\s-]?id|성과\s*(?:id|번호))\s*(?:은|는|:|=)?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
+    re.compile(r"(?:rst[_\s-]?id|perf[_\s-]?id)\s*(?:[:=]\s*|\()\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
+    re.compile(r"(?:\uC131\uACFC)\s*(?:id|\uBC88\uD638)\s*(?:\uC740|\uB294|[:=])?\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
 )
 _YEAR_PATTERNS = (
-    re.compile(r"(?:연도|년도|year)\s*(?:은|는|:|=)?\s*(\d{4})(?:년)?", re.IGNORECASE),
+    re.compile(r"(?:\uC5F0\uB3C4|\uB144\uB3C4|year)\s*(?:\uC740|\uB294|[:=])?\s*((?:19|20)\d{2})", re.IGNORECASE),
+    re.compile(
+        r"((?:19|20)\d{2})\s*(?:\uB144|\uB144\uB3C4)\s*"
+        r"(?:\uC5D0|\uBD80\uD130|\uAE4C\uC9C0|\uAE30\uC900|\uC218\uD589|\uC9C4\uD589|\uC2DC\uC791|\uC885\uB8CC|\uC120\uC815|\uBC1C\uD589|\uC785\uB2C8\uB2E4|\uC785\uB2C8\uAE4C|\uC600\uC2B5\uB2C8\uB2E4|\uC774\uC5C8\uC2B5\uB2C8\uB2E4)",
+        re.IGNORECASE,
+    ),
 )
 _ORG_PATTERNS = (
-    re.compile(r"(?:주관기관|수행기관|참여기관|소속기관|소속)\s*(?:은|는|:|=)\s*([^\n\.,;]{2,60})", re.IGNORECASE),
+    re.compile(
+        r"(?:\uC8FC\uAD00\uAE30\uAD00|\uC218\uD589\uAE30\uAD00|\uCC38\uC5EC\uAE30\uAD00|\uC18C\uC18D\uAE30\uAD00|\uC18C\uC18D)\s*"
+        r"(?:\uC740|\uB294|[:=])?\s*([^\n\.,;]{2,60}?)(?=\s*(?:\uC785\uB2C8\uB2E4|\uC785\uB2C8\uAE4C|[\.,;\n]|$))",
+        re.IGNORECASE,
+    ),
 )
 _COUNT_PATTERNS = (
-    re.compile(r"(?:총|모두)\s*(\d+)\s*(?:건|개|명)(?:\s*(?:입니다|이다))?", re.IGNORECASE),
-    re.compile(r"(?:건수|개수|인원|참여기관\s*수|연구자\s*수)\s*(?:은|는|:|=)?\s*(\d+)", re.IGNORECASE),
-    re.compile(r"(\d+)\s*(?:건|개|명)\s*(?:입니다|이다)\b", re.IGNORECASE),
+    re.compile(r"(?:\uCD1D|\uBAA8\uB450)\s*(\d+)\s*(?:\uAC74|\uAC1C|\uBA85|\uC885)", re.IGNORECASE),
+    re.compile(r"(?:\uAC74\uC218|\uAC1C\uC218|\uC778\uC6D0)\s*(?:\uC740|\uB294|[:=])?\s*(\d+)", re.IGNORECASE),
+    re.compile(r"(?<!\d)(\d+)\s*(?:\uAC74|\uAC1C|\uBA85|\uC885)\s*(?:\uC785\uB2C8\uB2E4|\uC785\uB2C8\uAE4C|(?:\uC774|\uAC00)\s*\uC788\uC2B5\uB2C8\uB2E4)?", re.IGNORECASE),
+)
+_CLAIM_VALUE_SUFFIXES = (
+    "\uB85C \uD655\uC778\uB429\uB2C8\uB2E4",
+    "\uB85C \uBCF4\uC785\uB2C8\uB2E4",
+    "\uB85C \uD310\uB2E8\uB429\uB2C8\uB2E4",
+    "\uC785\uB2C8\uB2E4\uB9CC",
+    "\uC785\uB2C8\uB2E4",
+    "\uC785\uB2C8\uAE4C",
+    "\uC774\uC5C8\uC2B5\uB2C8\uB2E4",
+    "\uC600\uC2B5\uB2C8\uB2E4",
 )
 
 
@@ -88,7 +109,11 @@ def _dedupe_text(values: list[str]) -> list[str]:
 
 def _clean_claim_value(value: Any) -> str:
     text = " ".join(str(value or "").split()).strip().strip("'\"")
-    text = re.sub(r"\s*(?:입니다|이다|로 확인됩니다|로 보입니다|로 판단됩니다|으로 확인됩니다|입니다만).*$", "", text)
+    text = text.strip(" .,:;")
+    for suffix in _CLAIM_VALUE_SUFFIXES:
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].rstrip(" .,:;")
+            break
     return text.strip(" .,:;")
 
 

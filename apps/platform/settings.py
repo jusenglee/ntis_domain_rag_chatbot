@@ -45,15 +45,64 @@ def _get_env_float(name: str, default: float, *, min_value: float | None = None)
         raise ValueError(f"{name} must be >= {min_value}")
     return value
 
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_local_models_root() -> Path:
+    """Resolve the repository-local model asset root."""
+    raw = _get_env_str("NTIS_LOCAL_MODELS_ROOT", str(_REPO_ROOT / "Models"))
+    return Path(raw).expanduser().resolve()
+
+
+LOCAL_MODELS_ROOT = str(_resolve_local_models_root())
+
+
+def _local_models_path(*parts: str) -> str:
+    """Build an absolute path under the local model asset root."""
+    return str((Path(LOCAL_MODELS_ROOT).joinpath(*parts)).resolve())
+
+
+def _resolve_local_hf_model_snapshot(model_dir_name: str) -> str:
+    """Resolve a Hugging Face cache-style local model directory to a loadable snapshot."""
+    model_root = Path(LOCAL_MODELS_ROOT).joinpath(model_dir_name).resolve()
+    if not model_root.exists():
+        raise ValueError(f"Local model directory not found: {model_root}")
+
+    if (model_root / "config.json").exists():
+        return str(model_root)
+
+    ref_main = model_root / "refs" / "main"
+    if ref_main.exists():
+        snapshot_name = ref_main.read_text(encoding="utf-8").strip()
+        if not snapshot_name:
+            raise ValueError(f"Local model ref is empty: {ref_main}")
+        snapshot_dir = (model_root / "snapshots" / snapshot_name).resolve()
+        if (snapshot_dir / "config.json").exists():
+            return str(snapshot_dir)
+        raise ValueError(f"Local model snapshot missing config.json: {snapshot_dir}")
+
+    raise ValueError(
+        f"Local model directory is not directly loadable and has no refs/main snapshot pointer: {model_root}"
+    )
+
+
+def _get_env_or_local_model(env_name: str, default_model_dir_name: str) -> str:
+    """Return the explicit env override or resolve the repository-local snapshot default."""
+    raw = os.getenv(env_name)
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    return _resolve_local_hf_model_snapshot(default_model_dir_name)
+
 # Qdrant / Embedding (A)
-QDRANT_HOST  = _get_env_str("QDRANT_HOST", "qdrant-ntis3")
-QDRANT_PORT  = _get_env_int("QDRANT_PORT", 6334, min_value=1)
-EMBED_MODEL  = _get_env_str("EMBEDDING_MODEL", "../../Models/multilingual-e5-large-instruct")
+QDRANT_HOST  = _get_env_str("QDRANT_HOST", "203.250.234.159")
+QDRANT_PORT  = _get_env_int("QDRANT_PORT", 8005, min_value=1)
+EMBED_MODEL  = _get_env_or_local_model("EMBEDDING_MODEL", "multilingual-e5-large-instruct")
 
 # Qdrant / Embedding (B)
 QDRANT_HOST_B  = _get_env_str("QDRANT_HOST_B", QDRANT_HOST)
 QDRANT_PORT_B  = _get_env_int("QDRANT_PORT_B", QDRANT_PORT, min_value=1)
-EMBED_MODEL_B  = _get_env_str("EMBEDDING_MODEL_B", "../../Models/multilingual-e5-large")
+EMBED_MODEL_B  = _get_env_or_local_model("EMBEDDING_MODEL_B", "multilingual-e5-large")
 
 
 def _split_csv(value: str | None, default: list[str]) -> list[str]:
@@ -74,11 +123,11 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 )
 
 # Triton
-TRITON_URL         = _get_env_str("TRITON_URL", "triton_ntis3:8001")
+TRITON_URL         = _get_env_str("TRITON_URL", "203.250.234.159:8001")
 DEFAULT_MODEL_NAME = _get_env_str("TRITON_MODEL", "gpt_triton_0")
 TOKENIZER_MAP = {
-    "gemma_triton_0": "../../Models/gemma-3-27b-it",
-    "gpt_triton_0": "./Models/gpt-oss-120b",
+    "gemma_triton_0": _local_models_path("gemma-3-27b-it"),
+    "gpt_triton_0": _local_models_path("gpt-oss-120b"),
 }
 SOLAR_TOKENIZER_NAME_OR_PATH = _get_env_str("SOLAR_TOKENIZER_NAME_OR_PATH", _get_env_str("SOLAR_VLLM_MODEL", "/model"))
 
@@ -272,7 +321,7 @@ class SolarVLLMConfig:
         필수 필드가 비어 있으면 즉시 예외를 내 부트 오류를 명확히 드러내고, timeout은 실수 형식으로 정규화한다.
         """
         model_name = _get_env_str("SOLAR_VLLM_MODEL", "/model")
-        base_url = _get_env_str("SOLAR_VLLM_BASE_URL", "http://vllm_solar:8010/v1")
+        base_url = _get_env_str("SOLAR_VLLM_BASE_URL", "http://203.250.234.159:8010/v1")
         api_key = _get_env_str("SOLAR_VLLM_API_KEY", "EMPTY")
 
         if not model_name:

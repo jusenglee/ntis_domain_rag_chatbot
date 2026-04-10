@@ -252,6 +252,8 @@ def _evaluate_model_answer(
         answer_kind=answer_kind,
         evidence_snapshot=evidence_snapshot,
     )
+    if not bypass_like_answer and str((groundedness or {}).get("status") or "").strip().lower() == "unsupported":
+        fail_reasons.append("unsupported_groundedness")
     refusal_like_answer = (
         answer_kind in {"llm_streamed", "llm_collected"}
         and _looks_like_context_refusal(answer)

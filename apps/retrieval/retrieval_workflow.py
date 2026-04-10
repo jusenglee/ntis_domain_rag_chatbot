@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 
 from typing import Any, Dict, Optional
 
@@ -27,11 +27,14 @@ from apps.conversation.view_state import (
     DETAIL_CACHE_SCHEMA_VERSION,
     DetailCacheEntry,
     FocusEntity,
+    append_recent_mentions,
     build_display_snapshot,
     focus_entity_from_detail,
     get_active_subject_entity,
     index_focus_subjects,
     index_snapshot_subjects,
+    recent_mention_from_display_item,
+    recent_mention_from_focus_entity,
     set_active_child_anchor_scope,
     set_active_focus_scope,
     set_active_result_scope,
@@ -1958,6 +1961,17 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 snapshot=snapshot,
                 turn_id=turn_id,
             )
+            # --- recent_mentions: 목록 응답 시 상위 N개를 recent_mentions에 적재 ---
+            _list_mentions = [
+                recent_mention_from_display_item(
+                    item,
+                    source="list_snapshot",
+                    turn_index=idx,
+                )
+                for idx, item in enumerate(snapshot.items[:12])
+            ]
+            if _list_mentions:
+                view_state = append_recent_mentions(view_state, _list_mentions, max_items=12)
             view_state.last_query_contract = {
                 "action": str(_pick_attr(query_intent, qa, key="action", default="") or ""),
                 "output_type": output_type,
@@ -2098,6 +2112,12 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                     candidate_count=promotion_meta.get("candidate_count"),
                     identity_key=promotion_meta.get("identity_key"),
                 )
+                # --- recent_mentions: child anchor 승격 시에도 적재 ---
+                _child_mention = recent_mention_from_focus_entity(
+                    promoted_child_anchor,
+                    source="child_anchor",
+                )
+                view_state = append_recent_mentions(view_state, [_child_mention], max_items=12)
             _log_scope_transition(state=state, view_state=view_state)
 
 
@@ -2123,6 +2143,12 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                     focus=focus_entity,
                     turn_id=turn_id,
                 )
+                # --- recent_mentions: 상세 응답 시 현재 focus 1건을 적재 ---
+                _detail_mention = recent_mention_from_focus_entity(
+                    focus_entity,
+                    source="detail_focus",
+                )
+                view_state = append_recent_mentions(view_state, [_detail_mention], max_items=12)
                 log_event(
                     "FOCUS.ENTITY.SET",
                     request_id=state.request_id,
@@ -2266,6 +2292,94 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
         raise
 
 
+# ---------------------------------------------------------------------------
+# relax_and_retry: 0건 결과 시 필터를 점진적으로 완화하여 재검색하는 노드
+# ---------------------------------------------------------------------------
+
+# 1차 완화 대상: 사람/기관 필터 (가장 제한적인 조건)
+_RELAX_STAGE1_NI_FIELDS = {
+    "people_terms": [],
+    "org_terms": [],
+    "participant_org_terms": [],
+    "lead_org_terms": [],
+    "people_affiliation_org_terms": [],
+}
+_RELAX_STAGE1_QA_FILTER_KEYS = frozenset({
+    "participant_researcher_name",
+    "org_name",
+    "lead_org_name",
+    "participant_org_name",
+    "people_affiliation_org_name",
+})
+
+# 2차 완화 대상: 연도 필터까지 추가 제거
+_RELAX_STAGE2_NI_FIELDS = {
+    **_RELAX_STAGE1_NI_FIELDS,
+    "years": [],
+    "year_from": None,
+    "year_to": None,
+}
+_RELAX_STAGE2_QA_FILTER_KEYS = _RELAX_STAGE1_QA_FILTER_KEYS | frozenset({
+    "years",
+    "year_range",
+})
+
+
+async def node_relax_and_retry(state: Any) -> Dict[str, Any]:
+    """0건 결과 후 필터를 점진적으로 완화하여 재검색을 준비한다.
+
+    LLM 호출 없이 rule-based로 NormalizedIntent와 QuestionAnalysis의
+    필터 필드를 단계적으로 제거한다. 최대 2회 재시도를 지원하며,
+    기존 Contract(mode/action/relation)은 절대 변경하지 않는다.
+    """
+    retry_count = (getattr(state, "search_retry_count", 0) or 0) + 1
+    qa = state.question_analysis
+    ip = state.intent_payload
+    ni = ip.normalized_intent
+
+    # 단계별 완화 대상 선택
+    if retry_count <= 1:
+        ni_updates = dict(_RELAX_STAGE1_NI_FIELDS)
+        drop_keys = _RELAX_STAGE1_QA_FILTER_KEYS
+    else:
+        ni_updates = dict(_RELAX_STAGE2_NI_FIELDS)
+        drop_keys = _RELAX_STAGE2_QA_FILTER_KEYS
+
+    # --- NormalizedIntent 완화 (frozen dataclass → replace) ---
+    # 실제 존재하는 필드만 교체 (NormalizedIntent에 없는 키 방어)
+    safe_ni_updates = {k: v for k, v in ni_updates.items() if hasattr(ni, k)}
+    new_ni = dc_replace(ni, **safe_ni_updates) if safe_ni_updates else ni
+
+    # --- QuestionAnalysisV3 완화 (Pydantic → model_copy) ---
+    relaxed_filters = {k: v for k, v in (qa.filters or {}).items() if k not in drop_keys}
+    new_qa = qa.model_copy(update={"filters": relaxed_filters})
+
+    # --- IntentPayloadV3 재조립 (frozen dataclass → replace) ---
+    new_ip = dc_replace(ip, normalized_intent=new_ni, question_analysis=new_qa)
+
+    # 완화된 필드 목록 로깅
+    dropped_ni = sorted(k for k in safe_ni_updates if getattr(ni, k, None) != safe_ni_updates[k])
+    dropped_qa = sorted(k for k in drop_keys if k in (qa.filters or {}))
+
+    log_event(
+        "RELAX.RETRY",
+        request_id=getattr(state, "request_id", None),
+        conversation_id=getattr(state, "conversation_id", None),
+        retry_count=retry_count,
+        dropped_ni_fields=dropped_ni,
+        dropped_qa_filter_keys=dropped_qa,
+        original_retrieval_query=getattr(qa, "retrieval_query", None),
+        mode=getattr(qa, "mode", None),
+        action=getattr(qa, "action", None),
+    )
+
+    return {
+        "question_analysis": new_qa,
+        "intent_payload": new_ip,
+        "search_retry_count": retry_count,
+        "context": [],
+        "no_result_message": None,
+    }
 
 
 

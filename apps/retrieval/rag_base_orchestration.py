@@ -66,6 +66,8 @@ class BaseOrchestrationRequest:
     people_org_terms: Optional[List[str]]
     org_role: Optional[str]
     intent_payload: Any
+    use_dense_threshold: bool = False
+    min_dense_score: float = 0.0
     per_col_stats_log_tier: str = "normal"
     perf_followup_join_ids_count: int = 0
 
@@ -122,6 +124,25 @@ DENSE_SUPPORT = build_dense_runtime_support(
     strategy_violation_type=StrategyViolation,
     log_kv=log_kv,
 )
+
+
+def _bind_dense_threshold_policy(
+    apply_dense_threshold_fn: Any,
+    *,
+    use_dense_threshold: bool,
+    min_dense_score: float,
+) -> Any:
+    """Bind per-request dense-threshold policy into the shared runtime helper."""
+
+    def _bound(search_result: Dict[str, Any], **kwargs: Any) -> None:
+        apply_dense_threshold_fn(
+            search_result,
+            use_dense_threshold=bool(use_dense_threshold),
+            min_dense_score=float(min_dense_score),
+            **kwargs,
+        )
+
+    return _bound
 
 
 def _hydrate_points(points: List[Any], *, qdr: Any, chunk_size: int = 128) -> None:
@@ -260,7 +281,15 @@ def execute_base_orchestration(
             build_tag_only_filter=build_tag_only_filter,
             and_filter=and_filter,
             build_project_id_filter=build_project_id_filter,
-            with_org_must_gate=lambda base_filter: with_org_must_gate(base_filter, col=col),
+            with_org_must_gate=lambda base_filter: with_org_must_gate(
+                    base_filter,
+                    col=col,
+                    org_role=filter_policy_context.org_role,
+                    org_filter=filter_policy_context.org_filter,
+                    participant_org_filter=filter_policy_context.participant_org_filter,
+                    col_project=filter_policy_context.col_project,
+                    and_filter_fn=and_filter,
+                ),
             log_lookup_ids_empty=lambda **kwargs: log_kv("RAG.LOOKUP.IDS_MAP.EMPTY", build_project_id_filter="skip", tier="debug", **kwargs),
             log_project_key_filter=lambda **kwargs: log_kv("RAG.LOOKUP.PROJECT_KEY_FILTER", tier="debug", **kwargs),
         )
@@ -274,6 +303,11 @@ def execute_base_orchestration(
     backfill_iteration = 0
     current_filtered_count = 0
     exhausted_backfill = False
+    apply_dense_threshold = _bind_dense_threshold_policy(
+        DENSE_SUPPORT.apply_dense_threshold,
+        use_dense_threshold=bool(request.use_dense_threshold),
+        min_dense_score=float(request.min_dense_score or 0.0),
+    )
     sources: List[Any] = []
     merged_rrf: List[Any] = []
     per_col_stats: Dict[str, Dict[str, float]] = {}
@@ -316,7 +350,7 @@ def execute_base_orchestration(
             topk_lex=topk_lex,
             call_dense_retrieve_hybrid_multi=DENSE_SUPPORT.call_dense_retrieve_hybrid_multi,
             validate_lookup_join_hybrid_metrics=DENSE_SUPPORT.validate_lookup_join_hybrid_metrics,
-            apply_dense_threshold=DENSE_SUPPORT.apply_dense_threshold,
+            apply_dense_threshold=apply_dense_threshold,
             ensure_collection_mark=DENSE_SUPPORT.ensure_collection_mark,
             log_kv=log_kv,
             log_section=log_section,

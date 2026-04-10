@@ -172,6 +172,27 @@ class ActiveScope(BaseModel):
     scope_kind: Literal["list", "detail", "child", "fresh"] = "fresh"
 
 
+class RecentMentionRecord(BaseModel):
+    """retrieval 결과에서 추출한 최근 언급 엔티티 레코드.
+
+    답변 텍스트 파싱이 아니라 구조화된 retrieval state에서만 생성한다.
+    """
+    entity_kind: Literal["project", "perf", "people", "org"]
+    title_text: Optional[str] = None
+    pjt_id: Optional[str] = None
+    pjt_no: Optional[str] = None
+    rst_id: Optional[str] = None
+    doi: Optional[str] = None
+    issn: Optional[str] = None
+    year: Optional[str] = None
+    lead_org: Optional[str] = None
+    participant_org: List[str] = Field(default_factory=list)
+    researchers: List[str] = Field(default_factory=list)
+    source: Literal["list_snapshot", "detail_focus", "child_anchor"] = "list_snapshot"
+    display_rank: Optional[int] = None
+    turn_index: Optional[int] = None
+
+
 class ConversationViewState(BaseModel):
     visible_answer_manifest: Optional[DisplaySnapshot] = None
     active_scope: ActiveScope = Field(default_factory=ActiveScope)
@@ -186,6 +207,7 @@ class ConversationViewState(BaseModel):
     entity_scope: Optional[str] = None
     refinement_history: List[Dict[str, Any]] = Field(default_factory=list)
     last_query_contract: Dict[str, Any] = Field(default_factory=dict)
+    recent_mentions: List[RecentMentionRecord] = Field(default_factory=list)
 
 
 def load_view_state(payload: Any) -> ConversationViewState:
@@ -1463,3 +1485,107 @@ def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_cha
         if max_chars > 0 and len(joined) >= max_chars:
             return joined[:max_chars]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# recent_mentions helpers
+# ---------------------------------------------------------------------------
+
+def _mention_dedup_key(m: RecentMentionRecord) -> str:
+    """중복 판별용 키. project는 pjt_id 우선, perf는 rst_id/doi/issn 우선."""
+    kind = str(m.entity_kind or "").strip().lower()
+    if kind == "project":
+        return f"project:{m.pjt_id or ''}/{m.pjt_no or ''}"
+    if kind == "perf":
+        return f"perf:{m.rst_id or ''}/{m.doi or ''}/{m.issn or ''}"
+    if kind == "people":
+        return f"people:{m.title_text or ''}"
+    if kind == "org":
+        return f"org:{m.lead_org or ''}/{m.title_text or ''}"
+    return f"{kind}:{m.title_text or ''}"
+
+
+def recent_mention_from_display_item(
+    item: DisplayItem,
+    *,
+    source: Literal["list_snapshot", "detail_focus", "child_anchor"] = "list_snapshot",
+    turn_index: Optional[int] = None,
+) -> RecentMentionRecord:
+    """DisplayItem에서 RecentMentionRecord를 생성한다."""
+    return RecentMentionRecord(
+        entity_kind=_normalize_kind(item.entity_kind, default="project"),  # type: ignore[arg-type]
+        title_text=_first_text(item.title_text),
+        pjt_id=_first_text(item.pjt_id),
+        pjt_no=_first_text(item.pjt_no),
+        rst_id=_first_text(item.rst_id),
+        doi=_first_text(item.doi),
+        issn=_first_text(item.issn),
+        year=str(item.year) if item.year is not None else None,
+        lead_org=_first_text(item.lead_org),
+        participant_org=list(item.participant_org or []),
+        researchers=list(item.researchers or []),
+        source=source,
+        display_rank=item.display_rank,
+        turn_index=turn_index,
+    )
+
+
+def recent_mention_from_focus_entity(
+    focus: FocusEntity,
+    *,
+    source: Literal["list_snapshot", "detail_focus", "child_anchor"] = "detail_focus",
+    turn_index: Optional[int] = None,
+) -> RecentMentionRecord:
+    """FocusEntity에서 RecentMentionRecord를 생성한다."""
+    return RecentMentionRecord(
+        entity_kind=_normalize_kind(focus.kind, default="project"),  # type: ignore[arg-type]
+        title_text=_first_text(focus.title_text),
+        pjt_id=_first_text(focus.pjt_id),
+        pjt_no=_first_text(focus.pjt_no),
+        rst_id=_first_text(focus.rst_id),
+        doi=_first_text(focus.doi),
+        issn=_first_text(focus.issn),
+        year=str(focus.year) if focus.year is not None else None,
+        lead_org=_first_text(focus.lead_org),
+        participant_org=list(focus.participant_org or []),
+        researchers=list(focus.researchers or []),
+        source=source,
+        display_rank=focus.display_rank,
+        turn_index=turn_index,
+    )
+
+
+def append_recent_mentions(
+    view_state: ConversationViewState,
+    mentions: List[RecentMentionRecord],
+    *,
+    max_items: int = 12,
+) -> ConversationViewState:
+    """view_state.recent_mentions에 mentions를 머지하여 추가한다.
+
+    동일 entity는 최신 레코드로 교체하고, 최대 max_items개만 유지한다.
+    """
+    existing = list(view_state.recent_mentions or [])
+    existing_by_key: Dict[str, RecentMentionRecord] = {}
+    for m in existing:
+        existing_by_key[_mention_dedup_key(m)] = m
+
+    for m in mentions:
+        existing_by_key[_mention_dedup_key(m)] = m
+
+    merged = list(existing_by_key.values())[-max_items:]
+    return view_state.model_copy(update={"recent_mentions": merged})
+
+
+def get_recent_mentions(
+    view_state: Optional[ConversationViewState],
+    entity_kind: Optional[str] = None,
+) -> List[RecentMentionRecord]:
+    """view_state에서 recent_mentions를 반환한다. entity_kind로 필터 가능."""
+    if view_state is None:
+        return []
+    mentions = list(getattr(view_state, "recent_mentions", []) or [])
+    if entity_kind:
+        kind = str(entity_kind).strip().lower()
+        mentions = [m for m in mentions if str(m.entity_kind or "").strip().lower() == kind]
+    return mentions
