@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from apps.planner.query_intent import normalize_korean_temporal_years
+
 from apps.conversation.followup_anchor import (
     _RELATIVE_LAST_PATTERNS as _LAST_PATTERNS,
     _RELATIVE_FIRST_PATTERNS as _FIRST_PATTERNS,
@@ -133,10 +135,15 @@ def _deterministic_resolve(
                     reason="ordinal_reference",
                 )
 
-    # "2025년꺼" — 연도 축 보조 해석
+    # "2025년꺼" / "올해꺼" / "작년 것" — 연도 축 보조 해석
     year_match = _YEAR_PATTERN.search(text)
+    temporal_years = normalize_korean_temporal_years(text) if not year_match else []
+    year_str: str | None = None
     if year_match:
         year_str = year_match.group(1)
+    elif temporal_years:
+        year_str = temporal_years[0]
+    if year_str:
         year_filtered = _filter_by_year(filtered, year_str)
         if len(year_filtered) == 1:
             return ContextRouterDecision(

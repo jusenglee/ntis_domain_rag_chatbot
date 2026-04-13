@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -234,9 +235,61 @@ def normalize_org_terms(values: Any) -> List[str]:
     return out
 
 
-def extract_years(q: str) -> List[str]:
-    """질의 문자열에서 연도만 추출해 최대 4개까지 유지한다."""
+
+
+# ── 한국어 시간 표현 → 절대 연도 ──────────────────────────
+_KOREAN_RELATIVE_YEAR_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    # 긴 표현 우선: "재작년" → -2 를 "작년" → -1 보다 먼저 매칭
+    (re.compile(r"올\s*해"), 0),
+    (re.compile(r"재\s*작\s*년"), -2),
+    (re.compile(r"(?<!재)(?:작|전)\s*년\s*도?"), -1),
+    (re.compile(r"내\s*년\s*도?"), 1),
+]
+_KOREAN_RECENT_N_YEARS_RE = re.compile(r"최근\s*(\d{1,2})\s*(?:년|개년|년간|년도)")
+
+
+def normalize_korean_temporal_years(text: str, *, reference_year: int | None = None) -> list[str]:
+    """한국어 상대 시간 표현을 절대 연도 문자열 리스트로 변환한다.
+
+    >>> normalize_korean_temporal_years("올해 과제", reference_year=2026)
+    ['2026']
+    >>> normalize_korean_temporal_years("최근 3년 추세", reference_year=2026)
+    ['2024', '2025', '2026']
+    """
+    ref = reference_year or date.today().year
+    years: list[str] = []
+
+    for pattern, offset in _KOREAN_RELATIVE_YEAR_PATTERNS:
+        if pattern.search(text or ""):
+            years.append(str(ref + offset))
+
+    m = _KOREAN_RECENT_N_YEARS_RE.search(text or "")
+    if m:
+        n = int(m.group(1))
+        years.extend(str(ref - i) for i in range(n - 1, -1, -1))
+
+    # deduplicate while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for y in years:
+        if y not in seen:
+            seen.add(y)
+            result.append(y)
+    return result
+
+
+def extract_years(q: str, *, reference_year: int | None = None) -> List[str]:
+    """질의 문자열에서 연도를 추출한다.
+
+    4자리 숫자 연도와 한국어 상대 시간 표현(올해, 작년, 최근 N년 등)을
+    모두 인식하며, 최대 4개까지 반환한다.
+    """
     years: List[str] = []
+    # 한국어 상대 시간 표현 우선 처리
+    for y in normalize_korean_temporal_years(q, reference_year=reference_year):
+        if y not in years:
+            years.append(y)
+    # 기존 4자리 숫자 연도 추출
     for match in _YEAR_RE.finditer(q or ""):
         year = match.group(1)
         if year not in years:

@@ -19,7 +19,7 @@ from apps.conversation.followup_resolution import resolve_reference_context_foll
 from apps.conversation.turn_policy import TurnPolicyResult, resolve_turn_policy
 from apps.conversation.turn_trigger import TurnTriggerResult, run_turn_trigger
 from apps.platform.settings import MAX_TOP_K_SIZE
-from apps.api.runtime_helpers import has_superlative_cue, log_event
+from apps.api.runtime_helpers import log_event
 from apps.planner.planner_defaults import (
     PLANNER_STAGE1_PROMPT_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
@@ -1293,7 +1293,6 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
 
 def _build_explicit_only_hint(question: str) -> Dict[str, Any]:
     return {
-        "wants_rank": has_superlative_cue(question),
         "years": extract_years(question),
         "perf_types": extract_perf_types(question),
         "title_terms": extract_title_terms(question),

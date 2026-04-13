@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from apps.planner.query_intent import normalize_korean_temporal_years
+
 
 _COUNT_SUFFIXES = ("\uac1c", "\uac74", "\uba85", "\ud3b8", "\uc885")
 _ORDINAL_SUFFIXES = ("\ubc88", "\ubc88\uc9f8")
@@ -102,6 +104,10 @@ def _scan_ordinal_ref(question: str) -> int | None:
 def _scan_years(question: str, normalized_intent: Any) -> list[str]:
     existing = [str(value).strip() for value in (getattr(normalized_intent, "years", None) or []) if str(value).strip()]
     years = list(existing)
+    # 한국어 상대 시간 표현 → 절대 연도
+    for y in normalize_korean_temporal_years(question):
+        years.append(y)
+    # 기존 4자리 숫자 연도 추출
     for token in _tokenize(question):
         if token.endswith(_YEAR_SUFFIXES):
             number = token[:-1].strip()
