@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from apps.conversation.followup_anchor import (
+    _RELATIVE_LAST_PATTERNS as _LAST_PATTERNS,
+    _RELATIVE_FIRST_PATTERNS as _FIRST_PATTERNS,
+    _RELATIVE_ORDINAL_PATTERNS as _ORDINAL_PATTERNS,
+    _is_temporal_choegeun,
+)
 from apps.conversation.view_state import RecentMentionRecord
 
 logger = logging.getLogger("Chatbot_Server")
@@ -32,21 +38,9 @@ class ContextRouterDecision(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Deterministic matchers
+# Deterministic matchers (공유 패턴은 followup_anchor에서 import)
 # ---------------------------------------------------------------------------
 
-_LAST_PATTERNS = (
-    re.compile(r"마지막\s*(?:과제|프로젝트|논문|특허|성과|보고서|결과|항목|것)?"),
-    re.compile(r"맨\s*마지막"),
-    re.compile(r"최근\s*(?:과제|프로젝트|논문|특허|성과|보고서|결과|항목|것)?"),
-    re.compile(r"방금\s*(?:본|검색한|조회한|과제|프로젝트)?\s*(?:과제|프로젝트|논문|것)?"),
-)
-_FIRST_PATTERNS = (
-    re.compile(r"(?:제\s*)?첫\s*(?:번째)?\s*(?:과제|프로젝트|논문|성과|결과|항목)?"),
-)
-_ORDINAL_PATTERNS = (
-    re.compile(r"(?:제\s*)?(\d{1,3})\s*번째\s*(?:과제|프로젝트|논문|성과|결과|항목)"),
-)
 _DEICTIC_PROJECT = (
     re.compile(r"그\s*과제"),
     re.compile(r"이\s*과제"),
@@ -99,9 +93,12 @@ def _deterministic_resolve(
     if not filtered:
         filtered = candidates
 
-    # "마지막/최근/방금" → 마지막 항목
+    # "마지막/최근/방금" → 마지막 항목 (최근 temporal guard 적용)
+    temporal_guard = _is_temporal_choegeun(text)
     for pattern in _LAST_PATTERNS:
         if pattern.search(text):
+            if temporal_guard and "최근" in pattern.pattern:
+                continue
             idx = len(filtered) - 1
             return ContextRouterDecision(
                 status="resolved",

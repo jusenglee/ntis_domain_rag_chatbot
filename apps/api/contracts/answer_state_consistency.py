@@ -47,6 +47,14 @@ class AnswerStateSnapshot(BaseModel):
     ordered_items: list[AnswerStateSnapshotItem] = Field(default_factory=list)
 
 
+class AnswerStateConsistencyPolicy(BaseModel):
+    policy_name: str = "exact_count"
+    enforce_exact_count: bool = True
+    allow_prefix_subset: bool = False
+    min_required_items: int = 1
+    allow_manifest_publish_on_subset: bool = False
+
+
 class AnswerStateConsistencyVerdict(BaseModel):
     status: AnswerStateConsistencyStatus
     reason_codes: list[str] = Field(default_factory=list)
@@ -58,6 +66,11 @@ class AnswerStateConsistencyVerdict(BaseModel):
     mismatch_reason: Optional[str] = None
     parsed_titles_preview: list[str] = Field(default_factory=list)
     snapshot_titles_preview: list[str] = Field(default_factory=list)
+    policy_name: str = "exact_count"
+    subset_accepted: bool = False
+    manifest_publish_allowed: bool = False
+    accepted_item_count: int = 0
+    required_visible_count: int = 0
 
 
 class _ParsedAnswerItem(BaseModel):
@@ -289,9 +302,19 @@ def _build_consistency_verdict(
     parsed_items: list[_ParsedAnswerItem] | None = None,
     declared_count: Optional[int] = None,
     mismatch_reason: Optional[str] = None,
+    policy: AnswerStateConsistencyPolicy | None = None,
+    subset_accepted: bool = False,
+    manifest_publish_allowed: Optional[bool] = None,
 ) -> AnswerStateConsistencyVerdict:
     parsed = list(parsed_items or [])
     normalized_snapshot = snapshot or AnswerStateSnapshot(available=False, snapshot_source="none")
+    normalized_policy = policy or AnswerStateConsistencyPolicy()
+    accepted = status == "supported"
+    publish_allowed = (
+        bool(manifest_publish_allowed)
+        if manifest_publish_allowed is not None
+        else bool(accepted and (not subset_accepted or normalized_policy.allow_manifest_publish_on_subset))
+    )
     return AnswerStateConsistencyVerdict(
         status=status,
         reason_codes=list(reason_codes or []),
@@ -305,6 +328,11 @@ def _build_consistency_verdict(
         snapshot_titles_preview=_titles_preview(
             [item.title_text for item in list(normalized_snapshot.ordered_items or [])]
         ),
+        policy_name=str(normalized_policy.policy_name or "exact_count").strip().lower() or "exact_count",
+        subset_accepted=bool(accepted and subset_accepted),
+        manifest_publish_allowed=bool(publish_allowed),
+        accepted_item_count=(len(parsed) if accepted else 0),
+        required_visible_count=int(normalized_snapshot.visible_count or 0),
     )
 
 
@@ -360,6 +388,14 @@ def _assign_snapshot_indices(
     if not _backtrack(0):
         return None
     return [int(index) for index in assignments if index is not None]
+
+
+def _normalize_state_consistency_policy(
+    source: AnswerStateConsistencyPolicy | dict[str, Any] | None,
+) -> AnswerStateConsistencyPolicy:
+    if isinstance(source, AnswerStateConsistencyPolicy):
+        return source
+    return AnswerStateConsistencyPolicy.model_validate(source or {})
 
 
 def build_state_snapshot_from_result_set(result_set: Any) -> AnswerStateSnapshot:
@@ -422,9 +458,11 @@ def evaluate_answer_state_consistency(
     answer_text: str,
     answer_kind: str,
     state_snapshot: AnswerStateSnapshot | dict[str, Any] | None,
+    state_policy: AnswerStateConsistencyPolicy | dict[str, Any] | None = None,
 ) -> AnswerStateConsistencyVerdict:
-    if answer_kind in BYPASS_ANSWER_KINDS:
-        return _build_consistency_verdict(status="not_applicable")
+    policy = _normalize_state_consistency_policy(state_policy)
+    if policy.policy_name == "bypass" or answer_kind in BYPASS_ANSWER_KINDS:
+        return _build_consistency_verdict(status="not_applicable", policy=policy)
 
     snapshot = (
         state_snapshot
@@ -437,6 +475,7 @@ def evaluate_answer_state_consistency(
             reason_codes=["insufficient_snapshot"],
             snapshot=snapshot,
             mismatch_reason="insufficient_snapshot",
+            policy=policy,
         )
 
     parsed_items = _parse_answer_items(answer_text)
@@ -447,6 +486,7 @@ def evaluate_answer_state_consistency(
             snapshot=snapshot,
             declared_count=_extract_declared_count(answer_text),
             mismatch_reason="no_structured_list",
+            policy=policy,
         )
 
     declared_count = _extract_declared_count(answer_text)
@@ -467,8 +507,46 @@ def evaluate_answer_state_consistency(
             parsed_items=parsed_items,
             declared_count=declared_count,
             mismatch_reason="declared_count_mismatch",
+            policy=policy,
         )
-    if len(parsed_items) != visible_count:
+    if len(parsed_items) > visible_count:
+        return _build_consistency_verdict(
+            status="unsupported_count",
+            reason_codes=["unsupported_count"],
+            checked_items=len(parsed_items),
+            mismatches=[
+                AnswerStateMismatch(
+                    reason="item_count_exceeds_visible_count",
+                    expected_rank=visible_count,
+                    observed_rank=len(parsed_items),
+                )
+            ],
+            snapshot=snapshot,
+            parsed_items=parsed_items,
+            declared_count=declared_count,
+            mismatch_reason="item_count_exceeds_visible_count",
+            policy=policy,
+        )
+    min_required_items = max(1, int(policy.min_required_items or 1))
+    if len(parsed_items) < min_required_items:
+        return _build_consistency_verdict(
+            status="unsupported_count",
+            reason_codes=["unsupported_count"],
+            checked_items=len(parsed_items),
+            mismatches=[
+                AnswerStateMismatch(
+                    reason="below_min_required_items",
+                    expected_rank=min_required_items,
+                    observed_rank=len(parsed_items),
+                )
+            ],
+            snapshot=snapshot,
+            parsed_items=parsed_items,
+            declared_count=declared_count,
+            mismatch_reason="below_min_required_items",
+            policy=policy,
+        )
+    if bool(policy.enforce_exact_count) and len(parsed_items) != visible_count:
         return _build_consistency_verdict(
             status="unsupported_count",
             reason_codes=["unsupported_count"],
@@ -484,12 +562,14 @@ def evaluate_answer_state_consistency(
             parsed_items=parsed_items,
             declared_count=declared_count,
             mismatch_reason="item_count_mismatch",
+            policy=policy,
         )
 
     same_rank_supported = True
     mismatches: list[AnswerStateMismatch] = []
+    comparison_items = list(snapshot.ordered_items[: len(parsed_items)])
     for index, parsed_item in enumerate(parsed_items):
-        expected_item = snapshot.ordered_items[index]
+        expected_item = comparison_items[index]
         if not _item_identity_matches(parsed_item, expected_item):
             same_rank_supported = False
             mismatches.append(
@@ -506,12 +586,16 @@ def evaluate_answer_state_consistency(
             )
 
     if same_rank_supported:
+        subset_accepted = len(parsed_items) != visible_count
         return _build_consistency_verdict(
             status="supported",
             checked_items=len(parsed_items),
             snapshot=snapshot,
             parsed_items=parsed_items,
             declared_count=declared_count,
+            mismatch_reason=("prefix_subset_accepted" if subset_accepted else None),
+            policy=policy,
+            subset_accepted=subset_accepted,
         )
 
     assignments = _assign_snapshot_indices(parsed_items, snapshot.ordered_items)
@@ -525,6 +609,7 @@ def evaluate_answer_state_consistency(
             parsed_items=parsed_items,
             declared_count=declared_count,
             mismatch_reason="unsupported_item_identity",
+            policy=policy,
         )
 
     if any(assigned_index != index for index, assigned_index in enumerate(assignments)):
@@ -551,6 +636,7 @@ def evaluate_answer_state_consistency(
             parsed_items=parsed_items,
             declared_count=declared_count,
             mismatch_reason="unsupported_order",
+            policy=policy,
         )
 
     return _build_consistency_verdict(
@@ -562,4 +648,5 @@ def evaluate_answer_state_consistency(
         parsed_items=parsed_items,
         declared_count=declared_count,
         mismatch_reason="unsupported_item_identity",
+        policy=policy,
     )

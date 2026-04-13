@@ -15,6 +15,7 @@ from apps.api.contracts.answer_groundedness import (
     evaluate_answer_groundedness,
 )
 from apps.api.contracts.answer_state_consistency import (
+    AnswerStateConsistencyPolicy,
     AnswerStateConsistencyVerdict,
     evaluate_answer_state_consistency,
 )
@@ -129,16 +130,32 @@ def _evaluate_state_consistency(
     answer_text: str,
     answer_kind: str,
     state_snapshot: dict[str, Any] | None,
+    state_policy: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return evaluate_answer_state_consistency(
         answer_text=answer_text,
         answer_kind=answer_kind,
         state_snapshot=state_snapshot,
+        state_policy=state_policy,
     ).model_dump()
 
 
 def _is_state_supported(verdict: dict[str, Any] | None) -> bool:
     return str((verdict or {}).get("status") or "").strip().lower() == "supported"
+
+
+def _state_support_rank(verdict: dict[str, Any] | None) -> int:
+    if not _is_state_supported(verdict):
+        return 0
+    return 2 if bool((verdict or {}).get("manifest_publish_allowed")) else 1
+
+
+def _state_selection_reason(model_name: str, verdict: dict[str, Any] | None) -> str:
+    return (
+        f"{model_name}_state_publishable"
+        if bool((verdict or {}).get("manifest_publish_allowed"))
+        else f"{model_name}_state_partial"
+    )
 
 
 def _pick_stricter_state_consistency(
@@ -289,6 +306,7 @@ def select_final_answer(
     evidence_snapshot: dict[str, Any] | None = None,
     protect_visible_order: bool = False,
     state_consistency_snapshot: dict[str, Any] | None = None,
+    state_consistency_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select the final answer from Solar/Gemma outputs and streamed metadata."""
     solar_eval = _evaluate_model_answer(
@@ -320,15 +338,18 @@ def select_final_answer(
             answer_text=solar_answer,
             answer_kind=solar_eval["answer_kind"],
             state_snapshot=state_consistency_snapshot,
+            state_policy=state_consistency_policy,
         )
         gemma_state_consistency = _evaluate_state_consistency(
             answer_text=gemma_answer,
             answer_kind=gemma_eval["answer_kind"],
             state_snapshot=state_consistency_snapshot,
+            state_policy=state_consistency_policy,
         )
     else:
-        solar_state_consistency = AnswerStateConsistencyVerdict(status="not_applicable").model_dump()
-        gemma_state_consistency = AnswerStateConsistencyVerdict(status="not_applicable").model_dump()
+        policy_payload = AnswerStateConsistencyPolicy(policy_name="bypass", enforce_exact_count=False).model_dump()
+        solar_state_consistency = AnswerStateConsistencyVerdict(status="not_applicable", policy_name=policy_payload["policy_name"]).model_dump()
+        gemma_state_consistency = AnswerStateConsistencyVerdict(status="not_applicable", policy_name=policy_payload["policy_name"]).model_dump()
     state_guard_applies = (
         bool(protect_visible_order)
         and bool((state_consistency_snapshot or {}).get("available"))
@@ -337,19 +358,19 @@ def select_final_answer(
             for verdict in (solar_state_consistency, gemma_state_consistency)
         )
     )
-    solar_state_safe = solar_valid and _is_state_supported(solar_state_consistency)
-    gemma_state_safe = gemma_valid and _is_state_supported(gemma_state_consistency)
+    solar_state_rank = _state_support_rank(solar_state_consistency) if solar_valid else 0
+    gemma_state_rank = _state_support_rank(gemma_state_consistency) if gemma_valid else 0
 
-    if state_guard_applies and solar_state_safe != gemma_state_safe:
-        if solar_state_safe:
+    if state_guard_applies and solar_state_rank != gemma_state_rank:
+        if solar_state_rank > gemma_state_rank:
             selected_model = "solar"
             selected_answer = solar_answer
-            selection_reason = "solar_state_consistent"
+            selection_reason = _state_selection_reason("solar", solar_state_consistency)
         else:
             selected_model = "gemma"
             selected_answer = gemma_answer
-            selection_reason = "gemma_state_consistent"
-    elif state_guard_applies and not solar_state_safe and not gemma_state_safe:
+            selection_reason = _state_selection_reason("gemma", gemma_state_consistency)
+    elif state_guard_applies and solar_state_rank == 0 and gemma_state_rank == 0:
         selected_model = "fallback"
         selected_answer = fallback_message
         selection_reason = "both_models_state_inconsistent"
@@ -418,6 +439,7 @@ def select_final_answer(
         "solar_state_consistency": dict(solar_state_consistency),
         "gemma_state_consistency": dict(gemma_state_consistency),
         "state_consistency_snapshot": dict(state_consistency_snapshot or {}),
+        "state_consistency_policy": dict(state_consistency_policy or {}),
         "selected_state_consistency": _pick_stricter_state_consistency(
             solar_state_consistency if selected_model == "solar" else None,
             gemma_state_consistency if selected_model == "gemma" else None,

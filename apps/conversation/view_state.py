@@ -1492,10 +1492,17 @@ def render_display_snapshot_text(snapshot: Optional[DisplaySnapshot], *, max_cha
 # ---------------------------------------------------------------------------
 
 def _mention_dedup_key(m: RecentMentionRecord) -> str:
-    """중복 판별용 키. project는 pjt_id 우선, perf는 rst_id/doi/issn 우선."""
+    """중복 판별용 키. project는 pjt_id 우선 → pjt_no fallback, perf는 rst_id/doi/issn 우선."""
     kind = str(m.entity_kind or "").strip().lower()
     if kind == "project":
-        return f"project:{m.pjt_id or ''}/{m.pjt_no or ''}"
+        # pjt_id가 있으면 pjt_id 기준, 없으면 pjt_no 기준
+        # 이렇게 하면 pjt_no만 있던 레코드가 pjt_id를 갖게 되었을 때 키가 달라져도
+        # append_recent_mentions의 secondary match에서 병합된다
+        if m.pjt_id:
+            return f"project:id={m.pjt_id}"
+        if m.pjt_no:
+            return f"project:no={m.pjt_no}"
+        return f"project:title={m.title_text or ''}"
     if kind == "perf":
         return f"perf:{m.rst_id or ''}/{m.doi or ''}/{m.issn or ''}"
     if kind == "people":
@@ -1571,7 +1578,13 @@ def append_recent_mentions(
         existing_by_key[_mention_dedup_key(m)] = m
 
     for m in mentions:
-        existing_by_key[_mention_dedup_key(m)] = m
+        new_key = _mention_dedup_key(m)
+        # secondary match: pjt_id가 새로 확보된 경우 기존 pjt_no-only 레코드를 교체
+        if m.entity_kind == "project" and m.pjt_id and m.pjt_no:
+            stale_key = f"project:no={m.pjt_no}"
+            if stale_key in existing_by_key and stale_key != new_key:
+                del existing_by_key[stale_key]
+        existing_by_key[new_key] = m
 
     merged = list(existing_by_key.values())[-max_items:]
     return view_state.model_copy(update={"recent_mentions": merged})

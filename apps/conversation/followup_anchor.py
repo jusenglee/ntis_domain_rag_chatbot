@@ -60,6 +60,8 @@ _DEICTIC_PATTERNS = {
     "generic": (
         re.compile("그\\s*(?:항목|결과|이거|이것)"),
         re.compile("이\\s*(?:항목|결과|것)"),
+        re.compile("그거"),
+        re.compile("이전\\s*(?:결과|것)"),
         re.compile(r"\b(?:that|this|the)\s+(?:item|result|entry|one)\b", re.IGNORECASE),
     ),
 }
@@ -415,8 +417,23 @@ _RELATIVE_FIRST_PATTERNS = (
     re.compile(r"(?:제\s*)?첫\s*(?:번째)?\s*(?:과제|프로젝트|논문|성과|결과|항목)?"),
 )
 _RELATIVE_ORDINAL_PATTERNS = (
-    re.compile(r"(?:제\s*)?(\d{1,3})\s*번째\s*(?:과제|프로젝트|논문|성과|결과|항목)"),
+    re.compile(r"(?:제\s*)?(\d{1,3})\s*번째\s*(?:과제|프로젝트|논문|성과|결과|항목)?"),
 )
+
+# "최근"이 시간축/필터 의미로 쓰인 경우를 배제하는 가드 패턴
+_CHOEGEUN_TEMPORAL_EXCLUSIONS = (
+    re.compile(r"최근\s*\d+\s*(?:년|개월|일|주|건)"),       # "최근 3년", "최근 5건"
+    re.compile(r"최근\s*(?:에|들어|동안|까지|부터)"),        # "최근에", "최근 들어"
+    re.compile(r"최근\s*(?:추세|동향|트렌드|변화|현황)"),    # "최근 동향" 등 temporal context
+)
+
+
+def _is_temporal_choegeun(text: str) -> bool:
+    """'최근'이 시간축/필터 의미로 쓰였는지 판별한다.
+
+    True이면 "최근"을 relative-last 참조로 해석해서는 안 된다.
+    """
+    return any(pat.search(text) for pat in _CHOEGEUN_TEMPORAL_EXCLUSIONS)
 
 
 def parse_relative_reference(question: str) -> Optional[Dict[str, Any]]:
@@ -431,8 +448,12 @@ def parse_relative_reference(question: str) -> Optional[Dict[str, Any]]:
     text = str(question or "").strip()
     if not text:
         return None
+    temporal_guard = _is_temporal_choegeun(text)
     for pattern in _RELATIVE_LAST_PATTERNS:
         if pattern.search(text):
+            # "최근" 패턴이 시간축 의미인 경우 relative-last 해석 방지
+            if temporal_guard and "최근" in pattern.pattern:
+                continue
             return {"position": "last"}
     for pattern in _RELATIVE_FIRST_PATTERNS:
         if pattern.search(text):
@@ -467,7 +488,7 @@ def _detect_entity_kind_from_question(question: str) -> Optional[str]:
     return None
 
 
-def _focus_entity_from_mention(mention: RecentMentionRecord) -> FocusEntity:
+def focus_entity_from_mention(mention: RecentMentionRecord) -> FocusEntity:
     """RecentMentionRecord를 FocusEntity로 변환한다."""
     kind = str(mention.entity_kind or "project").strip().lower() or "project"
     year_int = None
@@ -524,18 +545,18 @@ def resolve_from_recent_mentions(
     if relative_ref:
         pos = relative_ref.get("position")
         if pos == "last":
-            return _focus_entity_from_mention(candidates[-1])
+            return focus_entity_from_mention(candidates[-1])
         if pos == "first":
-            return _focus_entity_from_mention(candidates[0])
+            return focus_entity_from_mention(candidates[0])
         if pos == "ordinal":
             idx = relative_ref.get("index", 1)
             if 1 <= idx <= len(candidates):
-                return _focus_entity_from_mention(candidates[idx - 1])
+                return focus_entity_from_mention(candidates[idx - 1])
             return None
 
     # deictic fallback: 후보가 1개면 즉시 확정
     if is_deictic and len(candidates) == 1:
-        return _focus_entity_from_mention(candidates[0])
+        return focus_entity_from_mention(candidates[0])
 
     return None
 

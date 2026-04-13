@@ -830,7 +830,7 @@ def resolve_scope_decision(
 
                             reason="recent_mention_ambiguity",
 
-                            message=f"최근 언급한 대상이 여러 개입니다: {candidates_text} 중 어느 것인가요?",
+                            message=f"최근 언급한 대상이 여러 개입니다: {candidates_text} — 번호나 제목으로 지정해 주세요.",
 
                             latest_snapshot=latest_snapshot,
 

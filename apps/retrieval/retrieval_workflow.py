@@ -281,6 +281,58 @@ def _extract_explicit_count(question: Any) -> Optional[int]:
     return None if count == _DISPLAY_LIMIT_SENTINEL else int(count)
 
 
+def _should_short_circuit_count_contract_clarification(strategy_meta: dict[str, Any]) -> bool:
+
+    status = str((strategy_meta or {}).get("count_contract_validation_status") or "").strip().lower()
+
+    return status == "invalid"
+
+
+def _build_count_contract_clarification_message(strategy_meta: dict[str, Any]) -> Optional[str]:
+
+    payload = dict((strategy_meta or {}).get("count_contract_clarification_payload") or {})
+
+    message = str(payload.get("message") or "").strip()
+
+    if message:
+
+        return message
+
+    reason = str(payload.get("reason") or (strategy_meta or {}).get("count_contract_invalid_reason") or "").strip().lower()
+
+    if reason == "explicit_count_mismatch":
+
+        return "질문에서 요청한 개수와 검색 계획의 표시 개수가 맞지 않아 답변을 진행하지 않습니다. 대상이나 개수를 다시 지정해 주세요."
+
+    if reason == "detail_count_contract_violation":
+
+        return "상세 조회는 한 대상을 기준으로만 진행할 수 있는데 검색 계획의 개수 계약이 맞지 않아 답변을 보류합니다. 대상을 하나로 지정해 다시 질문해 주세요."
+
+    return "요청한 표시 개수를 안정적으로 확인하지 못해 답변을 진행하지 않습니다. 대상이나 개수를 더 구체적으로 지정해 다시 질문해 주세요."
+
+
+def _build_count_contract_clarification_payload(strategy_meta: dict[str, Any]) -> Optional[dict[str, Any]]:
+
+    if not _should_short_circuit_count_contract_clarification(strategy_meta):
+
+        return None
+
+    payload = dict((strategy_meta or {}).get("count_contract_clarification_payload") or {})
+
+    if payload:
+
+        return payload
+
+    reason = str((strategy_meta or {}).get("count_contract_invalid_reason") or "").strip().lower() or "invalid_count_contract"
+
+    return {
+        "status": "clarification_required",
+        "clarification_type": "planner_count_contract",
+        "reason": reason,
+        "message": _build_count_contract_clarification_message(strategy_meta),
+    }
+
+
 
 
 
@@ -1009,7 +1061,7 @@ def _normalize_display_payloads(
 
     canonical_kind = "item_list"
 
-    fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+    fallback_threshold = int(requested_count or 0)
     promoted_canonical_axis = False
     if (
         str(output_type or "").strip().lower() in {"list", "relation", "comparison", "series", "stats"}
@@ -1053,7 +1105,7 @@ def _normalize_display_payloads(
 
         aligned_count = min(docs_count, canonical_count)
 
-        fallback_threshold = int(explicit_count or 0) if explicit_count is not None else int(requested_count or 0)
+        fallback_threshold = int(requested_count or 0)
 
         prefer_canonical = (
             str(output_type or "").strip().lower() == "list"
@@ -1162,6 +1214,35 @@ async def node_knowledge_sufficiency(state: Any) -> Dict[str, Any]:
     intent_payload = getattr(state, "intent_payload", None)
 
     strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
+
+    if _should_short_circuit_count_contract_clarification(strategy_meta):
+        no_result_message = _build_count_contract_clarification_message(strategy_meta)
+        clarification = _build_count_contract_clarification_payload(strategy_meta)
+        log_event(
+            "CLARIFICATION.ISSUED",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            clarification_type=(clarification or {}).get("clarification_type") if isinstance(clarification, dict) else None,
+            reason=(clarification or {}).get("reason") if isinstance(clarification, dict) else strategy_meta.get("count_contract_invalid_reason"),
+        )
+        result = KnowledgeSufficiency(
+            requires_new_knowledge="low",
+            search_intent="planner count clarification required",
+            retrieval_query=state.messages[-1].content,
+            confidence=1.0,
+        )
+        log_event(
+            "KS.RESULT",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            stage="knowledge_sufficiency",
+            requires_new_knowledge=result.requires_new_knowledge,
+            retrieval_query=result.retrieval_query,
+            confidence=round(float(result.confidence), 2),
+            early_exit_reason="planner_count_contract_invalid",
+            count_contract_invalid_reason=strategy_meta.get("count_contract_invalid_reason"),
+        )
+        return {"knowledge_sufficiency": result, "no_result_message": no_result_message, "clarification": clarification}
 
     if should_short_circuit_followup_clarification(strategy_meta):
         no_result_message = build_followup_clarification_message(strategy_meta)

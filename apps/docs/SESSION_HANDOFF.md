@@ -1,5 +1,135 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-10T16:55:00+09:00 Improver
+- branch/head: expected branch verified / `5656d450556df1b7d4a91c16ff88459f22100480`
+- inspected files:
+  - `apps/chat/answer_generation.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - broad-history `people|org` list turn은 retrieval snapshot이 이미 stable visible truth를 가지고 있어도, answer-stage가 여전히 LLM의 top-level bullet 재현 여부에 묶여 fallback으로 내려갈 수 있었다.
+  - partial-safe generic list contract가 있어도 publishable manifest를 만들 수 있는 deterministic list path가 없어서, 사람/기관 activity list는 일부 요약 답변에 과도하게 의존했다.
+- changes:
+  - `apps/chat/answer_generation.py`: `people|org` `list` + visible snapshot이 있으면 answer-stage가 snapshot 순서대로 결정적 번호 목록을 렌더링하도록 추가했다.
+  - `apps/chat/answer_generation.py`: 결정적 목록 텍스트에 대해 groundedness/state-consistency를 다시 평가하고, `supported`이면 `selection_reason=deterministic_visible_list`, `model_key=deterministic_snapshot`으로 최종 artifact와 manifest를 승인하도록 연결했다.
+  - `tests/test_answer_merge_state_diagnostics.py`: 사람 축 list turn에서 모델 답변이 일부 항목만 설명해도 최종 답변이 snapshot-owned deterministic list로 승격되고 `visible_answer_manifest_status=approved`가 되는 회귀 테스트를 추가했다.
+  - docs: `apps/docs/02_실행계약과_전략규칙.md`, `apps/docs/GOLDEN_TESTS.md`, `apps/docs/SESSION_HANDOFF.md`를 새 계약에 맞게 갱신했다.
+- validations:
+  - `python -m py_compile apps\chat\answer_generation.py tests\test_answer_merge_state_diagnostics.py` passed
+  - `python -m pytest tests\test_answer_merge_state_diagnostics.py tests\test_request_facade_count_contract.py -q -p no:cacheprovider` passed (`10 passed`)
+- remains risky:
+  - 결정적 목록은 현재 title 축만 최소 보장한다. per-item role/org/source line을 snapshot truth와 안전하게 1:1로 렌더링하는 확장은 아직 하지 않았다.
+  - people-axis title 품질 자체가 synthetic name row로 흔들리는 retrieval/display 케이스는 answer-stage만으로 완전히 고쳐지지 않는다.
+- next best task:
+  - people/org canonical display item builder에서 representative activity title ownership을 고정하고, deterministic list에 안전한 secondary metadata line을 붙일 수 있게 snapshot schema를 보강한다.
+
+## 2026-04-10T16:20:00+09:00 Improver
+- branch/head: expected branch verified / `5656d450556df1b7d4a91c16ff88459f22100480`
+- inspected files:
+  - `apps/conversation/request_facade.py`
+  - `apps/retrieval/retrieval_workflow.py`
+  - `apps/chat/answer_generation.py`
+  - `tests/test_request_facade_count_contract.py`
+  - `tests/test_retrieval_count_contract.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - 문서상 planner가 count truth라고 되어 있었지만, 실제 `request_facade._resolve_question_analysis_count()`가 planner limit/display_limit, 질문 regex explicit count, 기본값을 섞어 `question_analysis`를 다시 써 버려 진실원이 붕괴돼 있었다.
+  - retrieval display normalization도 raw question explicit-count를 threshold에 다시 써서 planner validated `requested_count`보다 큰 값이 canonical axis promotion 여부를 흔들 수 있었다.
+  - answer-stage는 이미 `turn_contract` 우선으로 바뀌었지만 contract가 비어 있으면 여전히 raw question count regex가 strictness fallback으로 남아 있어 upstream contract ownership을 끝까지 잠그지 못했다.
+- changes:
+  - `apps/conversation/request_facade.py`: `_resolve_question_analysis_count()`를 count resolver가 아니라 validator로 바꿨다. 더 이상 `question_analysis.limit/display_limit`를 수정하지 않고 `PLANNER.COUNT_CONTRACT` 로그와 `count_contract_validation_status`, `planner_count_source`, `planner_explicit_count`, clarification payload만 downstream으로 전달한다.
+  - `apps/retrieval/retrieval_workflow.py`: invalid planner count contract를 knowledge-sufficiency 단계에서 `clarification_type=planner_count_contract`로 fail-close 하도록 short-circuit를 추가했다. display canonical promotion threshold는 raw explicit-count가 아니라 planner `requested_count`만 보도록 정리했다.
+  - `apps/chat/answer_generation.py`: contract 부재 시 raw question count regex를 다시 읽지 않고 보수적 exact-count fallback만 남겼다. answer-stage는 planner/request-facade가 넘긴 count contract만 소비한다.
+  - `tests/test_request_facade_count_contract.py`: valid explicit-count contract는 통과하고 invalid explicit-count/detail contract는 QA를 바꾸지 않은 채 invalid로만 내려가는 회귀를 추가했다.
+  - `tests/test_retrieval_count_contract.py`: invalid planner count contract가 clarification으로 short-circuit 되는지, display normalization이 raw explicit-count가 아니라 requested_count만 쓰는지 고정했다.
+- validations:
+  - `python -m py_compile apps\conversation\request_facade.py apps\retrieval\retrieval_workflow.py apps\chat\answer_generation.py tests\test_request_facade_count_contract.py tests\test_retrieval_count_contract.py tests\test_request_facade_turn_policy.py tests\test_answer_merge_state_diagnostics.py` passed
+  - `python -m pytest tests\test_request_facade_count_contract.py tests\test_retrieval_count_contract.py tests\test_request_facade_turn_policy.py tests\test_answer_merge_state_diagnostics.py -q -p no:cacheprovider` passed (`13 passed`)
+- docs:
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/GOLDEN_TESTS.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+- remains risky:
+  - planner stage2/raw-query fallback 내부에서 count를 만드는 경로는 여전히 planner runtime 소관이다. 이번 패치는 request facade 이후 overwrite를 없앤 것이지 planner 내부 recovery 정책 자체를 다시 설계한 것은 아니다.
+  - route/session transcript replay는 아직 없어 invalid count clarification이 실제 `/query/stream` surface와 session history에 어떻게 남는지 end-to-end로는 아직 고정하지 못했다.
+- next best task:
+  - planner runtime stage2 fallback의 `limit/display_limit` 생성 규칙을 ADR 수준으로 문서화하고, `/query/stream` transcript replay에서 invalid planner count contract가 clarification event와 history payload에 동일하게 반영되는지 고정한다.
+
+## 2026-04-10T15:10:00+09:00 Improver
+- branch/head: expected branch verified / `5656d450556df1b7d4a91c16ff88459f22100480`
+- inspected files:
+  - `apps/conversation/request_facade.py`
+  - `apps/conversation/turn_trigger.py`
+  - `apps/conversation/turn_policy.py`
+  - `apps/chat/answer_generation.py`
+  - `tests/test_request_facade_turn_policy.py`
+  - `tests/test_request_facade_child_detail_followup.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - follow-up 해석 여부와 stale manifest 재사용 권한이 기존에는 `request_facade`, `scope_resolver`, `answer_generation`에 분산돼 있어 직전 turn이 `withheld_partial`이어도 후속 ordinal/source follow-up이 잘못 이어질 여지가 있었다.
+  - answer-stage의 state-consistency policy도 여전히 질문 regex fallback을 남기고 있어, upstream에서 계산한 count contract가 있더라도 회귀 테스트가 없으면 다시 question-text 중심으로 drift할 수 있었다.
+- changes:
+  - `apps/conversation/turn_trigger.py`: 작은 trigger LLM 계층을 추가해 현재 질문을 `fresh | followup | ambiguous`와 `reference_style`로 분류하도록 만들었다. explicit seed 또는 이전 state 부재 시에는 heuristic fast-path로 우회한다.
+  - `apps/conversation/turn_policy.py`: trigger 결과와 `ConversationViewState.last_query_contract`를 받아 `reuse_manifest | reuse_anchor | fresh_retrieval | clarification`을 결정하는 deterministic policy gate를 추가했다.
+  - `apps/conversation/request_facade.py`: planner 전에 trigger/policy를 실행하고, `strategy_meta.turn_trigger`, `strategy_meta.turn_contract`, `strategy_meta.turn_policy`를 함께 싣도록 바꿨다. `withheld_partial` 또는 blocked turn 뒤 ordinal/source follow-up은 clarification으로 차단하고, publishable turn만 manifest reuse를 허용한다.
+  - `apps/chat/answer_generation.py`: `turn_contract.count_contract`를 state-consistency policy의 우선 truth로 소비하고, 현재 turn 결과를 `next_view_state.last_query_contract`에 `answer_publishability`, `followup_rights`, `turn_intent`, `policy_execution_path`까지 포함해 저장한다.
+  - `tests/test_request_facade_turn_policy.py`: publishable vs withheld_partial 이전 turn에 대해 ordinal follow-up이 각각 `reuse_manifest`와 `clarification`으로 갈라지는 회귀를 추가했다.
+  - `tests/test_answer_merge_state_diagnostics.py`: raw question regex보다 `turn_contract.count_contract`가 우선이라는 회귀를 추가했다.
+- validations:
+  - pending: `python -m py_compile apps\conversation\turn_trigger.py apps\conversation\turn_policy.py apps\conversation\request_facade.py apps\chat\answer_generation.py tests\test_request_facade_child_detail_followup.py tests\test_request_facade_turn_policy.py tests\test_answer_merge_state_diagnostics.py tests\test_answer_state_consistency_diagnostics.py`
+  - pending: `python -m pytest tests\test_request_facade_child_detail_followup.py tests\test_request_facade_turn_policy.py tests\test_answer_merge_state_diagnostics.py tests\test_answer_state_consistency_diagnostics.py -q -p no:cacheprovider`
+- docs:
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/GOLDEN_TESTS.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+- remains risky:
+  - trigger prompt는 새로 들어갔지만 runtime transcript replay는 아직 request_facade/unit 수준이고, 실제 route/session replay까지는 확장되지 않았다.
+  - `answer_generation.py`는 contract가 없을 때 질문 regex fallback을 아직 유지하므로, upstream contract가 누락되는 경로가 남아 있으면 예전 동작이 다시 나타날 수 있다.
+- next best task:
+  - route/session replay를 추가해 `withheld_partial` turn 뒤 `2번째`, `출처 2`, `그 항목`이 stale manifest를 절대 재사용하지 않는지 고정하고, retrieval workflow가 `last_query_contract`를 로그/진단에 일관되게 반영하도록 맞춘다.
+
+## 2026-04-10T14:00:41.4086831+09:00 Improver
+- branch/head: expected branch verified / `5656d450556df1b7d4a91c16ff88459f22100480`
+- inspected files:
+  - `apps/api/contracts/answer_state_consistency.py`
+  - `apps/chat/answer_merge.py`
+  - `apps/chat/answer_generation.py`
+  - `tests/test_answer_state_consistency_diagnostics.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - 기존 state-consistency guard는 generic `list`와 broad-history 계열까지 exact-count로 묶어서, 대상/순서는 맞지만 일부 항목만 설명한 정상 답변도 `both_models_state_inconsistent` degraded fallback으로 차단했다.
+  - 상용 기준에서 더 중요한 실패는 부분 응답 자체가 아니라, 그런 부분 응답을 다음 turn의 ordinal/source truth로 게시해 `2번째`, `출처 2` follow-up을 오염시키는 것이다.
+  - 따라서 `final answer acceptance`와 `visible_answer_manifest` publishability를 같은 규칙으로 다루는 현재 구조는 과도하게 보수적이면서도 후속질의 안전성 의도는 충분히 분리하지 못했다.
+- changes:
+  - `apps/api/contracts/answer_state_consistency.py`: `AnswerStateConsistencyPolicy`를 추가하고 verdict에 `policy_name`, `subset_accepted`, `manifest_publish_allowed`, `accepted_item_count`, `required_visible_count`를 실었다. exact-count strict family와 prefix-subset partial family를 분리해, generic `list`는 prefix identity/order가 맞으면 `supported`로 통과시키되 manifest publish는 금지한다.
+  - `apps/chat/answer_merge.py`: visible-order guard가 이제 `publishable exact support > partial support > reject` 순으로 모델을 고른다. 두 모델이 모두 partial-safe면 fallback 대신 기존 model priority로 채택하고, 둘 다 reject일 때만 `both_models_state_inconsistent`로 강등한다.
+  - `apps/chat/answer_generation.py`: 질문 텍스트와 output family를 보고 `exact_count` vs `prefix_subset` vs `bypass` policy를 계산한다. explicit-count `list`, `relation`, `comparison`, `series`는 strict 유지, generic `list`는 partial-safe prefix subset을 허용한다. partial-safe answer는 `visible_answer_manifest_status=withheld_partial`로 남기고 manifest 저장을 막는다.
+  - docs/tests: contract 문서와 golden/handoff를 partial-safe answer + withheld manifest 기준으로 갱신했고, exact-count list는 여전히 fallback 되는 회귀 테스트를 추가했다.
+- validations:
+  - `python -m py_compile apps\api\contracts\answer_state_consistency.py apps\chat\answer_merge.py apps\chat\answer_generation.py tests\test_answer_state_consistency_diagnostics.py tests\test_answer_merge_state_diagnostics.py` passed
+  - `python -m pytest tests\test_answer_state_consistency_diagnostics.py tests\test_answer_merge_state_diagnostics.py -q -p no:cacheprovider` passed (`8 passed`)
+- docs:
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/GOLDEN_TESTS.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+  - `README.md`, `apps/docs/03_운영과_환경.md` were reviewed but not changed because this patch changes answer-selection policy and follow-up publication rules, not environment defaults or operator command flows.
+- remains risky:
+  - explicit-count detection은 질문 regex heuristic이라 `몇 개만`, `대표 사례만` 같은 표현 변형을 아직 모두 흡수하지 못한다.
+  - 현재 policy default는 여전히 exact-count라서, 향후 `activities/history` 외 다른 generic list family가 늘어나면 family mapping을 더 세분화해야 한다.
+  - unit regression은 추가됐지만 실제 실패 transcript replay와 route-level follow-up replay는 아직 없다.
+- next best task:
+  - partial-safe answer 이후 `2번째`, `출처 2`, `그 항목` follow-up이 clarification 또는 fresh resolution로 가는 경로를 transcript-level regression으로 고정하고, query-family mapping을 planner output contract와 같은 vocabulary로 정리한다.
+
 ## 2026-04-10T12:36:21.3481785+09:00 Improver
 - branch/head: expected branch verified / `ecb08cef33d7e94baf1807b85d967986ff888ff7`
 - inspected files:
