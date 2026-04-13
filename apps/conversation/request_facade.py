@@ -966,6 +966,15 @@ def _build_strategy_meta(
     count_validation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
 
+    def _dump_meta_model(value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "model_dump"):
+            return dict(value.model_dump())
+        return dict(getattr(value, "__dict__", {}) or {})
+
     if isinstance(normalized_intent, dict):
 
         ids_map = normalized_intent.get("ids_map") or {}
@@ -1001,6 +1010,8 @@ def _build_strategy_meta(
     turn_policy = dict(turn_policy or {})
     turn_candidates = list(turn_candidates or [])
     count_validation = dict(count_validation or {})
+    hard_contract = _dump_meta_model(_get_field(question_analysis, "hard_contract", None))
+    soft_strategy_hints = _dump_meta_model(_get_field(question_analysis, "soft_strategy_hints", None))
 
     selected_prev_item = dict(followup_resolution.get("selected_prev_item") or {})
 
@@ -1009,6 +1020,11 @@ def _build_strategy_meta(
     return {
 
         "strategy_version": str(getattr(question_analysis, "strategy_version", "v3") or "v3"),
+        "hard_contract": hard_contract,
+        "soft_strategy_hints": soft_strategy_hints,
+        "resolved_project_key_axis": hard_contract.get("resolved_project_key_axis"),
+        "unsupported_project_key_aliases": list(hard_contract.get("unsupported_project_key_aliases") or []),
+        "project_key_axis_locked": bool(hard_contract.get("project_key_axis_locked")),
 
         "candidate_keys": dict(candidate_keys),
 

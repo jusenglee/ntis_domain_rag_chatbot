@@ -13,6 +13,7 @@ from typing import Any, Callable
 _PROJECT_ID_LABEL_RE = re.compile(r"(?:과제고유번호|과제\s*고유\s*번호|pjt[_\s-]*id|project\s*id)", re.I)
 _PROJECT_NO_LABEL_RE = re.compile(r"(?:과제그룹번호|동일과제번호|과제\s*그룹\s*번호|pjt[_\s-]*no|project\s*group\s*number|group\s*number)", re.I)
 _AMBIGUOUS_PROJECT_KEY_RE = re.compile(r"(?:과제번호|과제\s*번호|project\s*number|project\s*id|pjt)", re.I)
+_UNSUPPORTED_PROJECT_KEY_ALIAS_RE = re.compile(r"\brjt[_\s-]*id\b", re.I)
 _STRUCTURED_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$")
 _ALNUM_WITH_DIGIT_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]{4,64}$")
 _BIZ_NO_NUMERIC_RE = re.compile(r"^\d{3}-?\d{2}-?\d{5}$")
@@ -74,6 +75,38 @@ def has_ambiguous_project_key_label(text: str | None) -> bool:
     """`과제번호`처럼 instance/group을 가리지 않는 project key 표현을 감지한다."""
     raw = str(text or "")
     return bool(_AMBIGUOUS_PROJECT_KEY_RE.search(raw)) and not has_explicit_project_id_label(raw) and not has_explicit_project_no_label(raw)
+
+
+def extract_unsupported_project_key_aliases(text: str | None) -> list[str]:
+    """지원하지 않는 project-key alias를 질문 표면에서 추출한다."""
+    raw = str(text or "")
+    aliases = {match.group(0).upper().replace(" ", "_").replace("-", "_") for match in _UNSUPPORTED_PROJECT_KEY_ALIAS_RE.finditer(raw)}
+    return sorted(aliases)
+
+
+def is_unsupported_project_key_alias(key: str | None) -> bool:
+    """canonical contract에 없는 project-key alias인지 판단한다."""
+    normalized = str(key or "").strip().lower().replace("-", "_").replace(" ", "")
+    return normalized in {"rjt_id", "rjtid"}
+
+
+def infer_project_key_axis(
+    *,
+    ids_map: dict[str, list[str]] | None = None,
+    project_key_policy: str | None = None,
+) -> str | None:
+    """resolved/locked project key axis를 pjt_id 또는 pjt_no로 정규화한다."""
+    normalized_ids_map = ids_map if isinstance(ids_map, dict) else {}
+    if normalized_ids_map.get("pjt_id"):
+        return "pjt_id"
+    if normalized_ids_map.get("pjt_no"):
+        return "pjt_no"
+    policy = str(project_key_policy or "").strip().lower()
+    if policy in {"resolved_pjt_id", "anchor_locked_pjt_id"}:
+        return "pjt_id"
+    if policy in {"resolved_pjt_no", "anchor_locked_pjt_no"}:
+        return "pjt_no"
+    return None
 
 
 def _slot_allows_labeled_alnum(key: str) -> bool:
@@ -193,7 +226,13 @@ def sanitize_ids_map_semantics(
             for raw in values or []:
                 value = str(raw).strip()
                 if value:
-                    invalid.append({"key": key, "value": value, "reason": "unsupported_slot"})
+                    invalid.append(
+                        {
+                            "key": key,
+                            "value": value,
+                            "reason": "unsupported_project_key_alias" if is_unsupported_project_key_alias(key) else "unsupported_slot",
+                        }
+                    )
             continue
         out: list[str] = []
         for raw in values or []:

@@ -113,7 +113,9 @@ class RuntimePreludeResult:
     sparse_topk_eff: int
     sparse_weight_eff: float
     topk_spec: Dict[str, Any]
-    rerank_spec: Dict[str, Any]
+    rerank_spec: Dict[str, Any]
+
+    search_policy_variant: str
     topk_dense: int
     topk_lex_cand: int
     topk_lex: int
@@ -281,7 +283,86 @@ def _extract_payload_normalized_intent(payload: Any) -> Any:
         return None
     if isinstance(payload, Mapping):
         return payload.get("normalized_intent")
-    return getattr(payload, "normalized_intent", None)
+    return getattr(payload, "normalized_intent", None)
+
+
+
+
+def _extract_payload_question_analysis(payload: Any) -> Any:
+    """intent payload wrapper에서 `question_analysis`만 꺼낸다."""
+
+    if payload is None:
+
+        return None
+
+    if isinstance(payload, Mapping):
+
+        return payload.get("question_analysis")
+
+    return getattr(payload, "question_analysis", None)
+
+
+
+
+def _payload_item(value: Any, key: str, default: Any = None) -> Any:
+    """dict/object 양쪽에서 같은 key를 읽는다."""
+
+    if value is None:
+
+        return default
+
+    if isinstance(value, Mapping):
+
+        return value.get(key, default)
+
+    return getattr(value, key, default)
+
+
+
+
+def _flag_enabled(name: str, default: str = "0") -> bool:
+    text = str(os.getenv(name, default)).strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+
+
+def _resolve_search_policy_variant(*, payload: Any, resolved_mode: Optional[str]) -> str:
+    """payload에 담긴 hard/soft contract로 SEARCH 내부 variant를 정한다."""
+
+    if str(resolved_mode or "").strip().lower() != "search":
+
+        return "standard"
+
+    if not _flag_enabled("RAG_ENABLE_SEARCH_POLICY_VARIANT", "0"):
+
+        return "standard"
+
+    question_analysis = _extract_payload_question_analysis(payload)
+    hard_contract = _payload_item(question_analysis, "hard_contract", {}) or {}
+    soft_strategy_hints = _payload_item(question_analysis, "soft_strategy_hints", {}) or {}
+
+    semantic_kind = str(_payload_item(soft_strategy_hints, "semantic_kind", "") or "").strip().lower()
+    has_prev_anchor = bool(_payload_item(soft_strategy_hints, "has_prev_anchor", False))
+    explicit_project_id_label = bool(_payload_item(hard_contract, "explicit_project_id_label", False))
+    explicit_project_no_label = bool(_payload_item(hard_contract, "explicit_project_no_label", False))
+    project_key_axis_locked = bool(_payload_item(hard_contract, "project_key_axis_locked", False))
+    resolved_project_key_axis = str(_payload_item(hard_contract, "resolved_project_key_axis", "") or "").strip().lower()
+    candidate_project_key_count = int(_payload_item(hard_contract, "candidate_project_key_count", 0) or 0)
+
+    if semantic_kind != "broad_history":
+
+        return "standard"
+
+    if has_prev_anchor or explicit_project_id_label or explicit_project_no_label:
+
+        return "standard"
+
+    if project_key_axis_locked or resolved_project_key_axis or candidate_project_key_count > 0:
+
+        return "standard"
+
+    return "broad_semantic"
 
 
 def _normalize_payload_intent(raw: Any) -> Optional[NormalizedIntent]:
@@ -460,7 +541,9 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
         first = contract_violations[0]
         raise StrategyViolation(error_code=first.error_code, reason=first.reason, violations=contract_violations)
 
-    preset = _build_search_preset(ctx.intent_view())
+    search_policy_variant = _resolve_search_policy_variant(payload=request.intent_payload, resolved_mode=plan.mode)
+
+    preset = _build_search_preset(ctx.intent_view(), search_policy_variant=search_policy_variant)
     lex_w_eff = dict(request.lexical_field_weights) if request.lexical_field_weights is not None else dict(preset.lexical_field_weights)
     sparse_vector_name_eff, _ = _resolve_sparse_vector_name(runtime_sparse_vector_name=request.sparse_vector_name, preset_sparse_vector_name=preset.sparse_vector_name)
     sparse_topk_eff = int(request.sparse_topk or preset.sparse_topk or preset.top_k_lex)
@@ -481,7 +564,7 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
         topk_spec["top_k_lex_cand"] = int(rag_override_topk_lex_cand)
     if rag_override_min_dense_score is not None:
         topk_spec["min_dense_score"] = float(rag_override_min_dense_score)
-    rerank_spec = _build_rerank_spec(plan.mode)
+    rerank_spec = _build_rerank_spec(plan.mode, search_policy_variant=search_policy_variant)
     rerank_spec.setdefault("final_keep", 80)
 
     compile_runtime = assemble_runtime_compile_policy(
@@ -559,7 +642,7 @@ def build_runtime_prelude(*, request: RuntimePreludeRequest, runtime: RuntimePre
     use_dense_threshold_policy = bool(policy_topk.get("use_dense_threshold", preset.use_dense_threshold))
     min_dense_score_policy = float(policy_topk.get("min_dense_score", preset.min_dense_score))
 
-    return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_runtime_join_mode=resolved_runtime_join_mode, assembled_question_analysis_join_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter, resolved_anchors=resolved_anchors, reverse_trace_followup=bool(reverse_trace_followup), followup_relation_hint=followup_relation_hint, pattern_kind=(getattr(getattr(plan, "pattern_analysis_plan", None), "kind", None) if getattr(plan, "pattern_analysis_plan", None) is not None else None), bundle_kind=(getattr(getattr(plan, "multi_hop_bundle_plan", None), "kind", None) if getattr(plan, "multi_hop_bundle_plan", None) is not None else None), bundle_targets=list(getattr(getattr(plan, "multi_hop_bundle_plan", None), "targets", tuple()) or tuple()), guidance_required=bool(getattr(getattr(plan, "multi_hop_bundle_plan", None), "guidance_required", False)) if getattr(plan, "multi_hop_bundle_plan", None) is not None else bool(getattr(plan, "guidance_required", False)))
+    return build_runtime_prelude_result(query_text=q, keywords=kws, intent_item=it, context_state=ctx, plan=plan, strategy=strategy, mode=mode, action=ctx.action, base_route=ctx.base_route, relation=relation, target_collections=list(target_collections or []), planner_limit=int(planner_limit or 0), hinted_limit=hinted_limit, compiled_strategy=compiled_strategy, planner_filter_spec=dict(planner_filter_spec or {}), resolved_runtime_join_mode=resolved_runtime_join_mode, assembled_question_analysis_join_mode=getattr(ctx, "join_key_mode", None), preset=preset, lex_w_eff=dict(lex_w_eff or {}), sparse_vector_name_eff=sparse_vector_name_eff, sparse_topk_eff=int(sparse_topk_eff), sparse_weight_eff=float(sparse_weight_eff), topk_spec=dict(compiled_strategy.topk_spec or {}), rerank_spec=dict(compiled_strategy.rerank_spec or {}), search_policy_variant=search_policy_variant, topk_dense=int(topk_dense), topk_lex_cand=int(topk_lex_cand), topk_lex=int(topk_lex), use_dense_threshold_policy=bool(use_dense_threshold_policy), min_dense_score_policy=float(min_dense_score_policy), title_terms=list(title_terms or []), title_match_mode=str(title_match_mode or ""), title_filter=title_filter, title_filter_server_applied=bool(title_filter_server_applied), lookup_title_filter_policy=str(lookup_title_filter_policy or ""), lookup_filter_policy=str(lookup_filter_policy or ""), search_filter_signal=bool(search_filter_signal), search_filter_conf_ok=bool(search_filter_conf_ok), search_filter_enabled=bool(search_filter_enabled), lookup_filter_enabled=bool(lookup_filter_enabled), relation_lookup_enforce=bool(relation_lookup_enforce), join_hop1_lookup_filter_enabled=bool(join_hop1_lookup_filter_enabled), search_filter_server_policy=str(search_filter_server_policy or ""), org_terms=list(org_terms or []), org_role=org_role, people_terms=list(people_terms or []), people_ids=list(people_ids or []), gender_terms=list(gender_terms or []), people_org_terms=list(people_org_terms or []), people_min_should=people_min_should, people_match_mode=people_match_mode, people_promote_one_must=bool(people_promote_one_must), people_filter=people_filter, participant_org_filter=participant_org_filter, org_filter=org_filter, planner_org_filter_present=bool(planner_org_filter_present), project_tag_filter=project_tag_filter, perf_tag_filter=perf_tag_filter, year_range_filter=year_range_filter, perf_type_filter=perf_type_filter, resolved_anchors=resolved_anchors, reverse_trace_followup=bool(reverse_trace_followup), followup_relation_hint=followup_relation_hint, pattern_kind=(getattr(getattr(plan, "pattern_analysis_plan", None), "kind", None) if getattr(plan, "pattern_analysis_plan", None) is not None else None), bundle_kind=(getattr(getattr(plan, "multi_hop_bundle_plan", None), "kind", None) if getattr(plan, "multi_hop_bundle_plan", None) is not None else None), bundle_targets=list(getattr(getattr(plan, "multi_hop_bundle_plan", None), "targets", tuple()) or tuple()), guidance_required=bool(getattr(getattr(plan, "multi_hop_bundle_plan", None), "guidance_required", False)) if getattr(plan, "multi_hop_bundle_plan", None) is not None else bool(getattr(plan, "guidance_required", False)))
 
 
 

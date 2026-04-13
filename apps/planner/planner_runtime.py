@@ -10,8 +10,15 @@ import json
 import re
 from typing import Any, Optional
 
-from apps.api.contracts.runtime_contracts import sanitize_ids_map_semantics
-from apps.api.contracts.workflow_models import QuestionAnalysis
+from apps.api.contracts.runtime_contracts import (
+    extract_unsupported_project_key_aliases,
+    has_ambiguous_project_key_label,
+    has_explicit_project_id_label,
+    has_explicit_project_no_label,
+    infer_project_key_axis,
+    sanitize_ids_map_semantics,
+)
+from apps.api.contracts.workflow_models import HardContractV1, QuestionAnalysis, SoftStrategyHintsV1
 from apps.api.runtime_helpers import log_event
 from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
@@ -53,12 +60,7 @@ from apps.planner.planner_staged import (
 )
 from apps.planner.planner_surface_signals import SurfaceSignals, collect_surface_signals
 from apps.planner.planner_validation import Stage2ValidationResult, validate_stage2_slots
-from apps.planner.query_intent import (
-    ORG_CUES,
-    has_ambiguous_project_key_label,
-    has_explicit_project_id_label,
-    has_explicit_project_no_label,
-)
+from apps.planner.query_intent import ORG_CUES
 from apps.platform.schemas import PlannerStage1Decision, PlannerStage2Slots
 
 
@@ -285,6 +287,69 @@ def _resolve_org_filter_key(entity_role_plan: PlannerEntityRolePlan) -> str:
     if org_role_hint == "affiliation_org":
         return "people_affiliation_org_name"
     return "org_name"
+
+
+def _candidate_project_key_count(candidate_keys: dict[str, Any] | None) -> int:
+    if not isinstance(candidate_keys, dict):
+        return 0
+    return len(list(candidate_keys.get("project_key") or []))
+
+
+def _has_prev_anchor(locked_strategy: DeterministicGateStrategy) -> bool:
+    return bool(
+        dict(getattr(locked_strategy, "prev_context_seed", None) or {})
+        or dict(getattr(locked_strategy, "gate_seed_map", None) or {})
+    )
+
+
+def _build_hard_contract(
+    *,
+    question: str,
+    locked_strategy: DeterministicGateStrategy,
+    entity_role_plan: PlannerEntityRolePlan,
+    ids_map: dict[str, list[str]] | None,
+    candidate_keys: dict[str, Any] | None,
+    project_key_policy: str | None,
+    join_key_mode: str | None,
+) -> HardContractV1:
+    policy_norm = str(project_key_policy or "").strip().lower() or None
+    join_key_mode_norm = str(join_key_mode or getattr(locked_strategy, "join_key_mode", None) or "").strip().lower() or None
+    return HardContractV1(
+        explicit_project_id_label=bool(has_explicit_project_id_label(question)),
+        explicit_project_no_label=bool(has_explicit_project_no_label(question)),
+        ambiguous_project_key_label=bool(has_ambiguous_project_key_label(question)),
+        unsupported_project_key_aliases=extract_unsupported_project_key_aliases(question),
+        resolved_project_key_axis=infer_project_key_axis(ids_map=ids_map, project_key_policy=policy_norm),
+        candidate_project_key_count=_candidate_project_key_count(candidate_keys),
+        project_key_policy=policy_norm,
+        join_anchor_required=bool(getattr(entity_role_plan, "anchor_required", False) and getattr(locked_strategy, "relation", None)),
+        join_anchor_present=_has_prev_anchor(locked_strategy),
+        join_key_mode=join_key_mode_norm,
+        project_key_axis_locked=bool(policy_norm in {"resolved_pjt_id", "resolved_pjt_no", "anchor_locked_pjt_id", "anchor_locked_pjt_no"}),
+    )
+
+
+def _build_soft_strategy_hints(
+    *,
+    signals: SurfaceSignals,
+    entity_role_plan: PlannerEntityRolePlan,
+    locked_strategy: DeterministicGateStrategy,
+    candidate_keys: dict[str, Any] | None = None,
+) -> SoftStrategyHintsV1:
+    return SoftStrategyHintsV1(
+        years=list(signals.years or []),
+        id_like_terms=list(signals.id_like_terms or []),
+        people_terms=list(signals.people_terms or []),
+        org_terms=list(signals.org_terms or []),
+        perf_types=list(signals.perf_types or []),
+        followup_cues=list(signals.followup_cues or []),
+        must_keep_terms=list(getattr(entity_role_plan, "must_keep_terms", []) or []),
+        semantic_kind=str(getattr(entity_role_plan, "semantic_kind", "") or "").strip() or None,
+        perf_type_policy=str(getattr(entity_role_plan, "perf_type_policy", "") or "").strip() or None,
+        org_role_hint=str(getattr(entity_role_plan, "org_role_hint", "") or "").strip() or None,
+        candidate_project_key_count=_candidate_project_key_count(candidate_keys),
+        has_prev_anchor=_has_prev_anchor(locked_strategy),
+    )
 
 
 def _apply_deterministic_stage2_repair(
@@ -731,6 +796,8 @@ async def run_planner_stage2(
     locked_strategy: DeterministicGateStrategy,
     signals: SurfaceSignals,
     entity_role_plan: PlannerEntityRolePlan,
+    hard_contract: HardContractV1,
+    soft_strategy_hints: SoftStrategyHintsV1,
     cards: dict[str, str],
     validation_hints: dict[str, Any] | None = None,
     previous_output: dict[str, Any] | None = None,
@@ -746,7 +813,7 @@ async def run_planner_stage2(
             SystemMessage(content=system_prompt),
             (
                 "human",
-                "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<surface_signals>{surface_signals}</surface_signals>\n<entity_role_plan>{entity_role_plan}</entity_role_plan>\n<validation_hints>{validation_hints}</validation_hints>\n<previous_output>{previous_output}</previous_output>\n<user_query>{question}</user_query>",
+                "{format_instructions}\n<locked_strategy>{locked_strategy}</locked_strategy>\n<hard_contract>{hard_contract}</hard_contract>\n<soft_strategy_hints>{soft_strategy_hints}</soft_strategy_hints>\n<surface_signals>{surface_signals}</surface_signals>\n<entity_role_plan>{entity_role_plan}</entity_role_plan>\n<validation_hints>{validation_hints}</validation_hints>\n<previous_output>{previous_output}</previous_output>\n<user_query>{question}</user_query>",
             ),
         ]
     )
@@ -764,6 +831,8 @@ async def run_planner_stage2(
             "format_instructions": parser.get_format_instructions(),
             "question": question,
             "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
+            "hard_contract": json.dumps(hard_contract.model_dump(), ensure_ascii=False),
+            "soft_strategy_hints": json.dumps(soft_strategy_hints.model_dump(), ensure_ascii=False),
             "surface_signals": json.dumps(_signals_payload(signals), ensure_ascii=False),
             "entity_role_plan": json.dumps(_entity_role_payload(entity_role_plan), ensure_ascii=False),
             "validation_hints": json.dumps(validation_hints or {}, ensure_ascii=False),
@@ -792,6 +861,13 @@ async def run_planner_stage2(
         filters=dict(getattr(slots, "filters", {}) or {}),
         limit=getattr(slots, "limit", None),
         display_limit=getattr(slots, "display_limit", None),
+        hard_contract_project_id_label=int(bool(hard_contract.explicit_project_id_label)),
+        hard_contract_project_no_label=int(bool(hard_contract.explicit_project_no_label)),
+        hard_contract_ambiguous_project_key=int(bool(hard_contract.ambiguous_project_key_label)),
+        hard_contract_unsupported_project_key_alias_count=len(hard_contract.unsupported_project_key_aliases),
+        soft_hint_semantic_kind=soft_strategy_hints.semantic_kind,
+        soft_hint_must_keep_term_count=len(soft_strategy_hints.must_keep_terms),
+        soft_hint_has_prev_anchor=int(bool(soft_strategy_hints.has_prev_anchor)),
     )
     return slots
 
@@ -803,6 +879,8 @@ def assemble_question_analysis(
     request_id: Optional[str],
     stage1: Any,
     stage2: Any,
+    signals: SurfaceSignals,
+    entity_role_plan: PlannerEntityRolePlan,
     locked_strategy: DeterministicGateStrategy,
 ) -> Any:
     ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
@@ -892,6 +970,23 @@ def assemble_question_analysis(
             unresolved_anchor_pair=int(unresolved_anchor_pair),
         )
     payload["planner_source"] = "stagewise"
+    hard_contract = _build_hard_contract(
+        question=question,
+        locked_strategy=locked_strategy,
+        entity_role_plan=entity_role_plan,
+        ids_map=dict(payload.get("ids_map") or {}),
+        candidate_keys=dict(payload.get("candidate_keys") or {}),
+        project_key_policy=payload.get("project_key_policy"),
+        join_key_mode=payload.get("join_key_mode"),
+    )
+    soft_strategy_hints = _build_soft_strategy_hints(
+        signals=signals,
+        entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        candidate_keys=dict(payload.get("candidate_keys") or {}),
+    )
+    payload["hard_contract"] = hard_contract.model_dump()
+    payload["soft_strategy_hints"] = soft_strategy_hints.model_dump()
     qa = QuestionAnalysis.model_validate(payload)
     log_event(
         "PLANNER.ASSEMBLE",
@@ -915,6 +1010,12 @@ def assemble_question_analysis(
         planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
         planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
+        resolved_project_key_axis=qa.hard_contract.resolved_project_key_axis,
+        unsupported_project_key_alias_count=len(qa.hard_contract.unsupported_project_key_aliases),
+        candidate_project_key_count=qa.hard_contract.candidate_project_key_count,
+        project_key_axis_locked=int(bool(qa.hard_contract.project_key_axis_locked)),
+        soft_hint_semantic_kind=qa.soft_strategy_hints.semantic_kind,
+        soft_hint_has_prev_anchor=int(bool(qa.soft_strategy_hints.has_prev_anchor)),
     )
     return qa
 
@@ -973,6 +1074,21 @@ async def run_stagewise_question_analysis(
         signals=signals,
         cards=stage15_cards,
     )
+    stage2_hard_contract = _build_hard_contract(
+        question=question,
+        locked_strategy=locked_strategy,
+        entity_role_plan=stage15,
+        ids_map=dict(getattr(normalized_intent, "ids_map", None) or {}) or dict(getattr(locked_strategy, "gate_seed_map", None) or {}),
+        candidate_keys={},
+        project_key_policy=None,
+        join_key_mode=getattr(locked_strategy, "join_key_mode", None),
+    )
+    stage2_soft_strategy_hints = _build_soft_strategy_hints(
+        signals=signals,
+        entity_role_plan=stage15,
+        locked_strategy=locked_strategy,
+        candidate_keys={},
+    )
     stage2 = await run_planner_stage2(
         question=question,
         conversation_id=conversation_id,
@@ -980,6 +1096,8 @@ async def run_stagewise_question_analysis(
         locked_strategy=locked_strategy,
         signals=signals,
         entity_role_plan=stage15,
+        hard_contract=stage2_hard_contract,
+        soft_strategy_hints=stage2_soft_strategy_hints,
         cards=stage2_cards,
     )
     validation = validate_stage2_slots(
@@ -1010,6 +1128,8 @@ async def run_stagewise_question_analysis(
             locked_strategy=locked_strategy,
             signals=signals,
             entity_role_plan=stage15,
+            hard_contract=stage2_hard_contract,
+            soft_strategy_hints=stage2_soft_strategy_hints,
             cards=stage2_cards,
             validation_hints=_validation_hints_payload(validation),
             previous_output=previous_output,
@@ -1093,6 +1213,8 @@ async def run_stagewise_question_analysis(
         request_id=request_id,
         stage1=stage1,
         stage2=stage2,
+        signals=signals,
+        entity_role_plan=stage15,
         locked_strategy=locked_strategy,
     )
 

@@ -43,6 +43,7 @@ _PROMPT_CARD_MANIFEST = {
     ),
     "planner_stage2_v1": (
         "collections_card",
+        "relationship_semantics_card",
         "id_semantics_card",
         "filter_semantics_card",
         "perf_tag_card",

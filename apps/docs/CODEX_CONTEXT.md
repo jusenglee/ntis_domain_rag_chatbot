@@ -21,10 +21,12 @@
 
 ## Retrieval and Follow-up Rules
 - planner strategy is single and immutable for a request.
+- assembled `QuestionAnalysisV3` now carries `hard_contract` and `soft_strategy_hints`; legality/identifier truth stays in the hard contract and recall/planning bias stays in soft hints.
 - answer stage must not re-decide `mode`, `relation`, `target_cols`, or `join_key_mode`.
 - `SEARCH` is recall-first and must not add server-side must filters.
 - `LOOKUP` and `JOIN` are precision-first and keep server-side gates.
 - people/org questions are treated as lookup-oriented by default.
+- `pjt_id` and `pjt_no` are different canonical axes; unknown aliases such as `RJT_ID` must not be auto-mapped into either axis.
 - BM25-only bypass is not allowed.
 - fallback chat or mode-changing retries are not allowed.
 

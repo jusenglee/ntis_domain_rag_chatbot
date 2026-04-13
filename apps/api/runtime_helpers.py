@@ -273,6 +273,8 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         base_route = normalized_intent.get("base_route")
 
     planner_base_route = getattr(question_analysis, "head", None) or getattr(question_analysis, "base_route", None)
+    hard_contract = getattr(question_analysis, "hard_contract", None)
+    soft_strategy_hints = getattr(question_analysis, "soft_strategy_hints", None)
 
     return {
         "request_id": getattr(state, "request_id", None),
@@ -334,6 +336,11 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "planner_target_cols": getattr(question_analysis, "target_cols", None),
         "intent_payload_version": getattr(intent_payload, "intent_payload_version", None),
         "strategy_version": getattr(question_analysis, "strategy_version", None),
+        "resolved_project_key_axis": getattr(hard_contract, "resolved_project_key_axis", None),
+        "project_key_axis_locked": getattr(hard_contract, "project_key_axis_locked", None),
+        "unsupported_project_key_alias_count": len(getattr(hard_contract, "unsupported_project_key_aliases", []) or []),
+        "soft_strategy_semantic_kind": getattr(soft_strategy_hints, "semantic_kind", None),
+        "soft_strategy_has_prev_anchor": getattr(soft_strategy_hints, "has_prev_anchor", None),
         "project_key_policy": timings.get("info.project_key_policy") or getattr(strategy, "project_key_policy", None),
         "join_resolution_policy": timings.get("info.join_resolution_policy")
         or getattr(strategy, "join_resolution_policy", None),

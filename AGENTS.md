@@ -1,88 +1,140 @@
 # AGENTS.md
 
-## Repository identity
-- repo: `ntis_domain_rag_chatbot`
-- branch: `고도화`
+이 저장소에서 Codex가 작업할 때 반드시 따라야 하는 운영 지침이다.
 
+## 1. 기본 원칙
+
+이 프로젝트는 NTIS 원천 DB와 검색 인덱스를 기반으로 사용자 질의를 해석하고,
+그 결과를 LLM과 RAG로 조합해 응답을 만드는 검색엔진 + 챗봇 UI 시스템이다.
+
+따라서 아래 원칙을 항상 지킨다.
+- 모든 문서는 UTF-8을 사용한다.
+- 한글이 깨진 문서는 그대로 두지 않는다.
+- 원천 의미를 바꾸는 임의 보정은 하지 않는다.
+- 식별자 의미를 섞어서 다루지 않는다.
+- `output_type`과 renderer의 역할을 분리한다.
+- raw payload를 그대로 prompt에 넣지 않는다.
+
+## 2. 먼저 읽어야 할 문서
+
+- `docs/README.md`
+- `docs/01_아키텍처와_흐름.md`
+- `docs/02_실행계약과_전략규칙.md`
+- `docs/03_운영과_환경.md`
+- `docs/04_회귀기준과_점검.md`
+- `docs/05_유지보수와_확장.md`
+- `docs/SESSION_HANDOFF_*.md`가 있으면 함께 읽는다.
+- `.agents/skills/ntis-rag-context-refine/SKILL.md`
+- `.agents/skills/ntis-rag-context-refine/references/SKILL_revised_ko.md`
+
+## 2-1. 신규 기여자용 빠른 진입점
 ## Mission
-이 저장소는 NTIS 도메인 RAG / 챗봇 프로젝트다.
-Codex의 목적은 다음 3가지를 반복하는 것이다.
-1. 프로젝트를 계속 살핀다.
-2. 프로젝트를 작은 단위로 계속 고도화한다.
-3. 다음 단계 설계안과 ADR/RFC를 계속 제안한다.
+This repository is a chatbot / RAG application.
+Your purpose is not just to write code, but to continuously improve production quality, answer quality, maintainability, and architectural clarity.
 
+- 루트 `README.md`
+- `docs/00_ONBOARDING.md`
+- `apps/api/routes.py`
+- `apps/api/services/request_facade.py`
+- `apps/api/services/retrieval_workflow.py`
 ## Standing loop
-A. 현재 브랜치/HEAD 확인
-B. 구조, 프롬프트, 평가, 로그, 문서를 읽음
-C. 가장 값비싼 문제가 아니라 가장 안전한 다음 개선 1개를 고름
-D. 작은 패치 또는 문서 제안을 만듦
-E. 검증 수행
-F. 다음 루프를 위한 handoff 문서를 갱신
+1. Watch the project
+2. Improve the project
+3. Design the project
+4. Repeat
 
-## Non-negotiables
-- planner가 정한 strategy는 단일·불변이다.
-- answer stage에서 mode / relation / target_cols / join_key_mode를 재결정하지 않는다.
-- SEARCH는 recall 우선이며 server-side must를 넣어서는 안 된다.
-- LOOKUP / JOIN은 정확도 우선이며 server-side 게이트를 유지해야 한다.
-- 사람/기관 기반 질의는 기본적으로 LOOKUP으로 다룬다.
-- BM25-only 우회 금지.
-- fallback chat, mode 변경, 재시도성 전략 변경 금지.
-- 근거가 약하면 보수적으로 답한다.
-- prompts / docs / evals / runbooks도 코드와 동일한 중요도로 다룬다.
+## 3. 절대 섞으면 안 되는 의미
+## Rules
+- Inspect before patching
+- Prefer small safe changes
+- Never do broad rewrites without evidence
+- Run all relevant checks after changes
+- Keep outputs reviewable
+- Treat prompts, docs, evals, and runbooks as part of the product
+- Explicitly state uncertainty
+- Never fake confidence when code or docs do not support a conclusion
 
-## Mandatory preflight for every run
-```bash
-git rev-parse --show-toplevel
-git rev-parse --abbrev-ref HEAD
-git rev-parse HEAD
-```
+- `pjt_id`는 과제 instance key다.
+- `pjt_no`는 과제 group key다.
+- `pjt_id`와 `pjt_no`는 같은 값처럼 취급하면 안 된다.
+- 수행기관(`lead_org_name`), 참여기관(`participant_org_name`), 참여인력 소속기관(`people_affiliation_org_name`)은 서로 다른 의미다.
+- 검색 보조 필드(`title`, `answer_public`, `meta_flat`)를 prompt context의 사실 필드와 혼동하면 안 된다.
+- retrieval metadata 전체를 LLM에 직접 노출하면 안 된다.
+## Priority order
+1. user-visible bugs
+2. correctness / safety issues
+3. missing tests / evals
+4. prompt and config drift
+5. docs / runbook synchronization
+6. maintainability
+7. architecture proposals
 
-실행 결과가 아래와 다르면 반드시 보고만 하고 멈춘다.
-- expected branch: `고도화`
+## 4. 3층 artifact 구조
+## Always inspect these areas
+- prompt files
+- chatbot answer generation
+- verifier / repair logic
+- fallback and degraded behavior
+- RAG / retrieval contracts
+- tests and evals
+- logs / observability
+- docs / ADR / RUNBOOK / GOLDEN_TESTS
 
-## Role permissions
-### Watcher
-- production code 수정 금지
-- 보고서/문서 갱신만 허용
-- 목표: drift, regression, stale docs, weak evals, fragile prompts, observability gap 탐지
+이 저장소는 아래 3층 artifact를 전제로 한다.
+1. gate artifact
+2. assembled question analysis
+3. execution strategy
 
-### Improver
-- 1회 실행당 패치 1개만 허용
-- 가능하면 5개 파일 이내 수정
-- 관련 검증이 없으면 패치하지 않는다
-- 대규모 리팩터링 금지
+현재 지원하는 prompt view는 다음과 같다.
+- summary
+- detail
+- list
+- stats
+- relation
+- comparison
+- series
 
-### Architect
-- production code 수정 금지
-- ADR / RFC / migration note만 작성
-- 설계 제안은 staged migration 형태로 작성
+## 5. 변경 시 같이 볼 항목
 
-## Always inspect these areas first
-- planner prompt / planner assembler
-- answer-generation prompt / verifier / repair prompt
-- fallback / degraded response logic
-- retrieval strategy compiler
-- SEARCH / LOOKUP / JOIN tests
-- docs/CODEX_CONTEXT.md
-- docs/SESSION_HANDOFF.md
-- docs/GOLDEN_TESTS.md
-- logs or risk notes if present
+- planner / contract / filter / join key / output_type 문서
+- raw -> canonical 매핑 문서
+- renderer fieldset 문서
+- 운영 triage 및 summary 로그 문서
+- golden test 및 회귀 기준
+- env / runtime / validation entrypoint
+- 관련 ADR 및 handoff 문서
 
-## Preferred outputs for every run
-1. what was inspected
-2. what was found
-3. what was changed
-4. what was validated
-5. what remains risky
-6. what should be done next
+## 6. 금지 사항
 
-## Validation policy
-아래 명령은 아직 확실하지 않음이다. 실제 repo에서 발견되면 대체한다.
-- `pytest -q`
-- `pytest -q -k rag`
-- `python -m pytest`
-- `ruff check .`
-- `python -m compileall .`
+- raw payload 전체를 prompt에 dump하지 않는다.
+- regex만으로 구조 의미를 대충 복원하지 않는다.
+- SEARCH / LOOKUP / JOIN 등의 의미를 서로 바꾸지 않는다.
+- gate artifact에 `deferred`를 넣지 않는다.
+- lower layer가 새 전략 fallback을 발명하지 않는다.
+- 사람/기관 이름을 ids_map에 임의로 넣지 않는다.
 
-검증 명령을 실제 repo 기준으로 찾으면 docs/SESSION_HANDOFF.md에 갱신한다.
+## 7. 변경 후 최소 검증
 
+- syntax / import 오류 확인
+- baseline checks 실행
+- golden query 동작 확인
+- `output_type` propagation 확인
+- filter / join contract 확인
+- 한글 인코딩 깨짐 여부 확인
+
+## 8. 작업 보고에 포함할 내용
+
+- 무엇을 바꿨는지
+- 왜 바꿨는지
+- raw -> canonical -> prompt 흐름에서 어떤 의미를 유지했는지
+- 검증 결과
+- 남은 리스크
+- 추가로 보면 좋은 문서 또는 파일
+
+## Required output for each task
+- What was inspected
+- What was found
+- What changed
+- What was validated
+- What remains risky
+- What should happen next

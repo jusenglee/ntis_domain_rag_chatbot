@@ -1,5 +1,80 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-13T19:10:00+09:00 Improver
+- branch/head: expected branch verified / `6044be1e6977e9e6189b0372e309267b61284cb3`
+- inspected files:
+  - `apps/retrieval/rag_search_policy.py`
+  - `apps/retrieval/rag_runtime_prelude.py`
+  - `apps/docs/03_운영과_환경.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+- findings:
+  - current retrieval already had dense/sparse/hybrid internals, but there was no safe way to widen only the internal SEARCH preset without changing the top-level `SEARCH|LOOKUP|JOIN` contract.
+  - the new hard/soft planner split exposed enough signal to gate a recall-biased variant narrowly: `soft_strategy_hints.semantic_kind=broad_history` plus no explicit/locked project key axis and no active anchor.
+- changes:
+  - `apps/retrieval/rag_search_policy.py`: added `policy_variant` support to search preset/rerank specs and introduced a narrow `broad_semantic` variant that widens only topic-search internals while keeping the top-level strategy unchanged.
+  - `apps/retrieval/rag_runtime_prelude.py`: derived `search_policy_variant` from `question_analysis.hard_contract` and `soft_strategy_hints` behind `RAG_ENABLE_SEARCH_POLICY_VARIANT`, then threaded it into preset/rerank assembly and prelude result diagnostics.
+  - `tests/test_search_policy_variant.py`: locked the allowed path (`broad_history` SEARCH with no hard project axis/anchor) and the blocked paths (explicit project axis, previous anchor), plus preset/rerank widening behavior.
+  - docs: updated `apps/docs/03_운영과_환경.md` and `apps/docs/GOLDEN_TESTS.md`.
+- validations:
+  - `python -m py_compile apps\retrieval\rag_search_policy.py apps\retrieval\rag_runtime_prelude.py tests\test_search_policy_variant.py`
+  - `python -m pytest tests\test_search_policy_variant.py -q -p no:cacheprovider` passed (`4 passed`)
+- remains risky:
+  - this patch adds only an internal SEARCH preset/rerank variant. It does not introduce a first-class planner `HYBRID` mode, and default behavior stays off unless `RAG_ENABLE_SEARCH_POLICY_VARIANT=1`.
+  - broadening is currently limited to `topic`-style SEARCH preset tuning; downstream rerank/runtime compile policy still treats the request as ordinary SEARCH.
+- next best task:
+  - if rollout is desired, add one route-level or retrieval-workflow regression that asserts `strategy_meta`/runtime diagnostics surface `search_policy_variant` on a real broad-history SEARCH transcript.
+
+## 2026-04-13T18:40:00+09:00 Improver
+- branch/head: expected branch verified / `6044be1e6977e9e6189b0372e309267b61284cb3`
+- inspected files:
+  - `apps/prompts/planner_stage2_v1.md`
+  - `apps/planner/planner_context_cards.py`
+  - `tests/test_planner_prompt_asset_paths.py`
+- findings:
+  - the active runtime now passes `hard_contract` and `soft_strategy_hints` into every stage2 prompt call, but the dormant `planner_stage2_v1` prompt still described the old contract and did not mention project-key alias safety.
+  - `planner_stage2_v1` also loaded a smaller card set than `planner_stage2_v2`, so if it were re-enabled it would miss `relationship_semantics_card` context even though the new planner contract still depends on relation-safe project key semantics.
+- changes:
+  - `apps/prompts/planner_stage2_v1.md`: aligned the dormant stage2 v1 prompt with the new hard/soft contract split and explicit `RJT_ID` non-coercion rule.
+  - `apps/planner/planner_context_cards.py`: added `relationship_semantics_card` to the `planner_stage2_v1` card manifest.
+  - `tests/test_planner_prompt_asset_paths.py`: extended prompt asset coverage so cwd-independent loading now checks `planner_stage2_v1`, and added a regression asserting its card bundle includes relationship semantics.
+- validations:
+  - `python -m py_compile apps\planner\planner_context_cards.py tests\test_planner_prompt_asset_paths.py`
+  - `python -m pytest tests\test_planner_prompt_asset_paths.py -q -p no:cacheprovider` passed (`3 passed`)
+- remains risky:
+  - this only keeps dormant prompt assets aligned. It does not introduce new retrieval behavior or hybrid execution policy.
+- next best task:
+  - start the next staged planner change by defining a feature-flagged `HYBRID` execution policy contract without changing the current SEARCH/LOOKUP/JOIN default path.
+
+## 2026-04-13T18:20:00+09:00 Improver
+- branch/head: expected branch verified / `6044be1e6977e9e6189b0372e309267b61284cb3`
+- inspected files:
+  - `apps/api/contracts/runtime_contracts.py`
+  - `apps/api/contracts/workflow_models.py`
+  - `apps/planner/planner_runtime.py`
+  - `apps/prompts/planner_stage2_v2.md`
+  - `apps/conversation/request_facade.py`
+  - `apps/api/runtime_helpers.py`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+- findings:
+  - current code already kept `pjt_id/pjt_no` separate and preserved ambiguous project keys as `candidate_keys.project_key`, but that split lived across regex helpers, planner contract validation, prompt rules, and runtime logs rather than a single assembled QA contract.
+  - unknown project-key aliases such as `RJT_ID` were rejected only as generic unsupported slots; the reason was not specific enough for planner/runtime diagnostics.
+- changes:
+  - `QuestionAnalysisV3` now carries `hard_contract` and `soft_strategy_hints` so planner/runtime can expose legality-only rules separately from recall/planning bias.
+  - planner runtime now builds those two structures before stage2, passes them into the stage2 prompt, and persists the final resolved contract into assembled question analysis plus summary logs.
+  - runtime contract sanitization now reports unknown project-key aliases like `RJT_ID` as `unsupported_project_key_alias` instead of a generic unsupported slot.
+  - request strategy meta and runtime summary logs now surface `resolved_project_key_axis`, alias warnings, and the hard/soft split for downstream diagnostics.
+  - added `tests/test_planner_contract_split.py` to lock `PJT_ID/PJT_NO` axis separation, ambiguous project-key preservation, `RJT_ID` rejection, and hard-contract mismatch fail-close.
+- validations:
+  - `python -m py_compile apps\api\contracts\runtime_contracts.py apps\api\contracts\workflow_models.py apps\planner\planner_runtime.py apps\conversation\request_facade.py apps\api\runtime_helpers.py tests\test_planner_contract_split.py`
+  - `python -m pytest tests\test_planner_contract_split.py tests\test_request_facade_turn_policy.py tests\test_request_facade_child_detail_followup.py -q -p no:cacheprovider` passed (`8 passed`)
+- remains risky:
+  - this patch implements the hard/soft contract split as planner contract metadata, not as a new top-level `HYBRID` execution mode. SEARCH/LOOKUP/JOIN mode expansion is still a later migration step.
+  - only the active stage2 prompt (`v2`) was updated for the new hard/soft inputs; alternate prompt versions should be kept aligned if they are re-enabled.
+- next best task:
+  - extend planner/runtime rollout by introducing a first-class hybrid execution policy behind a feature flag, while keeping `pjt_id/pjt_no` axis checks in hard contract validation.
+
 ## 2026-04-13T12:55:00+09:00 Improver
 - branch/head: expected branch verified / `57dbb5bd63136604d02180e1289887db5e219ba8`
 - inspected files:

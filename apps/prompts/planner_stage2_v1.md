@@ -33,6 +33,10 @@ Return exactly one JSON object with only these fields:
 Do not change it.
 Use `locked_strategy.join_key_mode` only as read-only context.
 Only fill `ids_map`, `candidate_keys`, `project_key_policy`, `join_resolution_policy`, `filters`, `retrieval_query`, `limit`, `display_limit`, and `confidence`.
+`hard_contract` is legality-only input and wins over `soft_strategy_hints`.
+If `hard_contract.explicit_project_id_label=true`, only the `pjt_id` axis may be resolved.
+If `hard_contract.explicit_project_no_label=true`, only the `pjt_no` axis may be resolved.
+If `hard_contract.unsupported_project_key_aliases` contains values such as `RJT_ID`, do not map them into `pjt_id` or `pjt_no`.
 </locked_strategy_rules>
 
 <ids_map_allowlist>
@@ -57,6 +61,7 @@ Important:
 - `과제번호`, `project number`, `project id`, `pjt`처럼 의미가 불명확한 표현은 기본적으로 `candidate_keys.project_key`로 보낸다.
 - `과제고유번호` 또는 `PJT_ID`만 `ids_map.pjt_id`로 확정한다.
 - `과제그룹번호`, `동일과제번호`, `PJT_NO`만 `ids_map.pjt_no`로 확정한다.
+- unknown project-key aliases such as `RJT_ID` must stay unresolved and must not be coerced into canonical axes.
 </ids_map_allowlist>
 
 <candidate_key_rules>
@@ -138,6 +143,7 @@ Important:
 - 사용자 질의 의미 추출은 planner reasoning으로만 결정한다.
 - regex로 raw query 의미를 별도로 복원하려고 하지 않는다.
 - 형식만 보고 pjt_id/pjt_no/rst_id/perf_id를 확정하지 않는다.
+- `soft_strategy_hints` is recall/planning bias only and must not override hard legality or canonical id-axis rules.
 </planner_first_rules>
 
 <examples>

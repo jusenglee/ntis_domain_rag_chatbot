@@ -38,6 +38,8 @@
 
 <runtime_inputs>
 - locked_strategy
+- hard_contract
+- soft_strategy_hints
 - surface_signals
 - entity_role_plan
 - validation_hints
@@ -60,6 +62,10 @@
 </output_schema>
 
 <hard_guards>
+- `hard_contract`는 legality-only 입력이다. soft hint보다 우선한다.
+- `hard_contract.explicit_project_id_label=true`면 `pjt_id` 축만 허용한다.
+- `hard_contract.explicit_project_no_label=true`면 `pjt_no` 축만 허용한다.
+- `hard_contract.unsupported_project_key_aliases`에 값이 있으면 그 alias를 `pjt_id`/`pjt_no`로 임의 매핑하지 않는다.
 - ids_map에는 explicit/recovered 식별자 seed만 넣는다.
 - 사람명/기관명은 ids_map으로 승격하지 말고 filters 또는 retrieval_query에 유지한다.
 - broad people/org history query + explicit perf id 없음 => perf detail용 ids_map을 만들지 않는다.
@@ -70,6 +76,7 @@
   </hard_guards>
 
 <rules>
+- `soft_strategy_hints`는 recall을 살리기 위한 힌트일 뿐 hard legality를 뒤집지 못한다.
 - 기관 역할이 보이면 role-scoped filter를 쓴다:
   - lead_org_name
   - participant_org_name

@@ -10,7 +10,8 @@ from apps.planner.query_intent import QueryIntent
 
 logger = logging.getLogger(__name__)
 
-SEARCH_POLICY_VERSION = "v1.2"
+SEARCH_POLICY_VERSION = "v1.3"
+_SEARCH_POLICY_VARIANTS = {"standard", "broad_semantic"}
 
 PEOPLE_ORG_FIELDS = [
     "prtcp_mp[].hm_nm",
@@ -50,7 +51,9 @@ class SearchPreset:
     early_stop_min_hits: int = 0
     tag_boost: float = 0.0
     tag_mismatch_penalty: float = 0.0
-    strategy_key: Optional[str] = None
+    strategy_key: Optional[str] = None
+
+    policy_variant: str = "standard"
 
     def as_debug(self) -> Dict[str, object]:
         """SearchPreset을 로그/디버그용 dict 형태로 펼친다."""
@@ -73,7 +76,9 @@ class SearchPreset:
             "stop_if_top1_confident": int(self.stop_if_top1_confident),
             "tag_boost": self.tag_boost,
             "tag_mismatch_penalty": self.tag_mismatch_penalty,
-            "strategy_key": self.strategy_key,
+            "strategy_key": self.strategy_key,
+
+            "policy_variant": self.policy_variant,
         }
 
 
@@ -125,21 +130,37 @@ def point_brief(p: Any) -> Dict[str, Any]:
     }
 
 
-def build_strategy_key(action: Optional[str], mode: Optional[str]) -> str:
+def build_strategy_key(action: Optional[str], mode: Optional[str]) -> str:
     """action과 mode를 결합한 검색 전략 키를 만든다."""
     action_norm = str(action or "").strip().lower() or "unknown"
     mode_norm = str(mode or "").strip().lower() or "unknown"
-    return f"{action_norm}:{mode_norm}"
+    return f"{action_norm}:{mode_norm}"
+
+
+
+
+def normalize_search_policy_variant(variant: Optional[str]) -> str:
+
+    """search policy variant를 허용된 값으로 정규화한다."""
+
+    text = str(variant or "").strip().lower()
+
+    return text if text in _SEARCH_POLICY_VARIANTS else "standard"
 
 
-def build_rerank_spec(mode: Optional[str]) -> Dict[str, Any]:
+def build_rerank_spec(mode: Optional[str], *, search_policy_variant: Optional[str] = None) -> Dict[str, Any]:
     """mode별 최종 keep 개수와 rerank weight 기본값을 반환한다."""
-    mode_norm = str(mode or "").strip().lower()
+    mode_norm = str(mode or "").strip().lower()
+    variant_norm = normalize_search_policy_variant(search_policy_variant)
     if mode_norm == "lookup":
-        return {"final_keep": 80, "rerank_weights": {"lexical": 1.2, "dense": 1.0, "tag": 0.5}}
+        return {"final_keep": 80, "rerank_weights": {"lexical": 1.2, "dense": 1.0, "tag": 0.5}, "policy_variant": variant_norm}
     if mode_norm == "join":
-        return {"final_keep": 120, "rerank_weights": {"lexical": 1.1, "dense": 1.0, "join_key": 0.8}}
-    return {"final_keep": 80, "rerank_weights": {"lexical": 1.0, "dense": 1.0}}
+        return {"final_keep": 120, "rerank_weights": {"lexical": 1.1, "dense": 1.0, "join_key": 0.8}, "policy_variant": variant_norm}
+    if mode_norm == "search" and variant_norm == "broad_semantic":
+
+        return {"final_keep": 100, "rerank_weights": {"lexical": 1.0, "dense": 1.0}, "policy_variant": variant_norm}
+
+    return {"final_keep": 80, "rerank_weights": {"lexical": 1.0, "dense": 1.0}, "policy_variant": variant_norm}
 
 
 def resolve_sparse_vector_name(
@@ -268,7 +289,40 @@ def _i(name: str, default: int) -> int:
         return int(default)
 
 
-def build_search_preset(intent: QueryIntent) -> SearchPreset:
+def _apply_search_policy_variant(
+
+    preset: SearchPreset,
+
+    *,
+
+    variant: str,
+
+    action_for_preset: str,
+
+) -> SearchPreset:
+
+    """SEARCH 내부 실행 정책 variant를 preset에 반영한다."""
+
+    preset.policy_variant = normalize_search_policy_variant(variant)
+
+    if preset.policy_variant != "broad_semantic" or action_for_preset != "topic":
+
+        return preset
+
+    preset.top_k_dense = max(preset.top_k_dense, 60)
+
+    preset.top_k_lex_cand = max(preset.top_k_lex_cand, 600)
+
+    preset.top_k_lex = max(preset.top_k_lex, 100)
+
+    preset.max_ctx_items = max(preset.max_ctx_items, 16)
+
+    return preset
+
+
+
+
+def build_search_preset(intent: QueryIntent, *, search_policy_variant: Optional[str] = None) -> SearchPreset:
     """intent action과 route에 따라 SearchPreset 기본값을 고른다.
     
     support, relation, id_exact, id_fuzzy, filter/list, topic 경로를 나눠 top-k와 sparse/dense 비중, context 예산을 고정한다."""
@@ -280,11 +334,14 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     base_fields = ["title_text", "content_text", "keyword_text", "flat_text"]
     weights = {"title_text": default_title_w, "content_text": default_content_w, "keyword_text": default_keyword_w, "flat_text": default_flat_w}
     action = intent.action
-    action_for_preset = "id_exact" if (action == "detail" and bool(getattr(intent, "is_id_query", False))) else action
+    action_for_preset = "id_exact" if (action == "detail" and bool(getattr(intent, "is_id_query", False))) else action
+    variant_norm = normalize_search_policy_variant(search_policy_variant or getattr(intent, "search_policy_variant", None))
 
     def finish(preset: SearchPreset) -> SearchPreset:
         """preset에 pjt_no 필드와 people/org 우선순위 보정을 한 번에 적용한다."""
-        return _prioritize_people_org_fields(_ensure_pjt_no_fields(preset, default_weights=weights), intent=intent, default_weights=weights)
+        normalized = _prioritize_people_org_fields(_ensure_pjt_no_fields(preset, default_weights=weights), intent=intent, default_weights=weights)
+
+        return _apply_search_policy_variant(normalized, variant=variant_norm, action_for_preset=str(action_for_preset or "").strip().lower())
 
     if action_for_preset == "support":
         top_k_lex = _i("RAG_TOPK_LEX_SUPPORT", _i("RAG_TOPK_LEX", 50))
@@ -316,8 +373,8 @@ def build_search_preset(intent: QueryIntent) -> SearchPreset:
     if action_for_preset == "topic":
         top_k_lex = _i("RAG_TOPK_LEX_TOPIC", 80)
         w_lex = _f("RAG_W_LEX_TOPIC", 0.22)
-        return _prioritize_people_org_fields(SearchPreset(top_k_dense=_i("RAG_TOPK_DENSE_TOPIC", 45), top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_TOPIC", 450), top_k_lex=top_k_lex, w_lex=w_lex, lexical_fields=base_fields, lexical_field_weights=weights, sparse_vector_name=default_sparse_vector, sparse_topk=top_k_lex, sparse_weight=w_lex, use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_TOPIC", "1") == "1"), min_dense_score=_f("RAG_MIN_DENSE_SCORE_TOPIC", _f("RAG_MIN_DENSE_SCORE", 0.52)), min_reranked=_i("RAG_MIN_RERANKED_TOPIC", 4), max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_TOPIC", 12), tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.6)), tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.1))), intent=intent, default_weights=weights)
-    return _prioritize_people_org_fields(SearchPreset(top_k_dense=_i("RAG_TOPK_DENSE", 25), top_k_lex_cand=_i("RAG_TOPK_LEX_CAND", 250), top_k_lex=_i("RAG_TOPK_LEX", 50), w_lex=_f("RAG_W_LEX", 0.25), lexical_fields=base_fields, lexical_field_weights=weights, sparse_vector_name=default_sparse_vector, sparse_topk=_i("RAG_TOPK_LEX", 50), sparse_weight=_f("RAG_W_LEX", 0.25), use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD", "1") == "1"), min_dense_score=_f("RAG_MIN_DENSE_SCORE_DEFAULT", _f("RAG_MIN_DENSE_SCORE", 0.52)), min_reranked=_i("RAG_MIN_RERANKED", 4), max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS", 30), tag_boost=_f("RAG_TAG_BOOST", 0.6), tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.1)), intent=intent, default_weights=weights)
+        return finish(SearchPreset(top_k_dense=_i("RAG_TOPK_DENSE_TOPIC", 45), top_k_lex_cand=_i("RAG_TOPK_LEX_CAND_TOPIC", 450), top_k_lex=top_k_lex, w_lex=w_lex, lexical_fields=base_fields, lexical_field_weights=weights, sparse_vector_name=default_sparse_vector, sparse_topk=top_k_lex, sparse_weight=w_lex, use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD_TOPIC", "1") == "1"), min_dense_score=_f("RAG_MIN_DENSE_SCORE_TOPIC", _f("RAG_MIN_DENSE_SCORE", 0.52)), min_reranked=_i("RAG_MIN_RERANKED_TOPIC", 4), max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS_TOPIC", 12), tag_boost=_f("RAG_TAG_BOOST_TOPIC", _f("RAG_TAG_BOOST", 0.6)), tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY_TOPIC", _f("RAG_TAG_MISMATCH_PENALTY", 0.1))))
+    return finish(SearchPreset(top_k_dense=_i("RAG_TOPK_DENSE", 25), top_k_lex_cand=_i("RAG_TOPK_LEX_CAND", 250), top_k_lex=_i("RAG_TOPK_LEX", 50), w_lex=_f("RAG_W_LEX", 0.25), lexical_fields=base_fields, lexical_field_weights=weights, sparse_vector_name=default_sparse_vector, sparse_topk=_i("RAG_TOPK_LEX", 50), sparse_weight=_f("RAG_W_LEX", 0.25), use_dense_threshold=(os.getenv("RAG_USE_DENSE_THRESHOLD", "1") == "1"), min_dense_score=_f("RAG_MIN_DENSE_SCORE_DEFAULT", _f("RAG_MIN_DENSE_SCORE", 0.52)), min_reranked=_i("RAG_MIN_RERANKED", 4), max_ctx_items=_i("RAG_MAX_CONTEXT_ITEMS", 30), tag_boost=_f("RAG_TAG_BOOST", 0.6), tag_mismatch_penalty=_f("RAG_TAG_MISMATCH_PENALTY", 0.1)))
 
 
 def _log_project_key_policy_once() -> None:

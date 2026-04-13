@@ -54,6 +54,41 @@ Head = Literal["project", "perf", "people", "org", "support"]
 Action = Literal["topic", "list", "detail", "stats", "download"]
 
 
+class HardContractV1(BaseModel):
+    """Deterministic legality and identifier contract carried with QA."""
+
+    schema_version: Literal["v1"] = "v1"
+    explicit_project_id_label: bool = False
+    explicit_project_no_label: bool = False
+    ambiguous_project_key_label: bool = False
+    unsupported_project_key_aliases: list[str] = Field(default_factory=list)
+    resolved_project_key_axis: Literal["pjt_id", "pjt_no"] | None = None
+    candidate_project_key_count: int = Field(default=0, ge=0)
+    project_key_policy: Optional[str] = None
+    join_anchor_required: bool = False
+    join_anchor_present: bool = False
+    join_key_mode: Literal["instance", "group", "deferred"] | None = None
+    project_key_axis_locked: bool = False
+
+
+class SoftStrategyHintsV1(BaseModel):
+    """Planner-facing soft signals that must not override hard legality."""
+
+    schema_version: Literal["v1"] = "v1"
+    years: list[str] = Field(default_factory=list)
+    id_like_terms: list[str] = Field(default_factory=list)
+    people_terms: list[str] = Field(default_factory=list)
+    org_terms: list[str] = Field(default_factory=list)
+    perf_types: list[str] = Field(default_factory=list)
+    followup_cues: list[str] = Field(default_factory=list)
+    must_keep_terms: list[str] = Field(default_factory=list)
+    semantic_kind: Optional[str] = None
+    perf_type_policy: Optional[str] = None
+    org_role_hint: Optional[str] = None
+    candidate_project_key_count: int = Field(default=0, ge=0)
+    has_prev_anchor: bool = False
+
+
 class QuestionAnalysisV3(BaseModel):
     """Assembled question-analysis contract.
 
@@ -78,6 +113,8 @@ class QuestionAnalysisV3(BaseModel):
     display_limit: int = Field(MAX_TOP_K_SIZE, ge=1, le=MAX_TOP_K_SIZE)
     retrieval_query: Optional[str] = None
     confidence: float = Field(ge=0.0, le=1.0)
+    hard_contract: HardContractV1 = Field(default_factory=HardContractV1)
+    soft_strategy_hints: SoftStrategyHintsV1 = Field(default_factory=SoftStrategyHintsV1)
     planner_source: Optional[Literal["legacy", "stagewise"]] = None
 
     _ALLOWED_RELATIONS = {"project_perf", "perf_project"}
@@ -297,6 +334,14 @@ class QuestionAnalysisV3(BaseModel):
                 pass
         if int(self.display_limit or 0) > int(self.limit or 0):
             raise ValueError("PLANNER_DISPLAY_LIMIT_EXCEEDS_LIMIT")
+        resolved_axis = "pjt_id" if self.ids_map.get("pjt_id") else ("pjt_no" if self.ids_map.get("pjt_no") else None)
+        contract_axis = getattr(self.hard_contract, "resolved_project_key_axis", None)
+        if resolved_axis and contract_axis and resolved_axis != contract_axis:
+            raise ValueError("PLANNER_HARD_CONTRACT_PROJECT_KEY_AXIS_MISMATCH")
+        contract_policy = str(getattr(self.hard_contract, "project_key_policy", "") or "").strip().lower() or None
+        question_policy = str(self.project_key_policy or "").strip().lower() or None
+        if contract_policy and question_policy and contract_policy != question_policy:
+            raise ValueError("PLANNER_HARD_CONTRACT_PROJECT_KEY_POLICY_MISMATCH")
         return self
 
 

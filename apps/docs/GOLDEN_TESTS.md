@@ -40,6 +40,21 @@
 - expected join_key_mode: `group`
 - expected ids_map key: `pjt_no`
 
+### 6A. Explicit PJT_ID stays on the instance axis
+- query: `PJT_ID=1711015550 과제 상세`
+- expected keep: `ids_map.pjt_id`
+- expected ban: `ids_map.pjt_no`
+
+### 6B. Explicit PJT_NO stays on the group axis
+- query: `PJT_NO=PJT-2020-XXXX 과제 성과`
+- expected keep: `ids_map.pjt_no`
+- expected ban: `ids_map.pjt_id`
+
+### 6C. Unknown project-key alias does not auto-resolve
+- query: `RJT_ID=RJT-2024-001 과제 상세`
+- expected keep: unsupported alias is surfaced as invalid/clarify-safe input
+- expected ban: auto-mapping `RJT_ID` to `pjt_id` or `pjt_no`
+
 ### 7. Stats query stays LOOKUP
 - query: `2021~2023 ETRI 논문 통계`
 - expected mode: `LOOKUP`
@@ -197,11 +212,25 @@
 ### 15. No mixed join keys
 - `pjt_id` and `pjt_no` must not be mixed in one JOIN plan.
 
+### 15A. No implicit project-key alias coercion
+- unknown project-key aliases must not be coerced into `pjt_id` or `pjt_no` without an explicit alias contract.
+
 ### 16. No people-name must in SEARCH
 - person/org token in SEARCH can be bonus only, not hard must.
 
 ## Answer quality tests
 ### 17. Weak evidence => conservative answer
+
+### 18. Broad-history SEARCH may widen only the internal search preset
+- setup: `RAG_ENABLE_SEARCH_POLICY_VARIANT=1`, resolved mode is `SEARCH`, `soft_strategy_hints.semantic_kind=broad_history`, and hard contract has no explicit/locked project key plus no active anchor.
+- expected keep: top-level mode stays `SEARCH`.
+- expected keep: runtime prelude may choose `search_policy_variant=broad_semantic`, increasing only internal preset/rerank breadth.
+- expected ban: changing the top-level strategy to `LOOKUP` or `JOIN` just to widen recall.
+
+### 19. Explicit project axis or anchor blocks broad search variant
+- setup: same as above, but explicit `PJT_ID`/`PJT_NO`, resolved project-key axis, candidate project key, or previous anchor exists.
+- expected keep: `search_policy_variant=standard`.
+- expected ban: broad semantic widening overriding hard contract or active anchor truth.
 - answer must separate confirmed facts / unknowns / what more is needed.
 
 ### 18. No unsupported IDs or dates
