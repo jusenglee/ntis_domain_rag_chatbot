@@ -1,5 +1,33 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-13T20:05:00+09:00 Improver
+- branch/head: expected branch verified / `db44cc1f832acc1f9b0560cf74f8a4dd48b5310d`
+- inspected files:
+  - `apps/retrieval/rag_dense_runtime_support.py`
+  - `apps/retrieval/retrieval.py`
+  - `apps/api/contracts/runtime_contracts.py`
+  - `apps/api/routes.py`
+  - `apps/retrieval/result_contract.py`
+  - `tests/test_lookup_join_hybrid_runtime_failure.py`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/03_운영과_환경.md`
+- findings:
+  - production log `"[RETRIEVE.HYBRID] failed: empty result scope=lookup:ntis_project_v1"` was not a normal no-hit case. In `dense_retrieve_hybrid_multi()`, that branch fires only when the one-shot hybrid primitive returns `None`, not when it returns an empty hit list.
+  - strict `LOOKUP/JOIN` hybrid failures were escaping as plain `RuntimeError`, so `/query/stream` treated them as `INTERNAL_ERROR` instead of a degraded strategy violation even though normal no-result handling already existed elsewhere.
+- changes:
+  - `apps/retrieval/rag_dense_runtime_support.py`: wrapped strict lookup/join hybrid runtime failures and promote `[RETRIEVE.HYBRID] failed: ...` into `StrategyViolation(error_code="LOOKUP_JOIN_HYBRID_RUNTIME_FAILURE")`, with `RAG.LOOKUP_JOIN.HYBRID.RUNTIME_FAILURE` warning log.
+  - `apps/retrieval/retrieval.py`: corrected the misleading strict hybrid error text from `empty result` to `no hybrid response` so ops can distinguish primitive failure from true zero-hit retrieval.
+  - `apps/api/contracts/runtime_contracts.py`: added user-facing degraded messages for `LOOKUP_JOIN_HYBRID_RUNTIME_FAILURE` in both `LOOKUP` and `JOIN`.
+  - `tests/test_lookup_join_hybrid_runtime_failure.py`: added regression coverage for promotion-to-strategy-violation and friendly message rendering.
+  - docs: updated `apps/docs/02_실행계약과_전략규칙.md` and `apps/docs/03_운영과_환경.md`.
+- validations:
+  - pending in current turn after patch: `py_compile`, targeted `pytest`, `create_app()` smoke
+- remains risky:
+  - this patch fixes stream degradation behavior, not the underlying cause of the hybrid primitive returning `None` (sparse encoder failure, Qdrant exception, unsupported query primitive, etc.).
+  - route-level `/query/stream` replay coverage still does not lock the degraded transcript end-to-end.
+- next best task:
+  - add a route-level regression that proves strict lookup/join hybrid primitive failures emit degraded final answers rather than `REQ.ERROR error_code=INTERNAL_ERROR`.
+
 ## 2026-04-13T19:10:00+09:00 Improver
 - branch/head: expected branch verified / `6044be1e6977e9e6189b0372e309267b61284cb3`
 - inspected files:

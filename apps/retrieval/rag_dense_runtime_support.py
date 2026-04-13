@@ -165,11 +165,27 @@ def build_dense_runtime_support(*, dense_retrieve_hybrid_multi: Callable[..., Di
                     raise strategy_violation_type(error_code=code, reason=msg)
                 raise RuntimeError(f"[{code}] {msg}")
 
-        if "client" in params and "collection_name" in params:
+        try:
+            if "client" in params and "collection_name" in params:
+                return dense_retrieve_hybrid_multi(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
+            if "qdr" in params and "collection" in params:
+                return dense_retrieve_hybrid_multi(qdr=qdr, collection=collection, query_text=qtext, keywords=kws, filter_obj=query_filter, **common_kwargs)
             return dense_retrieve_hybrid_multi(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
-        if "qdr" in params and "collection" in params:
-            return dense_retrieve_hybrid_multi(qdr=qdr, collection=collection, query_text=qtext, keywords=kws, filter_obj=query_filter, **common_kwargs)
-        return dense_retrieve_hybrid_multi(client=qdr, expanded_text=qtext, keywords=kws, collection_name=collection, query_filter=query_filter, **common_kwargs)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if require_hybrid_both_sides and violation_on_contract and msg.startswith("[RETRIEVE.HYBRID] failed:"):
+                log_kv(
+                    "RAG.LOOKUP_JOIN.HYBRID.RUNTIME_FAILURE",
+                    tier="warning",
+                    contract_scope=contract_scope,
+                    collection=collection,
+                    reason=msg,
+                )
+                raise strategy_violation_type(
+                    error_code="LOOKUP_JOIN_HYBRID_RUNTIME_FAILURE",
+                    reason=msg,
+                ) from exc
+            raise
 
     def validate_lookup_join_hybrid_metrics(*, mode: str, contract_scope: str, timings: Mapping[str, Any], strict: bool = True) -> None:
         """lookup/join 모드에서 hybrid dense 히트가 exact-match 히트를 망치지 않는지 검사한다.

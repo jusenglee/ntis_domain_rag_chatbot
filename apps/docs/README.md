@@ -21,6 +21,10 @@
 1. `03_운영과_환경.md` — 검증 명령, 로그 트리아지
 2. `04_회귀기준과_점검.md` — 반드시 지킬 계약, 골든 테스트 케이스
 
+### 프런트엔드 / 연동
+1. `06_API_응답명세.md` — route-level 응답 계약, SSE event shape
+2. `02_실행계약과_전략규칙.md` — clarification, follow-up, manifest 의미
+
 ### AI 에이전트 (Codex / Claude)
 1. `CODEX_CONTEXT.md` — bootstrap truth (브랜치, 검증 방식, 패키지 소유권)
 2. `SESSION_HANDOFF.md` — 직전 세션 결과와 다음 권장 작업
@@ -38,6 +42,7 @@
 | `03_운영과_환경.md` | 환경변수, 검증 명령, 로그 트리아지 | 운영, 개발자 |
 | `04_회귀기준과_점검.md` | 회귀 계약, 골든 테스트 케이스 | QA, 개발자 |
 | `05_유지보수와_확장.md` | 패키지 소유권, 문서 동기화 규칙, 기술 부채 | 개발자 |
+| `06_API_응답명세.md` | `/query/stream`, `/query/debug`, health, metrics 응답 계약 | 프런트엔드, 연동 개발자, 운영 |
 | `EVIDENCE_PROMPT_PACKING.md` | evidence 조립, 압축, 예산 정책 | 개발자, AI 에이전트 |
 | `GOLDEN_TESTS.md` | 계약 검증 케이스 | QA, AI 에이전트 |
 | `PRODUCT_BASELINE.md` | 현재 검증 게이트 상태 | 운영, AI 에이전트 |

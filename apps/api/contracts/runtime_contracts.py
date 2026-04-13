@@ -293,4 +293,16 @@ def friendly_strategy_violation_message(
             "기준 과제나 성과를 더 구체적으로 지정해 다시 질문해 주세요."
         )
 
+    if error_code == "LOOKUP_JOIN_HYBRID_RUNTIME_FAILURE" and mode == "LOOKUP":
+        return (
+            "정밀 조회를 수행하는 검색 엔진 응답을 받지 못했습니다. "
+            "잠시 후 다시 시도해 주세요."
+        )
+
+    if error_code == "LOOKUP_JOIN_HYBRID_RUNTIME_FAILURE" and mode == "JOIN":
+        return (
+            "관계형 정밀 조회를 수행하는 검색 엔진 응답을 받지 못했습니다. "
+            "잠시 후 다시 시도해 주세요."
+        )
+
     return "요청을 처리하는 데 필요한 근거를 만들지 못했습니다. 질문을 조금 더 구체적으로 바꿔 다시 시도해 주세요."

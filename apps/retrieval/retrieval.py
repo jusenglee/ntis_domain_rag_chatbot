@@ -941,7 +941,7 @@ def dense_retrieve_hybrid_multi(
         )
         timings["hybrid_once_total"] = time.perf_counter() - t_hybrid0
         if hybrid_points is None:
-            msg = f"[RETRIEVE.HYBRID] failed: empty result scope={contract_scope}"
+            msg = f"[RETRIEVE.HYBRID] failed: no hybrid response scope={contract_scope}"
             if force_hybrid_once:
                 raise RuntimeError(msg)
             logger.warning(msg)
