@@ -122,6 +122,18 @@
 - expected keep: `answer_publishability=publishable` plus manifest presence are both required before ordinal/source follow-up can reuse prior visible truth
 - expected ban: trigger-only `followup` classification directly reusing stale manifest without checking previous publishability
 
+### 11H-1. Candidate builder and interpreter stay bounded by view state
+- setup: `ConversationViewState` already contains `visible_answer_manifest`, `active_scope`, `subject_index`, and `recent_mentions`
+- expected keep: turn candidates are built only from those state objects and carry stable `candidate_id`, ids, display name, source, and ranking hints
+- expected keep: the interpreter may rewrite user intent, but `selected_candidate_ids` must only reference provided candidates
+- expected ban: interpreter inventing a new subject/id outside the candidate list
+
+### 11H-2. Hard signal still wins before interpreter
+- query: `출처 2 보여줘`, `2번째 과제 자세히`, `방금 본 논문만`
+- expected keep: source/ordinal/guarded relative references resolve through deterministic hard-signal handling before ambiguous LLM interpretation
+- expected keep: `최근 3년 과제` is treated as a temporal filter, not a relative-last follow-up
+- expected ban: hard-signal wording being reinterpreted into a different candidate by the interpreter
+
 ### 11I. Answer-state consistency guard blocks wrong visible order
 - setup: `active_scope.result_set`는 A -> B 순서인데 한 모델 answer는 A -> Wrong, 다른 모델 answer는 A -> B
 - expected keep: state-consistent model만 선택된다.

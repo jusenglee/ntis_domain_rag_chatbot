@@ -12,10 +12,24 @@ else:
     BaseMessage = Any
 
 from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
-from apps.conversation.context_router import ContextRouterDecision, route_context
-from apps.conversation.followup_anchor import anchor_to_seed_map, is_child_anchor_source, parse_display_limit, parse_ordinal_reference, parse_source_reference, resolve_followup_anchor
+from apps.conversation.followup_anchor import (
+    anchor_to_seed_map,
+    is_child_anchor_source,
+    parse_display_limit,
+    parse_ordinal_reference,
+    parse_source_reference,
+    resolve_candidate_to_focus_entity,
+)
 from apps.conversation.scope_resolver import resolve_scope_decision
 from apps.conversation.followup_resolution import resolve_reference_context_followup
+from apps.conversation.turn_interpreter import (
+    TurnInterpretationResult,
+    build_clarification_payload,
+    build_turn_candidates,
+    match_anchor_to_candidates,
+    resolve_hard_followup_signal,
+    run_turn_interpreter,
+)
 from apps.conversation.turn_policy import TurnPolicyResult, resolve_turn_policy
 from apps.conversation.turn_trigger import TurnTriggerResult, run_turn_trigger
 from apps.platform.settings import MAX_TOP_K_SIZE
@@ -39,9 +53,6 @@ from apps.platform.schemas import IntentPayloadV3
 from apps.conversation.view_state import (
     ConversationViewState,
     clear_view_state_scope,
-    get_active_child_anchor,
-    get_active_focus_entity,
-    get_recent_mentions,
     set_visible_answer_manifest,
 )
 
@@ -948,8 +959,10 @@ def _build_strategy_meta(
     followup_resolution: Optional[Dict[str, Any]] = None,
     turn_id: Optional[str] = None,
     turn_trigger: Optional[Dict[str, Any]] = None,
+    turn_interpretation: Optional[Dict[str, Any]] = None,
     turn_contract: Optional[Dict[str, Any]] = None,
     turn_policy: Optional[Dict[str, Any]] = None,
+    turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
 
@@ -983,8 +996,10 @@ def _build_strategy_meta(
 
     followup_resolution = dict(followup_resolution or {})
     turn_trigger = dict(turn_trigger or {})
+    turn_interpretation = dict(turn_interpretation or {})
     turn_contract = dict(turn_contract or {})
     turn_policy = dict(turn_policy or {})
+    turn_candidates = list(turn_candidates or [])
     count_validation = dict(count_validation or {})
 
     selected_prev_item = dict(followup_resolution.get("selected_prev_item") or {})
@@ -1062,6 +1077,11 @@ def _build_strategy_meta(
         "turn_trigger": turn_trigger,
         "turn_trigger_intent": turn_trigger.get("turn_intent"),
         "turn_reference_style": turn_trigger.get("reference_style"),
+        "turn_interpretation": turn_interpretation,
+        "turn_interpretation_action": turn_interpretation.get("chosen_action"),
+        "turn_interpretation_confidence": turn_interpretation.get("confidence"),
+        "turn_candidate_count": len(turn_candidates),
+        "turn_candidates": turn_candidates,
         "turn_contract": turn_contract,
         "turn_kind": turn_contract.get("turn_kind"),
         "count_contract": turn_contract.get("count_contract"),
@@ -1089,8 +1109,10 @@ def _build_intent_payload_object(
     followup_resolution: Optional[Dict[str, Any]] = None,
     turn_id: Optional[str] = None,
     turn_trigger: Optional[Dict[str, Any]] = None,
+    turn_interpretation: Optional[Dict[str, Any]] = None,
     turn_contract: Optional[Dict[str, Any]] = None,
     turn_policy: Optional[Dict[str, Any]] = None,
+    turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
 ) -> Any:
 
@@ -1100,8 +1122,10 @@ def _build_intent_payload_object(
         followup_resolution=followup_resolution,
         turn_id=turn_id,
         turn_trigger=turn_trigger,
+        turn_interpretation=turn_interpretation,
         turn_contract=turn_contract,
         turn_policy=turn_policy,
+        turn_candidates=turn_candidates,
         count_validation=count_validation,
     )
 
@@ -1342,27 +1366,142 @@ async def build_intent_payload(
     source_reference_requested = parse_source_reference(question) is not None
     ordinal_reference_requested = parse_ordinal_reference(question) is not None
     previous_turn_contract = dict(getattr(active_view_state, "last_query_contract", {}) or {})
-    turn_trigger_result = run_turn_trigger(
-        question=question,
-        view_state=active_view_state,
-        has_explicit_seed=has_explicit_seed,
+    turn_candidates = [] if has_explicit_seed else build_turn_candidates(view_state=active_view_state)
+    log_event(
+        "TURN.CANDIDATES",
         request_id=request_id,
         conversation_id=conversation_id,
+        candidate_count=len(turn_candidates),
+        candidate_sources=[candidate.source for candidate in turn_candidates[:12]],
     )
-    turn_trigger = await turn_trigger_result if isawaitable(turn_trigger_result) else turn_trigger_result
+
+    hard_reference_resolution: Optional[Dict[str, Any]] = None
+    hard_result = resolve_hard_followup_signal(
+        question=question,
+        normalized_intent=normalized_intent_base,
+        view_state=active_view_state,
+    ) if not has_explicit_seed else None
+    if not has_explicit_seed and source_reference_requested:
+        reference_resolution = resolve_reference_context_followup(
+            question=question,
+            canonical_evidence=list(canonical_evidence or []),
+            prev_context=prev_context,
+            default_context_kind=base_route,
+        )
+        if str(reference_resolution.get("followup_resolution_status") or "").strip().lower() not in {"missing_context", "none"}:
+            hard_reference_resolution = reference_resolution
+            log_event(
+                "TURN.HARD_SIGNAL",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                hard_signal_kind="source_reference",
+                matched=1,
+                action="reuse_manifest",
+                reason="reference_context_source_reference",
+            )
+        elif hard_result is not None:
+            log_event(
+                "TURN.HARD_SIGNAL",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                hard_signal_kind="source_reference",
+                matched=int(bool(hard_result.matched)),
+                action=hard_result.action,
+                reason=hard_result.reason,
+            )
+    elif hard_result is not None and hard_result.matched:
+        log_event(
+            "TURN.HARD_SIGNAL",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            hard_signal_kind=(
+                "ordinal"
+                if ordinal_reference_requested or str(hard_result.reason or "").startswith("relative_")
+                else "explicit_id"
+            ),
+            matched=1,
+            action=hard_result.action,
+            reason=hard_result.reason,
+        )
+
+    turn_interpretation: Optional[TurnInterpretationResult]
+    if hard_reference_resolution is not None:
+        turn_trigger = TurnTriggerResult(
+            turn_intent="followup",
+            reference_style="source_reference",
+            confidence=1.0,
+            reason="hard_reference_context",
+        )
+        turn_interpretation = TurnInterpretationResult(
+            chosen_action="reuse_manifest",
+            selected_candidate_ids=[],
+            confidence=1.0,
+            reason="hard_reference_context",
+            rewritten_user_intent=question,
+        )
+    elif hard_result is not None and hard_result.matched:
+        hard_reference_style = "source_reference" if source_reference_requested else "ordinal"
+        turn_trigger = TurnTriggerResult(
+            turn_intent="followup",
+            reference_style=hard_reference_style,
+            confidence=1.0,
+            reason=f"hard_signal:{hard_result.reason}",
+        )
+        turn_interpretation = TurnInterpretationResult(
+            chosen_action=(
+                "clarification"
+                if str(hard_result.action or "").strip().lower() == "clarification"
+                else "reuse_manifest"
+                if str(hard_result.action or "").strip().lower() == "reuse_manifest"
+                else "reuse_anchor"
+            ),
+            selected_candidate_ids=match_anchor_to_candidates(anchor=hard_result.anchor, candidates=turn_candidates),
+            target_entity_kind=getattr(hard_result.anchor, "kind", None),
+            confidence=1.0,
+            reason=f"hard_signal:{hard_result.reason}",
+            ambiguity_reason=hard_result.reason if str(hard_result.action or "").strip().lower() == "clarification" else None,
+            rewritten_user_intent=question,
+        )
+    else:
+        turn_trigger_result = run_turn_trigger(
+            question=question,
+            view_state=active_view_state,
+            has_explicit_seed=has_explicit_seed,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+        turn_trigger = await turn_trigger_result if isawaitable(turn_trigger_result) else turn_trigger_result
+        turn_interpretation_result = run_turn_interpreter(
+            question=question,
+            view_state=active_view_state,
+            candidates=turn_candidates,
+            trigger=turn_trigger,
+            has_explicit_seed=has_explicit_seed,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+        turn_interpretation = (
+            await turn_interpretation_result if isawaitable(turn_interpretation_result) else turn_interpretation_result
+        )
     turn_policy = resolve_turn_policy(
         turn_trigger=turn_trigger,
+        interpretation=turn_interpretation,
         view_state=active_view_state,
         has_explicit_seed=has_explicit_seed,
+        candidates=turn_candidates,
     )
     log_event(
-        "TURN.POLICY",
+        "TURN.POLICY_DECISION",
         request_id=request_id,
         conversation_id=conversation_id,
         turn_intent=turn_trigger.turn_intent,
         reference_style=turn_trigger.reference_style,
+        chosen_action=(turn_interpretation.chosen_action if turn_interpretation is not None else None),
+        selected_candidate_ids=list((turn_interpretation.selected_candidate_ids if turn_interpretation is not None else []) or []),
+        confidence=(round(float(turn_interpretation.confidence or 0.0), 3) if turn_interpretation is not None else None),
         execution_path=turn_policy.execution_path,
         blocked_reason=turn_policy.blocked_reason,
+        final_execution_path=turn_policy.execution_path,
         allow_manifest_reuse=int(turn_policy.allow_manifest_reuse),
         skip_followup_resolution=int(turn_policy.skip_followup_resolution),
         previous_answer_publishability=previous_turn_contract.get("answer_publishability"),
@@ -1373,11 +1512,7 @@ async def build_intent_payload(
         resolution_view_state = set_visible_answer_manifest(active_view_state, snapshot=None)
     elif turn_policy.execution_path in {"fresh_retrieval", "clarification"}:
         resolution_view_state = _clear_active_view_scope(active_view_state)
-    visible_answer_manifest = getattr(resolution_view_state, "visible_answer_manifest", None)
-    subject_index = getattr(resolution_view_state, "subject_index", {}) or {}
-    scope_focus_entity = get_active_focus_entity(resolution_view_state)
-    active_anchor_entity = get_active_child_anchor(resolution_view_state)
-    followup_snapshot = visible_answer_manifest
+    followup_snapshot = getattr(resolution_view_state, "visible_answer_manifest", None)
     scope_decision = resolve_scope_decision(
         question=question,
         view_state=resolution_view_state,
@@ -1385,6 +1520,7 @@ async def build_intent_payload(
         strategy_meta={
             "turn_policy": turn_policy.model_dump(),
             "turn_trigger": turn_trigger.model_dump(),
+            "turn_interpretation": (turn_interpretation.model_dump() if turn_interpretation is not None else {}),
             "previous_turn_contract": previous_turn_contract,
         },
     )
@@ -1404,11 +1540,7 @@ async def build_intent_payload(
     if scope_decision.reset_requested:
         active_view_state = _clear_active_view_scope(active_view_state)
         resolution_view_state = active_view_state
-        visible_answer_manifest = None
         followup_snapshot = None
-        subject_index = getattr(resolution_view_state, "subject_index", {}) or {}
-        scope_focus_entity = None
-        active_anchor_entity = None
         log_event(
             "ANCHOR.ESCAPED",
             request_id=request_id,
@@ -1423,6 +1555,23 @@ async def build_intent_payload(
             filters=scope_decision.refinement_filters,
         )
     anchor = None if turn_policy.skip_followup_resolution else scope_decision.resolved_anchor
+    if (
+        anchor is None
+        and not turn_policy.skip_followup_resolution
+        and not has_explicit_seed
+        and turn_policy.selected_candidate_ids
+    ):
+        selected_candidate = next(
+            (candidate for candidate in turn_candidates if candidate.candidate_id == turn_policy.selected_candidate_ids[0]),
+            None,
+        )
+        if selected_candidate is not None:
+            materialized_anchor = resolve_candidate_to_focus_entity(
+                candidate=selected_candidate,
+                view_state=active_view_state,
+            )
+            if materialized_anchor is not None:
+                anchor = materialized_anchor
     if turn_policy.execution_path == "clarification":
         followup_resolution = _build_policy_clarification_resolution(
             policy=turn_policy,
@@ -1430,144 +1579,73 @@ async def build_intent_payload(
             snapshot=followup_snapshot,
             question=question,
         )
+    elif hard_reference_resolution is not None:
+        followup_resolution = hard_reference_resolution
+        anchor = None
+    elif hard_result is not None and hard_result.matched and str(hard_result.action or "").strip().lower() == "clarification":
+        clarification_payload = build_clarification_payload(
+            question=question,
+            candidates=turn_candidates,
+            interpretation=turn_interpretation,
+            blocked_reason=str(hard_result.reason or "hard_signal_block").strip() or "hard_signal_block",
+        )
+        followup_resolution = {
+            "followup_resolution_status": "clarification_required",
+            "selected_prev_item": None,
+            "seed_map": {},
+            "seed_source": None,
+            "explicit_followup": True,
+            "followup_reference_kind": "source_reference" if source_reference_requested else "ordinal",
+            "requested_token": question,
+            "requested_index": parse_source_reference(question) or parse_ordinal_reference(question),
+            "available_count": len(getattr(followup_snapshot, "items", []) or []),
+            "anchor_source": None,
+            "focus_entity": None,
+            "candidate_items": list(clarification_payload.get("candidates") or []),
+            "clarification_type": clarification_payload.get("clarification_type"),
+            "clarification_reason": clarification_payload.get("reason"),
+            "clarification_payload": clarification_payload,
+        }
     else:
         followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
-    if not turn_policy.skip_followup_resolution and not has_explicit_seed and source_reference_requested:
-        followup_resolution = resolve_reference_context_followup(
-            question=question,
-            canonical_evidence=list(canonical_evidence or []),
-            prev_context=prev_context,
-            default_context_kind=base_route,
-        )
-        if str(followup_resolution.get("followup_resolution_status") or "").strip().lower() not in {"missing_context", "none"}:
-            anchor = None
-        else:
-            if anchor is None:
-                anchor = resolve_followup_anchor(
-                    question=question,
-                    normalized_intent=normalized_intent_base,
-                    display_snapshot=followup_snapshot,
-                    focus_entity=active_anchor_entity,
-                    scope_focus_entity=scope_focus_entity,
-                    subject_index=subject_index,
-                    recent_mentions=get_recent_mentions(resolution_view_state),
-                )
-            if str(getattr(anchor, "source", "") or "").strip().lower() == "ambiguity_subject_index":
-                followup_resolution = {
-                    "followup_resolution_status": "clarification_required",
-                    "selected_prev_item": None,
-                    "seed_map": {},
-                    "seed_source": None,
-                    "explicit_followup": True,
-                    "followup_reference_kind": "named_subject",
-                    "requested_token": None,
-                    "requested_index": None,
-                    "available_count": len(getattr(followup_snapshot, "items", []) or []),
-                    "anchor_source": "ambiguity_subject_index",
-                    "focus_entity": None,
-                    "clarification_type": "reference_ambiguity",
-                    "clarification_reason": "multiple_named_subject_candidates",
-                    "clarification_payload": {
-                        "clarification_type": "reference_ambiguity",
-                        "reason": "multiple_named_subject_candidates",
-                    },
-                }
-                anchor = None
-            elif anchor is not None:
-                followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
-    elif not turn_policy.skip_followup_resolution and not has_explicit_seed and anchor is None:
-        anchor = resolve_followup_anchor(
-            question=question,
-            normalized_intent=normalized_intent_base,
-            display_snapshot=followup_snapshot,
-            focus_entity=active_anchor_entity,
-            scope_focus_entity=scope_focus_entity,
-            subject_index=subject_index,
-            recent_mentions=get_recent_mentions(resolution_view_state),
-        )
-        if str(getattr(anchor, "source", "") or "").strip().lower() == "ambiguity_subject_index":
-            followup_resolution = {
-                "followup_resolution_status": "clarification_required",
-                "selected_prev_item": None,
-                "seed_map": {},
-                "seed_source": None,
-                "explicit_followup": True,
-                "followup_reference_kind": "named_subject",
-                "requested_token": None,
-                "requested_index": None,
-                "available_count": len(getattr(followup_snapshot, "items", []) or []),
-                "anchor_source": "ambiguity_subject_index",
-                "focus_entity": None,
-                "clarification_type": "reference_ambiguity",
-                "clarification_reason": "multiple_named_subject_candidates",
-                "clarification_payload": {
-                    "clarification_type": "reference_ambiguity",
-                    "reason": "multiple_named_subject_candidates",
-                },
-            }
-            anchor = None
-        else:
-            followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
-        if anchor is None and str(followup_resolution.get("followup_resolution_status") or "").strip().lower() != "clarification_required":
-            followup_resolution = resolve_reference_context_followup(
-                question=question,
-                canonical_evidence=list(canonical_evidence or []),
-                prev_context=prev_context,
-                default_context_kind=base_route,
-            )
-    # --- context_router fallback: clarification 직전에 recent_mentions 기반 복원 시도 ---
-    context_router_decision: Optional[ContextRouterDecision] = None
-    _recent_mentions = get_recent_mentions(resolution_view_state)
+    followup_resolution_status = str(followup_resolution.get("followup_resolution_status") or "").strip().lower()
     if (
         anchor is None
-        and scope_decision.needs_clarification
-        and _recent_mentions
         and not has_explicit_seed
         and not turn_policy.skip_followup_resolution
-        and str(followup_resolution.get("followup_resolution_status") or "").strip().lower() in {"none", "missing_context"}
-    ):
-        context_router_decision = route_context(
-            question=question,
-            recent_mentions=_recent_mentions,
-            active_scope_summary={
-                "scope_kind": getattr(getattr(resolution_view_state, "active_scope", None), "scope_kind", None),
-                "has_focus": scope_focus_entity is not None,
-                "has_snapshot": visible_answer_manifest is not None,
-            },
+        and turn_policy.execution_path in {"reuse_manifest", "reuse_anchor"}
+        and hard_reference_resolution is None
+        and not (
+            hard_result is not None
+            and hard_result.matched
+            and str(hard_result.action or "").strip().lower() == "clarification"
         )
-        if context_router_decision.status == "resolved" and context_router_decision.selected_candidate_index is not None:
-            selected_mention = _recent_mentions[context_router_decision.selected_candidate_index]
-            # FocusEntity로 변환하여 anchor 확정 — _apply_resolved_anchor_seed만 수행
-            from apps.conversation.followup_anchor import focus_entity_from_mention
-            anchor = focus_entity_from_mention(selected_mention)
-            followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
-            log_event(
-                "CONTEXT_ROUTER.RESOLVED",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                source=context_router_decision.source,
-                confidence=context_router_decision.confidence,
-                reason=context_router_decision.reason,
-                selected_index=context_router_decision.selected_candidate_index,
-                entity_kind=selected_mention.entity_kind,
-                pjt_id=selected_mention.pjt_id,
-                pjt_no=selected_mention.pjt_no,
-                rewritten_query_hint=context_router_decision.rewritten_query_hint,
-                recent_mention_count=len(_recent_mentions),
-                clarification_avoided=True,
-            )
-        else:
-            log_event(
-                "CONTEXT_ROUTER.FALLBACK",
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=context_router_decision.status,
-                source=context_router_decision.source,
-                reason=context_router_decision.reason,
-                recent_mention_count=len(_recent_mentions),
-                clarification_avoided=False,
-            )
-
+        and followup_resolution_status not in {"resolved", "clarification_required"}
+    ):
+        blocked_reason = str(turn_policy.blocked_reason or "").strip() or "selected_candidate_not_materialized"
+        clarification_payload = build_clarification_payload(
+            question=question,
+            candidates=turn_candidates,
+            interpretation=turn_interpretation,
+            blocked_reason=blocked_reason,
+        )
+        followup_resolution = {
+            "followup_resolution_status": "clarification_required",
+            "selected_prev_item": None,
+            "seed_map": {},
+            "seed_source": None,
+            "explicit_followup": True,
+            "followup_reference_kind": turn_trigger.reference_style,
+            "requested_token": question,
+            "requested_index": parse_source_reference(question) or parse_ordinal_reference(question),
+            "available_count": len(getattr(followup_snapshot, "items", []) or []),
+            "anchor_source": None,
+            "focus_entity": None,
+            "candidate_items": list(clarification_payload.get("candidates") or []),
+            "clarification_type": clarification_payload.get("clarification_type"),
+            "clarification_reason": clarification_payload.get("reason"),
+            "clarification_payload": clarification_payload,
+        }
     if (
         anchor is None
         and scope_decision.needs_clarification
@@ -1603,6 +1681,16 @@ async def build_intent_payload(
             conversation_id=conversation_id,
             followup_type=scope_decision.followup_type,
             reason=((scope_decision.clarification_payload or {}).get("reason") if scope_decision.clarification_payload else None),
+        )
+    if str(followup_resolution.get("followup_resolution_status") or "").strip().lower() == "clarification_required":
+        clarification_payload = dict(followup_resolution.get("clarification_payload") or {})
+        log_event(
+            "TURN.CLARIFICATION",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            blocked_reason=followup_resolution.get("clarification_reason") or clarification_payload.get("reason"),
+            candidate_count=len(clarification_payload.get("candidates") or []),
+            final_execution_path=turn_policy.execution_path,
         )
 
     if anchor is not None:
@@ -1848,14 +1936,6 @@ async def build_intent_payload(
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
     )
-    # context_router 메타데이터를 followup_resolution에 추가 (strategy_meta에 전파)
-    if context_router_decision is not None:
-        followup_resolution["context_router_status"] = context_router_decision.status
-        followup_resolution["context_router_source"] = context_router_decision.source
-        followup_resolution["context_router_confidence"] = context_router_decision.confidence
-        followup_resolution["recent_mention_count"] = len(_recent_mentions)
-        followup_resolution["rewritten_query_hint"] = context_router_decision.rewritten_query_hint
-
     return (
         _build_intent_payload_object(
             normalized_intent,
@@ -1863,8 +1943,19 @@ async def build_intent_payload(
             followup_resolution=followup_resolution,
             turn_id=turn_id,
             turn_trigger=turn_trigger.model_dump(),
+            turn_interpretation=(turn_interpretation.model_dump() if turn_interpretation is not None else {}),
             turn_contract=turn_contract,
             turn_policy=turn_policy.model_dump(),
+            turn_candidates=[
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "source": candidate.source,
+                    "entity_kind": candidate.entity_kind,
+                    "display_name": candidate.display_name,
+                    "display_rank": candidate.display_rank,
+                }
+                for candidate in turn_candidates[:12]
+            ],
             count_validation=count_validation,
         ),
         question_analysis,

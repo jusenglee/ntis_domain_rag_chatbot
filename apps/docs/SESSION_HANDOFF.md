@@ -1,5 +1,85 @@
 # SESSION_HANDOFF.md
 
+## 2026-04-13T12:55:00+09:00 Improver
+- branch/head: expected branch verified / `57dbb5bd63136604d02180e1289887db5e219ba8`
+- inspected files:
+  - `apps/conversation/request_facade.py`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - main follow-up path는 이미 unified contract로 동작했지만, `request_facade.py` 안에 dead `context_router` fallback block과 관련 주석이 남아 있어 코드 구조가 실제 실행 경로보다 더 transitional하게 보였다.
+- changes:
+  - `apps/conversation/request_facade.py`: dead `context_router` fallback block을 제거하고, 남아 있던 `get_recent_mentions` import와 오래된 주석도 함께 정리했다.
+  - `apps/docs/SESSION_HANDOFF.md`: 이번 레거시 제거와 검증 결과를 기록했다.
+- validations:
+  - run after patch in current session: targeted grep, `python -m py_compile ...`, targeted `pytest`, import smoke
+- remains risky:
+  - historical handoff 기록에는 이전 상태 설명으로 `resolve_followup_anchor()`/legacy fallback 언급이 남아 있다. 이것은 기록 보존이며 current contract source-of-truth는 아니다.
+- next best task:
+  - `/query/stream` transcript replay에 deictic/source-reference precedence와 clarification fail-close를 route-level로 고정한다.
+
+## 2026-04-13T13:35:00+09:00 Improver
+- branch/head: expected branch verified / `57dbb5bd63136604d02180e1289887db5e219ba8`
+- inspected files:
+  - `apps/conversation/request_facade.py`
+  - `apps/conversation/scope_resolver.py`
+  - `tests/conversation/test_turn_interpreter.py`
+  - `tests/conversation/test_followup_candidate_resolution.py`
+  - `apps/docs/01_아키텍처와_흐름.md`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - main request path는 이미 interpreter-first로 바뀌었지만 `request_facade.py`에 disabled되지 않은 legacy follow-up/context-router 구간이 남아 있어 경로 일원화 설명과 실제 코드 구조가 어긋날 수 있었다.
+  - `scope_resolver`는 selection보다 reset/refinement/clarification 보조기로 축소됐지만, 이 계약을 직접 고정하는 테스트가 부족했다.
+- changes:
+  - `apps/conversation/request_facade.py`: policy가 `reuse_manifest|reuse_anchor`를 허용했는데도 candidate materialization이 실패하면 바로 구조화된 clarification으로 fail-close 하도록 추가했다. 실행 경로에서 legacy selector/context-router fallback은 제거하거나 비활성화해 main follow-up path가 다시 질문 문자열을 읽어 대상을 고르지 않게 정리했다.
+  - `tests/conversation/test_followup_unification.py`: `scope_resolver`가 selected candidate를 받은 경우 `reference_followup`만 선언하고 anchor를 직접 고르지 않는지, focus-only view state가 `reuse_anchor`로 끝나는지 회귀를 추가했다.
+  - docs: `apps/docs/01_아키텍처와_흐름.md`, `apps/docs/02_실행계약과_전략규칙.md`를 현재 오케스트레이션 계약에 맞춰 갱신했다.
+- validations:
+  - `python -m py_compile apps\conversation\request_facade.py apps\conversation\scope_resolver.py apps\conversation\followup_anchor.py tests\conversation\test_turn_interpreter.py tests\conversation\test_turn_policy_llm_guard.py tests\conversation\test_followup_candidate_resolution.py tests\conversation\test_followup_unification.py tests\test_request_facade_turn_policy.py tests\test_request_facade_child_detail_followup.py` passed
+  - `python -m pytest tests\conversation\test_turn_interpreter.py tests\conversation\test_turn_policy_llm_guard.py tests\conversation\test_followup_candidate_resolution.py tests\conversation\test_followup_unification.py tests\test_request_facade_turn_policy.py tests\test_request_facade_child_detail_followup.py -q -p no:cacheprovider` passed (`19 passed`)
+  - `python -c "from apps.api.app_factory import create_app; create_app()"` passed
+- remains risky:
+  - `request_facade.py` 안에 dead-code 형태의 legacy block 일부가 남아 있으면 유지보수자가 실행 경로를 오해할 수 있다. 가능하면 다음 정리 patch에서 완전히 삭제하는 편이 낫다.
+- next best task:
+  - dead context-router block을 실제 코드에서도 제거하고, `/query/stream` transcript replay에 deictic/source-reference precedence를 추가한다.
+
+## 2026-04-13T12:10:00+09:00 Improver
+- branch/head: expected branch verified / `57dbb5bd63136604d02180e1289887db5e219ba8`
+- inspected files:
+  - `apps/conversation/request_facade.py`
+  - `apps/conversation/followup_anchor.py`
+  - `apps/conversation/turn_policy.py`
+  - `apps/conversation/turn_trigger.py`
+  - `apps/conversation/view_state.py`
+  - `apps/docs/CODEX_CONTEXT.md`
+  - `apps/docs/02_실행계약과_전략규칙.md`
+  - `apps/docs/GOLDEN_TESTS.md`
+  - `apps/docs/SESSION_HANDOFF.md`
+- findings:
+  - 기존 후속질문 경로는 `turn_trigger -> turn_policy -> resolve_followup_anchor` 중심이라, ambiguous/deictic/refinement 해석 결과를 구조적으로 보존하지 못했고 실행 후보군/선택 결과가 policy와 executor 사이에서 명시 계약으로 남지 않았다.
+  - hard signal, LLM 해석, policy 검증, anchor materialization 책임이 섞여 있어 `출처 N`, ordinal, recent mention, subject-index 기반 follow-up의 우선순위와 차단 조건을 개별 테스트로 고정하기 어려웠다.
+- changes:
+  - `apps/conversation/turn_interpreter.py`, `apps/prompts/turn_interpreter_v1.md`: `TurnCandidate`, `RequestedRefinement`, `TurnInterpretationResult`, `HardResolutionResult`, clarification builder, candidate builder, hard-signal resolver, LLM/fallback turn interpreter를 추가했다.
+  - `apps/conversation/turn_policy.py`: policy를 “실행 결정기”가 아니라 interpreter output validator로 재구성했다. explicit seed, publishability, followup rights, candidate validity, entity-kind conflict를 검증하고 `selected_candidate_ids`와 clarification payload를 남긴다.
+  - `apps/conversation/followup_anchor.py`: 기존 question-string 탐색 로직은 유지하되 `resolve_candidate_to_focus_entity()`를 추가해 선택된 candidate를 `FocusEntity`로 materialize하는 executor 경로를 만들었다.
+  - `apps/conversation/request_facade.py`: main follow-up path를 `TURN.CANDIDATES -> TURN.HARD_SIGNAL -> TURN.INTERPRETATION -> TURN.POLICY_DECISION -> candidate materialization/fallback` 순서로 연결하고, `strategy_meta`에 `turn_interpretation`과 candidate summary를 함께 싣도록 바꿨다.
+  - tests: `tests/conversation/test_turn_interpreter.py`, `tests/conversation/test_turn_policy_llm_guard.py`, `tests/conversation/test_followup_candidate_resolution.py`를 추가하고 기존 `request_facade` follow-up 회귀와 함께 돌렸다.
+- validations:
+  - `python -m py_compile apps\conversation\turn_interpreter.py apps\conversation\turn_policy.py apps\conversation\followup_anchor.py apps\conversation\request_facade.py tests\conversation\test_turn_interpreter.py tests\conversation\test_turn_policy_llm_guard.py tests\conversation\test_followup_candidate_resolution.py` passed
+  - `python -m pytest tests\conversation\test_turn_interpreter.py tests\conversation\test_turn_policy_llm_guard.py tests\conversation\test_followup_candidate_resolution.py tests\test_request_facade_turn_policy.py tests\test_request_facade_child_detail_followup.py -q -p no:cacheprovider` passed (`17 passed`)
+  - `python -c "from apps.api.app_factory import create_app; create_app()"` passed
+- docs:
+  - updated `apps/docs/CODEX_CONTEXT.md`
+  - updated `apps/docs/02_실행계약과_전략규칙.md`
+  - updated `apps/docs/GOLDEN_TESTS.md`
+  - updated `apps/docs/SESSION_HANDOFF.md`
+- remains risky:
+  - legacy `scope_resolver.py` / `resolve_followup_anchor()` fallback이 아직 남아 있어, 모든 follow-up 종류가 interpreter-first로 완전히 일원화된 것은 아니다. 현재 patch는 main request path를 우선 전환하고 legacy path를 compatibility fallback으로 둔다.
+  - candidate dedupe가 canonical id 우선이라 동일 logical entity가 서로 다른 visible row로 반복되는 특수 list에서는 row-level disambiguation보다 entity-level merge가 먼저 일어날 수 있다.
+  - source-reference hard path는 여전히 reference-context owner와 display manifest fallback이 공존하므로, transcript replay 수준에서 multi-turn evidence/source precedence를 더 넓게 고정할 여지가 있다.
+- next best task:
+  - `scope_resolver.py`와 legacy `resolve_followup_anchor()` 선택 로직을 interpreter candidate contract에 맞춰 축소하고, `/query/stream` transcript replay에 `출처 N`, `그거`, `방금 본 논문만`, non-publishable manifest follow-up 차단 케이스를 추가해 route-level로 precedence를 고정한다.
+
 ## 2026-04-10T16:55:00+09:00 Improver
 - branch/head: expected branch verified / `5656d450556df1b7d4a91c16ff88459f22100480`
 - inspected files:

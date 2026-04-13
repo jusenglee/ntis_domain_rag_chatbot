@@ -12,19 +12,13 @@ from pydantic import BaseModel, Field
 
 from apps.conversation.followup_anchor import (
 
-    is_child_anchor_source,
-
     is_referential_followup,
 
     parse_ordinal_reference,
 
-    parse_relative_reference,
-
     parse_source_reference,
 
-    resolve_followup_anchor,
-
-    resolve_from_recent_mentions,
+    resolve_named_child_anchor_from_focus,
 
 )
 
@@ -37,10 +31,6 @@ from apps.conversation.view_state import (
     ConversationViewState,
 
     FocusEntity,
-
-    RecentMentionRecord,
-
-    get_active_child_anchor,
 
     get_active_focus_entity,
 
@@ -216,31 +206,6 @@ def _scope_focus_entity(view_state: Optional[ConversationViewState]) -> Optional
     return get_active_focus_entity(view_state)
 
 
-
-
-
-def _active_anchor_entity(view_state: Optional[ConversationViewState]) -> Optional[FocusEntity]:
-
-    return get_active_child_anchor(view_state)
-
-
-
-
-
-def _get_subject_index(view_state: Optional[ConversationViewState]) -> Any:
-
-    """view_state에서 subject_index를 추출한다. None이면 빈 dict를 반환한다."""
-
-    if view_state is None:
-
-        return {}
-
-    return getattr(view_state, "subject_index", {}) or {}
-
-
-
-
-
 def _extract_refinement_filters(normalized_intent: Any) -> Dict[str, Any]:
 
     filters: Dict[str, Any] = {}
@@ -360,6 +325,42 @@ def _has_independent_scope_axis(normalized_intent: Any) -> bool:
         if str(value or "").strip():
 
             return True
+
+    return False
+
+
+def _strategy_execution_path(strategy_meta: Optional[Dict[str, Any]]) -> str:
+
+    if not isinstance(strategy_meta, dict):
+
+        return ""
+
+    turn_policy = strategy_meta.get("turn_policy") or {}
+
+    if isinstance(turn_policy, dict):
+
+        return str(turn_policy.get("execution_path") or "").strip().lower()
+
+    return ""
+
+
+def _strategy_has_selected_candidate(strategy_meta: Optional[Dict[str, Any]]) -> bool:
+
+    if not isinstance(strategy_meta, dict):
+
+        return False
+
+    turn_policy = strategy_meta.get("turn_policy") or {}
+
+    if isinstance(turn_policy, dict) and list(turn_policy.get("selected_candidate_ids") or []):
+
+        return True
+
+    turn_interpretation = strategy_meta.get("turn_interpretation") or {}
+
+    if isinstance(turn_interpretation, dict) and list(turn_interpretation.get("selected_candidate_ids") or []):
+
+        return True
 
     return False
 
@@ -563,13 +564,11 @@ def resolve_scope_decision(
 
     scope_focus_entity = _scope_focus_entity(view_state)
 
-    latest_anchor_entity = _active_anchor_entity(view_state)
-
     has_active_scope_target = _has_active_scope_target(view_state)
 
-    subject_index = _get_subject_index(view_state)
-
     recent_mentions = get_recent_mentions(view_state)
+    strategy_execution_path = _strategy_execution_path(strategy_meta)
+    has_selected_candidate = _strategy_has_selected_candidate(strategy_meta)
 
 
 
@@ -582,68 +581,6 @@ def resolve_scope_decision(
     if _has_explicit_ids(normalized_intent_base):
 
         return ScopeDecision(followup_type="fresh_search")
-
-
-
-    anchor = resolve_followup_anchor(
-
-        question=question,
-
-        normalized_intent=normalized_intent_base,
-
-        display_snapshot=latest_snapshot,
-
-        focus_entity=latest_anchor_entity,
-
-        scope_focus_entity=scope_focus_entity,
-
-        subject_index=subject_index,
-
-        recent_mentions=recent_mentions,
-
-    )
-
-    if anchor is not None:
-
-        # subject_index í´ì ê²°ê³¼ê° ambiguousì¸ ê²½ì° clarificationì¼ë¡ ì²ë¦¬íë¤.
-
-        if str(getattr(anchor, "source", "") or "").strip() == "ambiguity_subject_index":
-
-            return ScopeDecision(
-
-                followup_type="ambiguous_followup",
-
-                needs_clarification=True,
-
-                clarification_payload=_build_clarification_payload(
-
-                    clarification_type="subject_index_ambiguity",
-
-                    reason="subject_index_ambiguity",
-
-                    message='ì\x9d´ì\xa0\x84 ë\x8c\x80í\x99\x94ì\x97\x90ì\x84\x9c ì\x96¸ê¸\x89ë\x90\x9c ë\x8c\x80ì\x83\x81ì\x9d´ ì\x97¬ë\x9f¿ì\x9e\x85ë\x8b\x88ë\x8b¤. ì\x96´ë\x96¤ ë\x8c\x80ì\x83\x81ì\x9d\x84 ê°\x80ë¦¬í\x82¤ë\x8a\x94ì§\x80 ë\x8b¤ì\x8b\x9c ì§\x80ì\xa0\x95í\x95´ ì£¼ì\x84¸ì\x9a\x94.',
-
-                    latest_snapshot=latest_snapshot,
-
-                    candidates=[],
-
-                    focus_entity=scope_focus_entity,
-
-                ),
-
-            )
-
-        followup_type = "child_entity_followup" if is_child_anchor_source(getattr(anchor, "source", None)) else "reference_followup"
-
-        return ScopeDecision(
-
-            followup_type=followup_type,
-
-            resolved_anchor=anchor,
-
-        )
-
-
 
     child_reference = _inspect_named_child_reference(question, scope_focus_entity)
 
@@ -713,25 +650,29 @@ def resolve_scope_decision(
 
 
 
+    if child_reference["matched"]:
+
+        return ScopeDecision(
+
+            followup_type="child_entity_followup",
+
+            resolved_anchor=resolve_named_child_anchor_from_focus(
+
+                question=question,
+
+                focus_entity=scope_focus_entity,
+
+            ),
+
+        )
+
+
+
     if _has_refinement_cue(question, normalized_intent_base):
 
         refinement_filters = _extract_refinement_filters(normalized_intent_base)
 
         if not has_active_scope_target and not _has_independent_scope_axis(normalized_intent_base):
-
-            # --- recent_mentions fallback: refinement target이 없을 때 복원 시도 ---
-
-            rm_anchor = resolve_from_recent_mentions(question=question, recent_mentions=recent_mentions)
-
-            if rm_anchor is not None:
-
-                return ScopeDecision(
-
-                    followup_type="reference_followup",
-
-                    resolved_anchor=rm_anchor,
-
-                )
 
             return ScopeDecision(
 
@@ -766,6 +707,10 @@ def resolve_scope_decision(
 
             )
 
+    if strategy_execution_path in {"reuse_manifest", "reuse_anchor"} or has_selected_candidate:
+
+        return ScopeDecision(followup_type="reference_followup")
+
 
 
     has_reference_cue = bool(
@@ -781,22 +726,6 @@ def resolve_scope_decision(
     if has_reference_cue:
 
         if latest_snapshot is None and scope_focus_entity is None:
-
-            # --- recent_mentions fallback: 이전 결과가 없을 때 복원 시도 ---
-
-            rm_anchor = resolve_from_recent_mentions(question=question, recent_mentions=recent_mentions)
-
-            if rm_anchor is not None:
-
-                return ScopeDecision(
-
-                    followup_type="reference_followup",
-
-                    resolved_anchor=rm_anchor,
-
-                )
-
-            # 후보가 여러 개면 후보 제시 clarification
 
             if recent_mentions and len(recent_mentions) > 1:
 
@@ -865,20 +794,6 @@ def resolve_scope_decision(
 
             )
 
-        # --- recent_mentions fallback: 기존 참조 해석 실패 시 복원 시도 ---
-
-        rm_anchor = resolve_from_recent_mentions(question=question, recent_mentions=recent_mentions)
-
-        if rm_anchor is not None:
-
-            return ScopeDecision(
-
-                followup_type="reference_followup",
-
-                resolved_anchor=rm_anchor,
-
-            )
-
         return ScopeDecision(
 
             followup_type="ambiguous_followup",
@@ -905,4 +820,3 @@ def resolve_scope_decision(
 
 
     return ScopeDecision(followup_type="fresh_search")
-

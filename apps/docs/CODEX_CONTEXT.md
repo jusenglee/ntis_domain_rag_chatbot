@@ -76,16 +76,22 @@
 
 ## Follow-up Priority
 - follow-up resolution runs before evidence packing.
+- follow-up orchestration is split into `hard signal -> candidate builder -> turn interpreter -> policy validator -> anchor executor`.
+- hard signals (`출처 N`, ordinal, explicit ids, guarded relative refs) stay deterministic and run before LLM interpretation.
+- ambiguous/deictic/refinement follow-ups may use the turn interpreter, but the policy layer is the final allow/block gate.
 - order:
-  - active anchor
-  - fact-based deterministic short-circuit
-  - raw payload / hydrate
+  - hard signal / reference-context owner
+  - candidate build from `ConversationViewState`
+  - LLM interpretation for ambiguous follow-ups
+  - policy validation of reuse rights and candidate validity
+  - scope reset/refinement/clarification assist only after policy
+  - anchor materialization / raw payload / hydrate
   - exact lookup rerun
   - then envelope build + pack if still needed
 
 ## What To Watch
 1. strategy drift
-2. follow-up anchor drift
+2. follow-up candidate/interpreter drift
 3. prompt-unit / serialized-context desync
 4. raw payload memory retention growth
 5. huge `prtcp_mp` / `prtcp_org` prompt explosions
