@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Literal, Optional
 
-from langchain_core.messages import SystemMessage
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+from apps.platform.langchain_compat import ChatPromptTemplate, PydanticOutputParser, SystemMessage
 from pydantic import BaseModel, Field
 
 from apps.api.runtime_helpers import log_event

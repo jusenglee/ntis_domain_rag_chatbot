@@ -53,10 +53,12 @@ from apps.conversation.raw_payload_store import sync_active_anchor_record, upser
 from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm
 from apps.planner.planner_contract import StrategyViolation
+from apps.platform.rag_constants import COL_PROJECT
+from apps.retrieval.execution_manager import ExecutionInput, ExecutionManager
+from apps.retrieval.runtime_routing import build_runtime_dispatch_plan, can_use_legacy_retry
 from apps.platform.settings import MAX_TOP_K_SIZE
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import Tool
 
 
 
@@ -269,6 +271,284 @@ def _resolve_display_request(question_analysis: Any) -> int:
         requested = _coerce_positive_int(getattr(question_analysis, "limit", None)) or 1
 
     return requested
+
+
+def _normalize_project_target_cols(*target_cols: Any) -> list[str]:
+
+    project_cols: list[str] = []
+    seen: set[str] = set()
+
+    for values in target_cols:
+
+        if not isinstance(values, list):
+
+            continue
+
+        for value in values:
+
+            text = str(value or "").strip()
+
+            if not text:
+
+                continue
+
+            if not text.lower().startswith("ntis_project"):
+
+                continue
+
+            if text in seen:
+
+                continue
+
+            seen.add(text)
+            project_cols.append(text)
+
+    return project_cols or [COL_PROJECT]
+
+
+def _merge_target_cols(*target_cols: Any) -> list[str]:
+
+    merged_cols: list[str] = []
+    seen: set[str] = set()
+
+    for values in target_cols:
+
+        if not isinstance(values, list):
+
+            continue
+
+        for value in values:
+
+            text = str(value or "").strip()
+
+            if not text or text in seen:
+
+                continue
+
+            seen.add(text)
+            merged_cols.append(text)
+
+    return merged_cols
+
+
+def _clone_tool_intent_payload(
+    *,
+    intent_payload: Any,
+    question_analysis: Any,
+    target_cols: list[str],
+    retrieval_query: str,
+    mode: str,
+    ids_map: dict[str, list[str]],
+    filters: dict[str, Any],
+    limit: int,
+    base_route_override: str | None = None,
+    head_override: str | None = None,
+) -> Any:
+
+    normalized_intent = getattr(intent_payload, "normalized_intent", None)
+    next_payload = intent_payload
+    normalized_base_route = str(base_route_override or "").strip().lower() or None
+    normalized_head = str(head_override or "").strip().lower() or None
+
+    if normalized_intent is not None:
+
+        next_normalized_intent = dc_replace(
+            normalized_intent,
+            mode=str(mode or "").strip().lower() or None,
+            base_route=normalized_base_route or getattr(normalized_intent, "base_route", None),
+            retrieval_query=str(retrieval_query or "").strip() or None,
+            ids_map=dict(ids_map or {}),
+            target_cols=list(target_cols or []),
+        )
+        next_payload = dc_replace(next_payload, normalized_intent=next_normalized_intent)
+
+    if next_payload is not None and question_analysis is not None and hasattr(question_analysis, "model_copy"):
+
+        next_question_analysis = question_analysis.model_copy(
+            update={
+                "mode": str(mode or "").strip().upper(),
+                "ids_map": dict(ids_map or {}),
+                "filters": dict(filters or {}),
+                "target_cols": list(target_cols or []),
+                "retrieval_query": str(retrieval_query or "").strip() or None,
+                "limit": max(1, int(limit or 1)),
+                "display_limit": max(1, int(limit or 1)),
+                **({"head": normalized_head} if normalized_head else {}),
+            }
+        )
+        next_payload = dc_replace(next_payload, question_analysis=next_question_analysis)
+
+    return next_payload
+
+
+def _build_project_tool_collaborators(
+    *,
+    state: Any,
+    qa: Any,
+    target_cols: list[str],
+    search_limit: int,
+) -> dict[str, Any]:
+
+    request_overrides = getattr(state, "request_overrides", None) or {}
+    base_intent_payload = getattr(state, "intent_payload", None)
+
+    def _retrieve_with_payload(*, query_text: str, tool_intent_payload: Any, top_k: int) -> dict[str, Any]:
+
+        retriever = CustomRAGRetriever(
+            top_k=max(1, int(top_k or 1)),
+            model_name="gemma_triton_0",
+            intent_payload=tool_intent_payload,
+            request_overrides=dict(request_overrides or {}),
+        )
+        return retriever.retrieve(query_text)
+
+    def _lookup_project_detail(*, pjt_id: str, target_cols: list[str]) -> dict[str, Any]:
+
+        lookup_payload = _clone_tool_intent_payload(
+            intent_payload=base_intent_payload,
+            question_analysis=qa,
+            target_cols=_normalize_project_target_cols(target_cols),
+            retrieval_query=str(pjt_id or "").strip(),
+            mode="LOOKUP",
+            ids_map={"pjt_id": [str(pjt_id or "").strip()]},
+            filters=dict(getattr(qa, "filters", {}) or {}),
+            limit=1,
+        )
+        return _retrieve_with_payload(
+            query_text=str(pjt_id or "").strip(),
+            tool_intent_payload=lookup_payload,
+            top_k=1,
+        )
+
+    def _search_projects_by_text(*, query: str, filters: dict[str, Any], limit: int) -> dict[str, Any]:
+
+        search_payload = _clone_tool_intent_payload(
+            intent_payload=base_intent_payload,
+            question_analysis=qa,
+            target_cols=_normalize_project_target_cols(target_cols),
+            retrieval_query=str(query or "").strip(),
+            mode="SEARCH",
+            ids_map={},
+            filters=dict(filters or {}),
+            limit=max(1, int(limit or search_limit or 1)),
+        )
+        return _retrieve_with_payload(
+            query_text=str(query or "").strip(),
+            tool_intent_payload=search_payload,
+            top_k=max(1, int(limit or search_limit or 1)),
+        )
+
+    return {
+        "lookup_project_detail": _lookup_project_detail,
+        "search_projects_by_text": _search_projects_by_text,
+    }
+
+
+def _build_route_search_collaborators(
+    *,
+    state: Any,
+    qa: Any,
+    base_route: str,
+    target_cols: list[str],
+    search_limit: int,
+) -> dict[str, Any]:
+
+    request_overrides = getattr(state, "request_overrides", None) or {}
+    base_intent_payload = getattr(state, "intent_payload", None)
+    normalized_base_route = str(base_route or getattr(qa, "head", None) or "project").strip().lower() or "project"
+    default_target_cols = list(target_cols or [])
+
+    def _retrieve_with_payload(*, query_text: str, tool_intent_payload: Any, top_k: int) -> dict[str, Any]:
+
+        retriever = CustomRAGRetriever(
+            top_k=max(1, int(top_k or 1)),
+            model_name="gemma_triton_0",
+            intent_payload=tool_intent_payload,
+            request_overrides=dict(request_overrides or {}),
+        )
+        return retriever.retrieve(query_text)
+
+    def _search_route_by_text(
+        *,
+        base_route: str,
+        query: str,
+        filters: dict[str, Any],
+        limit: int,
+        target_cols: list[str],
+    ) -> dict[str, Any]:
+
+        route = str(base_route or normalized_base_route).strip().lower() or normalized_base_route
+        effective_target_cols = _merge_target_cols(target_cols, default_target_cols)
+        resolved_limit = max(1, int(limit or search_limit or 1))
+        search_payload = _clone_tool_intent_payload(
+            intent_payload=base_intent_payload,
+            question_analysis=qa,
+            target_cols=effective_target_cols,
+            retrieval_query=str(query or "").strip(),
+            mode="SEARCH",
+            ids_map={},
+            filters=dict(filters or {}),
+            limit=resolved_limit,
+            base_route_override=route,
+            head_override=route,
+        )
+        return _retrieve_with_payload(
+            query_text=str(query or "").strip(),
+            tool_intent_payload=search_payload,
+            top_k=resolved_limit,
+        )
+
+    return {
+        "search_route_by_text": _search_route_by_text,
+    }
+
+
+def _build_project_join_collaborators(
+    *,
+    state: Any,
+    qa: Any,
+    target_cols: list[str],
+    retrieval_query: str,
+    search_limit: int,
+) -> dict[str, Any]:
+
+    request_overrides = getattr(state, "request_overrides", None) or {}
+    base_intent_payload = getattr(state, "intent_payload", None)
+
+    def _retrieve_with_payload(*, query_text: str, tool_intent_payload: Any, top_k: int) -> dict[str, Any]:
+
+        retriever = CustomRAGRetriever(
+            top_k=max(1, int(top_k or 1)),
+            model_name="gemma_triton_0",
+            intent_payload=tool_intent_payload,
+            request_overrides=dict(request_overrides or {}),
+        )
+        return retriever.retrieve(query_text)
+
+    def _fetch_project_performance(*, pjt_ids: list[str], join_key_mode: str) -> dict[str, Any]:
+
+        normalized_join_mode = str(join_key_mode or "").strip().lower()
+        normalized_ids = [str(value or "").strip() for value in list(pjt_ids or []) if str(value or "").strip()]
+        axis_key = "pjt_no" if normalized_join_mode == "group" else "pjt_id"
+        join_payload = _clone_tool_intent_payload(
+            intent_payload=base_intent_payload,
+            question_analysis=qa,
+            target_cols=_merge_target_cols(target_cols, getattr(qa, "target_cols", None)),
+            retrieval_query=str(retrieval_query or "").strip(),
+            mode="JOIN",
+            ids_map={axis_key: normalized_ids},
+            filters=dict(getattr(qa, "filters", {}) or {}),
+            limit=max(1, int(search_limit or 1)),
+        )
+        return _retrieve_with_payload(
+            query_text=str(retrieval_query or "").strip(),
+            tool_intent_payload=join_payload,
+            top_k=max(1, int(search_limit or 1)),
+        )
+
+    return {
+        "fetch_project_performance": _fetch_project_performance,
+    }
 
 
 
@@ -1634,6 +1914,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
                 "view_state": view_state,
                 "raw_payload_memory": raw_payload_memory,
+                "retrieval_runtime_meta": {},
 
             }
 
@@ -1664,6 +1945,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 "debug_answer_context_text": "",
                 "anchor_hit": bool(fact_followup.get("anchor_hit")),
                 "followup_resolved_by_facts": bool(fact_followup.get("followup_resolved_by_facts")),
+                "retrieval_runtime_meta": {},
             }
 
         detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
@@ -1752,6 +2034,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                     "raw_payload_memory": raw_payload_memory,
                     "anchor_hit": False,
                     "followup_resolved_by_facts": False,
+                    "retrieval_runtime_meta": {},
                 }
             log_event(
                 "DETAIL.CACHE.MISS",
@@ -1897,32 +2180,169 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 anchor_seed_map=focus_seed_map,
                 selected_search_query=resolved_retrieval_query,
             )
-        retriever = CustomRAGRetriever(
-
-            top_k=search_num,
-
-            model_name="gemma_triton_0",
-
-            intent_payload=state.intent_payload,
-
-            request_overrides=getattr(state, "request_overrides", None) or {},
-
+        execution_trace: list[dict[str, Any]] = []
+        retrieval_runtime_meta: dict[str, Any] = {}
+        dispatch_plan = build_runtime_dispatch_plan(
+            qa=qa,
+            query_intent=query_intent,
+            focus_seed_map=focus_seed_map,
+            prefer_fresh_retrieval=prefer_fresh_retrieval,
+            search_num=search_num,
+            resolved_retrieval_query=resolved_retrieval_query,
+        )
+        log_event(
+            "L2.DISPATCH",
+            request_id=state.request_id,
+            conversation_id=state.conversation_id,
+            policy_name=dispatch_plan.policy_name,
+            execution_kind=dispatch_plan.execution_kind,
+            use_execution_manager=int(dispatch_plan.use_execution_manager),
+            orchestrator_owned=int(dispatch_plan.orchestrator_owned),
+            legacy_retry_allowed=int(dispatch_plan.legacy_retry_allowed),
+            base_route=dispatch_plan.request_meta.get("base_route"),
         )
 
-        rag_tool = Tool(
+        if dispatch_plan.use_execution_manager:
+            execution_target_cols = list(dispatch_plan.target_cols or [])
+            if dispatch_plan.execution_kind == "project_join":
+                collaborator_bundle = _build_project_join_collaborators(
+                    state=state,
+                    qa=qa,
+                    target_cols=execution_target_cols,
+                    retrieval_query=resolved_retrieval_query,
+                    search_limit=search_num,
+                )
+            elif dispatch_plan.execution_kind == "route_search":
+                collaborator_bundle = _build_route_search_collaborators(
+                    state=state,
+                    qa=qa,
+                    base_route=str(
+                        dispatch_plan.request_meta.get("base_route")
+                        or _pick_attr(query_intent, qa, key="base_route", default=getattr(qa, "head", None))
+                        or getattr(qa, "head", None)
+                        or "project"
+                    ),
+                    target_cols=execution_target_cols,
+                    search_limit=search_num,
+                )
+            else:
+                collaborator_bundle = _build_project_tool_collaborators(
+                    state=state,
+                    qa=qa,
+                    target_cols=execution_target_cols,
+                    search_limit=search_num,
+                )
+            execution_request_meta = {
+                **dict(dispatch_plan.request_meta or {}),
+                "request_id": getattr(state, "request_id", None),
+                "conversation_id": getattr(state, "conversation_id", None),
+            }
+            if dispatch_plan.execution_kind == "project_join" and focus_entity is not None:
+                execution_request_meta.update(
+                    {
+                        "anchor_pjt_id": str(getattr(focus_entity, "pjt_id", None) or "").strip() or None,
+                        "anchor_pjt_no": str(getattr(focus_entity, "pjt_no", None) or "").strip() or None,
+                        "anchor_source": str(getattr(focus_entity, "source", None) or "").strip() or None,
+                    }
+                )
+            execution_input = ExecutionInput(
+                question_analysis=qa,
+                retrieval_query=resolved_retrieval_query,
+                target_cols=execution_target_cols,
+                request_meta=execution_request_meta,
+                collaborator_bundle=collaborator_bundle,
+            )
+            execution_outcome = await asyncio.to_thread(ExecutionManager().execute, execution_input)
+            _skip_reason = str(execution_outcome.diagnostics.get("reason") or "")
+            if _skip_reason in ("policy_not_implemented", "no_runtime_strategy_policy"):
+                log_event(
+                    "RAG.EXECUTION_MANAGER.ROUTING_INVARIANT_VIOLATION",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    policy_name=dispatch_plan.policy_name,
+                    execution_kind=dispatch_plan.execution_kind,
+                    skip_reason=_skip_reason,
+                )
+                execution_outcome = ExecutionOutcome(
+                    execution_trace=list(execution_outcome.execution_trace or []),
+                    diagnostics={"routing_invariant_violation": True, "reason": _skip_reason},
+                )
+            docs = list(execution_outcome.docs or [])
+            canonical_evidence = list(execution_outcome.canonical_evidence or [])
+            render_profile = dict(execution_outcome.render_profile or {})
+            no_result_message = execution_outcome.no_result_message
+            execution_trace = list(execution_outcome.execution_trace or [])
+            diagnostics = dict(execution_outcome.diagnostics or {})
+            clarification = diagnostics.get("clarification")
+            answer_context_text = str(diagnostics.get("answer_context_text") or "")
+            debug_answer_context_text = str(diagnostics.get("debug_answer_context_text") or answer_context_text)
+            actual_retrieval_query = str(diagnostics.get("actual_retrieval_query") or resolved_retrieval_query or "")
+            raw_result_count = int(diagnostics.get("raw_result_count") or len(docs))
+            retrieval_runtime_meta = dispatch_plan.build_runtime_meta(diagnostics=diagnostics)
+            if execution_trace:
+                _all_obs_codes: list[str] = []
+                _total_tool_latency_ms: float = 0.0
+                for _step in execution_trace:
+                    _all_obs_codes.extend(_step.get("observation_codes") or [])
+                    _total_tool_latency_ms += float(_step.get("latency_ms") or 0.0)
+                _deduped_obs_codes = list(dict.fromkeys(_all_obs_codes))
+                _recovery_applied = bool(diagnostics.get("recovery_applied"))
+                log_event(
+                    "RAG.EXECUTION_MANAGER.RESULT",
+                    request_id=state.request_id,
+                    conversation_id=state.conversation_id,
+                    policy_name=dispatch_plan.policy_name,
+                    execution_kind=dispatch_plan.execution_kind,
+                    policy=str(execution_trace[-1].get("policy") or execution_trace[0].get("policy") or ""),
+                    recovery_applied=int(_recovery_applied),
+                    trace_steps=len(execution_trace),
+                    docs_found=len(docs),
+                    canonical_found=len(canonical_evidence),
+                    observation_codes=_deduped_obs_codes,
+                    tool_latency_ms=round(_total_tool_latency_ms, 3),
+                )
+                if _recovery_applied:
+                    log_event(
+                        "L2.RECOVERY.APPLIED",
+                        request_id=state.request_id,
+                        conversation_id=state.conversation_id,
+                        policy_name=dispatch_plan.policy_name,
+                        execution_kind=dispatch_plan.execution_kind,
+                        trigger_codes=_deduped_obs_codes,
+                        recovery_policy=diagnostics.get("recovery_policy"),
+                        recovery_user_notice=diagnostics.get("recovery_user_notice"),
+                        docs_found_after_recovery=len(docs),
+                    )
+        else:
+            retriever = CustomRAGRetriever(
 
-            name="RAG_Search",
+                top_k=search_num,
 
-            description="Search the NTIS/IRIS knowledge base.",
+                model_name="gemma_triton_0",
 
-            func=retriever.retrieve,
+                intent_payload=state.intent_payload,
 
-        )
+                request_overrides=getattr(state, "request_overrides", None) or {},
 
+            )
 
+            retrieve_result = await asyncio.to_thread(retriever.retrieve, resolved_retrieval_query)
+            actual_retrieval_query = str((retrieve_result or {}).get("actual_retrieval_query") or resolved_retrieval_query or "")
+            docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
 
-        retrieve_result = await asyncio.to_thread(rag_tool.func, resolved_retrieval_query)
-        actual_retrieval_query = str((retrieve_result or {}).get("actual_retrieval_query") or resolved_retrieval_query or "")
+            canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
+
+            render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
+            no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
+            clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
+            answer_context_text = str(retrieve_result.get("answer_context_text") or "") if isinstance(retrieve_result, dict) else ""
+            debug_answer_context_text = (
+                str(retrieve_result.get("debug_answer_context_text") or answer_context_text)
+                if isinstance(retrieve_result, dict)
+                else answer_context_text
+            )
+            raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
+            retrieval_runtime_meta = dispatch_plan.build_runtime_meta()
         log_event(
             "RAG.RETRIEVAL_QUERY.ACTUAL",
             request_id=state.request_id,
@@ -1938,20 +2358,6 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 resolved_retrieval_query=resolved_retrieval_query,
                 actual_retrieval_query=actual_retrieval_query,
             )
-        docs = retrieve_result.get("documents", []) if isinstance(retrieve_result, dict) else []
-
-        canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
-
-        render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
-        no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
-        clarification = retrieve_result.get("clarification") if isinstance(retrieve_result, dict) else None
-        answer_context_text = str(retrieve_result.get("answer_context_text") or "") if isinstance(retrieve_result, dict) else ""
-        debug_answer_context_text = (
-            str(retrieve_result.get("debug_answer_context_text") or answer_context_text)
-            if isinstance(retrieve_result, dict)
-            else answer_context_text
-        )
-        raw_result_count = int(retrieve_result.get("raw_result_count") or len(docs)) if isinstance(retrieve_result, dict) else len(docs)
         retrieval_bundle = _build_retrieval_bundle(
             docs=docs,
             canonical_evidence=canonical_evidence,
@@ -2337,6 +2743,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             "actual_retrieval_query": actual_retrieval_query,
             "render_profile": render_profile,
             "no_result_message": no_result_message,
+            "execution_trace": execution_trace,
+            "retrieval_runtime_meta": retrieval_runtime_meta,
             "clarification": clarification,
             "view_state": view_state,
             "answer_artifact": answer_artifact,
@@ -2413,6 +2821,23 @@ async def node_relax_and_retry(state: Any) -> Dict[str, Any]:
     필터 필드를 단계적으로 제거한다. 최대 2회 재시도를 지원하며,
     기존 Contract(mode/action/relation)은 절대 변경하지 않는다.
     """
+    retrieval_runtime_meta = dict(getattr(state, "retrieval_runtime_meta", {}) or {})
+    qa_mode = str(getattr(getattr(state, "question_analysis", None), "mode", "") or "").strip().upper()
+    if not can_use_legacy_retry(
+        qa_mode=qa_mode,
+        retrieval_runtime_meta=retrieval_runtime_meta,
+    ):
+        log_event(
+            "RELAX.RETRY.SKIPPED",
+            request_id=getattr(state, "request_id", None),
+            conversation_id=getattr(state, "conversation_id", None),
+            mode=getattr(getattr(state, "question_analysis", None), "mode", None),
+            runtime_owner=retrieval_runtime_meta.get("runtime_owner"),
+            policy_name=retrieval_runtime_meta.get("policy_name"),
+            reason=("non_search_mode" if qa_mode != "SEARCH" else "legacy_retry_blocked"),
+        )
+        return {"retrieval_runtime_meta": retrieval_runtime_meta}
+
     retry_count = (getattr(state, "search_retry_count", 0) or 0) + 1
     qa = state.question_analysis
     ip = state.intent_payload
@@ -2460,6 +2885,7 @@ async def node_relax_and_retry(state: Any) -> Dict[str, Any]:
         "search_retry_count": retry_count,
         "context": [],
         "no_result_message": None,
+        "retrieval_runtime_meta": retrieval_runtime_meta,
     }
 
 

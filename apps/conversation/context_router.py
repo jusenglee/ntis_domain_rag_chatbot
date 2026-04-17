@@ -7,13 +7,18 @@ Router는 전략을 결정하지 않는다.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Literal, Optional
 
+from apps.platform.langchain_compat import ChatPromptTemplate, PydanticOutputParser, SystemMessage
 from pydantic import BaseModel, Field
 
+from apps.chat.llm_json import sanitize_llm_json
+from apps.chat.llm_runtime import build_llm, load_prompt_file
 from apps.planner.query_intent import normalize_korean_temporal_years
+from apps.planner.planner_defaults import PLANNER_DISABLE_THINKING, PLANNER_TEMPERATURE
 
 from apps.conversation.followup_anchor import (
     _RELATIVE_LAST_PATTERNS as _LAST_PATTERNS,
@@ -21,9 +26,11 @@ from apps.conversation.followup_anchor import (
     _RELATIVE_ORDINAL_PATTERNS as _ORDINAL_PATTERNS,
     _is_temporal_choegeun,
 )
+from apps.planner.prompt_asset_paths import planner_prompt_path
 from apps.conversation.view_state import RecentMentionRecord
 
 logger = logging.getLogger("Chatbot_Server")
+_ROUTER_LLM_CONFIDENCE_THRESHOLD = 0.45
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +86,47 @@ def _filter_by_kind(candidates: List[RecentMentionRecord], kind: Optional[str]) 
 
 def _filter_by_year(candidates: List[RecentMentionRecord], year: str) -> List[RecentMentionRecord]:
     return [c for c in candidates if c.year == year]
+
+
+def _latest_project_group_key(candidates: List[RecentMentionRecord]) -> Optional[str]:
+    for candidate in reversed(candidates):
+        if str(candidate.entity_kind or "").strip().lower() != "project":
+            continue
+        key = str(candidate.pjt_no or "").strip()
+        if key:
+            return key
+    return None
+
+
+def _compact_candidate(index: int, candidate: RecentMentionRecord) -> Dict[str, Any]:
+    return {
+        "index": index,
+        "entity_kind": str(candidate.entity_kind or "").strip().lower() or None,
+        "title": candidate.title_text,
+        "year": candidate.year,
+        "lead_org": candidate.lead_org,
+        "source": candidate.source,
+    }
+
+
+def _should_call_llm_fallback(
+    *,
+    question: str,
+    candidates: List[RecentMentionRecord],
+    decision: ContextRouterDecision,
+) -> bool:
+    if not candidates:
+        return False
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if decision.status == "resolved":
+        return False
+    if _YEAR_PATTERN.search(text):
+        return True
+    if any(token in text for token in ("그", "해당", "방금", "최근", "마지막", "첫")):
+        return True
+    return len(candidates) > 1
 
 
 def _deterministic_resolve(
@@ -145,6 +193,15 @@ def _deterministic_resolve(
         year_str = temporal_years[0]
     if year_str:
         year_filtered = _filter_by_year(filtered, year_str)
+        if (kind or "project") == "project":
+            latest_group_key = _latest_project_group_key(filtered)
+            if latest_group_key:
+                same_group_filtered = [
+                    candidate for candidate in year_filtered
+                    if str(candidate.pjt_no or "").strip() == latest_group_key
+                ]
+                if same_group_filtered:
+                    year_filtered = same_group_filtered
         if len(year_filtered) == 1:
             return ContextRouterDecision(
                 status="resolved",
@@ -197,6 +254,76 @@ def _deterministic_resolve(
         confidence=0.2,
         reason="no_deterministic_match",
     )
+
+
+async def run_context_router(
+    *,
+    question: str,
+    recent_mentions: List[RecentMentionRecord],
+    active_scope_summary: Optional[Dict[str, Any]] = None,
+) -> ContextRouterDecision:
+    """Deterministic recent-mention matcher with optional constrained LLM fallback."""
+    decision = route_context(
+        question=question,
+        recent_mentions=recent_mentions,
+        active_scope_summary=active_scope_summary,
+    )
+    if not _should_call_llm_fallback(question=question, candidates=recent_mentions, decision=decision):
+        return decision
+
+    candidate_payload = [
+        _compact_candidate(index, candidate)
+        for index, candidate in enumerate(recent_mentions[:12])
+    ]
+    if not candidate_payload:
+        return decision
+
+    try:
+        llm = build_llm(model_name="solar_vllm_0")
+        parser = PydanticOutputParser(pydantic_object=ContextRouterDecision)
+        system_prompt = await load_prompt_file(planner_prompt_path("context_router_v1.md"))
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                SystemMessage(content=system_prompt),
+                (
+                    "human",
+                    "{format_instructions}\n"
+                    "<user_query>{question}</user_query>\n"
+                    "<active_scope_summary>{active_scope_summary}</active_scope_summary>\n"
+                    "<candidates>{candidates}</candidates>\n"
+                    "<heuristic_hint>{heuristic_hint}</heuristic_hint>",
+                ),
+            ]
+        )
+        router_llm = llm.bind(
+            reasoning_effort="low",
+            include_reasoning=False,
+            disable_thinking=PLANNER_DISABLE_THINKING,
+            temperature=PLANNER_TEMPERATURE,
+            top_p=1.0,
+            max_tokens=180,
+        )
+        chain = prompt | router_llm | sanitize_llm_json | parser
+        result = await chain.ainvoke(
+            {
+                "format_instructions": parser.get_format_instructions(),
+                "question": question,
+                "active_scope_summary": json.dumps(active_scope_summary or {}, ensure_ascii=False),
+                "candidates": json.dumps(candidate_payload, ensure_ascii=False),
+                "heuristic_hint": json.dumps(decision.model_dump(), ensure_ascii=False),
+            }
+        )
+        selected_index = result.selected_candidate_index
+        if result.status == "resolved":
+            if selected_index is None or not 0 <= int(selected_index) < len(candidate_payload):
+                raise ValueError("invalid_candidate_index")
+            if float(result.confidence or 0.0) < _ROUTER_LLM_CONFIDENCE_THRESHOLD:
+                return decision.model_copy(update={"reason": "low_confidence_fallback"})
+            return result.model_copy(update={"source": "llm_recent_mentions"})
+        return result.model_copy(update={"source": "llm_recent_mentions"})
+    except Exception as exc:
+        logger.warning("[CONTEXT_ROUTER] LLM fallback failed: %s", exc)
+        return decision.model_copy(update={"reason": f"llm_error_fallback:{type(exc).__name__}"})
 
 
 # ---------------------------------------------------------------------------

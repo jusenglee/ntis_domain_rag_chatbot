@@ -1,140 +1,50 @@
-# AGENTS.md
+# AGENTS.md (AI Agent Operating Guidelines)
 
-이 저장소에서 Codex가 작업할 때 반드시 따라야 하는 운영 지침이다.
+이 저장소에서 작업하는 AI 에이전트(Codex, Claude 등)가 반드시 준수해야 하는 운영 지침이다.
 
-## 1. 기본 원칙
+---
 
-이 프로젝트는 NTIS 원천 DB와 검색 인덱스를 기반으로 사용자 질의를 해석하고,
-그 결과를 LLM과 RAG로 조합해 응답을 만드는 검색엔진 + 챗봇 UI 시스템이다.
+## 1. 지식 베이스 (Knowledge Base)
 
-따라서 아래 원칙을 항상 지킨다.
-- 모든 문서는 UTF-8을 사용한다.
-- 한글이 깨진 문서는 그대로 두지 않는다.
-- 원천 의미를 바꾸는 임의 보정은 하지 않는다.
-- 식별자 의미를 섞어서 다루지 않는다.
-- `output_type`과 renderer의 역할을 분리한다.
-- raw payload를 그대로 prompt에 넣지 않는다.
+시스템의 설계 원칙과 비즈니스 로직은 아래 문서를 최우선 진실원(Source of Truth)으로 삼는다. 작업 전 반드시 해당 문서를 먼저 읽고 맥락을 파악한다.
 
-## 2. 먼저 읽어야 할 문서
+*   **[`apps/docs/README.md`](./apps/docs/README.md)**: 전체 문서 인덱스
+*   **[`apps/docs/01_ARCHITECTURE.md`](./apps/docs/01_ARCHITECTURE.md)**: 2층 계약 및 4계층 구조
+*   **[`apps/docs/02_CONTRACTS_AND_RULES.md`](./apps/docs/02_CONTRACTS_AND_RULES.md)**: 식별자(pjt_id/no) 및 실행 규칙
 
-- `docs/README.md`
-- `docs/01_아키텍처와_흐름.md`
-- `docs/02_실행계약과_전략규칙.md`
-- `docs/03_운영과_환경.md`
-- `docs/04_회귀기준과_점검.md`
-- `docs/05_유지보수와_확장.md`
-- `docs/SESSION_HANDOFF_*.md`가 있으면 함께 읽는다.
-- `.agents/skills/ntis-rag-context-refine/SKILL.md`
-- `.agents/skills/ntis-rag-context-refine/references/SKILL_revised_ko.md`
+---
 
-## 2-1. 신규 기여자용 빠른 진입점
-## Mission
-This repository is a chatbot / RAG application.
-Your purpose is not just to write code, but to continuously improve production quality, answer quality, maintainability, and architectural clarity.
+## 2. 작업 기본 원칙
 
-- 루트 `README.md`
-- `docs/00_ONBOARDING.md`
-- `apps/api/routes.py`
-- `apps/api/services/request_facade.py`
-- `apps/api/services/retrieval_workflow.py`
-## Standing loop
-1. Watch the project
-2. Improve the project
-3. Design the project
-4. Repeat
+*   **Surgical Changes:** 코드 수정 시 가급적 작고 안전한 변경을 선호한다. 근거 없는 대규모 리팩토링은 지양한다.
+*   **Inspect Before Patch:** 수정 전 반드시 관련 파일과 테스트 코드를 먼저 분석한다.
+*   **Validation First:** 변경 후에는 문법 오류, 임포트 오류 등을 확인하고 가능하다면 관련 검증 스크립트를 실행한다.
+*   **No Faking:** 코드나 문서가 뒷받침하지 않는 결론을 임의로 내리지 않는다. 불확실한 경우 명확히 밝힌다.
 
-## 3. 절대 섞으면 안 되는 의미
-## Rules
-- Inspect before patching
-- Prefer small safe changes
-- Never do broad rewrites without evidence
-- Run all relevant checks after changes
-- Keep outputs reviewable
-- Treat prompts, docs, evals, and runbooks as part of the product
-- Explicitly state uncertainty
-- Never fake confidence when code or docs do not support a conclusion
+---
 
-- `pjt_id`는 과제 instance key다.
-- `pjt_no`는 과제 group key다.
-- `pjt_id`와 `pjt_no`는 같은 값처럼 취급하면 안 된다.
-- 수행기관(`lead_org_name`), 참여기관(`participant_org_name`), 참여인력 소속기관(`people_affiliation_org_name`)은 서로 다른 의미다.
-- 검색 보조 필드(`title`, `answer_public`, `meta_flat`)를 prompt context의 사실 필드와 혼동하면 안 된다.
-- retrieval metadata 전체를 LLM에 직접 노출하면 안 된다.
-## Priority order
-1. user-visible bugs
-2. correctness / safety issues
-3. missing tests / evals
-4. prompt and config drift
-5. docs / runbook synchronization
-6. maintainability
-7. architecture proposals
+## 3. 핵심 도메인 제약 (Critical Constraints)
 
-## 4. 3층 artifact 구조
-## Always inspect these areas
-- prompt files
-- chatbot answer generation
-- verifier / repair logic
-- fallback and degraded behavior
-- RAG / retrieval contracts
-- tests and evals
-- logs / observability
-- docs / ADR / RUNBOOK / GOLDEN_TESTS
+*   **`pjt_id` vs `pjt_no`**: 둘은 다른 의미를 가진 식별자다. 절대 혼용하지 않는다.
+*   **Organization Roles**: 수행기관, 참여기관, 인력 소속기관은 서로 다른 의미를 가진다.
+*   **No Raw Dumps**: 검색 결과의 raw payload를 프롬프트에 그대로 넣지 않는다. 반드시 `canonical_evidence`를 거쳐야 한다.
 
-이 저장소는 아래 3층 artifact를 전제로 한다.
-1. gate artifact
-2. assembled question analysis
-3. execution strategy
+---
 
-현재 지원하는 prompt view는 다음과 같다.
-- summary
-- detail
-- list
-- stats
-- relation
-- comparison
-- series
+## 4. 작업 보고 형식 (Reporting Format)
 
-## 5. 변경 시 같이 볼 항목
+모든 작업 완료 후에는 아래 항목을 포함하여 보고한다.
 
-- planner / contract / filter / join key / output_type 문서
-- raw -> canonical 매핑 문서
-- renderer fieldset 문서
-- 운영 triage 및 summary 로그 문서
-- golden test 및 회귀 기준
-- env / runtime / validation entrypoint
-- 관련 ADR 및 handoff 문서
+1.  **작업 내용:** 무엇을 수정/추가했는지
+2.  **변경 사유:** 왜 해당 방식이 최선이라고 판단했는지
+3.  **검증 결과:** 어떤 확인 과정을 거쳤는지 (Syntax, Import, Test 등)
+4.  **잔존 리스크:** 작업 후 발생할 수 있는 잠재적 이슈나 추가 검토가 필요한 부분
+5.  **다음 단계:** 이어서 수행하면 좋은 작업 제안
 
-## 6. 금지 사항
+---
 
-- raw payload 전체를 prompt에 dump하지 않는다.
-- regex만으로 구조 의미를 대충 복원하지 않는다.
-- SEARCH / LOOKUP / JOIN 등의 의미를 서로 바꾸지 않는다.
-- gate artifact에 `deferred`를 넣지 않는다.
-- lower layer가 새 전략 fallback을 발명하지 않는다.
-- 사람/기관 이름을 ids_map에 임의로 넣지 않는다.
+## 5. 금지 사항
 
-## 7. 변경 후 최소 검증
-
-- syntax / import 오류 확인
-- baseline checks 실행
-- golden query 동작 확인
-- `output_type` propagation 확인
-- filter / join contract 확인
-- 한글 인코딩 깨짐 여부 확인
-
-## 8. 작업 보고에 포함할 내용
-
-- 무엇을 바꿨는지
-- 왜 바꿨는지
-- raw -> canonical -> prompt 흐름에서 어떤 의미를 유지했는지
-- 검증 결과
-- 남은 리스크
-- 추가로 보면 좋은 문서 또는 파일
-
-## Required output for each task
-- What was inspected
-- What was found
-- What changed
-- What was validated
-- What remains risky
-- What should happen next
+*   UTF-8 이외의 인코딩 사용 금지 (한글 깨짐 주의).
+*   SEARCH / LOOKUP / JOIN의 아키텍처적 경계를 임의로 무너뜨리는 행위.
+*   `apps/docs` 문서와 일치하지 않는 방향으로의 코드 수정.

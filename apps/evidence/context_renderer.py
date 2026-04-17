@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from langchain_core.documents import Document
+from apps.platform.langchain_compat import Document
 
 from apps.api.rag_mapper.rag_mapper import RagMapper, MappingError
 

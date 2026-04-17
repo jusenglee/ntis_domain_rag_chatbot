@@ -1,5 +1,7 @@
 # Evidence Prompt Packing
 
+이 문서는 evidence packing 상세 메모다. 현행 검증 기준은 `03_운영과_환경.md`, `04_회귀기준과_점검.md`를 따른다.
+
 ## Owner Map
 - raw payload canonical memory: `apps/conversation/raw_payload_store.py`
 - fact-first follow-up resolution: `apps/conversation/fact_followup_resolver.py`
@@ -73,10 +75,5 @@ Rules:
   - then envelope build + pack
 
 ## Current Validation
-- current acceptance in this worktree is smoke-only:
-  - `python -m py_compile ...`
-  - import smoke for touched modules
-  - `python -c "from apps.api.app_factory import create_app; create_app()"`
-  - follow-up drift smoke
-  - huge-array defense smoke
-  - hybrid verify safety smoke
+- validation source of truth: `03_운영과_환경.md`, `04_회귀기준과_점검.md`
+- 이 문서는 packing 구조 메모이며, pytest lane과 운영 gate를 직접 소유하지 않는다.

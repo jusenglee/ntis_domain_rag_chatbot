@@ -1,60 +1,35 @@
-# docs/ 문서 안내
+# NTIS RAG 시스템 문서 인덱스 (Documentation Index)
 
-이 폴더는 NTIS Domain RAG Chatbot의 **운영 진실원(source-of-truth) 문서** 모음입니다.
-
----
-
-## 독자별 읽기 순서
-
-### 신규 개발자
-1. `00_ONBOARDING.md` — 시스템 개요 + 어디서부터 읽을지
-2. `01_아키텍처와_흐름.md` — 4개 계층 구조, 요청 흐름
-3. `02_실행계약과_전략규칙.md` — 절대 깨지면 안 되는 실행 약속
-4. `03_운영과_환경.md` — 환경변수, 검증 명령, 로그 구조
-5. `EVIDENCE_PROMPT_PACKING.md` — evidence 조립 상세
-
-### PM / 기획
-1. `00_ONBOARDING.md` — 시스템 한 줄 요약과 핵심 용어
-2. `01_아키텍처와_흐름.md` — 계층 역할과 제한 사항 (표 위주)
-
-### 운영 / QA
-1. `03_운영과_환경.md` — 검증 명령, 로그 트리아지
-2. `04_회귀기준과_점검.md` — 반드시 지킬 계약, 골든 테스트 케이스
-
-### 프런트엔드 / 연동
-1. `06_API_응답명세.md` — route-level 응답 계약, SSE event shape
-2. `02_실행계약과_전략규칙.md` — clarification, follow-up, manifest 의미
-
-### AI 에이전트 (Codex / Claude)
-1. `CODEX_CONTEXT.md` — bootstrap truth (브랜치, 검증 방식, 패키지 소유권)
-2. `SESSION_HANDOFF.md` — 직전 세션 결과와 다음 권장 작업
-3. `GOLDEN_TESTS.md` — 계약 검증 케이스 목록
+이 디렉터리는 NTIS RAG 서비스의 아키텍처, 실행 규칙, 운영 가이드를 담고 있는 **운영 진실원(Source of Truth)** 문서 모음입니다.
 
 ---
 
-## 문서 목록
+## 📖 문서 가이드
 
-| 파일 | 용도 | 주 독자 |
-|---|---|---|
-| `00_ONBOARDING.md` | 입구 문서, 빠른 시스템 이해 | 신규 개발자, PM |
-| `01_아키텍처와_흐름.md` | 4계층 구조, 요청 흐름, artifact 소유권 | 개발자, PM |
-| `02_실행계약과_전략규칙.md` | SEARCH/LOOKUP/JOIN 경계, follow-up 규칙, planner 단계 | 개발자, QA |
-| `03_운영과_환경.md` | 환경변수, 검증 명령, 로그 트리아지 | 운영, 개발자 |
-| `04_회귀기준과_점검.md` | 회귀 계약, 골든 테스트 케이스 | QA, 개발자 |
-| `05_유지보수와_확장.md` | 패키지 소유권, 문서 동기화 규칙, 기술 부채 | 개발자 |
-| `06_API_응답명세.md` | `/query/stream`, `/query/debug`, health, metrics 응답 계약 | 프런트엔드, 연동 개발자, 운영 |
-| `EVIDENCE_PROMPT_PACKING.md` | evidence 조립, 압축, 예산 정책 | 개발자, AI 에이전트 |
-| `GOLDEN_TESTS.md` | 계약 검증 케이스 | QA, AI 에이전트 |
-| `PRODUCT_BASELINE.md` | 현재 검증 게이트 상태 | 운영, AI 에이전트 |
-| `CODEX_CONTEXT.md` | 에이전트 bootstrap truth | AI 에이전트 |
-| `SESSION_HANDOFF.md` | 세션별 변경 이력 | AI 에이전트, 개발자 |
-| `ADR/` | 아키텍처 결정 기록 | 개발자 |
+| 번호 | 문서명 | 주요 내용 | 주 독자 |
+|---|---|---|---|
+| **00** | [온보딩 (Onboarding)](./00_ONBOARDING.md) | 시스템 한 줄 요약, 용어 정리, 코드 읽기 순서 | 신규 개발자, PM |
+| **01** | [아키텍처와 흐름](./01_ARCHITECTURE.md) | 2층 계약(L1/L2) 철학, 4계층 구조, 데이터 흐름 | 개발자, 아키텍트 |
+| **02** | [실행 계약과 전략 규칙](./02_CONTRACTS_AND_RULES.md) | L1 의도 정의, 식별자(pjt_id/no) 계약, Follow-up 규칙 | 개발자, QA |
+| **03** | [행동 안전 (L2)](./03_BEHAVIORAL_SAFETY.md) | Orchestrator 보정 정책, 예외 처리 및 회복 규칙 | 개발자, 운영 |
+| **04** | [도구화 표준](./04_TOOLING_STANDARDS.md) | Atomic Tool 구현 규격, 상태 격리 원칙 | 개발자 |
+| **05** | [API 응답 명세](./05_API_응답명세.md) | `/query/stream` 등 API 엔드포인트 및 페이로드 규격 | 프런트엔드, 연동 |
+| **06** | [운영과 환경](./06_운영과_환경.md) | 로그 트리아지, 검증 명령, 환경 설정 | 운영, SRE |
+| **07** | [회귀 기준과 점검](./07_회귀기준과_점검.md) | 골든 테스트 케이스, 반드시 지킬 회귀 계약 | QA, 개발자 |
+| **08** | [리팩토링 로드맵](./08_단계적_리팩토링_로드맵.md) | 모듈 해체 및 고도화 계획 | 개발자, PM |
 
 ---
 
-## 갱신 규칙
+## 🛠️ 참고 자료
 
-- planner/runtime owner 변경 시: `03_운영과_환경.md` + `SESSION_HANDOFF.md` 동시 갱신
-- contract/strategy 변경 시: `02_실행계약과_전략규칙.md` + `04_회귀기준과_점검.md` 동시 갱신
-- 대형 설계 결정 시: `ADR/` 폴더에 ADR 추가 후 관련 문서 링크
-- 모든 코드 패치 시: `SESSION_HANDOFF.md` append 필수
+*   [ADR/](./ADR/): 아키텍처 결정 기록 (Architecture Decision Records)
+*   [reference/](./reference/): 레거시 문서 및 참고 데이터
+*   [reports/](./reports/): 시스템 분석 리포트
+
+---
+
+## 💡 핵심 키워드
+
+*   **L1 (Intent Truth):** "사용자가 무엇을 원하는가?" (의도의 진실)
+*   **L2 (Behavioral Safety):** "시스템은 어떻게 안전하게 실행하는가?" (행동의 안전)
+*   **Atomic Tool:** 상태가 없는(Stateless) 순수 기능 조회 모듈.

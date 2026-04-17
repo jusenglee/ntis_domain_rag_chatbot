@@ -4,11 +4,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from langchain_core.messages import BaseMessage
+from apps.platform.langchain_compat import BaseMessage
 
 from apps.api.streaming.contracts import AnswerArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
-from apps.platform.openai_compat_llm import EmptyStreamContentError
+try:
+    from apps.platform.openai_compat_llm import EmptyStreamContentError
+except ModuleNotFoundError:
+    class EmptyStreamContentError(Exception):
+        """Fallback error used when langchain-backed LLM adapters are unavailable at import time."""
 
 logger = logging.getLogger(__name__)
 

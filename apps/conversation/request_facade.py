@@ -12,8 +12,10 @@ else:
     BaseMessage = Any
 
 from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
+from apps.conversation.context_router import run_context_router
 from apps.conversation.followup_anchor import (
     anchor_to_seed_map,
+    focus_entity_from_mention,
     is_child_anchor_source,
     parse_display_limit,
     parse_ordinal_reference,
@@ -53,6 +55,7 @@ from apps.platform.schemas import IntentPayloadV3
 from apps.conversation.view_state import (
     ConversationViewState,
     clear_view_state_scope,
+    get_recent_mentions,
     set_visible_answer_manifest,
 )
 
@@ -116,6 +119,48 @@ def _first_text(*values: Any) -> str:
             return text
 
     return ""
+
+
+_CONTEXT_ROUTER_CLARIFICATION_TYPES = {
+    "refinement_target_missing",
+    "reference_ambiguity",
+    "reference_missing_context",
+}
+_DETAIL_QUERY_HINTS = ("상세", "자세히", "자세한", "디테일")
+
+
+def _context_router_allowed(scope_decision: Any) -> bool:
+    clarification_payload = dict(getattr(scope_decision, "clarification_payload", None) or {})
+    clarification_type = str(clarification_payload.get("clarification_type") or "").strip().lower()
+    return bool(getattr(scope_decision, "needs_clarification", False) and clarification_type in _CONTEXT_ROUTER_CLARIFICATION_TYPES)
+
+
+def _context_router_anchor_allowed(anchor: Any, *, question: str, normalized_intent_base: Any) -> bool:
+    if anchor is None:
+        return False
+    kind = str(getattr(anchor, "kind", "") or "").strip().lower()
+    if kind != "project":
+        return True
+    action = _first_text(_get_field(normalized_intent_base, "action", None))
+    detail_requested = action.lower() == "detail" or any(token in str(question or "").strip() for token in _DETAIL_QUERY_HINTS)
+    if not detail_requested:
+        return True
+    return bool(getattr(anchor, "pjt_id", None))
+
+
+def _build_context_router_scope_summary(view_state: Optional[ConversationViewState]) -> Dict[str, Any]:
+    active_scope = getattr(view_state, "active_scope", None) if view_state is not None else None
+    focus = getattr(active_scope, "focus", None) if active_scope is not None else None
+    child_anchor = getattr(active_scope, "child_anchor", None) if active_scope is not None else None
+    return {
+        "scope_kind": str(getattr(active_scope, "scope_kind", None) or "").strip().lower() or None,
+        "focus_kind": str(getattr(focus, "kind", None) or "").strip().lower() or None,
+        "focus_title": _first_text(getattr(focus, "title_text", None)) or None,
+        "focus_pjt_id": _first_text(getattr(focus, "pjt_id", None)) or None,
+        "focus_pjt_no": _first_text(getattr(focus, "pjt_no", None)) or None,
+        "child_anchor_kind": str(getattr(child_anchor, "kind", None) or "").strip().lower() or None,
+        "child_anchor_title": _first_text(getattr(child_anchor, "title_text", None)) or None,
+    }
 
 
 
@@ -964,6 +1009,7 @@ def _build_strategy_meta(
     turn_policy: Optional[Dict[str, Any]] = None,
     turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
+    context_router: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
 
     def _dump_meta_model(value: Any) -> Dict[str, Any]:
@@ -1010,6 +1056,7 @@ def _build_strategy_meta(
     turn_policy = dict(turn_policy or {})
     turn_candidates = list(turn_candidates or [])
     count_validation = dict(count_validation or {})
+    context_router = dict(context_router or {})
     hard_contract = _dump_meta_model(_get_field(question_analysis, "hard_contract", None))
     soft_strategy_hints = _dump_meta_model(_get_field(question_analysis, "soft_strategy_hints", None))
 
@@ -1111,6 +1158,12 @@ def _build_strategy_meta(
         "turn_policy": turn_policy,
         "turn_execution_path": turn_policy.get("execution_path"),
         "turn_policy_blocked_reason": turn_policy.get("blocked_reason"),
+        "context_router_status": context_router.get("status"),
+        "context_router_source": context_router.get("source"),
+        "context_router_confidence": context_router.get("confidence"),
+        "context_router_invoked": bool(context_router.get("invoked")),
+        "recent_mention_count": context_router.get("recent_mention_count"),
+        "rewritten_query_hint": context_router.get("rewritten_query_hint"),
 
     }
 
@@ -1130,6 +1183,7 @@ def _build_intent_payload_object(
     turn_policy: Optional[Dict[str, Any]] = None,
     turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
+    context_router: Optional[Dict[str, Any]] = None,
 ) -> Any:
 
     strategy_meta = _build_strategy_meta(
@@ -1143,6 +1197,7 @@ def _build_intent_payload_object(
         turn_policy=turn_policy,
         turn_candidates=turn_candidates,
         count_validation=count_validation,
+        context_router=context_router,
     )
 
     try:
@@ -1529,6 +1584,15 @@ async def build_intent_payload(
     elif turn_policy.execution_path in {"fresh_retrieval", "clarification"}:
         resolution_view_state = _clear_active_view_scope(active_view_state)
     followup_snapshot = getattr(resolution_view_state, "visible_answer_manifest", None)
+    recent_mentions = get_recent_mentions(resolution_view_state)
+    context_router_meta: Dict[str, Any] = {
+        "invoked": False,
+        "status": "not_invoked",
+        "source": "none",
+        "confidence": 0.0,
+        "rewritten_query_hint": None,
+        "recent_mention_count": len(recent_mentions),
+    }
     scope_decision = resolve_scope_decision(
         question=question,
         view_state=resolution_view_state,
@@ -1540,6 +1604,64 @@ async def build_intent_payload(
             "previous_turn_contract": previous_turn_contract,
         },
     )
+    context_router_anchor = None
+    if (
+        not has_explicit_seed
+        and recent_mentions
+        and _context_router_allowed(scope_decision)
+    ):
+        context_router_meta["invoked"] = True
+        context_router_result = run_context_router(
+            question=question,
+            recent_mentions=recent_mentions,
+            active_scope_summary=_build_context_router_scope_summary(active_view_state),
+        )
+        context_router_decision = (
+            await context_router_result if isawaitable(context_router_result) else context_router_result
+        )
+        context_router_meta.update(
+            {
+                "status": context_router_decision.status,
+                "source": context_router_decision.source,
+                "confidence": round(float(context_router_decision.confidence or 0.0), 3),
+                "rewritten_query_hint": context_router_decision.rewritten_query_hint,
+                "reason": context_router_decision.reason,
+            }
+        )
+        selected_index = context_router_decision.selected_candidate_index
+        clarification_avoided = 0
+        if (
+            context_router_decision.status == "resolved"
+            and selected_index is not None
+            and 0 <= int(selected_index) < len(recent_mentions)
+        ):
+            router_anchor = focus_entity_from_mention(recent_mentions[int(selected_index)])
+            if _context_router_anchor_allowed(router_anchor, question=question, normalized_intent_base=normalized_intent_base):
+                context_router_anchor = router_anchor
+                clarification_avoided = 1
+                scope_decision = scope_decision.model_copy(
+                    update={
+                        "followup_type": "reference_followup",
+                        "resolved_anchor": router_anchor,
+                        "needs_clarification": False,
+                        "clarification_payload": None,
+                    }
+                )
+            else:
+                context_router_meta["status"] = "unresolved"
+                context_router_meta["reason"] = "detail_requires_instance_project_id"
+        log_event(
+            "CONTEXT.ROUTER",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            context_router_invoked=1,
+            context_router_status=context_router_meta.get("status"),
+            context_router_source=context_router_meta.get("source"),
+            context_router_confidence=context_router_meta.get("confidence"),
+            recent_mentions_count=context_router_meta.get("recent_mention_count"),
+            rewritten_query_hint=context_router_meta.get("rewritten_query_hint"),
+            clarification_avoided=clarification_avoided,
+        )
     log_event(
         "SCOPE.DECISION",
         request_id=request_id,
@@ -1552,6 +1674,8 @@ async def build_intent_payload(
         resolved_anchor_kind=getattr(scope_decision.resolved_anchor, "kind", None),
         clarification_type=((scope_decision.clarification_payload or {}).get("clarification_type") if scope_decision.clarification_payload else None),
         clarification_reason=((scope_decision.clarification_payload or {}).get("reason") if scope_decision.clarification_payload else None),
+        recent_mentions_count=context_router_meta.get("recent_mention_count"),
+        context_router_status=context_router_meta.get("status"),
     )
     if scope_decision.reset_requested:
         active_view_state = _clear_active_view_scope(active_view_state)
@@ -1570,7 +1694,7 @@ async def build_intent_payload(
             conversation_id=conversation_id,
             filters=scope_decision.refinement_filters,
         )
-    anchor = None if turn_policy.skip_followup_resolution else scope_decision.resolved_anchor
+    anchor = None if (turn_policy.skip_followup_resolution and context_router_anchor is None) else (context_router_anchor or scope_decision.resolved_anchor)
     if (
         anchor is None
         and not turn_policy.skip_followup_resolution
@@ -1588,7 +1712,9 @@ async def build_intent_payload(
             )
             if materialized_anchor is not None:
                 anchor = materialized_anchor
-    if turn_policy.execution_path == "clarification":
+    if context_router_anchor is not None and anchor is not None:
+        followup_resolution = _build_followup_resolution_from_anchor(anchor, followup_snapshot, question)
+    elif turn_policy.execution_path == "clarification":
         followup_resolution = _build_policy_clarification_resolution(
             policy=turn_policy,
             trigger=turn_trigger,
@@ -1973,6 +2099,7 @@ async def build_intent_payload(
                 for candidate in turn_candidates[:12]
             ],
             count_validation=count_validation,
+            context_router=context_router_meta,
         ),
         question_analysis,
     )

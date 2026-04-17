@@ -1,16 +1,16 @@
 # Product Baseline
 
-이 문서는 historical product baseline 메모다.
+이 문서는 historical product baseline 메모다. 현행 운영 검증은 `03_운영과_환경.md`, `04_회귀기준과_점검.md`를 따른다.
 
 ## 현재 상태
 - manifest-driven pytest baseline은 retired 상태다.
 - `scripts/run_baseline_checks.ps1`는 current release gate가 아니다.
-- 현재 worktree의 active gate는 smoke validation이다.
+- 현재 worktree의 active gate는 smoke + targeted pytest subset이다.
 
 ## current gate
-- `py_compile`
-- import smoke
-- `create_app()` smoke
+- `PYTHONPATH=.` + `py_compile`
+- `PYTHONPATH=.` + `create_app()` smoke
+- `PYTHONPATH=.` + targeted pytest subset
 - optional workflow graph smoke when `langgraph` is available
 
 ## historical note

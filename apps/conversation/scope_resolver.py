@@ -2,6 +2,7 @@
 
 
 
+import re
 from typing import Any, Dict, Optional
 
 
@@ -12,11 +13,13 @@ from pydantic import BaseModel, Field
 
 from apps.conversation.followup_anchor import (
 
+    focus_entity_from_mention,
     is_referential_followup,
 
     parse_ordinal_reference,
 
     parse_source_reference,
+    resolve_from_recent_mentions,
 
     resolve_named_child_anchor_from_focus,
 
@@ -204,6 +207,142 @@ def _latest_snapshot(view_state: Optional[ConversationViewState]) -> Optional[An
 def _scope_focus_entity(view_state: Optional[ConversationViewState]) -> Optional[FocusEntity]:
 
     return get_active_focus_entity(view_state)
+
+
+_RECENT_MENTION_KIND_HINTS = (
+    ("과제", "project"),
+    ("프로젝트", "project"),
+    ("성과", "perf"),
+    ("논문", "perf"),
+    ("특허", "perf"),
+    ("보고서", "perf"),
+)
+_DETAIL_HINTS = ("상세", "자세히", "자세한", "디테일")
+_YEAR_PATTERN = re.compile(r"((?:19|20)\d{2})\s*년")
+
+
+def _recent_mention_kind_hint(question: str) -> Optional[str]:
+    text = str(question or "").strip()
+    for token, kind in _RECENT_MENTION_KIND_HINTS:
+        if token in text:
+            return kind
+    return None
+
+
+def _extract_recent_mention_year(question: str, normalized_intent: Any) -> Optional[str]:
+    years = getattr(normalized_intent, "years", None)
+    if years is None and isinstance(normalized_intent, dict):
+        years = normalized_intent.get("years")
+    if isinstance(years, (list, tuple, set)):
+        for raw_year in years:
+            text = str(raw_year or "").strip()
+            if text:
+                return text
+    text = str(years or "").strip()
+    if text:
+        return text
+    match = _YEAR_PATTERN.search(str(question or "").strip())
+    return match.group(1) if match else None
+
+
+def _is_detail_project_question(question: str, normalized_intent: Any) -> bool:
+    action = getattr(normalized_intent, "action", None)
+    if action is None and isinstance(normalized_intent, dict):
+        action = normalized_intent.get("action")
+    if str(action or "").strip().lower() == "detail":
+        return True
+    text = str(question or "").strip()
+    return bool(text and any(token in text for token in _DETAIL_HINTS))
+
+
+def _recent_anchor_is_allowed(anchor: FocusEntity, *, question: str, normalized_intent: Any) -> bool:
+    if str(getattr(anchor, "kind", "") or "").strip().lower() != "project":
+        return True
+    if not _is_detail_project_question(question, normalized_intent):
+        return True
+    if getattr(anchor, "pjt_id", None):
+        return True
+    return False
+
+
+def _compact_recent_mention_candidate(mention: Any) -> Dict[str, Any]:
+    return {
+        "title": getattr(mention, "title_text", None),
+        "entity_kind": getattr(mention, "entity_kind", None),
+        "year": getattr(mention, "year", None),
+        "lead_org": getattr(mention, "lead_org", None),
+    }
+
+
+def _resolve_recent_mention_fallback(
+    *,
+    question: str,
+    normalized_intent: Any,
+    recent_mentions: list[Any],
+) -> tuple[Optional[FocusEntity], list[dict[str, Any]], Optional[str]]:
+    if not recent_mentions:
+        return None, [], None
+
+    target_kind = _recent_mention_kind_hint(question)
+    filtered_mentions = [
+        mention for mention in recent_mentions
+        if not target_kind or str(getattr(mention, "entity_kind", "") or "").strip().lower() == target_kind
+    ]
+    if not filtered_mentions:
+        filtered_mentions = list(recent_mentions)
+
+    target_year = _extract_recent_mention_year(question, normalized_intent)
+    if target_year:
+        project_mentions = [
+            mention for mention in filtered_mentions
+            if str(getattr(mention, "entity_kind", "") or "").strip().lower() == "project"
+        ]
+        if project_mentions:
+            latest_group_key = next(
+                (
+                    str(getattr(mention, "pjt_no", "") or "").strip()
+                    for mention in reversed(project_mentions)
+                    if str(getattr(mention, "pjt_no", "") or "").strip()
+                ),
+                "",
+            )
+            same_group_year = [
+                mention for mention in project_mentions
+                if latest_group_key
+                and str(getattr(mention, "pjt_no", "") or "").strip() == latest_group_key
+                and str(getattr(mention, "year", "") or "").strip() == target_year
+            ]
+            year_candidates = same_group_year or [
+                mention for mention in project_mentions
+                if str(getattr(mention, "year", "") or "").strip() == target_year
+            ]
+            if len(year_candidates) == 1:
+                anchor = focus_entity_from_mention(year_candidates[0])
+                if _recent_anchor_is_allowed(anchor, question=question, normalized_intent=normalized_intent):
+                    return anchor, [], "recent_mention_year"
+                return None, [_compact_recent_mention_candidate(year_candidates[0])], "detail_requires_instance_project_id"
+            if len(year_candidates) > 1:
+                return None, [_compact_recent_mention_candidate(mention) for mention in year_candidates[:5]], "recent_mention_year_ambiguity"
+
+    mention_anchor = resolve_from_recent_mentions(
+        question=question,
+        recent_mentions=filtered_mentions,
+    )
+    if mention_anchor is not None:
+        if _recent_anchor_is_allowed(mention_anchor, question=question, normalized_intent=normalized_intent):
+            return mention_anchor, [], "recent_mention_relative"
+        return None, [_compact_recent_mention_candidate(filtered_mentions[-1])], "detail_requires_instance_project_id"
+
+    if len(filtered_mentions) == 1 and is_referential_followup(question):
+        anchor = focus_entity_from_mention(filtered_mentions[0])
+        if _recent_anchor_is_allowed(anchor, question=question, normalized_intent=normalized_intent):
+            return anchor, [], "recent_mention_single_candidate"
+        return None, [_compact_recent_mention_candidate(filtered_mentions[0])], "detail_requires_instance_project_id"
+
+    if len(filtered_mentions) > 1 and is_referential_followup(question):
+        return None, [_compact_recent_mention_candidate(mention) for mention in filtered_mentions[:5]], "recent_mention_ambiguity"
+
+    return None, [], None
 
 
 def _extract_refinement_filters(normalized_intent: Any) -> Dict[str, Any]:
@@ -673,7 +812,51 @@ def resolve_scope_decision(
         refinement_filters = _extract_refinement_filters(normalized_intent_base)
 
         if not has_active_scope_target and not _has_independent_scope_axis(normalized_intent_base):
+            recent_anchor, recent_candidates, recent_reason = _resolve_recent_mention_fallback(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                recent_mentions=recent_mentions,
+            )
+            if recent_anchor is not None:
 
+                return ScopeDecision(
+
+                    followup_type="refinement_followup",
+
+                    resolved_anchor=recent_anchor,
+
+                    refinement_filters=refinement_filters,
+
+                )
+            if recent_candidates:
+                clarification_message = (
+                    "최근 언급한 과제는 묶음 수준 식별자만 있어 개별 상세를 바로 특정할 수 없습니다. 제목이나 개별 과제를 다시 지정해 주세요."
+                    if recent_reason == "detail_requires_instance_project_id"
+                    else "최근 언급한 대상이 여러 개입니다. 어떤 대상을 좁힐지 번호나 제목으로 지정해 주세요."
+                )
+
+                return ScopeDecision(
+
+                    followup_type="ambiguous_followup",
+
+                    needs_clarification=True,
+
+                    clarification_payload=_build_clarification_payload(
+
+                        clarification_type="refinement_target_missing",
+
+                        reason=recent_reason or "refinement_target_missing",
+
+                        message=clarification_message,
+                        latest_snapshot=latest_snapshot,
+
+                        candidates=recent_candidates,
+
+                        focus_entity=scope_focus_entity,
+
+                    ),
+
+                )
             return ScopeDecision(
 
                 followup_type="ambiguous_followup",
@@ -726,50 +909,61 @@ def resolve_scope_decision(
     if has_reference_cue:
 
         if latest_snapshot is None and scope_focus_entity is None:
+            recent_anchor, recent_candidates, recent_reason = _resolve_recent_mention_fallback(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                recent_mentions=recent_mentions,
+            )
+            if recent_anchor is not None:
+                return ScopeDecision(
 
-            if recent_mentions and len(recent_mentions) > 1:
+                    followup_type="reference_followup",
 
-                target_kind = None
+                    resolved_anchor=recent_anchor,
 
-                for kw, kind in [("과제", "project"), ("프로젝트", "project"), ("성과", "perf"), ("논문", "perf")]:
+                )
+            if recent_candidates:
 
-                    if kw in str(question or ""):
+                candidate_titles = [
+                    str(candidate.get("title") or "untitled")
+                    for candidate in recent_candidates[:5]
+                ]
 
-                        target_kind = kind
+                candidates_text = " / ".join(candidate_titles)
+                clarification_message = (
+                    "최근 언급한 과제는 묶음 수준 식별자만 있어 개별 상세를 바로 특정할 수 없습니다. 제목이나 개별 과제를 다시 지정해 주세요."
+                    if recent_reason == "detail_requires_instance_project_id"
+                    else f"최근 언급한 대상이 여러 개입니다: {candidates_text} — 번호나 제목으로 지정해 주세요."
+                )
+                clarification_type = (
+                    "reference_missing_context"
+                    if recent_reason == "detail_requires_instance_project_id"
+                    else "reference_ambiguity"
+                )
 
-                        break
+                return ScopeDecision(
 
-                kind_filtered = [m for m in recent_mentions if m.entity_kind == target_kind] if target_kind else recent_mentions
+                    followup_type="ambiguous_followup",
 
-                if len(kind_filtered) >= 2:
+                    needs_clarification=True,
 
-                    candidate_titles = [m.title_text or "untitled" for m in kind_filtered[:5]]
+                    clarification_payload=_build_clarification_payload(
 
-                    candidates_text = " / ".join(candidate_titles)
+                        clarification_type=clarification_type,
 
-                    return ScopeDecision(
+                        reason=recent_reason or "reference_ambiguity",
 
-                        followup_type="ambiguous_followup",
+                        message=clarification_message,
 
-                        needs_clarification=True,
+                        latest_snapshot=latest_snapshot,
 
-                        clarification_payload=_build_clarification_payload(
+                        candidates=recent_candidates,
 
-                            clarification_type="reference_ambiguity",
+                        focus_entity=scope_focus_entity,
 
-                            reason="recent_mention_ambiguity",
+                    ),
 
-                            message=f"최근 언급한 대상이 여러 개입니다: {candidates_text} — 번호나 제목으로 지정해 주세요.",
-
-                            latest_snapshot=latest_snapshot,
-
-                            candidates=[{"title": m.title_text, "entity_kind": m.entity_kind} for m in kind_filtered[:5]],
-
-                            focus_entity=scope_focus_entity,
-
-                        ),
-
-                    )
+                )
 
             return ScopeDecision(
 

@@ -43,6 +43,7 @@ class AnswerStateSnapshot(BaseModel):
     available: bool = False
     snapshot_source: Literal["active_result_set", "none"] = "none"
     context_kind: str = "project"
+    effective_context_kind: str = "project"
     visible_count: int = 0
     ordered_items: list[AnswerStateSnapshotItem] = Field(default_factory=list)
 
@@ -79,11 +80,15 @@ class _ParsedAnswerItem(BaseModel):
     ids_map: dict[str, list[str]] = Field(default_factory=dict)
     year: Optional[int] = None
     lead_org: Optional[str] = None
+    referenced_ranks: list[int] = Field(default_factory=list)
 
 
 _TOP_LEVEL_NUMBERED = re.compile(r"^\s*(\d+)[\.\)]\s+(.*\S)?\s*$")
 _TOP_LEVEL_BULLET = re.compile(r"^\s*[-*•]\s+(.*\S)?\s*$")
 _TITLE_CLEANUP = re.compile(r"\[(?:출처|source)\s*\d+\]", re.IGNORECASE)
+# rank citation: "[1]", "[2, 3, 4]", "[ 2 , 3 ]" — 답변 블록 내부에서 snapshot rank를 인용하는 형태.
+# 단독 숫자(또는 콤마로 구분된 숫자들)만 있는 대괄호만 인정. 출처 프리픽스 등은 _TITLE_CLEANUP이 처리함.
+_RANK_CITATION_PATTERN = re.compile(r"\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]")
 _PROJECT_ID_PATTERNS = (
     re.compile(r"(?:pjt[_\s-]?id|project[_\s-]?id)\s*(?:[:=]\s*|\()\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
     re.compile(r"\bPJT[_\s-]?ID\s*[:=]\s*([A-Za-z0-9-]{4,})", re.IGNORECASE),
@@ -264,7 +269,34 @@ def _extract_title_from_block(block: str) -> str:
     return first_line.strip()
 
 
-def _parse_answer_items(answer_text: str) -> list[_ParsedAnswerItem]:
+def _extract_rank_citations(block: str, *, max_rank: int) -> list[int]:
+    """답변 블록 내부의 `[N]` 또는 `[N, M, ...]` 패턴을 snapshot rank 인용으로 해석해 추출한다.
+
+    max_rank는 snapshot.visible_count (or ordered_items 길이)로, 범위를 벗어나는 값은 버려
+    연도·잡음 숫자가 rank로 오해되는 걸 막는다. 중복은 제거하되 등장 순서는 유지한다.
+    """
+    if max_rank <= 0:
+        return []
+    collected: list[int] = []
+    seen: set[int] = set()
+    for match in _RANK_CITATION_PATTERN.finditer(str(block or "")):
+        raw = match.group(1) or ""
+        for token in raw.split(","):
+            candidate = token.strip()
+            if not candidate.isdigit():
+                continue
+            try:
+                value = int(candidate)
+            except Exception:
+                continue
+            if value < 1 or value > max_rank or value in seen:
+                continue
+            seen.add(value)
+            collected.append(value)
+    return collected
+
+
+def _parse_answer_items(answer_text: str, *, max_rank: int = 0) -> list[_ParsedAnswerItem]:
     blocks = _split_list_blocks(answer_text)
     parsed: list[_ParsedAnswerItem] = []
     for index, block in enumerate(blocks, start=1):
@@ -275,9 +307,50 @@ def _parse_answer_items(answer_text: str) -> list[_ParsedAnswerItem]:
                 ids_map=_extract_ids_map(block),
                 year=_extract_year(block),
                 lead_org=_extract_lead_org(block),
+                referenced_ranks=_extract_rank_citations(block, max_rank=max_rank),
             )
         )
     return parsed
+
+
+def _expand_parsed_items_by_rank_citations(
+    parsed_items: list[_ParsedAnswerItem],
+    *,
+    snapshot_size: int,
+) -> tuple[list[_ParsedAnswerItem], bool]:
+    """rank citation이 여러 개인 parsed item을 rank별 virtual item으로 전개한다.
+
+    LLM이 같은 과제의 연차 row들을 하나의 항목으로 묶으면서 `[2, 3, 4]` 식으로 rank를 인용하면,
+    guard는 여전히 snapshot row-level granularity(M vs N)로 비교하므로 count·identity가 깨진다.
+    여기서는 인용된 rank가 모두 유효(1..snapshot_size)할 때만 해당 item을 가상 확장해
+    snapshot과 같은 세밀도로 비교할 수 있게 만든다.
+
+    전개가 일어나지 않으면 원본을 그대로 돌려준다. 두 번째 반환값은 "전개가 실제로 적용됐는가" 플래그.
+    """
+    if snapshot_size <= 0:
+        return list(parsed_items), False
+
+    expanded: list[_ParsedAnswerItem] = []
+    mutated = False
+    virtual_rank = 0
+    for item in parsed_items:
+        ranks = list(item.referenced_ranks or [])
+        if len(ranks) <= 1:
+            virtual_rank += 1
+            expanded.append(item.model_copy(update={"observed_rank": virtual_rank}))
+            continue
+        mutated = True
+        for rank in ranks:
+            virtual_rank += 1
+            expanded.append(
+                item.model_copy(
+                    update={
+                        "observed_rank": virtual_rank,
+                        "referenced_ranks": [int(rank)],
+                    }
+                )
+            )
+    return expanded, mutated
 
 
 def _titles_preview(values: list[str], *, limit: int = 3) -> list[str]:
@@ -348,10 +421,17 @@ def _item_identity_matches(
     observed: _ParsedAnswerItem,
     expected: AnswerStateSnapshotItem,
 ) -> bool:
+    referenced_ranks = list(getattr(observed, "referenced_ranks", None) or [])
+    if referenced_ranks:
+        if expected.display_rank in referenced_ranks:
+            return True
+        # rank citation이 있는데 해당 snapshot을 가리키지 않으면 identity 불일치로 간주.
+        # 단, ids_map/title이 확실히 일치하는 경우 rank 누락은 용인 (citation이 안전망 역할).
     if observed.ids_map:
-        return _ids_overlap(observed.ids_map, expected.ids_map)
-    if observed.title_text:
-        return _titles_compatible(observed.title_text, expected.title_text)
+        if _ids_overlap(observed.ids_map, expected.ids_map):
+            return True
+    if observed.title_text and _titles_compatible(observed.title_text, expected.title_text):
+        return True
     return False
 
 
@@ -444,13 +524,47 @@ def build_state_snapshot_from_result_set(result_set: Any) -> AnswerStateSnapshot
     except Exception:
         normalized_visible_count = len(ordered_items)
     context_kind = _first_text(payload.get("context_kind"), getattr(result_set, "context_kind", None)) or "project"
+    effective_context_kind = _derive_effective_context_kind(
+        declared_context_kind=context_kind,
+        ordered_items=ordered_items,
+    )
     return AnswerStateSnapshot(
         available=bool(ordered_items),
         snapshot_source="active_result_set" if ordered_items else "none",
         context_kind=context_kind,
+        effective_context_kind=effective_context_kind,
         visible_count=max(0, normalized_visible_count),
         ordered_items=ordered_items,
     )
+
+
+def _derive_effective_context_kind(
+    *,
+    declared_context_kind: str,
+    ordered_items: list[AnswerStateSnapshotItem],
+) -> str:
+    """item\uc758 entity_kind \ub2e4\uc218\uacb0\ub85c snapshot-level context_kind\ub97c \ubcf4\uc815\ud55c\ub2e4.
+
+    render_profile\uc774 "lookup+project + \uc0ac\ub78c/\uae30\uad00 \uc870\uac74"\uc5d0\uc11c context_kind\ub97c
+    people/org\ub85c \ub36e\uc5b4\uc4f0\ub294\ub370, retrieval\uc774 \ubc18\ud658\ud55c actual rows\ub294 project\uc77c \uc218 \uc788\ub2e4.
+    \uac00\ub4dc \ub85c\uc9c1\uc740 item\uc758 \uc2e4\uc81c entity_kind \uacc4\ubcc4\uc744 \ub530\ub77c\uc57c \uc815\ud655\ud788 \ud310\ub2e8\ud560 \uc218 \uc788\uc73c\ubbc0\ub85c,
+    50%\ub97c \ub118\uac8c \ub36e\ub294 \ub2e8\uc77c entity_kind\uac00 \uc788\uc73c\uba74 \uadf8\uac83\uc744 effective\uc73c\ub85c \uc32c\ub2e4.
+    \uadf8\ub807\uc9c0 \uc54a\uc73c\uba74 declared \uac12\uc744 \uadf8\ub300\ub85c \uc0ac\uc6a9\ud55c\ub2e4.
+    """
+    declared = str(declared_context_kind or "").strip().lower() or "project"
+    if not ordered_items:
+        return declared
+    counts: dict[str, int] = {}
+    for item in ordered_items:
+        kind = str(getattr(item, "entity_kind", "") or "").strip().lower() or "project"
+        counts[kind] = counts.get(kind, 0) + 1
+    if not counts:
+        return declared
+    dominant_kind, dominant_count = max(counts.items(), key=lambda pair: pair[1])
+    total = sum(counts.values())
+    if total > 0 and dominant_count * 2 > total:
+        return dominant_kind
+    return declared
 
 
 def evaluate_answer_state_consistency(
@@ -478,8 +592,11 @@ def evaluate_answer_state_consistency(
             policy=policy,
         )
 
-    parsed_items = _parse_answer_items(answer_text)
-    if not parsed_items:
+    parsed_items_raw = _parse_answer_items(
+        answer_text,
+        max_rank=len(snapshot.ordered_items),
+    )
+    if not parsed_items_raw:
         return _build_consistency_verdict(
             status="no_structured_list",
             reason_codes=["no_structured_list"],
@@ -489,9 +606,19 @@ def evaluate_answer_state_consistency(
             policy=policy,
         )
 
+    parsed_items, rank_citations_expanded = _expand_parsed_items_by_rank_citations(
+        parsed_items_raw,
+        snapshot_size=len(snapshot.ordered_items),
+    )
+
     declared_count = _extract_declared_count(answer_text)
     visible_count = int(snapshot.visible_count or 0)
-    if declared_count is not None and declared_count != visible_count:
+    # LLM이 pjt_no로 그룹핑하면 user-visible count(raw)와 snapshot row count(visible_count)가 다를 수 있다.
+    # rank_citations_expanded가 True면 두 값 모두 정당한 declared_count로 수용.
+    acceptable_declared_counts = {visible_count}
+    if rank_citations_expanded:
+        acceptable_declared_counts.add(len(parsed_items_raw))
+    if declared_count is not None and declared_count not in acceptable_declared_counts:
         return _build_consistency_verdict(
             status="unsupported_count",
             reason_codes=["unsupported_count"],

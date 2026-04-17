@@ -589,19 +589,6 @@ def resolve_followup_anchor(
     subject_index: Any = None,
     recent_mentions: Optional[list[RecentMentionRecord]] = None,
 ) -> Optional[FocusEntity]:
-    active_focus = scope_focus_entity or focus_entity
-    child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=active_focus)
-    if child_anchor is not None:
-        return child_anchor
-
-    subject_anchor = _resolve_named_subject_from_index(
-        question=question,
-        subject_index=subject_index,
-        focus_entity=active_focus,
-    )
-    if subject_anchor is not None:
-        return subject_anchor
-
     ids_map = _normalize_ids_map(getattr(normalized_intent, "ids_map", {}) or {})
     for key in _EXPLICIT_ID_KEYS:
         values = ids_map.get(key) or []
@@ -620,6 +607,19 @@ def resolve_followup_anchor(
             doi=values[0] if key == "doi" else None,
             issn=values[0] if key == "issn" else None,
         )
+
+    active_focus = scope_focus_entity or focus_entity
+    child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=active_focus)
+    if child_anchor is not None:
+        return child_anchor
+
+    subject_anchor = _resolve_named_subject_from_index(
+        question=question,
+        subject_index=subject_index,
+        focus_entity=active_focus,
+    )
+    if subject_anchor is not None:
+        return subject_anchor
 
     ordinal = parse_ordinal_reference(question)
     if ordinal is not None and display_snapshot and 1 <= ordinal <= len(display_snapshot.items):

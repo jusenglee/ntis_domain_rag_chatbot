@@ -1,13 +1,37 @@
 # API 응답 명세
 
 이 문서는 현재 `apps/api/routes.py` 기준의 HTTP/SSE 응답 계약만 정리한다.
-planner, retrieval, follow-up, canonical evidence의 내부 실행 계약은 `02_실행계약과_전략규칙.md`를 기준으로 본다.
+내부 실행 계약(planner, retrieval, follow-up, canonical evidence)은 `02_실행계약과_전략규칙.md`를 참고한다.
 
 ## Source of Truth
+
 - route surface: `apps/api/routes.py`
+- stream envelope: `apps/api/streaming/contracts.py`, `apps/api/streaming/sse_encoder.py`
+- 함께 읽을 문서: `03_운영과_환경.md`, `02_실행계약과_전략규칙.md`
+
+---
+
+## 목차
+
+1. [Source of Truth](#source-of-truth)
+2. [엔드포인트 요약](#엔드포인트-요약)
+3. [공통 요청 바디](#공통-요청-바디query)
+4. [/query/stream](#querystream)
+5. [/query/debug](#querydebug)
+6. [/health](#health)
+7. [/metrics](#metrics)
+8. [/metrics/stream](#metricsstream)
+9. [공통 오류 응답](#공통-오류-응답)
+10. [유지 규칙](#유지-규칙)
+
+---
+
+## 상세 기준
 - `/query/stream` event contract: `apps/api/streaming/contracts.py`, `apps/api/streaming/sse_encoder.py`
 - `/metrics` payload: `apps/platform/metrics.py`
 - debug strategy 직렬화: `apps/platform/schemas.py`
+
+---
 
 ## 엔드포인트 요약
 
@@ -19,6 +43,8 @@ planner, retrieval, follow-up, canonical evidence의 내부 실행 계약은 `02
 | `/health/details` | `GET` | `application/json` | 항상 `200` |
 | `/metrics` | `GET` | `application/json` | Prometheus snapshot |
 | `/metrics/stream` | `GET` | `text/event-stream` | metrics SSE. `/query/stream`과 포맷이 다름 |
+
+---
 
 ## 공통 요청 바디(`/query/*`)
 
@@ -40,6 +66,8 @@ planner, retrieval, follow-up, canonical evidence의 내부 실행 계약은 `02
 - `question`만 필수다.
 - override 필드는 route에서 먼저 범위 검증한다.
 - 잘못된 값은 `422`와 FastAPI `HTTPException.detail` 문자열로 반환한다.
+
+---
 
 ## `/query/stream`
 
@@ -174,6 +202,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 - invalid reference payload는 fail-open으로 드롭되며, route 전체를 실패시키지 않는다.
 - project reference는 `pjt_id` 축을 우선하고, performance 계열은 `rst_id/perf_id/paper_id` 축을 우선한다.
 
+---
+
 ## `/query/debug`
 
 ### 성공 응답
@@ -233,6 +263,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 - debug route가 활성화돼 있어도 graph가 없거나 실행 중 예외가 나면 본문은 위 shape의 `success=false` JSON이다.
 - 내부 예외 시 추가 `contract_failure_details` 필드가 붙을 수 있다.
 
+---
+
 ## `/health`
 
 ### 응답 본문
@@ -262,6 +294,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 - `/health`는 `ready=true`일 때 `200`, 아니면 `503`을 반환한다.
 - `/health/details`는 같은 payload를 항상 `200`으로 반환한다.
 
+---
+
 ## `/metrics`
 
 ### 성공 응답
@@ -290,6 +324,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 
 - metrics client가 없으면 `503`을 반환한다.
 
+---
+
 ## `/metrics/stream`
 
 - media type: `text/event-stream`
@@ -312,6 +348,8 @@ data: {"error":"runtime_not_ready","error_code":"RUNTIME_NOT_READY"}
 
 - 연결 시작 시 `retry:`와 padding comment frame을 먼저 보낼 수 있다.
 
+---
+
 ## 공통 오류 응답
 
 ### 422 override validation
@@ -332,6 +370,8 @@ data: {"error":"runtime_not_ready","error_code":"RUNTIME_NOT_READY"}
   "detail": "not found"
 }
 ```
+
+---
 
 ## 유지 규칙
 

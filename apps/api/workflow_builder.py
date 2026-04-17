@@ -16,14 +16,12 @@ from apps.chat.answer_generation import (
     node_generate_answer_solar,
     node_merge_answers,
 )
+from apps.retrieval.runtime_routing import decide_post_retrieval_route
 from apps.retrieval.retrieval_workflow import node_knowledge_sufficiency, node_rag_search, node_relax_and_retry
 
 # ---------------------------------------------------------------------------
-# 재시도 상한: 원본 검색 1회 + 재시도 N회 = 총 (1 + N)회 검색
+# 재시도 상한: 기본 검색 1회 + 재시도 N회 = 총 (1 + N)회 검색
 # ---------------------------------------------------------------------------
-_MAX_SEARCH_RETRIES = 2
-
-
 def route_after_rule(state: Any) -> str:
     """Route direct-answer prechecks away from the planner pipeline."""
 
@@ -48,24 +46,16 @@ def route_after_knowledge_sufficiency(state: Any) -> str | list[str]:
 
 
 def route_after_rag_search(state: Any) -> str | list[str]:
-    """0건 결과 시 relax_and_retry로 보내고, 그 외에는 답변 생성으로 진행한다.
+    """Route empty retrieval results either to bounded answer generation or legacy retry."""
 
-    재시도 조건:
-    - context(docs)가 비어 있고
-    - 재시도 횟수가 상한 미만이며
-    - JOIN의 명시적 ID 검색이 아닌 경우
-    """
-    context = getattr(state, "context", None) or []
-    retry_count = getattr(state, "search_retry_count", 0) or 0
-
-    if not context and retry_count < _MAX_SEARCH_RETRIES:
-        qa = getattr(state, "question_analysis", None)
-        # JOIN + 명시적 join_key_mode가 있으면 완화해봐야 무의미
-        if qa and getattr(qa, "mode", "") == "JOIN" and getattr(qa, "join_key_mode", None):
-            return ["generate_answer_gemma", "generate_answer_solar"]
-        return "relax_and_retry"
-
-    return ["generate_answer_gemma", "generate_answer_solar"]
+    qa = getattr(state, "question_analysis", None)
+    return decide_post_retrieval_route(
+        context=getattr(state, "context", None) or [],
+        retry_count=getattr(state, "search_retry_count", 0) or 0,
+        qa_mode=getattr(qa, "mode", ""),
+        join_key_mode=getattr(qa, "join_key_mode", None),
+        retrieval_runtime_meta=getattr(state, "retrieval_runtime_meta", None) or {},
+    )
 
 
 def build_request_workflow() -> Any:

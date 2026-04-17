@@ -192,6 +192,21 @@ class RecentMentionRecord(BaseModel):
     display_rank: Optional[int] = None
     turn_index: Optional[int] = None
 
+    @model_validator(mode="after")
+    def _normalize_recent_mention(self) -> "RecentMentionRecord":
+        self.entity_kind = _normalize_kind(self.entity_kind, default="project")  # type: ignore[assignment]
+        self.title_text = _first_text(self.title_text) or None
+        self.pjt_id = _first_text(self.pjt_id) or None
+        self.pjt_no = _first_text(self.pjt_no) or None
+        self.rst_id = _first_text(self.rst_id) or None
+        self.doi = _first_text(self.doi) or None
+        self.issn = _first_text(self.issn) or None
+        self.year = _first_text(self.year) or None
+        self.lead_org = _first_text(self.lead_org) or None
+        self.participant_org = _dedupe_texts(self.participant_org or [])
+        self.researchers = _dedupe_texts(self.researchers or [])
+        return self
+
 
 class ConversationViewState(BaseModel):
     visible_answer_manifest: Optional[DisplaySnapshot] = None
@@ -308,12 +323,25 @@ def _normalize_view_state(
             entry_key = _first_text(key) or entry.subject_id
             if entry_key:
                 subject_index[entry_key] = entry
+    recent_mentions_payload = getattr(view_state, "recent_mentions", []) or []
+    recent_mentions: List[RecentMentionRecord] = []
+    for raw_mention in recent_mentions_payload:
+        try:
+            mention = (
+                raw_mention
+                if isinstance(raw_mention, RecentMentionRecord)
+                else RecentMentionRecord.model_validate(raw_mention)
+            )
+        except Exception:
+            continue
+        recent_mentions.append(mention)
     return view_state.model_copy(
         update={
             "active_scope": normalized_scope,
             "visible_answer_manifest": visible_answer_manifest,
             "subject_index": subject_index,
             "active_result_view_id": getattr(normalized_scope.result_set, "view_id", None),
+            "recent_mentions": recent_mentions[-12:],
         }
     )
 

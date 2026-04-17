@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import os
+import re
 
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from apps.platform.langchain_compat import AIMessage, HumanMessage, SystemMessage
 
 from apps.api.rag_mapper.schema_types import DataTag
 from apps.api.contracts.answer_groundedness import (
     AnswerGroundednessVerdict,
     build_groundedness_snapshot_from_canonical_evidence,
+    evaluate_answer_groundedness,
 )
 from apps.api.contracts.answer_state_consistency import (
+    AnswerStateConsistencyPolicy,
     AnswerStateConsistencyVerdict,
     build_state_snapshot_from_result_set,
+    evaluate_answer_state_consistency,
 )
 from apps.evidence.canonical_context import (
     render_canonical_evidence_debug_text,
@@ -25,6 +29,7 @@ from apps.api.streaming.contracts import AnswerArtifact
 from apps.evidence.canonical_evidence import build_canonical_evidence
 from apps.api.runtime_helpers import log_event, log_section, logger, measure_latency, select_max_tokens_hint
 from apps.chat.answer_merge import select_final_answer
+from apps.chat.execution_trace_summary import summarize_execution_trace
 from apps.chat.llm_runtime import build_llm, load_system_prompt, resolve_system_prompt_path
 from apps.chat.llm_streaming import run_llm_streaming
 from apps.evidence.context_renderer import split_sentences
@@ -62,6 +67,9 @@ _SOLAR_SYSTEM_PROMPT_PATH_RAW = os.getenv("SOLAR_SYSTEM_PROMPT_PATH", "").strip(
 _SOLAR_SYSTEM_PROMPT_PATH = Path(_SOLAR_SYSTEM_PROMPT_PATH_RAW) if _SOLAR_SYSTEM_PROMPT_PATH_RAW else None
 _SOLAR_MAX_DOC_SENTENCES = int(os.getenv("SOLAR_MAX_DOC_SENTENCES", str(MAX_DOC_SENTENCES)))
 _SOLAR_MAX_DOC_TOKENS = int(os.getenv("SOLAR_MAX_DOC_TOKENS", str(MAX_DOC_TOKENS)))
+_LIST_LIKE_OUTPUT_TYPES = {"list", "relation", "comparison", "series", "stats"}
+_DETERMINISTIC_VISIBLE_LIST_PREAMBLE = "현재 화면에 보이는 항목을 기준으로 정리하면 다음과 같습니다."
+_EXPLICIT_COUNT_REQUEST_PATTERN = re.compile(r"(\d+)\s*(건|개|명)")
 
 
 
@@ -79,7 +87,6 @@ def _coerce_float(value: Any) -> Optional[float]:
 
 
 
-
 def _coerce_int(value: Any) -> Optional[int]:
 
     try:
@@ -91,6 +98,13 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+
+    number = _coerce_int(value)
+    if number is None or number < 1:
+        return None
+    return number
+
 
 
 
@@ -98,7 +112,6 @@ def _resolve_llm_request_overrides(state: Any) -> dict[str, Any]:
     overrides = getattr(state, "request_overrides", None) or {}
     if not isinstance(overrides, dict):
         return {}
-
 
     llm_overrides: dict[str, Any] = {}
 
@@ -109,8 +122,6 @@ def _resolve_llm_request_overrides(state: Any) -> dict[str, Any]:
     max_tokens = _coerce_int(overrides.get("max_tokens"))
 
     top_k = _coerce_int(overrides.get("top_k"))
-
-
 
     if temperature is not None:
 
@@ -278,6 +289,11 @@ def _state_consistency_diag(verdict: dict[str, Any] | None) -> dict[str, Any]:
         "mismatch_reason": payload.get("mismatch_reason"),
         "parsed_titles_preview": list(payload.get("parsed_titles_preview") or []),
         "snapshot_titles_preview": list(payload.get("snapshot_titles_preview") or []),
+        "policy_name": str(payload.get("policy_name") or "").strip().lower() or "exact_count",
+        "subset_accepted": bool(payload.get("subset_accepted")),
+        "manifest_publish_allowed": bool(payload.get("manifest_publish_allowed")),
+        "accepted_item_count": int(payload.get("accepted_item_count") or 0),
+        "required_visible_count": int(payload.get("required_visible_count") or 0),
     }
 
 
@@ -285,21 +301,198 @@ def _state_snapshot_diag(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(snapshot or {})
     ordered_items = payload.get("ordered_items") if isinstance(payload.get("ordered_items"), list) else []
     titles_preview: list[str] = []
+    entity_kind_counts: dict[str, int] = {}
+    pjt_no_bucket_sizes: dict[str, int] = {}
+    items_without_pjt_no = 0
     for item in ordered_items:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title_text") or "").strip()
-        if not title:
-            continue
-        titles_preview.append(title)
-        if len(titles_preview) >= 3:
-            break
+        if title and len(titles_preview) < 3:
+            titles_preview.append(title)
+        kind = str(item.get("entity_kind") or "").strip().lower() or "project"
+        entity_kind_counts[kind] = entity_kind_counts.get(kind, 0) + 1
+        ids_map = item.get("ids_map") if isinstance(item.get("ids_map"), dict) else {}
+        pjt_no_values = ids_map.get("pjt_no") if isinstance(ids_map.get("pjt_no"), list) else []
+        pjt_no_key = str(pjt_no_values[0]).strip() if pjt_no_values and str(pjt_no_values[0]).strip() else ""
+        if pjt_no_key:
+            pjt_no_bucket_sizes[pjt_no_key] = pjt_no_bucket_sizes.get(pjt_no_key, 0) + 1
+        else:
+            items_without_pjt_no += 1
+    declared_context_kind = str(payload.get("context_kind") or "").strip().lower() or "project"
+    effective_context_kind = declared_context_kind
+    if entity_kind_counts:
+        dominant_kind, dominant_count = max(entity_kind_counts.items(), key=lambda pair: pair[1])
+        total_items = sum(entity_kind_counts.values())
+        if total_items > 0 and dominant_count * 2 > total_items:
+            effective_context_kind = dominant_kind
+    pjt_no_bucket_count = len(pjt_no_bucket_sizes)
+    pjt_no_grouped_rows = sum(size for size in pjt_no_bucket_sizes.values() if size > 1)
     return {
         "available": bool(payload.get("available")),
         "snapshot_source": str(payload.get("snapshot_source") or "none"),
-        "context_kind": str(payload.get("context_kind") or "").strip().lower() or "project",
+        "context_kind": declared_context_kind,
+        "effective_context_kind": effective_context_kind,
+        "context_kind_mismatch": bool(
+            effective_context_kind != declared_context_kind and effective_context_kind
+        ),
         "visible_count": int(payload.get("visible_count") or 0),
         "titles_preview": titles_preview,
+        "entity_kind_counts": entity_kind_counts,
+        "pjt_no_bucket_count": pjt_no_bucket_count,
+        "pjt_no_grouped_rows": pjt_no_grouped_rows,
+        "items_without_pjt_no": items_without_pjt_no,
+    }
+
+
+def _resolve_output_family(state: Any) -> str:
+    render_profile = getattr(state, "render_profile", None) or {}
+    question_analysis = getattr(state, "question_analysis", None)
+    return str(
+        render_profile.get("name")
+        or _pick_attr(question_analysis, key="output_type", default=None)
+        or "summary"
+    ).strip().lower() or "summary"
+
+
+def _resolve_turn_contract(state: Any) -> dict[str, Any]:
+    intent_payload = getattr(state, "intent_payload", None)
+    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
+    turn_contract = strategy_meta.get("turn_contract")
+    return dict(turn_contract or {}) if isinstance(turn_contract, dict) else {}
+
+
+def _snapshot_to_payload(snapshot: Any) -> dict[str, Any]:
+    if snapshot is None:
+        return {}
+    if hasattr(snapshot, "model_dump"):
+        try:
+            payload = snapshot.model_dump()
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    if isinstance(snapshot, dict):
+        return dict(snapshot)
+    return dict(getattr(snapshot, "__dict__", {}) or {})
+
+
+def _question_has_explicit_count(question: Any) -> bool:
+    return bool(_EXPLICIT_COUNT_REQUEST_PATTERN.search(str(question or "")))
+
+
+def _resolve_state_consistency_policy(state: Any) -> dict[str, Any]:
+    output_family = _resolve_output_family(state)
+    if output_family not in _LIST_LIKE_OUTPUT_TYPES:
+        return AnswerStateConsistencyPolicy(
+            policy_name="bypass",
+            enforce_exact_count=False,
+        ).model_dump()
+
+    turn_contract = _resolve_turn_contract(state)
+    count_contract = str(turn_contract.get("count_contract") or "").strip().lower()
+    explicit_count_requested = bool(turn_contract.get("explicit_count_requested"))
+    requested_count = _coerce_positive_int(turn_contract.get("requested_count"))
+    question_requests_count = _question_has_explicit_count(getattr(state, "question", None))
+
+    if count_contract == "partial_ok":
+        return AnswerStateConsistencyPolicy(
+            policy_name="prefix_subset",
+            enforce_exact_count=False,
+            allow_prefix_subset=True,
+            min_required_items=1,
+            allow_manifest_publish_on_subset=False,
+        ).model_dump()
+
+    if (
+        count_contract == "exact"
+        or explicit_count_requested
+        or requested_count is not None
+        or output_family in {"relation", "comparison", "series"}
+        or question_requests_count
+    ):
+        return AnswerStateConsistencyPolicy(
+            policy_name="exact_count",
+            enforce_exact_count=True,
+            allow_prefix_subset=False,
+            min_required_items=1,
+            allow_manifest_publish_on_subset=False,
+        ).model_dump()
+
+    if output_family == "list":
+        return AnswerStateConsistencyPolicy(
+            policy_name="prefix_subset",
+            enforce_exact_count=False,
+            allow_prefix_subset=True,
+            min_required_items=1,
+            allow_manifest_publish_on_subset=False,
+        ).model_dump()
+
+    return AnswerStateConsistencyPolicy(
+        policy_name="bypass",
+        enforce_exact_count=False,
+    ).model_dump()
+
+
+def _render_deterministic_visible_list(snapshot: Any) -> Optional[str]:
+    if snapshot is None:
+        return None
+    context_kind = str(getattr(snapshot, "context_kind", None) or "").strip().lower()
+    if context_kind not in {"people", "org"}:
+        return None
+    items = getattr(snapshot, "items", None)
+    if not isinstance(items, list) or not items:
+        return None
+    lines = [_DETERMINISTIC_VISIBLE_LIST_PREAMBLE]
+    for index, raw_item in enumerate(items, start=1):
+        item = dict(raw_item or {}) if isinstance(raw_item, dict) else {}
+        title = str(item.get("title_text") or "").strip()
+        if not title:
+            continue
+        lines.append(f"{index}. {title}")
+    return "\n".join(lines) if len(lines) > 1 else None
+
+
+def _build_deterministic_visible_list_candidate(
+    *,
+    state: Any,
+    active_result_snapshot: Any,
+    groundedness_snapshot: dict[str, Any],
+    state_consistency_snapshot: dict[str, Any],
+    state_consistency_policy: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    if _resolve_output_family(state) != "list":
+        return None
+
+    text = _render_deterministic_visible_list(active_result_snapshot)
+    if not text:
+        return None
+
+    groundedness = evaluate_answer_groundedness(
+        answer_text=text,
+        answer_kind="deterministic_render",
+        evidence_snapshot=groundedness_snapshot,
+    ).model_dump()
+    state_consistency = evaluate_answer_state_consistency(
+        answer_text=text,
+        answer_kind="deterministic_render",
+        state_snapshot=state_consistency_snapshot,
+        state_policy=state_consistency_policy,
+    ).model_dump()
+    if str(state_consistency.get("status") or "").strip().lower() != "supported":
+        return None
+    if str(groundedness.get("status") or "").strip().lower() == "unsupported":
+        return None
+    return {
+        "text": text,
+        "groundedness": groundedness,
+        "state_consistency": state_consistency,
+        "meta": {
+            "answer_source": "deterministic_snapshot",
+            "model_key": "deterministic_snapshot",
+            "answer_kind": "deterministic_render",
+            "deterministic_render_mode": "visible_snapshot",
+        },
     }
 
 
@@ -318,8 +511,6 @@ def _build_user_visible_fallback_message(selection: dict[str, Any]) -> str:
     if "unsupported_groundedness" in fail_reasons:
         return _GROUNDEDNESS_DEGRADED_FALLBACK_MESSAGE
     return _GENERIC_DEGRADED_FALLBACK_MESSAGE
-
-
 
 
 def _pick_attr(*sources: Any, key: str, default: Any = None) -> Any:
@@ -375,12 +566,8 @@ def build_answer_context(
 
     """문서와 canonical evidence를 답변 생성용 context text로 정리한다.
 
-
-
     가능하면 canonical_evidence를 그대로 렌더링하고, 없을 때만 docs를 canonical 형태로 파생해
-
     raw payload 직접 참조를 줄인다.
-
     """
 
     is_solar = model_name == "solar_vllm_0"
@@ -393,9 +580,7 @@ def build_answer_context(
             "context_kind": str(
                 _pick_attr(normalized_intent, strategy, qa, key="base_route")
                 or _pick_attr(qa, key="head")
-
                 or "project"
-
             ).strip().lower() or "project",
         }
 
@@ -434,25 +619,16 @@ def build_answer_context(
                 continue
 
             derived.append(
-
                 build_canonical_evidence(
-
                     item,
-
                     rank=rank,
-
                     base_route=base_route,
-
                     output_type=output_type,
-
                 ).to_dict()
-
             )
 
         effective_canonical = derived
-
         context_source = "derived_canonical_evidence"
-
 
     context_text = render_canonical_evidence_text(
         effective_canonical,
@@ -475,153 +651,86 @@ def build_answer_context(
         "context_sentences": context_sentences,
         "context_tokens_est": context_tokens_est,
         "is_solar": is_solar,
-
         "context_source": context_source,
-
     }
 
 
-
-
-
 async def generate_answer(
-
     state: Any,
-
     *,
-
     model_name: str,
-
     final_field: str,
-
 ) -> Dict[str, Any]:
 
     """모델별 system prompt, reference context, user question을 묶어 최종 답변을 생성한다.
 
-
-
     스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게
-
     판단할 수 있도록 만든다.
-
     """
+    execution_trace_summary = summarize_execution_trace(getattr(state, "execution_trace", None) or [])
 
     def _build_short_circuit_artifact(*, content: str, answer_kind: str, answer_source: str) -> AnswerArtifact:
-
+        meta = {"answer_source": answer_source, "model_key": final_field.replace("answer_", "")}
+        if execution_trace_summary:
+            meta.update(execution_trace_summary)
         return AnswerArtifact(
-
             text=content,
-
             answer_kind=answer_kind,
-
             stream_metrics={
-
                 "content_chars": len(content),
-
                 "stream_content_emitted_chunks": 1,
-
                 "emitted_chars": len(content),
-
                 "ttft_any_ms": 0.0,
-
                 "ttft_content_ms": 0.0,
-
             },
-
             user_visible_final_required=True,
-
-            meta={"answer_source": answer_source, "model_key": final_field.replace("answer_", "")},
-
+            meta=meta,
         )
-
-
 
     answer_artifact = getattr(state, "answer_artifact", None)
 
     if isinstance(answer_artifact, AnswerArtifact) and answer_artifact.text:
-
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-
         return {
-
             final_field: answer_artifact.text,
-
             f"{final_field}_meta": answer_artifact.to_meta_dict(),
-
             f"answer_artifact_{final_field.replace('answer_', '')}": answer_artifact,
-
             rendered_context_key: False,
-
             "stream_meta": {final_field: answer_artifact.to_meta_dict()},
-
         }
-
-
 
     no_result_message = str(getattr(state, "no_result_message", "") or "").strip()
-
     if no_result_message:
-
         log_event(
-
             "LLM.GENERATE",
-
             request_id=getattr(state, "request_id", None),
-
             conversation_id=getattr(state, "conversation_id", None),
-
             stage="generate_answer_no_result",
-
             model=model_name,
-
             ks_level="short_circuit",
-
             ctx_chars=0,
-
             ctx_sentences=0,
-
             ctx_tokens_est=0,
-
             context_source="no_result_message",
-
             emitted_chars=len(no_result_message),
-
         )
-
         rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-
         no_result_artifact = _build_short_circuit_artifact(
-
             content=no_result_message,
-
             answer_source="no_result_message",
-
             answer_kind="no_result",
-
         )
-
         return {
-
             final_field: no_result_message,
-
             f"{final_field}_meta": no_result_artifact.to_meta_dict(),
-
             f"answer_artifact_{final_field.replace('answer_', '')}": no_result_artifact,
-
             rendered_context_key: False,
-
             "stream_meta": {final_field: no_result_artifact.to_meta_dict()},
-
         }
-
-
 
     llm = build_llm(model_name=model_name)
 
-
-
     ks = getattr(state, "knowledge_sufficiency", None)
-
     qa = getattr(state, "question_analysis", None)
     intent_payload = getattr(state, "intent_payload", None)
     normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload else None
@@ -648,13 +757,9 @@ async def generate_answer(
         canonical_evidence=canonical_evidence,
         render_profile=render_profile,
         normalized_intent=normalized_intent,
-
         strategy=strategy,
-
         qa=qa,
-
         model_name=model_name,
-
     )
     context_text = context_info["context_text"]
     debug_context_text = context_info.get("debug_context_text") or context_text
@@ -663,8 +768,6 @@ async def generate_answer(
     context_tokens_est = context_info["context_tokens_est"]
     context_source = context_info.get("context_source", "canonical_evidence")
 
-
-
     system_prompt_path = resolve_system_prompt_path(
         model_name=model_name,
         default_path=_DEFAULT_SYSTEM_PROMPT_PATH,
@@ -672,7 +775,6 @@ async def generate_answer(
         solar_path=_SOLAR_SYSTEM_PROMPT_PATH,
     )
     system_prompt = await load_system_prompt(system_prompt_path)
-
 
     messages_state = getattr(state, "messages", None) or []
     last_message = messages_state[-1] if messages_state else HumanMessage(content="")
@@ -689,15 +791,11 @@ async def generate_answer(
     )
     log_section("Reference Context", debug_context_text)
 
-
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)]
 
     token_hint_source = qa
-
     strategy_mode = _pick_attr(strategy, key="mode")
-
     if strategy_mode:
-
         token_hint_source = type("TokenHintSource", (), {"mode": str(strategy_mode).strip().upper()})()
 
     max_tokens_hint = select_max_tokens_hint(
@@ -707,31 +805,19 @@ async def generate_answer(
     )
 
     llm_request_overrides = _resolve_llm_request_overrides(state)
-
     max_tokens_hint = int(llm_request_overrides.get("max_tokens_hint", max_tokens_hint))
 
     final_artifact = await run_llm_streaming(
-
         llm,
-
         messages,
-
         emitter=getattr(state, "stream_emitter", None),
-
         model_key=final_field.replace("answer_", ""),
-
         max_tokens_hint=max_tokens_hint,
-
         request_id=getattr(state, "request_id", None),
-
         ttft_deadline_ms=_SOLAR_TTFT_DEADLINE_MS if model_name == "solar_vllm_0" else None,
-
         gen_deadline_ms=_SOLAR_GEN_DEADLINE_MS if model_name == "solar_vllm_0" else None,
-
         max_chars=_SOLAR_STREAM_MAX_CHARS if model_name == "solar_vllm_0" else None,
-
         astream_kwargs={key: value for key, value in llm_request_overrides.items() if key != "max_tokens_hint"},
-
     )
 
     if isinstance(final_artifact, tuple):
@@ -740,7 +826,6 @@ async def generate_answer(
             text=str(final_answer or ""),
             answer_kind="llm_collected",
             stream_metrics=dict(stream_metrics or {}),
-
             user_visible_final_required=True,
             meta={"model_key": final_field.replace("answer_", "")},
         )
@@ -751,183 +836,94 @@ async def generate_answer(
     final_answer = final_artifact.text
     stream_metrics = dict(final_artifact.stream_metrics or {})
 
-
     ttft_any_ms = stream_metrics.get("ttft_any_ms")
-
     ttft_content_ms = stream_metrics.get("ttft_content_ms")
-
     reasoning_chars = int(stream_metrics.get("reasoning_chars") or 0)
-
     content_chars = int(stream_metrics.get("content_chars") or 0)
 
-
-
     logger.info(
-
         "[stream_metrics] request_id=%s model=%s ttft_any_ms=%s ttft_content_ms=%s reasoning_chars=%s content_chars=%s",
-
         getattr(state, "request_id", None),
-
         model_name,
-
         ttft_any_ms,
-
         ttft_content_ms,
-
         reasoning_chars,
-
         content_chars,
-
     )
 
-
-
     if model_name == "solar_vllm_0":
-
         content_delay_ms: Optional[float] = None
-
         if ttft_any_ms is not None and ttft_content_ms is not None:
-
             content_delay_ms = round(ttft_content_ms - ttft_any_ms, 1)
 
-
-
         if ttft_any_ms is None:
-
             logger.warning(
-
                 "[solar_stream_guard] request_id=%s category=stream_not_started_or_stalled ttft_any_ms=%s ttft_content_ms=%s ttft_deadline_exceeded=%s deadline_exceeded=%s",
-
                 getattr(state, "request_id", None),
-
                 ttft_any_ms,
-
                 ttft_content_ms,
-
                 bool(stream_metrics.get("ttft_deadline_exceeded")),
-
                 bool(stream_metrics.get("deadline_exceeded")),
-
             )
-
         elif ttft_content_ms is None or (content_delay_ms is not None and content_delay_ms >= 500):
-
             logger.warning(
-
                 "[solar_stream_guard] request_id=%s category=content_delayed ttft_any_ms=%s ttft_content_ms=%s content_delay_ms=%s reasoning_chars=%s content_chars=%s",
-
                 getattr(state, "request_id", None),
-
                 ttft_any_ms,
-
                 ttft_content_ms,
-
                 content_delay_ms,
-
                 reasoning_chars,
-
                 content_chars,
-
             )
-
         elif stream_metrics.get("gen_deadline_exceeded"):
-
             logger.warning(
-
                 "[solar_stream_guard] request_id=%s category=gen_deadline_exceeded gen_deadline_ms=%s truncated_chars=%s emitted_chars=%s",
-
                 getattr(state, "request_id", None),
-
                 _SOLAR_GEN_DEADLINE_MS,
-
                 len(final_answer),
-
                 stream_metrics.get("emitted_chars"),
-
             )
-
             if stream_metrics.get("short_output_guard_triggered"):
-
                 logger.warning(
-
                     "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
-
                     getattr(state, "request_id", None),
-
                     stream_metrics.get("short_output_guard_min_chars"),
-
                     stream_metrics.get("emitted_chars"),
-
                 )
-
         elif stream_metrics.get("char_limited"):
-
             logger.warning(
-
                 "[solar_stream_guard] request_id=%s category=char_limited max_chars=%s truncated_chars=%s",
-
                 getattr(state, "request_id", None),
-
                 _SOLAR_STREAM_MAX_CHARS,
-
                 len(final_answer),
-
             )
-
-
 
     log_event(
-
         "LLM.GENERATE",
-
         request_id=getattr(state, "request_id", None),
-
         conversation_id=getattr(state, "conversation_id", None),
-
         stage="generate_answer",
-
         model=model_name,
-
         request_temperature=llm_request_overrides.get("temperature"),
-
         request_top_p=llm_request_overrides.get("top_p"),
-
         request_max_tokens=max_tokens_hint,
-
         request_top_k=llm_request_overrides.get("top_k"),
-
         ks_level=(getattr(ks, "requires_new_knowledge", None) if ks else "unknown"),
-
         ctx_chars=len(context_text),
-
         ctx_sentences=context_sentences,
-
         ctx_tokens_est=context_tokens_est,
-
         context_source=context_source,
-
         emitted_chars=len(final_answer or ""),
-
     )
 
     rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
-
     return {
-
         final_field: final_answer,
-
         f"{final_field}_meta": stream_metrics,
-
         f"answer_artifact_{final_field.replace('answer_', '')}": final_artifact,
-
         rendered_context_key: rendered_context_used,
-
         "stream_meta": {final_field: stream_metrics},
-
     }
-
-
-
 
 
 @measure_latency("generate_answer_gemma")
@@ -949,20 +945,14 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
 
     """Solar과 Gemma 결과 중 최종 답변을 선택하고 병합 메타를 기록한다.
 
-
-
     선택 정책은 별도 함수에 위임하고, 여기서는 선택 사유와 실패 징후를 workflow state에 보존한다.
-
     """
 
     has_docs_context = bool(getattr(state, "context", None) or getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
-
     rendered_context_used = bool(getattr(state, "rendered_context_used_gemma", False)) or bool(getattr(state, "rendered_context_used_solar", False))
-
-
+    execution_trace_summary = summarize_execution_trace(getattr(state, "execution_trace", None) or [])
 
     answer_gemma = (getattr(state, "answer_gemma", "") or "").strip()
-
     answer_gemma_meta = getattr(state, "answer_gemma_meta", None) or {}
     answer_solar_raw = getattr(state, "answer_solar", None) or ""
     answer_solar = answer_solar_raw.strip()
@@ -988,6 +978,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         if state_consistency_snapshot_model is not None
         else {"available": False, "snapshot_source": "none"}
     )
+    state_consistency_policy = _resolve_state_consistency_policy(state)
     selection = select_final_answer(
         answer_solar=answer_solar,
         answer_gemma=answer_gemma,
@@ -999,6 +990,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         evidence_snapshot=groundedness_snapshot,
         protect_visible_order=protect_visible_order,
         state_consistency_snapshot=state_consistency_snapshot,
+        state_consistency_policy=state_consistency_policy,
     )
     solar_fail_reasons = list(selection["solar_fail_reasons"])
     solar_warning_reasons = list(selection["solar_warning_reasons"])
@@ -1013,6 +1005,17 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     solar_state_diag = _state_consistency_diag(solar_state_consistency)
     gemma_state_diag = _state_consistency_diag(gemma_state_consistency)
     state_snapshot_diag = _state_snapshot_diag(state_consistency_snapshot)
+    deterministic_visible_list = _build_deterministic_visible_list_candidate(
+        state=state,
+        active_result_snapshot=active_result_snapshot,
+        groundedness_snapshot=groundedness_snapshot,
+        state_consistency_snapshot=state_consistency_snapshot,
+        state_consistency_policy=state_consistency_policy,
+    )
+    if deterministic_visible_list is not None:
+        selection["selected_model"] = "deterministic_snapshot"
+        selection["selected_answer"] = str(deterministic_visible_list["text"] or "")
+        selection["selection_reason"] = "deterministic_visible_list"
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
     if selected_model == "fallback":
@@ -1021,21 +1024,33 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     selected_meta = {}
     if selected_model == "solar":
         selected_meta = solar_meta
-
     elif selected_model == "gemma":
-
         selected_meta = answer_gemma_meta
+    elif selected_model == "deterministic_snapshot":
+        selected_meta = dict(deterministic_visible_list.get("meta") or {}) if deterministic_visible_list is not None else {}
 
     selected_answer_source = str(selected_meta.get("answer_source") or selected_model)
-
     selected_artifact = None
 
     if selected_model == "solar" and isinstance(answer_artifact_solar, AnswerArtifact):
-
         selected_artifact = answer_artifact_solar
-
     elif selected_model == "gemma" and isinstance(answer_artifact_gemma, AnswerArtifact):
         selected_artifact = answer_artifact_gemma
+    elif selected_model == "deterministic_snapshot" and selected_answer:
+        selected_artifact = AnswerArtifact(
+            text=selected_answer,
+            answer_kind=str(selected_meta.get("answer_kind") or "deterministic_render"),
+            stream_metrics=dict(selected_meta or {}),
+            user_visible_final_required=True,
+            references=_collect_state_references(state),
+            meta={
+                "answer_source": selected_answer_source,
+                "model_key": selected_model,
+                "selection_reason": selection["selection_reason"],
+                "degraded": False,
+                **dict(selected_meta or {}),
+            },
+        )
     elif selected_answer:
         selected_artifact = AnswerArtifact(
             text=selected_answer,
@@ -1054,6 +1069,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_groundedness = solar_groundedness
     elif selected_model == "gemma":
         selected_groundedness = gemma_groundedness
+    elif selected_model == "deterministic_snapshot" and deterministic_visible_list is not None:
+        selected_groundedness = dict(deterministic_visible_list.get("groundedness") or {})
     else:
         selected_groundedness = AnswerGroundednessVerdict(
             status="skipped_fallback",
@@ -1069,6 +1086,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_state_consistency = solar_state_consistency
     elif selected_model == "gemma":
         selected_state_consistency = gemma_state_consistency
+    elif selected_model == "deterministic_snapshot" and deterministic_visible_list is not None:
+        selected_state_consistency = dict(deterministic_visible_list.get("state_consistency") or {})
     if not selected_state_consistency:
         selected_state_consistency = AnswerStateConsistencyVerdict(
             status="not_applicable",
@@ -1078,6 +1097,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         enriched_meta = dict(selected_artifact.meta or {})
         enriched_meta.setdefault("answer_source", selected_answer_source)
         enriched_meta.setdefault("model_key", selected_model)
+        if execution_trace_summary:
+            enriched_meta.update(execution_trace_summary)
         enriched_meta["groundedness_status"] = selected_groundedness.get("status")
         enriched_meta["groundedness_reason_codes"] = list(selected_groundedness.get("reason_codes") or [])
         enriched_meta["groundedness_summary"] = selected_groundedness
@@ -1096,10 +1117,21 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
                 visible_answer_manifest_status = "blocked_groundedness"
             elif state_consistency_status != "supported":
                 visible_answer_manifest_status = "blocked_state_consistency"
+            elif bool(selected_state_consistency.get("subset_accepted")) and not bool(selected_state_consistency.get("manifest_publish_allowed")):
+                visible_answer_manifest_status = "withheld_partial"
             else:
                 visible_answer_manifest_status = "approved"
-                visible_answer_manifest = active_result_snapshot.model_dump() if hasattr(active_result_snapshot, "model_dump") else dict(active_result_snapshot)
+                visible_answer_manifest = _snapshot_to_payload(active_result_snapshot)
         enriched_meta["visible_answer_manifest_status"] = visible_answer_manifest_status
+        enriched_meta["answer_publishability"] = (
+            "publishable"
+            if visible_answer_manifest_status == "approved"
+            else "withheld_partial"
+            if visible_answer_manifest_status == "withheld_partial"
+            else "blocked"
+            if visible_answer_manifest_status.startswith("blocked_")
+            else "not_applicable"
+        )
         selected_artifact = AnswerArtifact(
             text=selected_artifact.text,
             answer_kind=selected_artifact.answer_kind,
@@ -1161,13 +1193,9 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         ),
     }
 
-
     log_event(
-
         "LLM.RESULT",
-
         request_id=getattr(state, "request_id", None),
-
         conversation_id=getattr(state, "conversation_id", None),
         stage="merge_answers",
         selected_model=selected_model,
@@ -1186,6 +1214,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         solar_state_reason_codes=list(solar_state_diag.get("reason_codes") or []),
         gemma_state_status=gemma_state_diag.get("status"),
         gemma_state_reason_codes=list(gemma_state_diag.get("reason_codes") or []),
+        state_consistency_subset_accepted=int(bool(selected_state_diag.get("subset_accepted"))),
+        state_manifest_publish_allowed=int(bool(selected_state_diag.get("manifest_publish_allowed"))),
         visible_answer_manifest_status=(
             (selected_artifact.meta or {}).get("visible_answer_manifest_status")
             if isinstance(selected_artifact, AnswerArtifact)
@@ -1207,18 +1237,11 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             selected_state=selected_state_diag,
         )
     logger.info(
-
         "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
-
         getattr(state, "request_id", None),
-
         selected_model,
-
         solar_fail_reasons,
-
     )
-
-
 
     return {
         "messages": [AIMessage(content=selected_answer)],
@@ -1239,15 +1262,3 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "degraded": degraded,
         "view_state": next_view_state,
     }
-
-
-
-
-
-
-
-
-
-
-
-

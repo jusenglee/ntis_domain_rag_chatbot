@@ -250,6 +250,7 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     question_analysis = getattr(state, "question_analysis", None)
     strategy = getattr(state, "strategy", None)
     intent_payload = getattr(state, "intent_payload", None)
+    retrieval_runtime_meta = dict(getattr(state, "retrieval_runtime_meta", {}) or {})
     normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload is not None else None
     strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {}) if intent_payload is not None else {}
     context = getattr(state, "context", None) or []
@@ -386,5 +387,11 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "reranked_count": timings.get("info.reranked_count"),
         "degraded": int(bool(getattr(state, "degraded", False))),
         "total_ms": total_ms,
+        # L2 layer fields
+        "l2_orchestrator_owned": retrieval_runtime_meta.get("orchestrator_owned"),
+        "l2_policy_name": retrieval_runtime_meta.get("policy_name"),
+        "l2_execution_kind": retrieval_runtime_meta.get("execution_kind"),
+        "l2_recovery_applied": retrieval_runtime_meta.get("recovery_applied"),
+        "l2_legacy_retry_allowed": retrieval_runtime_meta.get("legacy_retry_allowed"),
     }
 

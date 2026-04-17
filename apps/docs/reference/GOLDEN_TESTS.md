@@ -1,5 +1,7 @@
 # GOLDEN_TESTS.md
 
+이 문서는 골든 시나리오 카탈로그다. 현재 실행 가능한 검증 명령의 source of truth는 `../04_회귀기준과_점검.md`다.
+
 ## Purpose
 이 문서는 SEARCH / LOOKUP / JOIN 계약과 answer-stage groundedness 회귀를 잡기 위한 골든 테스트 초안이다.
 
@@ -149,6 +151,28 @@
 - expected keep: `최근 3년 과제` is treated as a temporal filter, not a relative-last follow-up
 - expected ban: hard-signal wording being reinterpreted into a different candidate by the interpreter
 
+### 11H-3. Recent mentions recover project follow-up without changing planner strategy ownership
+- setup: `ConversationViewState.recent_mentions` contains retrieval-owned project mentions but there is no reusable manifest/focus snapshot
+- query chain:
+  - summary or list-like project response
+  - `마지막 과제 상세`
+- expected keep: recent mention recovery restores only the project anchor seed
+- expected keep: `strategy_meta.context_router_*` records the rescue path when router fallback is needed
+- expected ban: router choosing `SEARCH/LOOKUP/JOIN`, `relation`, `target_cols`, or `join_key_mode`
+
+### 11H-4. Year-axis follow-up uses project recent mentions conservatively
+- setup: no active project scope, but recent project mentions exist with year metadata
+- query: `2025년꺼`
+- expected keep: active scope가 있으면 기존 refinement가 우선하고, active scope가 없을 때만 recent project mentions의 year 축으로 복원한다
+- expected keep: latest recent project group(`pjt_no`) 안에서 단일 candidate가 있으면 그 candidate를 우선한다
+- expected ban: `pjt_id` / `pjt_no` 혼용 또는 router 단계에서 group/detail semantics를 새로 발명하는 것
+
+### 11H-5. Project detail does not materialize from group-only mention
+- setup: recent project mention has `pjt_no` only and no `pjt_id`
+- query: `마지막 과제 상세`
+- expected keep: clarification or existing detail-fail-close path
+- expected ban: recent mention만 보고 instance detail을 확정하거나 `pjt_no`를 `pjt_id`처럼 쓰는 것
+
 ### 11I. Answer-state consistency guard blocks wrong visible order
 - setup: `active_scope.result_set`는 A -> B 순서인데 한 모델 answer는 A -> Wrong, 다른 모델 answer는 A -> B
 - expected keep: state-consistent model만 선택된다.
@@ -243,6 +267,31 @@
 
 ### 19. No detail answer for broad people/org query
 - broad people/org query must not collapse into a fake single-detail answer.
+
+### 19A. Perf SEARCH is observation-only and stays on perf
+- query: `배터리 관련 성과`
+- expected mode: `SEARCH`
+- expected head: `perf`
+- expected keep: `ExecutionManager` ownership with `policy_name=PERF_SEARCH_OBSERVATION`
+- expected keep: `target_cols == [COL_PERF]`
+- expected ban: automatic relax, mode promotion, legacy retry re-entry
+
+### 19B. Instance JOIN may retry group only from active anchor pjt_no
+- setup: active anchor already contains `pjt_no`
+- query: project instance-key-based JOIN that returns 0 rows on the primary step
+- expected keep: one bounded `group` retry only
+- expected keep: `recovery_source=active_anchor`
+- expected ban: invented key, free-text `pjt_no` reconstruction, second retry
+
+### 19C. Explicit project id blocks JOIN group recovery
+- query: explicit `PJT_ID=...` JOIN request
+- expected keep: instance axis remains locked
+- expected ban: `group` fallback even when active anchor has `pjt_no`
+
+### 19D. Support SEARCH stays legacy
+- query: `지원 과제`
+- expected keep: legacy retriever path
+- expected ban: `ExecutionManager` ownership until support contract is explicitly migrated
 
 ## Streaming reliability watchlist
 ### 20. async close handled correctly

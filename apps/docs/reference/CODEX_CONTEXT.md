@@ -1,14 +1,16 @@
 # CODEX_CONTEXT.md
 
+이 문서는 에이전트/자동화용 요약 메모다. 사람 기준의 현행 source of truth는 `apps/docs/README.md`, `03_운영과_환경.md`, `04_회귀기준과_점검.md`를 따른다.
+
 ## Bootstrap Truth
 - repo: `ntis_domain_rag_chatbot`
 - branch: `고도화`
 - active validation in this worktree:
-  - `python -m py_compile ...`
-  - import smoke
-  - `python -c "from apps.api.app_factory import create_app; create_app()"`
-- `tests/` is not the active validation gate in this worktree.
-- `scripts/run_baseline_checks.ps1` is a retired historical entrypoint.
+  - `PYTHONPATH=.` + `python -m py_compile ...`
+  - `PYTHONPATH=.` + `python -c "from apps.api.app_factory import create_app; create_app()"`
+  - `PYTHONPATH=.` + targeted `pytest -q -p no:cacheprovider`
+- broad `pytest -q` 전체 수집 결과는 현재 운영 gate가 아니다.
+- retired historical entrypoint가 있더라도 현행 검증 기준은 `03_운영과_환경.md`, `04_회귀기준과_점검.md`를 따른다.
 
 ## Package Owners
 - `apps/api`: composition root, routes, runtime wiring, contracts, streaming transport

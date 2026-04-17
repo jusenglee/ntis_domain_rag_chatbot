@@ -23,9 +23,7 @@ from apps.api.runtime_helpers import log_event
 from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
 
-from langchain_core.messages import BaseMessage, SystemMessage
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.prompts import ChatPromptTemplate
+from apps.platform.langchain_compat import BaseMessage, ChatPromptTemplate, PydanticOutputParser, SystemMessage
 
 from apps.evidence.canonical_context import render_canonical_evidence_text
 from apps.conversation.followup_anchor import anchor_to_seed_map

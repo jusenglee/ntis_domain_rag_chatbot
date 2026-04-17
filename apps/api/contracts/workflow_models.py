@@ -5,7 +5,7 @@ import time
 from functools import wraps
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from langchain_core.messages import BaseMessage
+from apps.platform.langchain_compat import BaseMessage
 try:
     from langgraph.graph.message import add_messages
 except ModuleNotFoundError:
@@ -417,6 +417,8 @@ class AgentState(BaseModel):
     final_answer_artifact: Optional[AnswerArtifact] = None
     merge_debug: Dict[str, Any] = Field(default_factory=dict)
     selected_answer_meta: Dict[str, Any] = Field(default_factory=dict)
+    execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieval_runtime_meta: Dict[str, Any] = Field(default_factory=dict)
     answer_groundedness_snapshot: Optional[AnswerEvidenceSnapshot] = None
     answer_groundedness_verdict: Optional[AnswerGroundednessVerdict] = None
     answer_state_consistency_snapshot: Optional[AnswerStateSnapshot] = None

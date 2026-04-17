@@ -334,43 +334,6 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     return text
         return None
 
-    def _normalize_reference_payload(doc: Dict[str, Any]) -> Dict[str, Any]:
-        """context 문서를 API 응답용 reference payload로 정규화한다."""
-        mapped = rag_mapper.get_references(doc)
-        if not isinstance(mapped, dict):
-            mapped = {}
-        result = dict(mapped)
-        result["tag"] = str(result.get("tag") or doc.get("tag") or "").strip() or None
-        result["id"] = _resolve_reference_id(result, doc)
-        result["title"] = _resolve_reference_title(result, doc)
-        return result
-
-    def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
-        """canonical evidence item을 reference payload 정규화 입력 형태로 바꾼다."""
-        if not isinstance(item, dict):
-            return {}
-        ids = item.get("ids")
-        facts = item.get("facts")
-        evidence = item.get("evidence")
-        source_type = str(item.get("source_type") or "").strip().lower()
-        tag = str(item.get("tag") or "").strip()
-        if not tag and source_type == "project":
-            tag = DataTag.PROJECT.value
-
-        doc: Dict[str, Any] = {"tag": tag}
-        if isinstance(ids, dict):
-            doc.update(ids)
-        if isinstance(facts, dict):
-            title = str(facts.get("title") or "").strip()
-            if title:
-                doc["title"] = title
-        if isinstance(evidence, dict):
-            for key in ("title", "title_text", "title1", "title2"):
-                value = evidence.get(key)
-                if value is not None:
-                    doc[key] = value
-        return doc
-
     def _normalize_reference_payload(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Fail-open reference normalization for route finalization."""
         tag = _normalize_reference_tag(doc.get("tag"), source_type=doc.get("source_type"))
