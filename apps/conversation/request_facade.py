@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from dataclasses import is_dataclass, replace
 from inspect import isawaitable
@@ -56,6 +57,7 @@ from apps.platform.schemas import IntentPayloadV3
 from apps.conversation.view_state import (
     ConversationViewState,
     clear_view_state_scope,
+    get_active_subject_entity,
     get_recent_mentions,
     set_visible_answer_manifest,
 )
@@ -105,6 +107,57 @@ _SUBJECT_AXIS_CUES = (
     "참여성과",
     "참여 성과",
 )
+
+_NAMED_SUBJECT_CUES_BY_KIND: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("people", ("연구책임자", "참여연구원", "참여 연구원", "연구자", "연구원", "참여자", "사람")),
+    ("org", ("소속기관", "수행기관", "주관기관", "참여기관", "협력기관", "기관", "회사", "조직")),
+    ("project", ("과제", "프로젝트")),
+    ("perf", ("성과", "논문", "특허", "보고서")),
+)
+_NAMED_SUBJECT_CUES = tuple(cue for _, cues in _NAMED_SUBJECT_CUES_BY_KIND for cue in cues)
+_NAMED_SUBJECT_PREFIX_RE = re.compile(
+    r"(?P<term>[가-힣A-Za-z][가-힣A-Za-z0-9·.\-&()\s]{1,60}?)\s*(?:의\s*)?"
+    r"(?P<cue>연구책임자|참여\s*연구원|참여연구원|연구자|연구원|참여자|사람|"
+    r"소속기관|수행기관|주관기관|참여기관|협력기관|기관|회사|조직|"
+    r"과제|프로젝트|성과|논문|특허|보고서)"
+)
+_NAMED_SUBJECT_SUFFIX_RE = re.compile(
+    r"(?P<cue>연구책임자|참여\s*연구원|참여연구원|연구자|연구원|참여자|사람|"
+    r"소속기관|수행기관|주관기관|참여기관|협력기관|기관|회사|조직|"
+    r"과제|프로젝트|성과|논문|특허|보고서)\s*(?:[:=은는이가]\s*)?"
+    r"(?P<term>[가-힣A-Za-z][가-힣A-Za-z0-9·.\-&()]{1,60})"
+)
+_SUBJECT_REFINEMENT_CUES = (
+    "활동",
+    "활동내역",
+    "활동 내역",
+    "활동이력",
+    "활동 이력",
+    "참여이력",
+    "이력",
+    "논문만",
+    "성과만",
+    "특허만",
+    "보고서만",
+    "다른 연도",
+    "연도",
+    "년도",
+    "최근",
+)
+_SUBJECT_TERM_STOPWORDS = {
+    "그",
+    "그런",
+    "해당",
+    "이",
+    "저",
+    "어떤",
+    "무슨",
+    "몇",
+    "다음",
+    "이전",
+    "직전",
+    "동일",
+}
 
 
 
@@ -382,6 +435,141 @@ def _has_ids_map_values(ids_map: Any) -> bool:
         if str(values or "").strip():
             return True
     return False
+
+
+def _subject_kind_for_cue(cue: str) -> str | None:
+    compact = re.sub(r"\s+", "", str(cue or "").strip())
+    if not compact:
+        return None
+    for kind, cues in _NAMED_SUBJECT_CUES_BY_KIND:
+        if any(compact == re.sub(r"\s+", "", item) for item in cues):
+            return kind
+    return None
+
+
+def _clean_explicit_subject_term(term: Any) -> str:
+    text = re.sub(r"\s+", " ", str(term or "")).strip(" \t\r\n,.:;!?()[]{}'\"")
+    text = re.sub(r"^(?:그리고|또|이번엔|이번에는|그럼|그러면)\s+", "", text).strip()
+    if not text:
+        return ""
+    if text in _SUBJECT_TERM_STOPWORDS:
+        return ""
+    if re.fullmatch(r"(?:19|20)\d{2}(?:\s*[~\-]\s*(?:19|20)\d{2})?\s*년?도?", text):
+        return ""
+    if re.fullmatch(r"\d+\s*(?:번|번째|차|건|개|명)?", text):
+        return ""
+    if len(text) < 2:
+        return ""
+    return text
+
+
+def _extract_named_subject_from_question(question: str) -> tuple[str | None, str | None]:
+    text = str(question or "").strip()
+    if not text:
+        return None, None
+    for pattern in (_NAMED_SUBJECT_PREFIX_RE, _NAMED_SUBJECT_SUFFIX_RE):
+        for match in pattern.finditer(text):
+            cue = str(match.group("cue") or "").strip()
+            subject_kind = _subject_kind_for_cue(cue)
+            term = _clean_explicit_subject_term(match.group("term"))
+            if subject_kind and term:
+                return subject_kind, term
+    return None, None
+
+
+def _intent_subject_terms(normalized_intent: Any) -> tuple[str | None, str | None]:
+    field_kind_pairs = (
+        ("people_terms", "people"),
+        ("org_terms", "org"),
+        ("lead_org_terms", "org"),
+        ("participant_org_terms", "org"),
+        ("people_affiliation_org_terms", "org"),
+        ("title", "perf"),
+    )
+    for field, kind in field_kind_pairs:
+        values = _get_field(normalized_intent, field, None) or []
+        iterable = values if isinstance(values, (list, tuple, set)) else [values]
+        for value in iterable:
+            term = _clean_explicit_subject_term(value)
+            if term:
+                return kind, term
+    return None, None
+
+
+def _has_explicit_named_subject_seed(question: str, normalized_intent_base: Any) -> bool:
+    if parse_source_reference(question) is not None or parse_ordinal_reference(question) is not None:
+        return False
+    text = str(question or "").strip()
+    if not text:
+        return False
+    has_axis_cue = any(cue in text for cue in _NAMED_SUBJECT_CUES)
+    intent_kind, intent_term = _intent_subject_terms(normalized_intent_base)
+    question_kind, question_term = _extract_named_subject_from_question(text)
+    return bool((has_axis_cue and question_kind and question_term) or (has_axis_cue and intent_kind and intent_term))
+
+
+def _subject_seed_from_focus(view_state: Optional[ConversationViewState]) -> tuple[str | None, str | None]:
+    focus = get_active_subject_entity(view_state)
+    kind = str(getattr(focus, "kind", "") or "").strip().lower()
+    if kind not in {"people", "org"}:
+        return None, None
+    title = _clean_explicit_subject_term(getattr(focus, "title_text", None))
+    return (kind, title) if title else (None, None)
+
+
+def _subject_seed_from_previous_contract(previous_turn_contract: Dict[str, Any]) -> tuple[str | None, str | None]:
+    kind = str(previous_turn_contract.get("subject_kind") or previous_turn_contract.get("current_subject_kind") or "").strip().lower()
+    title = _clean_explicit_subject_term(
+        previous_turn_contract.get("subject_name") or previous_turn_contract.get("current_subject_name")
+    )
+    if kind in {"people", "org"} and title:
+        return kind, title
+    return None, None
+
+
+def _has_subject_refinement_signal(question: str, normalized_intent_base: Any) -> bool:
+    if parse_source_reference(question) is not None or parse_ordinal_reference(question) is not None:
+        return False
+    if _has_explicit_named_subject_seed(question, normalized_intent_base):
+        return False
+    if _get_field(normalized_intent_base, "years", None) or _get_field(normalized_intent_base, "year_from", None) or _get_field(normalized_intent_base, "year_to", None):
+        return True
+    for field in ("perf_types", "title", "project_tag_filters", "perf_tag_filters"):
+        values = _get_field(normalized_intent_base, field, None) or []
+        iterable = values if isinstance(values, (list, tuple, set)) else [values]
+        if any(str(value or "").strip() for value in iterable):
+            return True
+    text = str(question or "").strip()
+    return bool(text and any(cue in text for cue in _SUBJECT_REFINEMENT_CUES))
+
+
+def _apply_subject_context_seed(normalized_intent: Any, *, subject_kind: str, subject_name: str) -> Any:
+    kind = str(subject_kind or "").strip().lower()
+    title = _clean_explicit_subject_term(subject_name)
+    if not kind or not title:
+        return normalized_intent
+    if kind == "people":
+        people_terms = _merge_unique_terms(_get_field(normalized_intent, "people_terms", []) or [], title)
+        return _replace_fields(normalized_intent, people_terms=people_terms)
+    if kind == "org":
+        org_terms = _merge_unique_terms(_get_field(normalized_intent, "org_terms", []) or [], title)
+        return _replace_fields(normalized_intent, org_terms=org_terms)
+    return normalized_intent
+
+
+def _resolve_subject_refinement_seed(
+    *,
+    question: str,
+    normalized_intent_base: Any,
+    view_state: Optional[ConversationViewState],
+    previous_turn_contract: Dict[str, Any],
+) -> tuple[str | None, str | None]:
+    if not _has_subject_refinement_signal(question, normalized_intent_base):
+        return None, None
+    kind, title = _subject_seed_from_focus(view_state)
+    if kind and title:
+        return kind, title
+    return _subject_seed_from_previous_contract(previous_turn_contract)
 
 
 
@@ -1547,10 +1735,34 @@ async def build_intent_payload(
     planner_failed = 0
     base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
     base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
-    has_explicit_seed = has_explicit_precheck_signals(precheck) or _has_ids_map_values(base_ids_map)
     source_reference_requested = parse_source_reference(question) is not None
     ordinal_reference_requested = parse_ordinal_reference(question) is not None
     previous_turn_contract = dict(getattr(active_view_state, "last_query_contract", {}) or {})
+    has_explicit_id_seed = has_explicit_precheck_signals(precheck) or _has_ids_map_values(base_ids_map)
+    has_named_subject_seed = _has_explicit_named_subject_seed(question, normalized_intent_base)
+    explicit_seed_kind = "named_subject" if has_named_subject_seed else ("id" if has_explicit_id_seed else None)
+    has_explicit_seed = bool(has_explicit_id_seed or has_named_subject_seed)
+    subject_refinement_kind, subject_refinement_name = (None, None)
+    if not has_explicit_seed:
+        subject_refinement_kind, subject_refinement_name = _resolve_subject_refinement_seed(
+            question=question,
+            normalized_intent_base=normalized_intent_base,
+            view_state=active_view_state,
+            previous_turn_contract=previous_turn_contract,
+        )
+        if subject_refinement_kind and subject_refinement_name:
+            normalized_intent_base = _apply_subject_context_seed(
+                normalized_intent_base,
+                subject_kind=subject_refinement_kind,
+                subject_name=subject_refinement_name,
+            )
+            log_event(
+                "TURN.SUBJECT_REFINEMENT.SEED",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                subject_kind=subject_refinement_kind,
+                subject_name=subject_refinement_name,
+            )
     turn_candidates = [] if has_explicit_seed else build_turn_candidates(view_state=active_view_state)
     log_event(
         "TURN.CANDIDATES",
@@ -1558,6 +1770,8 @@ async def build_intent_payload(
         conversation_id=conversation_id,
         candidate_count=len(turn_candidates),
         candidate_sources=[candidate.source for candidate in turn_candidates[:12]],
+        has_explicit_seed=int(has_explicit_seed),
+        explicit_seed_kind=explicit_seed_kind,
     )
 
     hard_reference_resolution: Optional[Dict[str, Any]] = None
@@ -1652,6 +1866,7 @@ async def build_intent_payload(
             question=question,
             view_state=active_view_state,
             has_explicit_seed=has_explicit_seed,
+            explicit_seed_kind=explicit_seed_kind,
             request_id=request_id,
             conversation_id=conversation_id,
         )
@@ -1673,6 +1888,7 @@ async def build_intent_payload(
         interpretation=turn_interpretation,
         view_state=active_view_state,
         has_explicit_seed=has_explicit_seed,
+        explicit_seed_kind=explicit_seed_kind,
         candidates=turn_candidates,
     )
     log_event(

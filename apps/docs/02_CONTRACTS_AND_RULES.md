@@ -40,6 +40,9 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 ### 실행 규칙
 *   `selected_candidate_ids`는 반드시 현재 대화 상태(`ConversationViewState`)에 포함된 후보군 내에서 선택되어야 한다. 후보군 밖의 ID를 임의로 발명하지 않는다.
 *   대상 선택(무엇을 가리키는가)은 pre-planner 단계에서 확정하며, 이후 planner는 해당 대상을 바탕으로 실행 전략(어떻게 찾을 것인가)을 수립한다.
+*   질문 안에 `신동구 연구자`, `한국과학기술정보연구원 기관`처럼 명시 주체명과 주체 축 cue가 함께 있으면 `ExplicitNamedSubjectSeed`로 본다. 이 경우 이전 ambiguous context나 stale manifest를 재사용하지 않고 fresh search로 진입한다.
+*   `2010~2015년도의 활동내역은?`, `논문만`, `다른 연도 활동`처럼 주체명 없이 필터만 바뀐 질문은 직전 current subject가 people/org로 확정되어 있을 때만 `SubjectRefinement`로 처리한다. 이는 `1번`, `출처 2`, `그 항목` 같은 `ReferenceFollowup`과 분리한다.
+*   질문의 대상 축이 명시된 경우 후보 해석은 같은 entity kind로 fail-closed 한다. 예를 들어 people 질문에 people 후보가 없으면 project 후보로 fallback하지 않고 clarification 또는 fresh path로 빠진다.
 
 ---
 

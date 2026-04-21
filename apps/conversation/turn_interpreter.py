@@ -255,7 +255,7 @@ def _filtered_candidates_for_question(question: str, candidates: list[TurnCandid
     if target_kind is None:
         return list(candidates)
     filtered = [candidate for candidate in candidates if candidate.entity_kind == target_kind]
-    return filtered or list(candidates)
+    return filtered
 
 
 def _relative_candidates(question: str, candidates: list[TurnCandidate]) -> list[TurnCandidate]:
@@ -673,6 +673,16 @@ def _heuristic_turn_interpretation(
             rewritten_user_intent=_normalized_text(question) or None,
         )
 
+    if trigger.reference_style == "refinement":
+        return TurnInterpretationResult(
+            chosen_action="fresh_retrieval",
+            target_entity_kind=_question_entity_kind(question),
+            requested_refinement=_build_requested_refinement(question),
+            confidence=max(float(trigger.confidence or 0.0), 0.82),
+            reason="subject_refresh",
+            rewritten_user_intent=_normalized_text(question) or None,
+        )
+
     if parse_source_reference(question) is not None or parse_ordinal_reference(question) is not None:
         return TurnInterpretationResult(
             chosen_action="clarification",
@@ -705,6 +715,16 @@ def _heuristic_turn_interpretation(
         )
 
     filtered = _filtered_candidates_for_question(question, candidates)
+    if _question_entity_kind(question) is not None and not filtered:
+        return TurnInterpretationResult(
+            chosen_action="clarification",
+            target_entity_kind=_question_entity_kind(question),
+            requested_refinement=_build_requested_refinement(question),
+            confidence=0.88,
+            reason="same_kind_candidates_missing",
+            ambiguity_reason="same_kind_candidates_missing",
+            rewritten_user_intent=_normalized_text(question) or None,
+        )
     named_matches = [candidate for candidate in filtered if _candidate_matches_name(question, candidate)]
     if len(named_matches) == 1:
         selected = named_matches[0]
@@ -780,10 +800,11 @@ async def run_turn_interpreter(
         trigger=trigger,
         has_explicit_seed=has_explicit_seed,
     )
-    candidate_payload = [_compact_candidate(candidate) for candidate in candidates[:_MAX_CANDIDATES_FOR_PROMPT]]
+    prompt_candidates = _filtered_candidates_for_question(question, candidates)
+    candidate_payload = [_compact_candidate(candidate) for candidate in prompt_candidates[:_MAX_CANDIDATES_FOR_PROMPT]]
     summary = _view_state_summary(view_state)
 
-    if has_explicit_seed or trigger.turn_intent == "fresh" or not candidates:
+    if has_explicit_seed or trigger.turn_intent == "fresh" or trigger.reference_style == "refinement" or not prompt_candidates:
         log_event(
             "TURN.INTERPRETATION",
             request_id=request_id,
@@ -793,7 +814,7 @@ async def run_turn_interpreter(
             selected_candidate_ids=list(heuristic.selected_candidate_ids or []),
             confidence=round(float(heuristic.confidence or 0.0), 3),
             reason=heuristic.reason,
-            candidate_count=len(candidates),
+            candidate_count=len(prompt_candidates),
             target_entity_kind=heuristic.target_entity_kind,
         )
         return heuristic
@@ -835,7 +856,7 @@ async def run_turn_interpreter(
                 "heuristic_hint": json.dumps(heuristic.model_dump(), ensure_ascii=False),
             }
         )
-        valid_candidate_ids = {candidate.candidate_id for candidate in candidates}
+        valid_candidate_ids = {candidate.candidate_id for candidate in prompt_candidates}
         if any(candidate_id not in valid_candidate_ids for candidate_id in result.selected_candidate_ids):
             raise ValueError("invalid_candidate_id")
         if float(result.confidence or 0.0) < _INTERPRETER_LOW_CONFIDENCE and result.chosen_action != "clarification":
@@ -854,6 +875,7 @@ async def run_turn_interpreter(
                 target_entity_kind=fallback.target_entity_kind,
             )
             return fallback
+
         log_event(
             "TURN.INTERPRETATION",
             request_id=request_id,

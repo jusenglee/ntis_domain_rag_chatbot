@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Literal, Optional
 
 from apps.platform.langchain_compat import ChatPromptTemplate, PydanticOutputParser, SystemMessage
@@ -22,6 +23,24 @@ from apps.planner.prompt_asset_paths import planner_prompt_path
 
 TurnIntent = Literal["fresh", "followup", "ambiguous"]
 ReferenceStyle = Literal["ordinal", "source_reference", "deictic", "named_subject", "refinement", "none"]
+
+_YEAR_OR_RANGE_RE = re.compile(r"(?:19|20)\d{2}(?:\s*[~\-]\s*(?:19|20)\d{2})?\s*년?도?")
+_SUBJECT_REFINEMENT_CUES = (
+    "활동",
+    "활동내역",
+    "활동 내역",
+    "활동이력",
+    "활동 이력",
+    "참여이력",
+    "이력",
+    "논문만",
+    "성과만",
+    "특허만",
+    "보고서만",
+    "최근",
+    "연도",
+    "년도",
+)
 
 
 class TurnTriggerResult(BaseModel):
@@ -74,19 +93,33 @@ def _has_previous_state(summary: Dict[str, Any]) -> bool:
     )
 
 
+def _has_subject_refinement_cue(question: str) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if parse_source_reference(text) is not None or parse_ordinal_reference(text) is not None:
+        return False
+    if parse_relative_reference(text) is not None or is_referential_followup(text):
+        return False
+    return bool(_YEAR_OR_RANGE_RE.search(text) or any(cue in text for cue in _SUBJECT_REFINEMENT_CUES))
+
+
 def _heuristic_turn_trigger(
     *,
     question: str,
     has_explicit_seed: bool,
+    explicit_seed_kind: Optional[str] = None,
     summary: Dict[str, Any],
 ) -> TurnTriggerResult:
     if has_explicit_seed:
+        reason = "explicit_named_subject_seed" if explicit_seed_kind == "named_subject" else "explicit_seed"
         return TurnTriggerResult(
             turn_intent="fresh",
             reference_style="none",
             confidence=1.0,
-            reason="explicit_seed",
+            reason=reason,
         )
+
     if not _has_previous_state(summary):
         return TurnTriggerResult(
             turn_intent="fresh",
@@ -94,6 +127,7 @@ def _heuristic_turn_trigger(
             confidence=0.96,
             reason="no_previous_state",
         )
+
     if parse_source_reference(question) is not None:
         return TurnTriggerResult(
             turn_intent="followup",
@@ -101,6 +135,7 @@ def _heuristic_turn_trigger(
             confidence=0.98,
             reason="source_reference_token",
         )
+
     if parse_ordinal_reference(question) is not None or parse_relative_reference(question) is not None:
         return TurnTriggerResult(
             turn_intent="followup",
@@ -108,6 +143,7 @@ def _heuristic_turn_trigger(
             confidence=0.96,
             reason="ordinal_token",
         )
+
     if is_referential_followup(question):
         return TurnTriggerResult(
             turn_intent="ambiguous",
@@ -115,6 +151,15 @@ def _heuristic_turn_trigger(
             confidence=0.62,
             reason="referential_cue",
         )
+
+    if _has_subject_refinement_cue(question):
+        return TurnTriggerResult(
+            turn_intent="followup",
+            reference_style="refinement",
+            confidence=0.9,
+            reason="subject_refinement",
+        )
+
     return TurnTriggerResult(
         turn_intent="fresh",
         reference_style="none",
@@ -128,6 +173,7 @@ async def run_turn_trigger(
     question: str,
     view_state: Optional[ConversationViewState],
     has_explicit_seed: bool,
+    explicit_seed_kind: Optional[str] = None,
     request_id: Optional[str],
     conversation_id: str,
 ) -> TurnTriggerResult:
@@ -135,9 +181,11 @@ async def run_turn_trigger(
     heuristic = _heuristic_turn_trigger(
         question=question,
         has_explicit_seed=has_explicit_seed,
+        explicit_seed_kind=explicit_seed_kind,
         summary=summary,
     )
-    if has_explicit_seed or not _has_previous_state(summary):
+
+    if has_explicit_seed or not _has_previous_state(summary) or heuristic.reference_style == "refinement":
         log_event(
             "TURN.TRIGGER",
             request_id=request_id,
@@ -180,6 +228,7 @@ async def run_turn_trigger(
                 "heuristic_hint": json.dumps(heuristic.model_dump(), ensure_ascii=False),
             }
         )
+
         if float(result.confidence or 0.0) < 0.35:
             fallback = heuristic.model_copy(update={"reason": "low_confidence_fallback"})
             log_event(
@@ -193,6 +242,7 @@ async def run_turn_trigger(
                 reason=fallback.reason,
             )
             return fallback
+
         log_event(
             "TURN.TRIGGER",
             request_id=request_id,

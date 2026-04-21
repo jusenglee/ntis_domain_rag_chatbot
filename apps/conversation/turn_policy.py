@@ -80,6 +80,7 @@ def resolve_turn_policy(
     interpretation: Optional[TurnInterpretationResult],
     view_state: Optional[ConversationViewState],
     has_explicit_seed: bool,
+    explicit_seed_kind: Optional[str] = None,
     candidates: Optional[list[TurnCandidate]] = None,
 ) -> TurnPolicyResult:
     trigger = (
@@ -102,12 +103,26 @@ def resolve_turn_policy(
     has_anchor_context = _has_anchor_context(view_state)
 
     if has_explicit_seed:
+        blocked_reason = "explicit_named_subject_seed_bypass" if explicit_seed_kind == "named_subject" else "explicit_seed_bypass"
         return TurnPolicyResult(
             execution_path="fresh_retrieval",
             followup_type_hint="fresh_search",
             skip_followup_resolution=True,
-            blocked_reason="explicit_seed_bypass",
+            blocked_reason=blocked_reason,
             policy_source="explicit_seed",
+        )
+
+    if trigger.reference_style == "refinement" or (
+        interpretation_model is not None
+        and str(interpretation_model.reason or "").strip().lower() == "subject_refresh"
+    ):
+        return TurnPolicyResult(
+            execution_path="fresh_retrieval",
+            followup_type_hint="subject_refinement",
+            skip_followup_resolution=True,
+            blocked_reason="subject_refresh",
+            selected_candidate_ids=list((interpretation_model.selected_candidate_ids if interpretation_model else []) or []),
+            policy_source="subject_refresh",
         )
 
     if trigger.turn_intent == "fresh":

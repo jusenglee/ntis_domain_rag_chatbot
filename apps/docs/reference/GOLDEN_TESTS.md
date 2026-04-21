@@ -173,6 +173,19 @@
 - expected keep: clarification or existing detail-fail-close path
 - expected ban: recent mention만 보고 instance detail을 확정하거나 `pjt_no`를 `pjt_id`처럼 쓰는 것
 
+### 11H-6. Named subject reseed and subject refinement are distinct
+- query chain:
+  - `신동구 연구자의 24년도 활동내역은?`
+  - `2010~2015년도의 활동내역은?`
+  - `신동구 연구자의 2010~2015년도의 활동내역은?`
+  - `2번째 과제는?`
+- expected keep: explicit named subject questions are `fresh_retrieval` and do not reuse stale manifest/project context
+- expected keep: year-only activity follow-up keeps the current people/org subject as a refinement seed, not as ordinal/source reference
+- expected keep: people 질문의 후보 필터는 people 후보만 보며, people 후보가 없으면 clarification 후보를 비워 둔다
+- expected keep: ordinal/source references such as `2번째 과제` still use visible manifest truth only when publishable
+- expected ban: people 질문이 people 후보 부재 시 project 후보 예시로 fail-open 되는 것
+- expected ban: named subject reseed가 trigger LLM 또는 previous publishability/followup_rights 때문에 reference follow-up으로 되돌아가는 것
+
 ### 11I. Answer-state consistency guard blocks wrong visible order
 - setup: `active_scope.result_set`는 A -> B 순서인데 한 모델 answer는 A -> Wrong, 다른 모델 answer는 A -> B
 - expected keep: state-consistent model만 선택된다.
