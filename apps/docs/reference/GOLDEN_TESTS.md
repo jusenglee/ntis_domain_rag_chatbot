@@ -184,19 +184,29 @@
 - answer: the model explains only `A -> B`, and those returned items still match the snapshot prefix identity/order.
 - expected keep: the final answer is accepted instead of degrading to the state-consistency fallback.
 - expected keep: selected answer meta keeps `answer_state_consistency_status=supported`, `answer_state_consistency_subset_accepted=true`, and `visible_answer_manifest_status=withheld_partial`.
+- expected keep: `visible_answer_manifest_publication.publication_status=withheld_partial` and `published_manifest` is absent.
 - expected ban: a partial-safe answer publishing `visible_answer_manifest` or becoming ordinal/source truth for the next turn.
 - expected ban: a follow-up like `2번째`, `출처 2`, or `그 항목` reusing a withheld manifest as truth.
 
 - expected keep: if `turn_contract.count_contract=partial_ok`, this policy wins even when the raw question text still contains count-like surface tokens.
 - expected keep: if `turn_contract.count_contract=exact`, exact-count guard stays on even when the raw question text alone would not trigger the legacy regex heuristic.
 
-### 11N. Broad-history people/org list publishes the snapshot-owned list
+### 11N. Broad-history people/org list uses snapshot repair only after state inconsistency
 - setup: `active_scope.result_set.context_kind` is `people` or `org`, and the visible list already reflects the canonical activity rows that follow-up truth should reuse.
-- answer: model outputs may be partial, merged, or even fallback-worthy, but answer-stage still has the visible snapshot.
-- expected keep: the final user-visible list is rendered deterministically from the snapshot in the same visible order and count.
+- answer: a model output that is already state-consistent is selected normally.
+- expected keep: supported LLM list answers are not replaced by `deterministic_snapshot` just because the snapshot context is `people` or `org`.
+- expected keep: if both model answers are state-inconsistent, the final user-visible list is rendered deterministically from the snapshot in the same visible order and count.
 - expected keep: if that deterministic list is state-consistent and not groundedness-unsupported, `visible_answer_manifest_status=approved`.
+- expected keep: approved publication writes `visible_answer_manifest_publication.published_manifest` and that manifest is the only answer-owned publish artifact.
 - expected keep: summary or intro text is non-authoritative and must not own item count/order truth.
 - expected ban: degrading broad-history people/org list answers only because the LLM collapsed multiple rows into fewer top-level bullets.
+
+### 11N-2. Activity list order failure falls back to snapshot-owned rendering
+- setup: list-family active snapshot rows are activity-like rows carrying project, result, and actor ids such as `pjt_id`, `rst_id`, and `person_no`.
+- answer: both model answers contain the right family of items but swap visible ranks or miss a tail row.
+- expected keep: if projection lineage matches, answer-stage renders the deterministic visible snapshot list instead of emitting the state-consistency degraded fallback.
+- expected keep: publication status is `approved` only for the deterministic snapshot-owned list.
+- expected ban: model-generated reordered activity rows becoming `visible_answer_manifest` truth.
 
 ### 11L. Invalid planner count contract fails closed instead of runtime overwrite
 - query: explicit-count list where planner assembled `display_limit` does not match the requested count
@@ -207,12 +217,20 @@
 ### 11M. Display canonical promotion uses planner requested_count only
 - setup: `docs` is a collection wrapper, `canonical_evidence` has the real visible items, `requested_count=2`, raw question explicit-count diagnostic is larger
 - expected keep: display normalization promotes canonical axis when it satisfies planner `requested_count`
+- expected keep: `active_scope.result_set` is built from the promoted canonical axis, so rank/title/ids match the answer context instead of the collection wrapper text.
+- expected keep: the projected item identity keeps `rank`, `entity_kind`, `canonical_title`, `ids_map`, and `identity_key` together before validator input is built.
+- expected keep: when a projection bundle is present, answer references, state validation, and manifest publication use projection lineage instead of raw `retrieval_bundle.items`.
+- expected keep: projection lineage mismatch yields `visible_answer_manifest_publication.publication_status=blocked_projection_lineage`.
+- expected ban: collection wrapper rows owning visible rank or mixing wrapper titles with canonical item ids in state-consistency snapshots.
+- expected ban: publishing a visible manifest when the active snapshot `projection_id/request_id/turn_id` does not match the current projection bundle.
+- expected ban: route reconstruction resurrecting stale `view_state.visible_answer_manifest` when publication status is blocked or withheld.
 - expected ban: raw question explicit-count inflating the threshold and suppressing canonical promotion
 
 ### 11J. Both models state-inconsistent fall back and clear manifest
 - setup: 두 모델 answer 모두 현재 `active_scope.result_set`와 item order/title이 다르다.
 - expected keep: `selection_reason=both_models_state_inconsistent`
 - expected keep: `visible_answer_manifest_status=blocked_state_consistency`
+- expected keep: `visible_answer_manifest_publication.publication_status=blocked_state_consistency` and no `published_manifest`.
 - expected keep: 최종 사용자 answer는 state-consistency 차단을 설명하는 degraded message이며, empty-answer notice가 아니어야 한다.
 - expected keep: current turn 이후 `visible_answer_manifest`는 비워진다.
 - expected ban: blocked turn 뒤 `2번째`, `출처 2`, `그 항목` follow-up이 stale manifest로 resolve되는 것

@@ -12,6 +12,42 @@ class ResultItem:
 
 
 @dataclass(frozen=True)
+class ProjectedItem:
+    projection_item_id: str
+    projection_id: str
+    request_id: str
+    rank: int
+    entity_kind: str
+    display_title: str
+    canonical_title: str
+    ids_map: dict[str, list[str]]
+    identity_key: str
+    source_doc_id: str | None = None
+    source_type: str | None = None
+    publishable: bool = True
+
+
+@dataclass(frozen=True)
+class EvidenceProjectionBundle:
+    projection_id: str
+    request_id: str
+    turn_id: str
+    context_kind: str
+    output_type: str
+    display_source: str
+    display_documents: list[dict[str, Any]] = field(default_factory=list)
+    canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    projected_items: list[ProjectedItem] = field(default_factory=list)
+    answer_context_text: str = ""
+    debug_answer_context_text: str = ""
+    render_profile: dict[str, Any] = field(default_factory=dict)
+    requested_count: int = 0
+    selected_count: int = 0
+    manifest_count: int = 0
+    rendered_count: int = 0
+
+
+@dataclass(frozen=True)
 class RetrievalBundle:
     items: list[ResultItem] = field(default_factory=list)
     render_profile: dict[str, Any] = field(default_factory=dict)

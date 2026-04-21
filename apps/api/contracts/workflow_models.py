@@ -425,6 +425,7 @@ class AgentState(BaseModel):
     answer_state_consistency_verdict: Optional[AnswerStateConsistencyVerdict] = None
     clarification: Optional[Dict[str, Any]] = None
     retrieval_bundle: Optional[Any] = None
+    evidence_projection_bundle: Optional[Any] = None
     answer_context_text: str = ""
     debug_answer_context_text: str = ""
     resolved_retrieval_query: Optional[str] = None

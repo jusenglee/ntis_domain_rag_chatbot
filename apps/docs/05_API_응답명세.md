@@ -175,6 +175,7 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 | `answer_state_consistency_reason_codes` | array | list-family 검증 경로 | state consistency 보조 코드 |
 | `visible_answer_manifest_status` | string | 병합 경로 | `approved`, `withheld_partial`, `blocked_*`, `not_applicable` |
 | `visible_answer_manifest` | object | publishable list-family | 다음 turn의 ordinal/source follow-up truth |
+| `visible_answer_manifest_publication` | object | list-family publication | answer-owned publication artifact; `approved` contains `published_manifest`, blocked/withheld statuses must not fall back to stale `view_state.visible_answer_manifest` |
 | `error_code` | string | guard/degraded error 경로 | route 또는 strategy 위반 코드 |
 | `reason` | string | guard/degraded error 경로 | 오류 설명 |
 | `degraded` | boolean | degraded 경로 | 사용자 메시지로 강등된 종료 여부 |

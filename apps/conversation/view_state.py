@@ -115,6 +115,8 @@ class DisplaySnapshot(BaseModel):
     view_id: str
     conversation_id: str
     turn_id: str
+    request_id: Optional[str] = None
+    projection_id: Optional[str] = None
     context_kind: str
     requested_count: int
     visible_count: int
@@ -908,6 +910,8 @@ def build_display_snapshot(
     turn_id: str,
     context_kind: str,
     requested_count: int,
+    request_id: Optional[str] = None,
+    projection_id: Optional[str] = None,
     documents: Optional[List[Dict[str, Any]]] = None,
     canonical_evidence: Optional[List[Dict[str, Any]]] = None,
     items: Optional[List[Any]] = None,
@@ -961,6 +965,8 @@ def build_display_snapshot(
             view_id=f"{conversation_id}:{turn_id}:list",
             conversation_id=conversation_id,
             turn_id=turn_id,
+            request_id=_first_text(request_id),
+            projection_id=_first_text(projection_id),
             context_kind=str(context_kind or "project").strip().lower() or "project",
             requested_count=max(0, int(requested_count or 0)),
             visible_count=len(normalized_items),
@@ -1017,6 +1023,8 @@ def build_display_snapshot(
         view_id=f"{conversation_id}:{turn_id}:list",
         conversation_id=conversation_id,
         turn_id=turn_id,
+        request_id=_first_text(request_id),
+        projection_id=_first_text(projection_id),
         context_kind=str(context_kind or "project").strip().lower() or "project",
         requested_count=max(0, int(requested_count or 0)),
         visible_count=len(items),

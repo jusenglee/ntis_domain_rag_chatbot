@@ -50,6 +50,7 @@ class AnswerArtifact:
     user_visible_final_required: bool = True
     references: list[dict[str, Any]] = field(default_factory=list)
     visible_answer_manifest: Optional[dict[str, Any]] = None
+    visible_answer_manifest_publication: Optional[dict[str, Any]] = None
     clarification: Optional[ClarificationRequest] = None
     error: Optional[ErrorArtifact] = None
     meta: dict[str, Any] = field(default_factory=dict)
@@ -61,4 +62,6 @@ class AnswerArtifact:
         data["user_visible_final_required"] = bool(self.user_visible_final_required)
         if isinstance(self.visible_answer_manifest, dict):
             data["visible_answer_manifest"] = dict(self.visible_answer_manifest)
+        if isinstance(self.visible_answer_manifest_publication, dict):
+            data["visible_answer_manifest_publication"] = dict(self.visible_answer_manifest_publication)
         return data

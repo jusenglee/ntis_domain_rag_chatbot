@@ -157,8 +157,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         selected_answer_meta = _state_get_dict(state, "selected_answer_meta")
         merge_debug = _state_get_dict(state, "merge_debug")
         view_state = _state_get(state, "view_state")
-        visible_answer_manifest = selected_answer_meta.get("visible_answer_manifest")
-        if not isinstance(visible_answer_manifest, dict):
+        publication_payload = _dump_model(selected_answer_meta.get("visible_answer_manifest_publication"))
+        visible_answer_manifest_publication = dict(publication_payload) if isinstance(publication_payload, dict) else None
+        visible_answer_manifest = None
+        if isinstance(visible_answer_manifest_publication, dict):
+            publication_status = str(visible_answer_manifest_publication.get("publication_status") or "").strip().lower()
+            published_manifest = visible_answer_manifest_publication.get("published_manifest")
+            if publication_status == "approved" and isinstance(published_manifest, dict):
+                visible_answer_manifest = dict(published_manifest)
+            elif publication_status == "approved" and isinstance(selected_answer_meta.get("visible_answer_manifest"), dict):
+                visible_answer_manifest = dict(selected_answer_meta.get("visible_answer_manifest") or {})
+        else:
+            visible_answer_manifest = selected_answer_meta.get("visible_answer_manifest")
+        if visible_answer_manifest_publication is None and not isinstance(visible_answer_manifest, dict):
             snapshot = getattr(view_state, "visible_answer_manifest", None)
             if snapshot is not None:
                 visible_answer_manifest = snapshot.model_dump() if hasattr(snapshot, "model_dump") else dict(snapshot)
@@ -170,6 +181,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             stream_metrics=selected_answer_meta,
             user_visible_final_required=bool(selected_answer_meta.get("user_visible_final_required", True)),
             visible_answer_manifest=visible_answer_manifest if isinstance(visible_answer_manifest, dict) else None,
+            visible_answer_manifest_publication=visible_answer_manifest_publication,
             meta={
                 "answer_source": merge_debug.get("selected_answer_source"),
                 "model_key": merge_debug.get("selected_model"),

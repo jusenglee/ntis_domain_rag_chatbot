@@ -226,6 +226,18 @@
       font-size:13px;
       line-height:1.55;
     }
+    .final-card{
+      margin-top:12px;
+      display:none;
+    }
+    .final-card .compare-head{
+      background: linear-gradient(180deg, rgba(16,163,127,.10), rgba(255,255,255,.76));
+    }
+    .final-card .compare-body{
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Pretendard, Roboto, "Noto Sans KR", Arial, sans-serif;
+      font-size:14px;
+      line-height:1.65;
+    }
 
     /* Input bar */
     .inputbar{
@@ -487,6 +499,17 @@
 
     wrap.appendChild(grid);
 
+    const finalCard = document.createElement("div");
+    finalCard.className = "compare-card final-card";
+    const finalHead = document.createElement("div");
+    finalHead.className = "compare-head";
+    finalHead.innerHTML = `<div class="compare-title">최종 검증 답변</div><div class="pill">FINAL</div>`;
+    const finalBody = document.createElement("div");
+    finalBody.className = "compare-body";
+    finalCard.appendChild(finalHead);
+    finalCard.appendChild(finalBody);
+    wrap.appendChild(finalCard);
+
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.innerHTML = `<span>assistant</span><span class="dot"></span><span>${new Date().toLocaleTimeString()}</span>`;
@@ -496,7 +519,7 @@
     chatInner.appendChild(row);
     scrollToBottom();
 
-    return { bodyA, bodyB };
+    return { bodyA, bodyB, finalCard, finalBody };
   }
 
   // Enter send / Shift+Enter newline
@@ -585,6 +608,12 @@
     function renderBodies() {
       bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
       bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
+    }
+
+    function renderFinalAnswer(text) {
+      if (!text) return;
+      bubbles.finalBody.textContent = text;
+      bubbles.finalCard.style.display = "block";
     }
 
     function renderClarification(text) {
@@ -713,8 +742,9 @@
           } else if (isGemmaFrame) {
             rawB = eventContent;
           } else {
-            rawA = eventContent;
-            rawB = eventContent;
+            if (!rawA) rawA = "최종 검증 답변을 확인하세요.";
+            if (!rawB) rawB = "최종 검증 답변을 확인하세요.";
+            renderFinalAnswer(eventContent);
           }
           renderBodies();
           scrollToBottom();

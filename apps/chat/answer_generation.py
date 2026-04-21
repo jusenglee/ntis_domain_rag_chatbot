@@ -20,6 +20,7 @@ from apps.api.contracts.answer_state_consistency import (
     build_state_snapshot_from_result_set,
     evaluate_answer_state_consistency,
 )
+from apps.api.contracts.visible_answer_manifest_publication import build_visible_answer_manifest_publication
 from apps.evidence.canonical_context import (
     render_canonical_evidence_debug_text,
     render_canonical_evidence_text,
@@ -221,6 +222,59 @@ def _reference_seed_from_canonical_item(
     }
 
 
+def _projection_payload(source: Any) -> dict[str, Any]:
+    if source is None:
+        return {}
+    if isinstance(source, dict):
+        return dict(source)
+    if hasattr(source, "model_dump"):
+        try:
+            payload = source.model_dump()
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+    if hasattr(source, "__dict__"):
+        try:
+            return dict(vars(source))
+        except Exception:
+            return {}
+    return {}
+
+
+def _projection_bundle_payload(state: Any) -> dict[str, Any]:
+    return _projection_payload(getattr(state, "evidence_projection_bundle", None))
+
+
+def _projection_sequence(payload: dict[str, Any], key: str) -> list[Any]:
+    value = payload.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
+def _snapshot_matches_projection(snapshot: Any, projection_payload: dict[str, Any], state: Any) -> bool:
+    if snapshot is None or not projection_payload:
+        return snapshot is not None
+    expected_projection_id = str(projection_payload.get("projection_id") or "").strip()
+    expected_request_id = str(projection_payload.get("request_id") or getattr(state, "request_id", "") or "").strip()
+    expected_turn_id = str(projection_payload.get("turn_id") or getattr(state, "turn_id", "") or "").strip()
+    observed_projection_id = str(getattr(snapshot, "projection_id", None) or "").strip()
+    observed_request_id = str(getattr(snapshot, "request_id", None) or getattr(state, "request_id", "") or "").strip()
+    observed_turn_id = str(getattr(snapshot, "turn_id", None) or "").strip()
+    if expected_projection_id and observed_projection_id != expected_projection_id:
+        return False
+    if expected_request_id and observed_request_id != expected_request_id:
+        return False
+    if expected_turn_id and observed_turn_id != expected_turn_id:
+        return False
+    return True
+
+
+def _projection_lineage_status(projection_payload: dict[str, Any], matched: bool) -> str:
+    if not projection_payload:
+        return "not_applicable"
+    return "matched" if matched else "mismatch"
+
+
 def _collect_state_references(state: Any) -> list[dict[str, Any]]:
     references: list[dict[str, Any]] = []
     seen_keys: set[tuple[Any, Any, Any]] = set()
@@ -236,6 +290,17 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
             return
         seen_keys.add(dedupe_key)
         references.append(normalized)
+
+    projection_payload = _projection_bundle_payload(state)
+    projection_canonical = _projection_sequence(projection_payload, "canonical_evidence")
+    projection_display = _projection_sequence(projection_payload, "display_documents")
+    if projection_payload:
+        for index, canonical in enumerate(projection_canonical):
+            if not isinstance(canonical, dict):
+                continue
+            display = projection_display[index] if index < len(projection_display) and isinstance(projection_display[index], dict) else {}
+            _append(_reference_seed_from_canonical_item(canonical, fallback_doc=display))
+        return references
 
     retrieval_bundle = getattr(state, "retrieval_bundle", None)
     if isinstance(retrieval_bundle, dict):
@@ -272,6 +337,8 @@ def _with_references(artifact: AnswerArtifact, references: list[dict[str, Any]])
         stream_metrics=dict(artifact.stream_metrics or {}),
         user_visible_final_required=bool(artifact.user_visible_final_required),
         references=list(references or []),
+        visible_answer_manifest=artifact.visible_answer_manifest,
+        visible_answer_manifest_publication=artifact.visible_answer_manifest_publication,
         clarification=artifact.clarification,
         error=artifact.error,
         meta=dict(artifact.meta or {}),
@@ -434,22 +501,82 @@ def _resolve_state_consistency_policy(state: Any) -> dict[str, Any]:
     ).model_dump()
 
 
-def _render_deterministic_visible_list(snapshot: Any) -> Optional[str]:
+def _snapshot_items(snapshot: Any) -> list[dict[str, Any]]:
+    if snapshot is None:
+        return []
+    items = getattr(snapshot, "items", None)
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for raw_item in items:
+        if isinstance(raw_item, dict):
+            normalized.append(dict(raw_item or {}))
+        elif hasattr(raw_item, "model_dump"):
+            try:
+                payload = raw_item.model_dump()
+                if isinstance(payload, dict):
+                    normalized.append(dict(payload))
+                    continue
+            except Exception:
+                pass
+            normalized.append(dict(getattr(raw_item, "__dict__", {}) or {}))
+        else:
+            normalized.append(dict(getattr(raw_item, "__dict__", {}) or {}))
+    return normalized
+
+
+def _has_text_value(item: dict[str, Any], *keys: str) -> bool:
+    return any(str(item.get(key) or "").strip() for key in keys)
+
+
+def _is_activity_like_visible_snapshot(snapshot: Any) -> bool:
+    items = _snapshot_items(snapshot)
+    if not items:
+        return False
+    activity_rows = 0
+    for item in items:
+        has_result_identity = _has_text_value(item, "rst_id", "doi", "issn")
+        has_actor_identity = _has_text_value(item, "person_no", "org_id", "org_code", "biz_no")
+        has_project_identity = _has_text_value(item, "pjt_id", "pjt_no")
+        if has_result_identity and has_actor_identity and has_project_identity:
+            activity_rows += 1
+    return activity_rows > 0 and activity_rows * 2 >= len(items)
+
+
+def _can_render_deterministic_visible_list(snapshot: Any, *, state_inconsistent: bool) -> bool:
+    if not state_inconsistent:
+        return False
+    context_kind = str(getattr(snapshot, "context_kind", None) or "").strip().lower()
+    if context_kind in {"people", "org"}:
+        return True
+    return _is_activity_like_visible_snapshot(snapshot)
+
+
+def _render_deterministic_visible_list(snapshot: Any, *, state_inconsistent: bool = False) -> Optional[str]:
     if snapshot is None:
         return None
-    context_kind = str(getattr(snapshot, "context_kind", None) or "").strip().lower()
-    if context_kind not in {"people", "org"}:
+    if not _can_render_deterministic_visible_list(snapshot, state_inconsistent=state_inconsistent):
         return None
-    items = getattr(snapshot, "items", None)
-    if not isinstance(items, list) or not items:
+    items = _snapshot_items(snapshot)
+    if not items:
         return None
     lines = [_DETERMINISTIC_VISIBLE_LIST_PREAMBLE]
     for index, raw_item in enumerate(items, start=1):
-        item = dict(raw_item or {}) if isinstance(raw_item, dict) else {}
+        item = dict(raw_item or {})
         title = str(item.get("title_text") or "").strip()
         if not title:
             continue
-        lines.append(f"{index}. {title}")
+        suffixes: list[str] = []
+        year = str(item.get("year") or "").strip()
+        if year:
+            suffixes.append(f"({year})")
+        lead_org = str(item.get("lead_org") or "").strip()
+        if lead_org:
+            suffixes.append(f": {lead_org}")
+        rst_id = str(item.get("rst_id") or "").strip()
+        if rst_id:
+            suffixes.append(f"[rst_id: {rst_id}]")
+        lines.append(f"{index}. {title}{(' ' + ' '.join(suffixes)) if suffixes else ''}")
     return "\n".join(lines) if len(lines) > 1 else None
 
 
@@ -460,11 +587,15 @@ def _build_deterministic_visible_list_candidate(
     groundedness_snapshot: dict[str, Any],
     state_consistency_snapshot: dict[str, Any],
     state_consistency_policy: dict[str, Any],
+    state_inconsistent: bool = False,
 ) -> Optional[dict[str, Any]]:
     if _resolve_output_family(state) != "list":
         return None
 
-    text = _render_deterministic_visible_list(active_result_snapshot)
+    text = _render_deterministic_visible_list(
+        active_result_snapshot,
+        state_inconsistent=state_inconsistent,
+    )
     if not text:
         return None
 
@@ -736,19 +867,22 @@ async def generate_answer(
     normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload else None
     strategy = getattr(state, "strategy", None)
     retrieval_bundle = getattr(state, "retrieval_bundle", None)
+    projection_payload = _projection_bundle_payload(state)
     answer_context_text = str(
         getattr(state, "answer_context_text", None)
+        or projection_payload.get("answer_context_text")
         or getattr(retrieval_bundle, "answer_context_text", None)
         or ""
     ).strip()
     debug_answer_context_text = str(
         getattr(state, "debug_answer_context_text", None)
+        or projection_payload.get("debug_answer_context_text")
         or getattr(retrieval_bundle, "debug_answer_context_text", None)
         or ""
     ).strip()
     docs_for_ctx = getattr(state, "context", None) or getattr(state, "prev_context", None) or []
-    canonical_evidence = getattr(state, "canonical_evidence", None) or []
-    render_profile = getattr(state, "render_profile", None) or {}
+    canonical_evidence = getattr(state, "canonical_evidence", None) or _projection_sequence(projection_payload, "canonical_evidence")
+    render_profile = getattr(state, "render_profile", None) or projection_payload.get("render_profile") or {}
 
     context_info = build_answer_context(
         answer_context_text=answer_context_text,
@@ -959,15 +1093,25 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     solar_meta = getattr(state, "answer_solar_meta", None) or {}
     answer_artifact_gemma = getattr(state, "answer_artifact_gemma", None)
     answer_artifact_solar = getattr(state, "answer_artifact_solar", None)
-    canonical_evidence = getattr(state, "canonical_evidence", None) or []
-    visible_order_count = _resolve_groundedness_visible_count(state)
+    projection_payload = _projection_bundle_payload(state)
+    canonical_evidence = getattr(state, "canonical_evidence", None) or _projection_sequence(projection_payload, "canonical_evidence")
+    active_result_snapshot_raw = get_active_result_snapshot(getattr(state, "view_state", None))
+    projection_lineage_ok = _snapshot_matches_projection(active_result_snapshot_raw, projection_payload, state)
+    projection_lineage_status = _projection_lineage_status(projection_payload, projection_lineage_ok)
+    active_result_snapshot = active_result_snapshot_raw if projection_lineage_ok else None
+    output_family = _resolve_output_family(state)
+    publication_applicable = output_family in _LIST_LIKE_OUTPUT_TYPES
+    visible_order_count = (
+        int(getattr(active_result_snapshot, "visible_count", 0) or 0)
+        if publication_applicable and active_result_snapshot is not None
+        else None
+    )
     protect_visible_order = visible_order_count is not None
     groundedness_snapshot_model = build_groundedness_snapshot_from_canonical_evidence(
         canonical_evidence=canonical_evidence,
         visible_count=visible_order_count,
     )
     groundedness_snapshot = groundedness_snapshot_model.model_dump()
-    active_result_snapshot = get_active_result_snapshot(getattr(state, "view_state", None))
     state_consistency_snapshot_model = (
         build_state_snapshot_from_result_set(active_result_snapshot)
         if protect_visible_order
@@ -1011,6 +1155,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         groundedness_snapshot=groundedness_snapshot,
         state_consistency_snapshot=state_consistency_snapshot,
         state_consistency_policy=state_consistency_policy,
+        state_inconsistent=str(selection.get("selection_reason") or "").strip().lower() == "both_models_state_inconsistent",
     )
     if deterministic_visible_list is not None:
         selection["selected_model"] = "deterministic_snapshot"
@@ -1093,6 +1238,9 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             status="not_applicable",
         ).model_dump()
     selected_state_diag = _state_consistency_diag(selected_state_consistency)
+    visible_answer_manifest_status = "not_applicable"
+    visible_answer_manifest_publication = None
+    view_state_manifest_snapshot = None
     if isinstance(selected_artifact, AnswerArtifact):
         enriched_meta = dict(selected_artifact.meta or {})
         enriched_meta.setdefault("answer_source", selected_answer_source)
@@ -1105,24 +1253,28 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         enriched_meta["answer_state_consistency"] = selected_state_consistency
         enriched_meta["answer_state_consistency_status"] = selected_state_consistency.get("status")
         enriched_meta["answer_state_consistency_reason_codes"] = list(selected_state_consistency.get("reason_codes") or [])
+        enriched_meta["projection_id"] = projection_payload.get("projection_id")
+        enriched_meta["projection_lineage_status"] = projection_lineage_status
         selected_references = list(selected_artifact.references or [])
         if not selected_references:
             selected_references = _collect_state_references(state)
-        visible_answer_manifest = None
-        visible_answer_manifest_status = "not_applicable"
-        if protect_visible_order and active_result_snapshot is not None:
-            groundedness_status = str(selected_groundedness.get("status") or "").strip().lower()
-            state_consistency_status = str(selected_state_consistency.get("status") or "").strip().lower()
-            if groundedness_status == "unsupported":
-                visible_answer_manifest_status = "blocked_groundedness"
-            elif state_consistency_status != "supported":
-                visible_answer_manifest_status = "blocked_state_consistency"
-            elif bool(selected_state_consistency.get("subset_accepted")) and not bool(selected_state_consistency.get("manifest_publish_allowed")):
-                visible_answer_manifest_status = "withheld_partial"
-            else:
-                visible_answer_manifest_status = "approved"
-                visible_answer_manifest = _snapshot_to_payload(active_result_snapshot)
+        snapshot_payload = _snapshot_to_payload(active_result_snapshot) if active_result_snapshot is not None else None
+        publication = build_visible_answer_manifest_publication(
+            publication_applicable=publication_applicable,
+            snapshot_payload=snapshot_payload,
+            projection_payload=projection_payload,
+            projection_lineage_ok=projection_lineage_ok,
+            projection_lineage_status=projection_lineage_status,
+            groundedness=selected_groundedness,
+            state_consistency=selected_state_consistency,
+        )
+        visible_answer_manifest_status = publication.publication_status
+        visible_answer_manifest = publication.published_manifest
+        visible_answer_manifest_publication = publication.to_meta_dict()
+        if visible_answer_manifest_status == "approved":
+            view_state_manifest_snapshot = active_result_snapshot
         enriched_meta["visible_answer_manifest_status"] = visible_answer_manifest_status
+        enriched_meta["visible_answer_manifest_publication"] = dict(visible_answer_manifest_publication or {})
         enriched_meta["answer_publishability"] = (
             "publishable"
             if visible_answer_manifest_status == "approved"
@@ -1139,22 +1291,16 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             user_visible_final_required=bool(selected_artifact.user_visible_final_required),
             references=selected_references,
             visible_answer_manifest=visible_answer_manifest,
+            visible_answer_manifest_publication=dict(visible_answer_manifest_publication or {}),
             clarification=selected_artifact.clarification,
             error=selected_artifact.error,
             meta=enriched_meta,
         )
     next_view_state = getattr(state, "view_state", None)
-    if protect_visible_order and next_view_state is not None:
+    if visible_answer_manifest_status != "not_applicable" and next_view_state is not None:
         next_view_state = set_visible_answer_manifest(
             next_view_state,
-            snapshot=(
-                get_active_result_snapshot(next_view_state)
-                if (
-                    str(selected_groundedness.get("status") or "").strip().lower() != "unsupported"
-                    and str(selected_state_consistency.get("status") or "").strip().lower() == "supported"
-                )
-                else None
-            ),
+            snapshot=view_state_manifest_snapshot,
         )
 
     merge_debug = {
@@ -1180,6 +1326,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "selected_groundedness": selected_groundedness,
         "state_consistency_snapshot": state_consistency_snapshot,
         "state_consistency_snapshot_diag": state_snapshot_diag,
+        "projection_id": projection_payload.get("projection_id"),
+        "projection_lineage_status": projection_lineage_status,
         "solar_state_consistency": solar_state_consistency,
         "solar_state_diag": solar_state_diag,
         "gemma_state_consistency": gemma_state_consistency,
@@ -1190,6 +1338,11 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             (selected_artifact.meta or {}).get("visible_answer_manifest_status")
             if isinstance(selected_artifact, AnswerArtifact)
             else "not_applicable"
+        ),
+        "visible_answer_manifest_publication": (
+            (selected_artifact.meta or {}).get("visible_answer_manifest_publication")
+            if isinstance(selected_artifact, AnswerArtifact)
+            else None
         ),
     }
 

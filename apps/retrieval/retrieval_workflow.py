@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from dataclasses import dataclass, replace as dc_replace
+from dataclasses import dataclass, field, replace as dc_replace
 
 from typing import Any, Dict, Optional
 
@@ -21,7 +21,7 @@ from apps.evidence.detail_contract import (
     extract_requested_fields,
     make_entity_cache_key,
 )
-from apps.evidence.result_set import ResultItem, RetrievalBundle
+from apps.evidence.result_set import EvidenceProjectionBundle, ProjectedItem, ResultItem, RetrievalBundle
 
 from apps.conversation.view_state import (
     DETAIL_CACHE_SCHEMA_VERSION,
@@ -793,7 +793,7 @@ def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]])
 
                 "source_index": index,
 
-                "source_type": "canonical_item",
+                "source_type": item.get("source_type") or "canonical_item",
 
                 "doc_id": ids.get("doc_id"),
 
@@ -801,9 +801,174 @@ def _build_display_docs_from_canonical(canonical_evidence: list[dict[str, Any]])
 
                 "pjt_no": ids.get("pjt_no"),
 
+                "rst_id": ids.get("rst_id"),
+
+                "person_no": ids.get("person_no"),
+
+                "org_id": ids.get("org_id"),
+
+                "org_code": ids.get("org_code"),
+
+                "biz_no": ids.get("biz_no"),
+
+                "doi": ids.get("doi"),
+
+                "issn": ids.get("issn"),
+
             }
         )
     return synthetic_docs
+
+
+def _canonical_title(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    facts = item.get("facts") or {}
+    evidence = item.get("evidence") or {}
+    return str(
+        facts.get("title")
+        or evidence.get("title_text")
+        or item.get("title_text")
+        or item.get("title")
+        or item.get("identity")
+        or ""
+    ).strip()
+
+
+def _display_title(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(
+        item.get("title_text")
+        or item.get("title")
+        or item.get("title1")
+        or item.get("title2")
+        or ""
+    ).strip()
+
+
+def _truncate_diag_text(value: Any, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+_PROJECTION_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+
+
+def _projection_ids(*sources: dict[str, Any] | None) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {}
+    for key in _PROJECTION_ID_KEYS:
+        seen: set[str] = set()
+        values: list[str] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            source_ids = source.get("ids") if isinstance(source.get("ids"), dict) else {}
+            for raw_value in (source.get(key), source_ids.get(key)):
+                text = str(raw_value or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                values.append(text)
+        if values:
+            normalized[key] = values
+    return normalized
+
+
+def _projection_entity_kind(
+    *,
+    context_kind: str,
+    doc: dict[str, Any] | None,
+    canonical: dict[str, Any] | None,
+    ids_map: dict[str, list[str]],
+) -> str:
+    source_type = str(
+        (doc or {}).get("source_type")
+        or (doc or {}).get("doc_type")
+        or (canonical or {}).get("source_type")
+        or ""
+    ).strip().lower()
+    if "perf" in source_type or source_type in {"paper", "patent", "report", "software", "standard", "compound", "equipment"}:
+        return "perf"
+    if source_type in {"people", "person", "researcher"}:
+        return "people"
+    if source_type in {"org", "organization"}:
+        return "org"
+    if ids_map.get("person_no"):
+        return "people"
+    if ids_map.get("org_id") or ids_map.get("org_code") or ids_map.get("biz_no"):
+        return "org"
+    if ids_map.get("rst_id") or ids_map.get("doi") or ids_map.get("issn"):
+        return "perf"
+    return str(context_kind or "project").strip().lower() or "project"
+
+
+def _projection_identity_key(entity_kind: str, ids_map: dict[str, list[str]], title: str) -> str:
+    kind = str(entity_kind or "project").strip().lower() or "project"
+    if kind == "perf":
+        order = ("rst_id", "doi", "issn", "pjt_id", "pjt_no", "person_no", "org_id", "org_code", "biz_no")
+    elif kind == "people":
+        order = ("person_no", "pjt_id", "pjt_no", "rst_id", "org_id", "org_code", "biz_no", "doi", "issn")
+    elif kind == "org":
+        order = ("org_id", "org_code", "biz_no", "pjt_id", "pjt_no", "rst_id", "person_no", "doi", "issn")
+    else:
+        order = ("pjt_id", "pjt_no", "rst_id", "doi", "issn", "person_no", "org_id", "org_code", "biz_no")
+    for key in order:
+        values = ids_map.get(key) or []
+        if values:
+            return f"{kind}:{key}:{values[0]}"
+    return f"{kind}:title:{str(title or '').strip().lower()}"
+
+
+def _build_projected_items(
+    *,
+    documents: list[dict[str, Any]],
+    canonical_evidence: list[dict[str, Any]],
+    context_kind: str,
+    projection_id: str,
+    request_id: str,
+) -> list[ProjectedItem]:
+    projected: list[ProjectedItem] = []
+    max_len = max(len(documents or []), len(canonical_evidence or []))
+    for index in range(max_len):
+        doc = documents[index] if index < len(documents) and isinstance(documents[index], dict) else {}
+        canonical = (
+            canonical_evidence[index]
+            if index < len(canonical_evidence) and isinstance(canonical_evidence[index], dict)
+            else {}
+        )
+        ids_map = _projection_ids(doc, canonical)
+        display_title = _display_title(doc)
+        canonical_title = _canonical_title(canonical)
+        title = canonical_title or display_title
+        entity_kind = _projection_entity_kind(
+            context_kind=context_kind,
+            doc=doc,
+            canonical=canonical,
+            ids_map=ids_map,
+        )
+        source_doc_id = str((doc.get("doc_id") or (canonical.get("ids") or {}).get("doc_id") or "")).strip() or None
+        source_type = str((doc.get("source_type") or canonical.get("source_type") or "")).strip() or None
+        identity_key = _projection_identity_key(entity_kind, ids_map, title)
+        projected.append(
+            ProjectedItem(
+                projection_item_id=f"{projection_id}:rank:{index + 1}:{identity_key}",
+                projection_id=projection_id,
+                request_id=request_id,
+                rank=index + 1,
+                entity_kind=entity_kind,
+                display_title=display_title,
+                canonical_title=canonical_title,
+                ids_map=ids_map,
+                identity_key=identity_key,
+                source_doc_id=source_doc_id,
+                source_type=source_type,
+                publishable=bool(title or ids_map),
+            )
+        )
+    return projected
 
 
 def _subject_identity(kind: str, *, display_name: str | None, ids_map: dict[str, list[str]]) -> str:
@@ -1079,6 +1244,20 @@ class DisplayPayloadBundle:
 
     display_source: str
 
+    projection_id: str = ""
+
+    projected_items: list[ProjectedItem] = field(default_factory=list)
+
+    projection_bundle: EvidenceProjectionBundle | None = None
+
+    requested_count: int = 0
+
+    selected_count: int = 0
+
+    manifest_count: int = 0
+
+    rendered_count: int = 0
+
 
 
 
@@ -1277,6 +1456,8 @@ def _normalize_display_payloads(
 
     conversation_id: str,
 
+    turn_id: str,
+
 ) -> DisplayPayloadBundle:
 
     """Normalize display inputs and choose the snapshot source of truth."""
@@ -1444,6 +1625,33 @@ def _normalize_display_payloads(
 
 
 
+    projection_id = f"{conversation_id}:{turn_id or request_id}:display"
+    projected_items = _build_projected_items(
+        documents=snapshot_documents,
+        canonical_evidence=snapshot_canonical,
+        context_kind=base_route or "project",
+        projection_id=projection_id,
+        request_id=request_id,
+    )
+    requested = max(0, int(requested_count or 0))
+    selected = len(projected_items)
+    manifest = len([item for item in projected_items if item.publishable])
+    projection_bundle = EvidenceProjectionBundle(
+        projection_id=projection_id,
+        request_id=str(request_id or ""),
+        turn_id=str(turn_id or ""),
+        context_kind=str(base_route or "project").strip().lower() or "project",
+        output_type=str(output_type or "summary").strip().lower() or "summary",
+        display_source=display_source,
+        display_documents=list(snapshot_documents),
+        canonical_evidence=list(snapshot_canonical),
+        projected_items=projected_items,
+        requested_count=requested,
+        selected_count=selected,
+        manifest_count=manifest,
+        rendered_count=0,
+    )
+
     return DisplayPayloadBundle(
 
         snapshot_documents=snapshot_documents,
@@ -1460,6 +1668,46 @@ def _normalize_display_payloads(
 
         display_source=display_source,
 
+        projection_id=projection_id,
+
+        projected_items=projected_items,
+
+        projection_bundle=projection_bundle,
+
+        requested_count=requested,
+
+        selected_count=selected,
+
+        manifest_count=manifest,
+
+        rendered_count=0,
+
+    )
+
+
+def _finalize_projection_bundle(
+    bundle: EvidenceProjectionBundle | None,
+    *,
+    docs: list[dict[str, Any]],
+    canonical_evidence: list[dict[str, Any]],
+    answer_context_text: str,
+    debug_answer_context_text: str,
+    render_profile: dict[str, Any],
+) -> EvidenceProjectionBundle | None:
+    if bundle is None:
+        return None
+    visible_len = max(len(docs or []), len(canonical_evidence or []))
+    projected_items = list(bundle.projected_items[:visible_len])
+    return dc_replace(
+        bundle,
+        display_documents=list(docs or []),
+        canonical_evidence=list(canonical_evidence or []),
+        projected_items=projected_items,
+        answer_context_text=str(answer_context_text or ""),
+        debug_answer_context_text=str(debug_answer_context_text or ""),
+        render_profile=dict(render_profile or {}),
+        selected_count=len(projected_items),
+        manifest_count=len([item for item in projected_items if item.publishable]),
     )
 
 
@@ -2400,6 +2648,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
                 conversation_id=state.conversation_id,
 
+                turn_id=turn_id,
+
             )
 
         else:
@@ -2422,6 +2672,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
             )
 
+        evidence_projection_bundle = display_bundle.projection_bundle
+
         if list_like_output and docs and view_state is not None:
             docs_count_before_snapshot = display_bundle.docs_count
             canonical_count_before_snapshot = display_bundle.canonical_count
@@ -2430,7 +2682,10 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 turn_id=turn_id,
                 context_kind=context_kind or "project",
                 requested_count=display_limit,
-                items=retrieval_bundle.items,
+                request_id=state.request_id,
+                projection_id=display_bundle.projection_id,
+                documents=display_bundle.snapshot_documents,
+                canonical_evidence=display_bundle.snapshot_canonical_evidence,
                 raw_count=raw_result_count,
             )
             scope_kind = "child" if str(strategy_meta.get("followup_reference_kind") or "").strip().lower() == "child_entity" else "list"
@@ -2518,6 +2773,18 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 display_source=display_bundle.display_source,
 
                 requested_count_source=requested_count_source,
+
+                projection_id=display_bundle.projection_id,
+
+                projection_selected_count=display_bundle.selected_count,
+
+                projection_manifest_count=display_bundle.manifest_count,
+
+                snapshot_first_title=_truncate_diag_text(snapshot.items[0].title_text if snapshot.items else ""),
+
+                display_first_title=_truncate_diag_text(_display_title(display_bundle.snapshot_documents[0] if display_bundle.snapshot_documents else None)),
+
+                canonical_first_title=_truncate_diag_text(_canonical_title(display_bundle.snapshot_canonical_evidence[0] if display_bundle.snapshot_canonical_evidence else None)),
 
             )
 
@@ -2710,6 +2977,15 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                     missing_fields=coverage.missing_fields,
                 )
 
+        evidence_projection_bundle = _finalize_projection_bundle(
+            evidence_projection_bundle,
+            docs=docs,
+            canonical_evidence=canonical_evidence,
+            answer_context_text=answer_context_text,
+            debug_answer_context_text=debug_answer_context_text,
+            render_profile=render_profile,
+        )
+
         if docs:
             raw_payload_memory = upsert_raw_payload_records(
                 raw_payload_memory,
@@ -2737,6 +3013,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             "context": docs,
             "canonical_evidence": canonical_evidence,
             "retrieval_bundle": retrieval_bundle,
+            "evidence_projection_bundle": evidence_projection_bundle,
             "answer_context_text": answer_context_text,
             "debug_answer_context_text": debug_answer_context_text,
             "resolved_retrieval_query": resolved_retrieval_query,
