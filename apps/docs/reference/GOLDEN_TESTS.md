@@ -195,17 +195,18 @@
 - setup: `active_scope.result_set.context_kind` is `people` or `org`, and the visible list already reflects the canonical activity rows that follow-up truth should reuse.
 - answer: a model output that is already state-consistent is selected normally.
 - expected keep: supported LLM list answers are not replaced by `deterministic_snapshot` just because the snapshot context is `people` or `org`.
-- expected keep: if both model answers are state-inconsistent, the final user-visible list is rendered deterministically from the snapshot in the same visible order and count.
-- expected keep: if that deterministic list is state-consistent and not groundedness-unsupported, `visible_answer_manifest_status=approved`.
+- expected keep: if both model answers are state-inconsistent but a verified projection summary can be rendered, the LLM answer remains the final user-visible body and the deterministic text is exposed as `verified_projection_summary`.
+- expected keep: if that verified projection summary is state-consistent and not groundedness-unsupported, `visible_answer_manifest_status=approved` with `visible_answer_manifest_publication_source=verified_projection_summary`.
 - expected keep: approved publication writes `visible_answer_manifest_publication.published_manifest` and that manifest is the only answer-owned publish artifact.
 - expected keep: summary or intro text is non-authoritative and must not own item count/order truth.
 - expected ban: degrading broad-history people/org list answers only because the LLM collapsed multiple rows into fewer top-level bullets.
+- expected ban: replacing the final user-visible body with `model_key=deterministic_snapshot`.
 
-### 11N-2. Activity list order failure falls back to snapshot-owned rendering
+### 11N-2. Activity list order failure augments with snapshot-owned rendering
 - setup: list-family active snapshot rows are activity-like rows carrying project, result, and actor ids such as `pjt_id`, `rst_id`, and `person_no`.
 - answer: both model answers contain the right family of items but swap visible ranks or miss a tail row.
-- expected keep: if projection lineage matches, answer-stage renders the deterministic visible snapshot list instead of emitting the state-consistency degraded fallback.
-- expected keep: publication status is `approved` only for the deterministic snapshot-owned list.
+- expected keep: if projection lineage matches, answer-stage keeps the selected LLM text and attaches the deterministic visible snapshot list as `verified_projection_summary`.
+- expected keep: publication status is `approved` only when the verified projection summary is snapshot-owned and supported.
 - expected ban: model-generated reordered activity rows becoming `visible_answer_manifest` truth.
 
 ### 11L. Invalid planner count contract fails closed instead of runtime overwrite

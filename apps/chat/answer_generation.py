@@ -627,6 +627,47 @@ def _build_deterministic_visible_list_candidate(
     }
 
 
+def _build_verified_projection_summary(candidate: dict[str, Any] | None) -> Optional[dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    text = str(candidate.get("text") or "").strip()
+    if not text:
+        return None
+    candidate_meta = dict(candidate.get("meta") or {})
+    return {
+        "text": text,
+        "answer_source": str(candidate_meta.get("answer_source") or "deterministic_snapshot"),
+        "model_key": str(candidate_meta.get("model_key") or "deterministic_snapshot"),
+        "answer_kind": str(candidate_meta.get("answer_kind") or "deterministic_render"),
+        "render_mode": str(candidate_meta.get("deterministic_render_mode") or "visible_snapshot"),
+        "groundedness": dict(candidate.get("groundedness") or {}),
+        "state_consistency": dict(candidate.get("state_consistency") or {}),
+    }
+
+
+def _promote_llm_for_augmented_state_inconsistency(
+    *,
+    selection: dict[str, Any],
+    answer_solar: str,
+    answer_gemma: str,
+    solar_failed: bool,
+    gemma_failed: bool,
+) -> bool:
+    if str(selection.get("selection_reason") or "").strip().lower() != "both_models_state_inconsistent":
+        return False
+    if answer_solar and not solar_failed:
+        selection["selected_model"] = "solar"
+        selection["selected_answer"] = answer_solar
+        selection["selection_reason"] = "solar_augmented_state_inconsistent"
+        return True
+    if answer_gemma and not gemma_failed:
+        selection["selected_model"] = "gemma"
+        selection["selected_answer"] = answer_gemma
+        selection["selection_reason"] = "gemma_augmented_state_inconsistent"
+        return True
+    return False
+
+
 def _build_user_visible_fallback_message(selection: dict[str, Any]) -> str:
     selection_reason = str(selection.get("selection_reason") or "").strip().lower()
     fail_reasons = {
@@ -1157,10 +1198,16 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         state_consistency_policy=state_consistency_policy,
         state_inconsistent=str(selection.get("selection_reason") or "").strip().lower() == "both_models_state_inconsistent",
     )
-    if deterministic_visible_list is not None:
-        selection["selected_model"] = "deterministic_snapshot"
-        selection["selected_answer"] = str(deterministic_visible_list["text"] or "")
-        selection["selection_reason"] = "deterministic_visible_list"
+    verified_projection_summary = _build_verified_projection_summary(deterministic_visible_list)
+    augmented_state_inconsistent = False
+    if verified_projection_summary is not None:
+        augmented_state_inconsistent = _promote_llm_for_augmented_state_inconsistency(
+            selection=selection,
+            answer_solar=answer_solar,
+            answer_gemma=answer_gemma,
+            solar_failed=solar_failed,
+            gemma_failed=gemma_failed,
+        )
     selected_model = str(selection["selected_model"])
     selected_answer = str(selection["selected_answer"])
     if selected_model == "fallback":
@@ -1171,8 +1218,6 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_meta = solar_meta
     elif selected_model == "gemma":
         selected_meta = answer_gemma_meta
-    elif selected_model == "deterministic_snapshot":
-        selected_meta = dict(deterministic_visible_list.get("meta") or {}) if deterministic_visible_list is not None else {}
 
     selected_answer_source = str(selected_meta.get("answer_source") or selected_model)
     selected_artifact = None
@@ -1181,21 +1226,6 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_artifact = answer_artifact_solar
     elif selected_model == "gemma" and isinstance(answer_artifact_gemma, AnswerArtifact):
         selected_artifact = answer_artifact_gemma
-    elif selected_model == "deterministic_snapshot" and selected_answer:
-        selected_artifact = AnswerArtifact(
-            text=selected_answer,
-            answer_kind=str(selected_meta.get("answer_kind") or "deterministic_render"),
-            stream_metrics=dict(selected_meta or {}),
-            user_visible_final_required=True,
-            references=_collect_state_references(state),
-            meta={
-                "answer_source": selected_answer_source,
-                "model_key": selected_model,
-                "selection_reason": selection["selection_reason"],
-                "degraded": False,
-                **dict(selected_meta or {}),
-            },
-        )
     elif selected_answer:
         selected_artifact = AnswerArtifact(
             text=selected_answer,
@@ -1214,8 +1244,6 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_groundedness = solar_groundedness
     elif selected_model == "gemma":
         selected_groundedness = gemma_groundedness
-    elif selected_model == "deterministic_snapshot" and deterministic_visible_list is not None:
-        selected_groundedness = dict(deterministic_visible_list.get("groundedness") or {})
     else:
         selected_groundedness = AnswerGroundednessVerdict(
             status="skipped_fallback",
@@ -1231,8 +1259,6 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_state_consistency = solar_state_consistency
     elif selected_model == "gemma":
         selected_state_consistency = gemma_state_consistency
-    elif selected_model == "deterministic_snapshot" and deterministic_visible_list is not None:
-        selected_state_consistency = dict(deterministic_visible_list.get("state_consistency") or {})
     if not selected_state_consistency:
         selected_state_consistency = AnswerStateConsistencyVerdict(
             status="not_applicable",
@@ -1245,6 +1271,13 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         enriched_meta = dict(selected_artifact.meta or {})
         enriched_meta.setdefault("answer_source", selected_answer_source)
         enriched_meta.setdefault("model_key", selected_model)
+        enriched_meta["selection_reason"] = selection["selection_reason"]
+        if verified_projection_summary is not None:
+            enriched_meta["verified_projection_summary"] = dict(verified_projection_summary)
+            enriched_meta["deterministic_snapshot_suppressed"] = True
+            enriched_meta["deterministic_render_mode"] = verified_projection_summary.get("render_mode")
+            if augmented_state_inconsistent:
+                enriched_meta["answer_augmentation_mode"] = "verified_projection_summary"
         if execution_trace_summary:
             enriched_meta.update(execution_trace_summary)
         enriched_meta["groundedness_status"] = selected_groundedness.get("status")
@@ -1259,14 +1292,20 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         if not selected_references:
             selected_references = _collect_state_references(state)
         snapshot_payload = _snapshot_to_payload(active_result_snapshot) if active_result_snapshot is not None else None
+        publication_groundedness = selected_groundedness
+        publication_state_consistency = selected_state_consistency
+        if augmented_state_inconsistent and isinstance(verified_projection_summary, dict):
+            publication_groundedness = dict(verified_projection_summary.get("groundedness") or selected_groundedness)
+            publication_state_consistency = dict(verified_projection_summary.get("state_consistency") or selected_state_consistency)
+            enriched_meta["visible_answer_manifest_publication_source"] = "verified_projection_summary"
         publication = build_visible_answer_manifest_publication(
             publication_applicable=publication_applicable,
             snapshot_payload=snapshot_payload,
             projection_payload=projection_payload,
             projection_lineage_ok=projection_lineage_ok,
             projection_lineage_status=projection_lineage_status,
-            groundedness=selected_groundedness,
-            state_consistency=selected_state_consistency,
+            groundedness=publication_groundedness,
+            state_consistency=publication_state_consistency,
         )
         visible_answer_manifest_status = publication.publication_status
         visible_answer_manifest = publication.published_manifest
@@ -1334,6 +1373,9 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "gemma_state_diag": gemma_state_diag,
         "selected_state_consistency": selected_state_consistency,
         "selected_state_diag": selected_state_diag,
+        "verified_projection_summary": verified_projection_summary,
+        "deterministic_snapshot_suppressed": bool(verified_projection_summary is not None),
+        "answer_augmentation_mode": "verified_projection_summary" if augmented_state_inconsistent else None,
         "visible_answer_manifest_status": (
             (selected_artifact.meta or {}).get("visible_answer_manifest_status")
             if isinstance(selected_artifact, AnswerArtifact)

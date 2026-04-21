@@ -13,6 +13,7 @@ else:
 
 from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
 from apps.conversation.context_router import run_context_router
+from apps.conversation.memory_observer import log_context_router_transition
 from apps.conversation.followup_anchor import (
     anchor_to_seed_map,
     focus_entity_from_mention,
@@ -161,6 +162,119 @@ def _build_context_router_scope_summary(view_state: Optional[ConversationViewSta
         "child_anchor_kind": str(getattr(child_anchor, "kind", None) or "").strip().lower() or None,
         "child_anchor_title": _first_text(getattr(child_anchor, "title_text", None)) or None,
     }
+
+
+async def _apply_context_router_decision(
+    *,
+    question: str,
+    request_id: Optional[str],
+    conversation_id: str,
+    active_view_state: Optional[ConversationViewState],
+    recent_mentions: List[Any],
+    has_explicit_seed: bool,
+    scope_decision: Any,
+    normalized_intent_base: Any,
+    context_router_meta: Dict[str, Any],
+) -> tuple[Any, Optional[Any], Dict[str, Any]]:
+    """Context Router 호출·scope_decision 패치·observability 방출을 한 곳에서 처리.
+
+    ADR-0013 후속 정리에 따라 build_intent_payload 내부의 분기를 단일 헬퍼로 추출했다.
+    본 헬퍼는 라우팅 행위를 변경하지 않고, 관측과 scope_decision 패치만 수행한다.
+
+    Returns:
+        (updated_scope_decision, context_router_anchor, context_router_meta)
+    """
+    context_router_anchor: Optional[Any] = None
+    if not (
+        not has_explicit_seed
+        and recent_mentions
+        and _context_router_allowed(scope_decision)
+    ):
+        return scope_decision, context_router_anchor, context_router_meta
+
+    context_router_meta["invoked"] = True
+    context_router_result = run_context_router(
+        question=question,
+        recent_mentions=recent_mentions,
+        active_scope_summary=_build_context_router_scope_summary(active_view_state),
+    )
+    context_router_decision = (
+        await context_router_result if isawaitable(context_router_result) else context_router_result
+    )
+    context_router_meta.update(
+        {
+            "status": context_router_decision.status,
+            "source": context_router_decision.source,
+            "confidence": round(float(context_router_decision.confidence or 0.0), 3),
+            "rewritten_query_hint": context_router_decision.rewritten_query_hint,
+            "reason": context_router_decision.reason,
+        }
+    )
+    selected_index = context_router_decision.selected_candidate_index
+    clarification_avoided = 0
+    if (
+        context_router_decision.status == "resolved"
+        and selected_index is not None
+        and 0 <= int(selected_index) < len(recent_mentions)
+    ):
+        router_anchor = focus_entity_from_mention(recent_mentions[int(selected_index)])
+        if _context_router_anchor_allowed(router_anchor, question=question, normalized_intent_base=normalized_intent_base):
+            context_router_anchor = router_anchor
+            clarification_avoided = 1
+            scope_decision = scope_decision.model_copy(
+                update={
+                    "followup_type": "reference_followup",
+                    "resolved_anchor": router_anchor,
+                    "needs_clarification": False,
+                    "clarification_payload": None,
+                }
+            )
+        else:
+            context_router_meta["status"] = "unresolved"
+            context_router_meta["reason"] = "detail_requires_instance_project_id"
+    log_event(
+        "CONTEXT.ROUTER",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        context_router_invoked=1,
+        context_router_status=context_router_meta.get("status"),
+        context_router_source=context_router_meta.get("source"),
+        context_router_confidence=context_router_meta.get("confidence"),
+        recent_mentions_count=context_router_meta.get("recent_mention_count"),
+        rewritten_query_hint=context_router_meta.get("rewritten_query_hint"),
+        clarification_avoided=clarification_avoided,
+    )
+    # ADR-0013: heuristic↔LLM fallback 전환 경로를 별도 이벤트로 추적한다.
+    router_source = str(context_router_meta.get("source") or "").strip().lower()
+    router_reason = str(context_router_meta.get("reason") or "").strip().lower()
+    final_status = context_router_meta.get("status")
+    final_confidence = context_router_meta.get("confidence")
+    recent_count = context_router_meta.get("recent_mention_count")
+    if router_source == "llm_recent_mentions":
+        log_context_router_transition(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            from_source="heuristic",
+            to_source="llm",
+            reason=router_reason or "heuristic_non_resolved",
+            final_status=final_status,
+            final_confidence=final_confidence,
+            recent_mention_count=recent_count,
+        )
+    elif router_source == "deterministic_recent_mentions" and router_reason.startswith(
+        ("low_confidence_fallback", "llm_error_fallback")
+    ):
+        log_context_router_transition(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            from_source="llm",
+            to_source="heuristic",
+            reason=router_reason,
+            final_status=final_status,
+            final_confidence=final_confidence,
+            recent_mention_count=recent_count,
+        )
+    return scope_decision, context_router_anchor, context_router_meta
 
 
 
@@ -1604,64 +1718,17 @@ async def build_intent_payload(
             "previous_turn_contract": previous_turn_contract,
         },
     )
-    context_router_anchor = None
-    if (
-        not has_explicit_seed
-        and recent_mentions
-        and _context_router_allowed(scope_decision)
-    ):
-        context_router_meta["invoked"] = True
-        context_router_result = run_context_router(
-            question=question,
-            recent_mentions=recent_mentions,
-            active_scope_summary=_build_context_router_scope_summary(active_view_state),
-        )
-        context_router_decision = (
-            await context_router_result if isawaitable(context_router_result) else context_router_result
-        )
-        context_router_meta.update(
-            {
-                "status": context_router_decision.status,
-                "source": context_router_decision.source,
-                "confidence": round(float(context_router_decision.confidence or 0.0), 3),
-                "rewritten_query_hint": context_router_decision.rewritten_query_hint,
-                "reason": context_router_decision.reason,
-            }
-        )
-        selected_index = context_router_decision.selected_candidate_index
-        clarification_avoided = 0
-        if (
-            context_router_decision.status == "resolved"
-            and selected_index is not None
-            and 0 <= int(selected_index) < len(recent_mentions)
-        ):
-            router_anchor = focus_entity_from_mention(recent_mentions[int(selected_index)])
-            if _context_router_anchor_allowed(router_anchor, question=question, normalized_intent_base=normalized_intent_base):
-                context_router_anchor = router_anchor
-                clarification_avoided = 1
-                scope_decision = scope_decision.model_copy(
-                    update={
-                        "followup_type": "reference_followup",
-                        "resolved_anchor": router_anchor,
-                        "needs_clarification": False,
-                        "clarification_payload": None,
-                    }
-                )
-            else:
-                context_router_meta["status"] = "unresolved"
-                context_router_meta["reason"] = "detail_requires_instance_project_id"
-        log_event(
-            "CONTEXT.ROUTER",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            context_router_invoked=1,
-            context_router_status=context_router_meta.get("status"),
-            context_router_source=context_router_meta.get("source"),
-            context_router_confidence=context_router_meta.get("confidence"),
-            recent_mentions_count=context_router_meta.get("recent_mention_count"),
-            rewritten_query_hint=context_router_meta.get("rewritten_query_hint"),
-            clarification_avoided=clarification_avoided,
-        )
+    scope_decision, context_router_anchor, context_router_meta = await _apply_context_router_decision(
+        question=question,
+        request_id=request_id,
+        conversation_id=conversation_id,
+        active_view_state=active_view_state,
+        recent_mentions=recent_mentions,
+        has_explicit_seed=has_explicit_seed,
+        scope_decision=scope_decision,
+        normalized_intent_base=normalized_intent_base,
+        context_router_meta=context_router_meta,
+    )
     log_event(
         "SCOPE.DECISION",
         request_id=request_id,

@@ -25,6 +25,7 @@ from apps.conversation.raw_payload_store import (
     save_raw_payload_memory,
     sync_active_anchor_record,
 )
+from apps.conversation.memory_observer import log_memory_snapshot
 from apps.conversation.request_facade import build_intent_payload
 from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
 from apps.platform.settings import REDIS_TTL
@@ -81,6 +82,16 @@ async def node_load_memory(state: Any) -> Dict[str, Any]:
         history_turns=len(loaded_history),
         prev_context_docs=len(effective_prev_context),
         turn_id=turn_id,
+    )
+    # ADR-0013: raw_payload_memory / view_state 스냅샷을 관측 이벤트로 기록한다.
+    log_memory_snapshot(
+        stage="load",
+        request_id=state.request_id,
+        conversation_id=cid,
+        turn_id=turn_id,
+        raw_payload_memory=raw_payload_memory,
+        history_turns=len(loaded_history),
+        view_state=view_state,
     )
     return {
         "question": state.messages[-1].content,
@@ -211,6 +222,18 @@ async def node_save_history(state: Any) -> Dict[str, Any]:
         logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
     if not raw_saved:
         logger.debug("[memory] kv_store unavailable: skip raw payload save (cid=%s)", cid)
+
+    # ADR-0013: save 시점 메모리 스냅샷 (prune 이후 상태 가시화)
+    log_memory_snapshot(
+        stage="save",
+        request_id=getattr(state, "request_id", None),
+        conversation_id=cid,
+        turn_id=str(getattr(state, "turn_id", "") or "") or None,
+        raw_payload_memory=raw_payload_memory,
+        history_turns=len(save_payload.get("history") or []),
+        view_state=save_payload.get("view_state"),
+        note=None if (saved and raw_saved) else "kv_store_unavailable",
+    )
 
     total_ms = compute_total_ms_from_start(getattr(state, "request_started_at", None))
     summary_fields = _state_log_summary_fields(state, total_ms=total_ms)

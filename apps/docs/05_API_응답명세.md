@@ -75,6 +75,8 @@
 - media type: `text/event-stream`
 - canonical envelope: 모든 frame은 `data: {"tag":"event","event":...}` 형태다.
 - route-level reasoning chunk는 내보내지 않는다. 사용자 가시 텍스트만 `answer.chunk`로 보낸다.
+- `answer.chunk`는 요청 진행 중의 provisional stream이다. 클라이언트는 같은 UI row에 대해 최초 수신한 `request_id`와 다른 `answer.chunk`/`answer.final`/`reference.set`/`done`을 반영하면 안 된다.
+- `answer.final`은 LLM 스트림 본문을 임의로 덮어쓰기 위한 이벤트가 아니다. 정합성 보완이 필요하면 `meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
 - `reference.set`과 `done`은 정상/오류/강등(degraded) 종료 모두에서 내려보내는 것이 원칙이다.
 
 ### 공통 SSE envelope
@@ -88,6 +90,7 @@
     "seq": 4,
     "model_key": "solar",
     "content": "최종 답변",
+    "references": null,
     "meta": {}
   }
 }
@@ -101,20 +104,21 @@
 | `event.seq` | integer | route 기준 순번 |
 | `event.model_key` | string \| null | `answer.chunk`, `answer.final` 등 모델 종속 event에서만 사용 |
 | `event.content` | string \| null | 사용자 가시 텍스트 |
+| `event.references` | array \| null | `reference.set`에서 사용하며, 다른 event에서는 `null` |
 | `event.meta` | object | event별 추가 payload |
 
 ### event kind
 
-| kind | content | meta |
-|---|---|---|
-| `conversation` | 없음 | `{ "conversation_id": "..." }` |
-| `status` | 없음 | 현재 구현은 `{ "status": "retrieve" }` |
-| `answer.chunk` | 부분 답변 텍스트 | `{}` |
-| `clarification` | clarification 메시지 | `{ "clarification": ClarificationPayload }` |
-| `answer.final` | 최종 사용자 답변 | `AnswerFinalMeta` |
-| `reference.set` | 없음 | `{ "references": ReferenceItem[] }` |
-| `error` | 없음 | `{ "error": "...", "error_code": "...", "reason": "..." }` |
-| `done` | 없음 | `{}` 또는 `{ "error": true }` 또는 `{ "degraded": true }` |
+| kind | content | references | meta |
+|---|---|---|---|
+| `conversation` | `conversation_id` | `null` | `{ "conversation_id": "..." }` |
+| `status` | 없음 | `null` | 현재 구현은 `{ "status": "retrieve" }` |
+| `answer.chunk` | 부분 답변 텍스트 | `null` | `{}` |
+| `clarification` | clarification 메시지 | `null` | `{ "clarification": ClarificationPayload }` |
+| `answer.final` | 최종 사용자 답변 | `null` | `AnswerFinalMeta` |
+| `reference.set` | `"null"` | `ReferenceItem[]` | `{ "references": ReferenceItem[] }` |
+| `error` | 없음 | `null` | `{ "error": "...", "error_code": "...", "reason": "..." }` |
+| `done` | 없음 | `null` | `{}` 또는 `{ "error": true }` 또는 `{ "degraded": true }` |
 
 ### 정상 종료 순서
 
@@ -173,6 +177,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 | `answer_state_consistency` | object | list-family 검증 경로 | state consistency verdict 전체 |
 | `answer_state_consistency_status` | string | list-family 검증 경로 | state consistency 상태 |
 | `answer_state_consistency_reason_codes` | array | list-family 검증 경로 | state consistency 보조 코드 |
+| `verified_projection_summary` | object | list-family 보완 경로 | LLM 본문을 교체하지 않고 보완 UI에 표시할 검증된 projection 요약. `text`, `groundedness`, `state_consistency`를 포함한다. |
+| `answer_augmentation_mode` | string | list-family 보완 경로 | 현재는 `verified_projection_summary`. LLM 본문 유지 후 검증 데이터 레이어를 보강했음을 나타낸다. |
 | `visible_answer_manifest_status` | string | 병합 경로 | `approved`, `withheld_partial`, `blocked_*`, `not_applicable` |
 | `visible_answer_manifest` | object | publishable list-family | 다음 turn의 ordinal/source follow-up truth |
 | `visible_answer_manifest_publication` | object | list-family publication | answer-owned publication artifact; `approved` contains `published_manifest`, blocked/withheld statuses must not fall back to stale `view_state.visible_answer_manifest` |

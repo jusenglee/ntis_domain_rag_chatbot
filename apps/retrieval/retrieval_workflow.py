@@ -46,7 +46,11 @@ from apps.api.runtime_helpers import log_event, logger, measure_latency
 from apps.api.streaming.contracts import AnswerArtifact
 
 from apps.conversation.entity_reference import ClarificationRequest, ResolvedEntityRef
-from apps.conversation.fact_followup_resolver import resolve_followup_from_facts
+from apps.evidence.memory_facts_resolver import (
+    diagnose_followup_fact_miss,
+    resolve_followup_from_facts,
+)
+from apps.conversation.memory_observer import log_fact_followup_miss
 
 from apps.conversation.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload, resolve_entity_ref_from_strategy_meta, should_short_circuit_followup_clarification
 from apps.conversation.raw_payload_store import sync_active_anchor_record, upsert_raw_payload_records
@@ -2166,17 +2170,20 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
             }
 
+        fact_followup_question = str(getattr(state, "question", "") or state.messages[-1].content or "")
+        fact_followup_base_route = str(_pick_attr(query_intent, qa, key="base_route", default="project") or "project")
         fact_followup = resolve_followup_from_facts(
-            question=str(getattr(state, "question", "") or state.messages[-1].content or ""),
+            question=fact_followup_question,
             view_state=view_state,
             raw_payload_memory=raw_payload_memory,
-            base_route=str(_pick_attr(query_intent, qa, key="base_route", default="project") or "project"),
+            base_route=fact_followup_base_route,
         )
-        if fact_followup is not None and bool(
+        fact_preconditions_met = bool(
             strategy_meta.get("explicit_followup")
             or strategy_meta.get("anchor_source")
             or str(strategy_meta.get("followup_resolution_status") or "").strip().lower() == "resolved"
-        ):
+        )
+        if fact_followup is not None and fact_preconditions_met:
             artifact = fact_followup["answer_artifact"]
             log_event(
                 "FOLLOWUP.FACT_RESOLVED",
@@ -2195,6 +2202,32 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 "followup_resolved_by_facts": bool(fact_followup.get("followup_resolved_by_facts")),
                 "retrieval_runtime_meta": {},
             }
+        # ADR-0013: fact short-circuit miss 사유를 관측 신호로 남긴다.
+        if not fact_preconditions_met:
+            log_fact_followup_miss(
+                request_id=getattr(state, "request_id", None),
+                conversation_id=getattr(state, "conversation_id", None),
+                turn_id=turn_id,
+                reason="preconditions_unmet",
+                base_route=fact_followup_base_route,
+            )
+        else:
+            miss_diag = diagnose_followup_fact_miss(
+                question=fact_followup_question,
+                view_state=view_state,
+                raw_payload_memory=raw_payload_memory,
+                base_route=fact_followup_base_route,
+            )
+            log_fact_followup_miss(
+                request_id=getattr(state, "request_id", None),
+                conversation_id=getattr(state, "conversation_id", None),
+                turn_id=turn_id,
+                reason=str(miss_diag.get("reason") or "unknown"),
+                anchor_key=miss_diag.get("anchor_key"),
+                has_anchor=miss_diag.get("has_anchor"),
+                has_record=miss_diag.get("has_record"),
+                base_route=fact_followup_base_route,
+            )
 
         detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
         if output_type == "detail" and not detail_anchor_active:
@@ -3164,8 +3197,3 @@ async def node_relax_and_retry(state: Any) -> Dict[str, Any]:
         "no_result_message": None,
         "retrieval_runtime_meta": retrieval_runtime_meta,
     }
-
-
-
-
-

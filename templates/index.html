@@ -230,11 +230,8 @@
       margin-top:12px;
       display:none;
     }
-    .final-card .compare-head{
-      background: linear-gradient(180deg, rgba(16,163,127,.10), rgba(255,255,255,.76));
-    }
     .final-card .compare-body{
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Pretendard, Roboto, "Noto Sans KR", Arial, sans-serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
       font-size:14px;
       line-height:1.65;
     }
@@ -399,6 +396,8 @@
   const convChip = document.getElementById("convChip");
 
   let eventSource = null;
+  let activeFetchController = null;
+  let activeStreamToken = 0;
   let streaming = false;
   let lastCompareTarget = "A";
 
@@ -417,9 +416,14 @@
   }
 
   function stopStream(reason){
+    activeStreamToken += 1;
     if (eventSource){
       try { eventSource.close(); } catch(e){}
       eventSource = null;
+    }
+    if (activeFetchController){
+      try { activeFetchController.abort(); } catch(e){}
+      activeFetchController = null;
     }
     setStreaming(false);
     if (reason){
@@ -596,12 +600,16 @@
     const bubbles = addCompareRow(aTitle, bTitle);
 
     stopStream();
+    const streamToken = ++activeStreamToken;
+    const controller = new AbortController();
+    activeFetchController = controller;
     setStreaming(true);
 
     logBox.textContent += `\n=== USER: ${q}\n`;
 
     let rawA = "";
     let rawB = "";
+    let activeRequestId = "";
     let clarificationRendered = false;
     lastCompareTarget = "A";
 
@@ -610,9 +618,14 @@
       bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
     }
 
-    function renderFinalAnswer(text) {
+    function renderFinalAnswer(text, meta) {
       if (!text) return;
-      bubbles.finalBody.textContent = text;
+      const summary = meta && meta.verified_projection_summary && typeof meta.verified_projection_summary === "object"
+        ? String(meta.verified_projection_summary.text || "")
+        : "";
+      bubbles.finalBody.textContent = summary
+        ? `${text}\n\n[데이터 정합성 확인]\n${summary}`
+        : text;
       bubbles.finalCard.style.display = "block";
     }
 
@@ -624,13 +637,6 @@
       renderBodies();
     }
 
-    function appendRawTrace(rawLine) {
-      if (!rawLine) return;
-      logBox.textContent += `${rawLine}\n\n`;
-      logBox.scrollTop = logBox.scrollHeight;
-      console.log(rawLine);
-    }
-
     const payload = {
       model: aKey,
       question: q,
@@ -639,19 +645,22 @@
       conversation_id: conversationId || null
     };
 
-    const res = await fetch("/query/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-
+    let reader = null;
     let buffer = "";
     let done = false;
+    try {
+      const res = await fetch("/query/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+
+    reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
 
     while (!done) {
+      if (streamToken !== activeStreamToken) return;
       const { value, done: streamDone } = await reader.read();
       done = streamDone;
       if (!value) continue;
@@ -661,7 +670,9 @@
       // SSE 이벤트는 빈 줄로 끝남
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        if (streamToken !== activeStreamToken) return;
         const event = buffer.slice(0, idx).trim();
+
         buffer = buffer.slice(idx + 2);
 
         if (!event.startsWith("data:")) continue;
@@ -683,13 +694,17 @@
 
         const eventPayload = json.event;
         const eventKind = String(eventPayload?.kind || "");
+        const eventRequestId = String(eventPayload?.request_id || "");
         const eventContent = (typeof eventPayload?.content === "string") ? eventPayload.content : "";
         const eventMeta = (eventPayload?.meta && typeof eventPayload.meta === "object") ? eventPayload.meta : {};
-        const shouldTraceRawEvent = eventKind !== "conversation" && eventKind !== "status";
-        const rawTraceLine = `data: ${jsonStr}`;
 
-        if (shouldTraceRawEvent) {
-          appendRawTrace(rawTraceLine);
+        if (!activeRequestId && eventRequestId) {
+          activeRequestId = eventRequestId;
+        }
+        if (activeRequestId && eventRequestId && eventRequestId !== activeRequestId) {
+          logBox.textContent += `[ignored stale event request_id=${eventRequestId} active_request_id=${activeRequestId}]\n`;
+          logBox.scrollTop = logBox.scrollHeight;
+          continue;
         }
 
         if (eventKind === "conversation") {
@@ -704,8 +719,11 @@
 
         if (eventKind === "done") {
           done = true;
-          setStreaming(false);
-          logBox.textContent += "[END]\n";
+          if (streamToken === activeStreamToken) {
+            setStreaming(false);
+            activeFetchController = null;
+            logBox.textContent += "[END]\n";
+          }
           scrollToBottom();
           return;
         }
@@ -737,15 +755,7 @@
             scrollToBottom();
             continue;
           }
-          if (isSolarFrame) {
-            rawA = eventContent;
-          } else if (isGemmaFrame) {
-            rawB = eventContent;
-          } else {
-            if (!rawA) rawA = "최종 검증 답변을 확인하세요.";
-            if (!rawB) rawB = "최종 검증 답변을 확인하세요.";
-            renderFinalAnswer(eventContent);
-          }
+          renderFinalAnswer(eventContent, eventMeta);
           renderBodies();
           scrollToBottom();
           continue;
@@ -772,16 +782,20 @@
       }
     }
 
-    // catch network/stream errors
-    try {
-      await reader.closed;
     } catch (err) {
+      if (streamToken !== activeStreamToken || err?.name === "AbortError") {
+        return;
+      }
       console.error("Streaming fetch error:", err);
       stopStream("❗ SSE fetch 오류");
       bubbles.bodyA.textContent = rawA || "(fetch 오류)";
       bubbles.bodyB.textContent = rawB || "(fetch 오류)";
       done = true;
       scrollToBottom();
+    } finally {
+      if (streamToken === activeStreamToken && activeFetchController === controller) {
+        activeFetchController = null;
+      }
     }
   }
 

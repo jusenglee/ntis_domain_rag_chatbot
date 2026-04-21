@@ -18,6 +18,7 @@ def encode_stream_event(event: StreamEvent) -> str:
         "seq": event.seq,
         "model_key": event.model_key,
         "content": event.content,
+        "references": event.references,
         "meta": dict(event.meta or {}),
     }
     return encode_sse_payload("event", event=payload)

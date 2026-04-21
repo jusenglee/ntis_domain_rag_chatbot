@@ -548,10 +548,25 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             """graph 이벤트를 route 레벨 SSE 규약으로 변환해 순차 전송한다."""
             route_seq = 0
 
-            def _next_route_event(*, kind: str, model_key: Optional[str] = None, content: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> StreamEvent:
+            def _next_route_event(
+                *,
+                kind: str,
+                model_key: Optional[str] = None,
+                content: Optional[str] = None,
+                references: Optional[list[dict[str, Any]]] = None,
+                meta: Optional[Dict[str, Any]] = None,
+            ) -> StreamEvent:
                 nonlocal route_seq
                 route_seq += 1
-                return StreamEvent(kind=kind, request_id=request_id, seq=route_seq, model_key=model_key, content=content, meta=dict(meta or {}))
+                return StreamEvent(
+                    kind=kind,
+                    request_id=request_id,
+                    seq=route_seq,
+                    model_key=model_key,
+                    content=content,
+                    references=references,
+                    meta=dict(meta or {}),
+                )
 
             if graph is None:
                 for payload_line in _emit_legacy_stream_event(
@@ -562,7 +577,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 ):
                     yield payload_line
                 for payload_line in _emit_legacy_stream_event(
-                    _next_route_event(kind="reference.set", meta={"references": []})
+                    _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
                 for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
@@ -571,6 +586,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             for payload_line in _emit_legacy_stream_event(
                 _next_route_event(
                     kind="conversation",
+                    content=conversation_id,
                     meta={"conversation_id": conversation_id},
                 )
             ):
@@ -783,6 +799,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
                 ref_event = _next_route_event(
                     kind="reference.set",
+                    content="null",
+                    references=ref_docs,
                     meta={"references": ref_docs},
                 )
                 for payload_line in _emit_legacy_stream_event(ref_event):
@@ -853,7 +871,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     ):
                         yield payload_line
                     for payload_line in _emit_legacy_stream_event(
-                        _next_route_event(kind="reference.set", meta={"references": []})
+                        _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                     ):
                         yield payload_line
                     for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"degraded": True})):
@@ -867,7 +885,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 ):
                     yield payload_line
                 for payload_line in _emit_legacy_stream_event(
-                    _next_route_event(kind="reference.set", meta={"references": []})
+                    _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
                 for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
