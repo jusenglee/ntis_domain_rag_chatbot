@@ -1,15 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Any
-
-
-_TRUTHY = {"1", "true", "yes", "y", "on"}
-
-
-def env_flag(name: str, default: str = "0") -> bool:
-    return str(os.getenv(name, default)).strip().lower() in _TRUTHY
-
 
 def env_int(name: str, default: int, *, min_value: int | None = None) -> int:
     raw = str(os.getenv(name, str(default)) or "").strip()
@@ -23,19 +14,17 @@ def env_int(name: str, default: int, *, min_value: int | None = None) -> int:
 
 
 def agent_tool_enabled(flag_name: str | None) -> bool:
-    if not flag_name:
-        return True
-    return env_flag(flag_name, "0")
+    """Return whether an implemented agent tool can execute.
+
+    Agentic dialogue is now the normal front-controller path, so implemented
+    tools are not runtime-gated by rollout flags. Tools that are not ready must
+    stay declared with ``implemented=False`` in the registry.
+    """
+
+    return True
 
 
-def agentic_dialogue_enabled(overrides: dict[str, Any] | None = None) -> bool:
-    """Return whether the agentic dialogue workflow path is enabled."""
+def agentic_max_steps() -> int:
+    """Return the reserved agent loop guard threshold for tool execution."""
 
-    if isinstance(overrides, dict):
-        for key in ("AGENTIC_DIALOGUE_ENABLED", "agentic_dialogue_enabled"):
-            if key in overrides:
-                value = overrides.get(key)
-                if isinstance(value, bool):
-                    return value
-                return str(value).strip().lower() in _TRUTHY
-    return env_flag("AGENTIC_DIALOGUE_ENABLED", "0")
+    return env_int("AGENTIC_MAX_STEPS", 3, min_value=1)

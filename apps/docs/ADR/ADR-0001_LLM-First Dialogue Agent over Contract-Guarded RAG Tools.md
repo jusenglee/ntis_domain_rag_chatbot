@@ -871,6 +871,11 @@ AGENT.TOOL_OBSERVATION
 AGENT.CLARIFICATION
 AGENT.CONTRACT_BLOCKED
 AGENT.STATE_CARD.BUILT
+AGENT.DIRECT_ANSWER
+AGENT.LEGACY_FALLBACK
+AGENT.LOOP_GUARD.TRIGGERED
+LEGACY.PIPELINE.DECISION
+AGENT.LEGACY_DIFF
 
 예:
 
@@ -891,7 +896,7 @@ AGENTIC_DIALOGUE_ENABLED=false
 AGENTIC_SHADOW_MODE=true
 Stage 1. Guarded Tool Path (current)
 `AGENTIC_DIALOGUE_ENABLED=true`이면 user-visible workflow가 agent direct/tool/clarification path로 진입한다.
-`search_ntis_domain`과 `refine_current_subject`는 각 tool flag가 켜진 경우 guarded intent를 만들어 기존 retrieval path에 합류하고, 다른 질문은 agent clarification 또는 contract block으로 닫고 legacy fallback으로 넘기지 않는다.
+`search_ntis_domain`과 `refine_current_subject`는 각 tool flag가 켜진 경우 guarded intent를 만들어 기존 retrieval path에 합류한다. 단계적 rollout에서 disabled data tool은 `AGENT.LEGACY_FALLBACK`을 남기고 legacy pipeline으로 넘길 수 있으나, unknown/unimplemented tool과 contract violation은 clarification 또는 contract block으로 닫는다.
 AGENTIC_DIALOGUE_ENABLED=true
 AGENTIC_TOOL_REFINE_SUBJECT_ENABLED=true
 AGENTIC_TOOL_SEARCH_ENABLED=true

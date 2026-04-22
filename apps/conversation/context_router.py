@@ -318,7 +318,7 @@ async def run_context_router(
             ]
         )
         router_llm = llm.bind(
-            reasoning_effort="low",
+            reasoning_effort="high",
             include_reasoning=False,
             disable_thinking=PLANNER_DISABLE_THINKING,
             temperature=PLANNER_TEMPERATURE,

@@ -248,6 +248,9 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     """Extract summary log fields from workflow state without pulling in app boot imports."""
 
     question_analysis = getattr(state, "question_analysis", None)
+    agent_decision = getattr(state, "agent_decision", None)
+    agent_observation = getattr(state, "agent_observation", None)
+    agent_context_meta = dict(getattr(state, "agent_context_meta", {}) or {})
     strategy = getattr(state, "strategy", None)
     intent_payload = getattr(state, "intent_payload", None)
     retrieval_runtime_meta = dict(getattr(state, "retrieval_runtime_meta", {}) or {})
@@ -387,6 +390,16 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "reranked_count": timings.get("info.reranked_count"),
         "degraded": int(bool(getattr(state, "degraded", False))),
         "total_ms": total_ms,
+        "agent_front_controller": 1,
+        "agent_decision_type": getattr(agent_decision, "decision_type", None),
+        "agent_tool_name": getattr(agent_decision, "tool_name", None),
+        "agent_current_context_type": agent_context_meta.get("current_context_type"),
+        "agent_subject_name": agent_context_meta.get("subject_name"),
+        "agent_observation_type": getattr(agent_observation, "observation_type", None),
+        "agent_contract_blocked": int(
+            str(getattr(agent_observation, "observation_type", "") or "") == "contract_violation"
+        ),
+        "agent_loop_guard_triggered": int(bool(getattr(state, "agent_loop_guard_triggered", False))),
         # L2 layer fields
         "l2_orchestrator_owned": retrieval_runtime_meta.get("orchestrator_owned"),
         "l2_policy_name": retrieval_runtime_meta.get("policy_name"),
@@ -394,4 +407,3 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
         "l2_recovery_applied": retrieval_runtime_meta.get("recovery_applied"),
         "l2_legacy_retry_allowed": retrieval_runtime_meta.get("legacy_retry_allowed"),
     }
-

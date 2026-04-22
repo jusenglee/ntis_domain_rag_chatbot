@@ -645,7 +645,7 @@ async def run_planner_stage1(
         ]
     )
     planner_llm = llm.bind(
-        reasoning_effort="low",
+        reasoning_effort="high",
         include_reasoning=False,
         disable_thinking=PLANNER_DISABLE_THINKING,
         temperature=PLANNER_TEMPERATURE,
@@ -702,7 +702,7 @@ async def run_planner_stage15(
         ]
     )
     planner_llm = llm.bind(
-        reasoning_effort="low",
+        reasoning_effort="high",
         include_reasoning=False,
         disable_thinking=PLANNER_DISABLE_THINKING,
         temperature=PLANNER_TEMPERATURE,

@@ -70,6 +70,31 @@ def _fail_closed_decision(*, reason: str, confidence: float = 0.0) -> AgentDecis
     )
 
 
+def _safe_tool_arg_fields(tool_args: Dict[str, Any]) -> Dict[str, Any]:
+    args = dict(tool_args or {})
+    fields: Dict[str, Any] = {}
+    for key in (
+        "subject_ref",
+        "domain_head",
+        "people_name",
+        "org_name",
+        "perf_type",
+        "year_from",
+        "year_to",
+        "role",
+        "target",
+        "limit",
+    ):
+        value = args.get(key)
+        if value not in (None, "", [], {}):
+            fields[key] = value
+    query = str(args.get("query") or "").strip()
+    if query:
+        fields["query_chars"] = len(query)
+        fields["query_preview"] = query[:80] + ("...(truncated)" if len(query) > 80 else "")
+    return fields
+
+
 def _validate_tool_decision(
     decision: AgentDecision,
     *,
@@ -86,25 +111,54 @@ def _validate_tool_decision(
     return decision
 
 
+def _card_meta_from_card(conversation_state_card: str) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    for raw_line in str(conversation_state_card or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("current_context_type:"):
+            meta["current_context_type"] = line.split(":", 1)[1].strip() or None
+        elif line.startswith("current subject:"):
+            subject = line.split(":", 1)[1].strip()
+            if not subject or subject == "none confirmed":
+                continue
+            if subject.endswith(")") and "(" in subject:
+                name, kind = subject.rsplit("(", 1)
+                meta["subject_name"] = name.strip()
+                meta["subject_kind"] = kind[:-1].strip() or None
+            else:
+                meta["subject_name"] = subject
+        elif line.startswith("refinement_allowed:"):
+            meta["refinement_allowed"] = line.split(":", 1)[1].strip().lower() == "yes"
+    return meta
+
+
 def _log_agent_decision(
     *,
     decision: AgentDecision,
     request_id: str,
     conversation_id: str,
+    turn_id: str,
     current_context_type: Optional[str],
+    subject_kind: Optional[str],
+    subject_name: Optional[str],
 ) -> None:
     try:
         from apps.api.runtime_helpers import log_event
 
+        tool_arg_fields = _safe_tool_arg_fields(decision.tool_args)
         log_event(
             "AGENT.DECISION",
             request_id=request_id,
             conversation_id=conversation_id,
+            turn_id=turn_id,
             decision_type=decision.decision_type,
             tool_name=decision.tool_name,
             confidence=round(float(decision.confidence), 3),
             current_context_type=current_context_type,
+            subject_kind=subject_kind,
+            subject_name=subject_name,
             reasoning_summary=decision.reasoning_summary,
+            **tool_arg_fields,
         )
     except Exception:
         pass
@@ -125,6 +179,7 @@ async def run_dialogue_agent(
     available_tools: Optional[List[AgentToolSpec]] = None,
     request_id: str,
     conversation_id: str,
+    turn_id: str = "",
     invoke_model: Optional[AgentModelInvoker] = None,
 ) -> AgentDecision:
     """Run the LLM-first dialogue router.
@@ -169,10 +224,14 @@ async def run_dialogue_agent(
     except Exception as exc:
         decision = _fail_closed_decision(reason=f"dialogue_agent_parse_or_invoke_error:{type(exc).__name__}")
 
+    card_meta = _card_meta_from_card(conversation_state_card)
     _log_agent_decision(
         decision=decision,
         request_id=request_id,
         conversation_id=conversation_id,
-        current_context_type=_context_type_from_card(conversation_state_card),
+        turn_id=turn_id,
+        current_context_type=card_meta.get("current_context_type") or _context_type_from_card(conversation_state_card),
+        subject_kind=card_meta.get("subject_kind"),
+        subject_name=card_meta.get("subject_name"),
     )
     return decision

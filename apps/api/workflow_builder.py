@@ -4,7 +4,6 @@ from typing import Any
 
 from apps.api.contracts.workflow_models import AgentState
 from apps.api.workflow_nodes import (
-    node_analyze_question,
     node_agent_clarification,
     node_agent_direct_answer,
     node_build_conversation_state_card,
@@ -21,7 +20,6 @@ from apps.chat.answer_generation import (
     node_generate_answer_solar,
     node_merge_answers,
 )
-from apps.conversation.agent_flags import agentic_dialogue_enabled
 from apps.retrieval.runtime_routing import decide_post_retrieval_route
 from apps.retrieval.retrieval_workflow import node_knowledge_sufficiency, node_rag_search, node_relax_and_retry
 
@@ -29,14 +27,12 @@ from apps.retrieval.retrieval_workflow import node_knowledge_sufficiency, node_r
 # 재시도 상한: 기본 검색 1회 + 재시도 N회 = 총 (1 + N)회 검색
 # ---------------------------------------------------------------------------
 def route_after_rule(state: Any) -> str:
-    """Route direct-answer prechecks or feature-flagged agent path."""
+    """Route direct-answer prechecks or the normal agent front-controller path."""
 
     rule_decision = getattr(state, "rule_decision", None)
     if rule_decision and getattr(rule_decision, "action", None) == "direct_answer":
         return "direct_answer"
-    if agentic_dialogue_enabled(getattr(state, "request_overrides", None)):
-        return "build_conversation_state_card"
-    return "analyze_question"
+    return "build_conversation_state_card"
 
 
 def route_after_agent_decision(state: Any) -> str:
@@ -104,7 +100,6 @@ def build_request_workflow() -> Any:
     workflow.add_node("execute_agent_tool", node_execute_agent_tool)
     workflow.add_node("agent_direct_answer", node_agent_direct_answer)
     workflow.add_node("agent_clarification", node_agent_clarification)
-    workflow.add_node("analyze_question", node_analyze_question)
     workflow.add_node("judge_knowledge_sufficiency", node_knowledge_sufficiency)
     workflow.add_node("rag_search", node_rag_search)
     workflow.add_node("relax_and_retry", node_relax_and_retry)
@@ -123,7 +118,6 @@ def build_request_workflow() -> Any:
         {
             "direct_answer": "direct_answer",
             "build_conversation_state_card": "build_conversation_state_card",
-            "analyze_question": "analyze_question",
         },
     )
 
@@ -146,7 +140,6 @@ def build_request_workflow() -> Any:
         },
     )
 
-    workflow.add_edge("analyze_question", "judge_knowledge_sufficiency")
     workflow.add_conditional_edges(
         "judge_knowledge_sufficiency",
         route_after_knowledge_sufficiency,

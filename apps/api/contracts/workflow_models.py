@@ -450,10 +450,12 @@ class AgentState(BaseModel):
     knowledge_sufficiency: Optional[KnowledgeSufficiency] = None
     intent_payload: Optional[IntentPayloadV3] = None
     conversation_state_card: str = ""
+    agent_context_meta: Dict[str, Any] = Field(default_factory=dict)
     agent_decision: Optional[AgentDecision] = None
     agent_observation: Optional[AgentObservation] = None
     agent_tool_intent_payload: Optional[IntentPayloadV3] = None
     agent_tool_question_analysis: Optional[QuestionAnalysis] = None
+    agent_loop_guard_triggered: bool = False
     search_retry_count: int = 0
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:

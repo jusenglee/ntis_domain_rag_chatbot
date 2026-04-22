@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
@@ -16,10 +17,14 @@ from apps.api.runtime_helpers import (
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.conversation.agent_contracts import AgentDecision
 from apps.conversation.agent_dialogue_router import run_dialogue_agent
+from apps.conversation.agent_flags import agentic_max_steps
 from apps.conversation.agent_observation import AgentObservation, AgentToolExecutionResult
 from apps.conversation.agent_tool_executor import execute_agent_tool
 from apps.conversation.agent_tools import default_agent_tool_specs
-from apps.conversation.conversation_state_card import build_conversation_state_card
+from apps.conversation.conversation_state_card import (
+    build_conversation_state_card_model,
+    render_conversation_state_card,
+)
 from apps.conversation.conversation_store import (
     build_save_history_payload,
     load_conversation_memory_from_store,
@@ -32,7 +37,6 @@ from apps.conversation.raw_payload_store import (
     sync_active_anchor_record,
 )
 from apps.conversation.memory_observer import log_memory_snapshot
-from apps.conversation.request_facade import build_intent_payload
 from apps.conversation.entity_reference import ClarificationRequest
 from apps.conversation.session_memory import ClarificationContext, EmptyContext
 from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
@@ -40,6 +44,104 @@ from apps.platform.settings import REDIS_TTL
 
 _MAX_HISTORY_TURNS = 10
 _HISTORY_PREVIEW_LIMIT = 100
+_AGENT_QUERY_PREVIEW_LIMIT = 80
+
+
+def _agent_base_fields(state: Any) -> Dict[str, Any]:
+    return {
+        "request_id": getattr(state, "request_id", None),
+        "conversation_id": getattr(state, "conversation_id", None),
+        "turn_id": getattr(state, "turn_id", None),
+    }
+
+
+def _agent_context_meta_from_card_model(card_model: Any) -> Dict[str, Any]:
+    constraints = dict(getattr(card_model, "unresolved_constraints", {}) or {})
+    return {
+        "current_context_type": getattr(card_model, "current_context_type", None),
+        "subject_kind": getattr(card_model, "current_subject_kind", None),
+        "subject_name": getattr(card_model, "current_subject_name", None),
+        "refinement_allowed": bool(getattr(card_model, "refinement_allowed", False)),
+        "last_publication_status": getattr(card_model, "last_publication_status", None),
+        "unresolved_constraint_keys": sorted(constraints.keys()),
+    }
+
+
+def _agent_context_fields(state: Any) -> Dict[str, Any]:
+    meta = getattr(state, "agent_context_meta", None)
+    if isinstance(meta, dict) and meta:
+        return {
+            "current_context_type": meta.get("current_context_type"),
+            "subject_kind": meta.get("subject_kind"),
+            "subject_name": meta.get("subject_name"),
+            "refinement_allowed": meta.get("refinement_allowed"),
+            "last_publication_status": meta.get("last_publication_status"),
+        }
+    return {}
+
+
+def _safe_agent_tool_arg_fields(tool_args: Dict[str, Any]) -> Dict[str, Any]:
+    args = dict(tool_args or {})
+    fields: Dict[str, Any] = {}
+    for key in (
+        "subject_ref",
+        "domain_head",
+        "people_name",
+        "org_name",
+        "perf_type",
+        "year_from",
+        "year_to",
+        "role",
+        "target",
+        "limit",
+    ):
+        value = args.get(key)
+        if value not in (None, "", [], {}):
+            fields[key] = value
+    query = str(args.get("query") or "").strip()
+    if query:
+        fields["query_chars"] = len(query)
+        fields["query_preview"] = truncate_text(query, _AGENT_QUERY_PREVIEW_LIMIT)
+    return fields
+
+
+def _agent_decision_fields(decision: Any) -> Dict[str, Any]:
+    return {
+        "decision_type": getattr(decision, "decision_type", None),
+        "tool_name": getattr(decision, "tool_name", None),
+        "confidence": round(float(getattr(decision, "confidence", 0.0) or 0.0), 3),
+        **_safe_agent_tool_arg_fields(dict(getattr(decision, "tool_args", None) or {})),
+    }
+
+
+def _observation_reason(observation: Any) -> str | None:
+    warnings = list(getattr(observation, "warnings", []) or [])
+    if warnings:
+        return str(warnings[0])
+    summary = str(getattr(observation, "summary", "") or "").strip()
+    return summary or None
+
+
+def _agent_tool_call_fingerprint(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    return json.dumps(
+        {"tool_name": str(tool_name or ""), "tool_args": dict(tool_args or {})},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _loop_guard_triggered(state: Any, *, tool_name: str, tool_args: Dict[str, Any]) -> bool:
+    trace = list(getattr(state, "execution_trace", []) or [])
+    fingerprint = _agent_tool_call_fingerprint(tool_name, tool_args)
+    agent_calls = [
+        item
+        for item in trace
+        if isinstance(item, dict) and item.get("stage") == "agent_tool_call"
+    ]
+    if len(agent_calls) >= agentic_max_steps():
+        return True
+    return any(item.get("fingerprint") == fingerprint for item in agent_calls)
 
 
 def is_short_query_exception(raw_query: str) -> bool:
@@ -147,32 +249,6 @@ async def node_rule_precheck(state: Any) -> Dict[str, Any]:
     }
 
 
-async def node_analyze_question(state: Any) -> Dict[str, Any]:
-    """Build intent payload and planner output when they are not already present."""
-
-    if state.question_analysis and state.intent_payload:
-        return {
-            "question_analysis": state.question_analysis,
-            "intent_payload": state.intent_payload,
-        }
-
-    intent_payload, question_analysis = await build_intent_payload(
-        question=state.messages[-1].content,
-        conversation_id=state.conversation_id,
-        chat_history=state.chat_history,
-        prev_context=state.prev_context,
-        canonical_evidence=getattr(state, "canonical_evidence", None) or [],
-        view_state=getattr(state, "view_state", None),
-        session_memory=getattr(state, "session_memory", None),
-        request_id=getattr(state, "request_id", None),
-        turn_id=getattr(state, "turn_id", None),
-    )
-    return {
-        "question_analysis": question_analysis,
-        "intent_payload": intent_payload,
-    }
-
-
 async def node_direct_answer(state: Any) -> Dict[str, Any]:
     """Return a direct-answer artifact when the rule precheck short-circuits."""
 
@@ -206,18 +282,21 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
 async def node_build_conversation_state_card(state: Any) -> Dict[str, Any]:
     """Build the LLM-readable state card from official session memory."""
 
-    card = build_conversation_state_card(
+    card_model = build_conversation_state_card_model(
         session_memory=getattr(state, "session_memory", None),
         view_state=getattr(state, "view_state", None),
         selected_answer_meta=getattr(state, "selected_answer_meta", None),
     )
+    card = render_conversation_state_card(card_model)
+    context_meta = _agent_context_meta_from_card_model(card_model)
     log_event(
         "AGENT.STATE_CARD.BUILT",
-        request_id=getattr(state, "request_id", None),
-        conversation_id=getattr(state, "conversation_id", None),
+        **_agent_base_fields(state),
         card_chars=len(card),
+        front_controller=True,
+        **context_meta,
     )
-    return {"conversation_state_card": card}
+    return {"conversation_state_card": card, "agent_context_meta": context_meta}
 
 
 async def node_run_dialogue_agent(state: Any) -> Dict[str, Any]:
@@ -232,6 +311,7 @@ async def node_run_dialogue_agent(state: Any) -> Dict[str, Any]:
         available_tools=default_agent_tool_specs(),
         request_id=str(getattr(state, "request_id", "") or ""),
         conversation_id=str(getattr(state, "conversation_id", "") or ""),
+        turn_id=str(getattr(state, "turn_id", "") or ""),
     )
     return {"agent_decision": decision}
 
@@ -289,26 +369,81 @@ async def node_execute_agent_tool(state: Any) -> Dict[str, Any]:
     decision = getattr(state, "agent_decision", None)
     tool_name = str(getattr(decision, "tool_name", "") or "")
     tool_args = dict(getattr(decision, "tool_args", None) or {})
+    decision_fields = _agent_decision_fields(decision)
+    context_fields = _agent_context_fields(state)
+
+    if _loop_guard_triggered(state, tool_name=tool_name, tool_args=tool_args):
+        observation = AgentObservation(
+            observation_type="contract_violation",
+            summary="Agent loop guard stopped repeated tool execution.",
+            warnings=["agent_loop_guard_triggered"],
+        )
+        log_event(
+            "AGENT.LOOP_GUARD.TRIGGERED",
+            **_agent_base_fields(state),
+            **context_fields,
+            **decision_fields,
+        )
+        return {
+            "agent_observation": observation,
+            "agent_loop_guard_triggered": True,
+            "agent_tool_intent_payload": None,
+            "agent_tool_question_analysis": None,
+        }
+
+    log_event(
+        "AGENT.TOOL_CALL",
+        **_agent_base_fields(state),
+        **context_fields,
+        **decision_fields,
+    )
+    execution_trace = list(getattr(state, "execution_trace", []) or [])
+    execution_trace.append(
+        {
+            "stage": "agent_tool_call",
+            "tool_name": tool_name,
+            "fingerprint": _agent_tool_call_fingerprint(tool_name, tool_args),
+        }
+    )
     result = _coerce_agent_tool_result(
         await execute_agent_tool(tool_name=tool_name, tool_args=tool_args, state=state)
     )
     observation = result.observation
+    structured_refs = dict(getattr(observation, "structured_refs", {}) or {})
+    generated_question = str(structured_refs.get("generated_question") or "").strip()
     updates: Dict[str, Any] = {
         "agent_observation": observation,
         "agent_tool_intent_payload": result.intent_payload,
         "agent_tool_question_analysis": result.question_analysis,
+        "execution_trace": execution_trace,
     }
     if observation.observation_type == "planned_intent" and result.intent_payload and result.question_analysis:
         updates["intent_payload"] = result.intent_payload
         updates["question_analysis"] = result.question_analysis
     log_event(
         "AGENT.TOOL_OBSERVATION",
-        request_id=getattr(state, "request_id", None),
-        conversation_id=getattr(state, "conversation_id", None),
+        **_agent_base_fields(state),
+        **context_fields,
         tool_name=tool_name,
         observation_type=observation.observation_type,
         warnings=list(observation.warnings or []),
+        has_intent_payload=bool(result.intent_payload),
+        has_question_analysis=bool(result.question_analysis),
+        structured_ref_keys=sorted(structured_refs.keys()),
+        generated_question_chars=len(generated_question) if generated_question else None,
+        generated_question_preview=truncate_text(generated_question, _AGENT_QUERY_PREVIEW_LIMIT)
+        if generated_question
+        else None,
     )
+    if observation.observation_type == "contract_violation":
+        log_event(
+            "AGENT.CONTRACT_BLOCKED",
+            **_agent_base_fields(state),
+            **context_fields,
+            tool_name=tool_name,
+            contract_block_reason=_observation_reason(observation),
+            warnings=list(observation.warnings or []),
+        )
     return updates
 
 
@@ -329,6 +464,13 @@ async def node_agent_direct_answer(state: Any) -> Dict[str, Any]:
             "model_key": "agent",
             "agent_decision": _agent_decision_meta(decision),
         },
+    )
+    log_event(
+        "AGENT.DIRECT_ANSWER",
+        **_agent_base_fields(state),
+        **_agent_context_fields(state),
+        **_agent_decision_fields(decision),
+        answer_chars=len(response_text),
     )
     return {
         "answer_gemma": response_text,
@@ -384,6 +526,15 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
             "agent_decision": _agent_decision_meta(decision),
             "agent_observation": _agent_observation_meta(observation),
         },
+    )
+    log_event(
+        "AGENT.CLARIFICATION",
+        **_agent_base_fields(state),
+        **_agent_context_fields(state),
+        **_agent_decision_fields(decision),
+        observation_type=observation_type,
+        clarification_reason=_observation_reason(observation) or str(getattr(decision, "reasoning_summary", "") or ""),
+        answer_chars=len(response_text),
     )
     return {
         "answer_gemma": response_text,
