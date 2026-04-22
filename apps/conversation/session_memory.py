@@ -56,6 +56,9 @@ class SubjectQueryContext(BaseModel):
 class ClarificationContext(BaseModel):
     context_type: Literal["clarification"] = "clarification"
     reason: Optional[str] = None
+    unresolved_question: Optional[str] = None
+    unresolved_constraints: Dict[str, Any] = Field(default_factory=dict)
+    requested_refinement: Dict[str, Any] = Field(default_factory=dict)
     followup_rights: FollowupRights = Field(default_factory=FollowupRights)
 
 
@@ -136,8 +139,154 @@ def _as_payload(value: Any) -> Dict[str, Any]:
 
 
 def _normalized_intent_payload(intent_payload: Any) -> Dict[str, Any]:
-    normalized_intent = getattr(intent_payload, "normalized_intent", None)
+    normalized_intent = (
+        intent_payload.get("normalized_intent")
+        if isinstance(intent_payload, dict)
+        else getattr(intent_payload, "normalized_intent", None)
+    )
     return _as_payload(normalized_intent)
+
+
+def _question_analysis_payload(intent_payload: Any) -> Dict[str, Any]:
+    question_analysis = (
+        intent_payload.get("question_analysis")
+        if isinstance(intent_payload, dict)
+        else getattr(intent_payload, "question_analysis", None)
+    )
+    return _as_payload(question_analysis)
+
+
+def _strategy_meta_payload(intent_payload: Any) -> Dict[str, Any]:
+    strategy_meta = (
+        intent_payload.get("strategy_meta")
+        if isinstance(intent_payload, dict)
+        else getattr(intent_payload, "strategy_meta", None)
+    )
+    return _as_payload(strategy_meta)
+
+
+def _clean_list(values: Any) -> List[str]:
+    if values is None:
+        return []
+    iterable = values if isinstance(values, (list, tuple, set)) else [values]
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in iterable:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _infer_subject_kind_hint(question: str, normalized_intent: Dict[str, Any], strategy_meta: Dict[str, Any]) -> Optional[str]:
+    turn_interpretation = _as_payload(strategy_meta.get("turn_interpretation"))
+    target_kind = str(turn_interpretation.get("target_entity_kind") or "").strip().lower()
+    if target_kind in {"people", "org", "project", "perf"}:
+        return target_kind
+    if _clean_list(normalized_intent.get("people_terms")):
+        return "people"
+    if _clean_list(
+        normalized_intent.get("org_terms")
+        or normalized_intent.get("lead_org_terms")
+        or normalized_intent.get("participant_org_terms")
+        or normalized_intent.get("people_affiliation_org_terms")
+    ):
+        return "org"
+    text = str(question or "").strip().lower()
+    if any(token in text for token in ("연구자", "연구원", "연구책임자", "참여연구원", "researcher", "pi")):
+        return "people"
+    if any(token in text for token in ("기관", "회사", "조직", "소속", "org")):
+        return "org"
+    return None
+
+
+def _researcher_role_from_question(question: str) -> Optional[str]:
+    text = str(question or "").strip().lower()
+    if not text:
+        return None
+    if any(token in text for token in ("연구책임자", "책임자", "principal investigator", "pi")):
+        return "연구책임자"
+    if any(token in text for token in ("참여연구원", "참여 연구원", "참여자")):
+        return "참여연구원"
+    return None
+
+
+def _clarification_reason_from_payload(answer_meta: Dict[str, Any], strategy_meta: Dict[str, Any]) -> Optional[str]:
+    if answer_meta.get("clarification") or str(answer_meta.get("answer_kind") or "").strip().lower() == "clarification":
+        return str(answer_meta.get("clarification_reason") or "clarification").strip() or "clarification"
+    status = str(strategy_meta.get("followup_resolution_status") or "").strip().lower()
+    clarification_payload = _as_payload(strategy_meta.get("clarification_payload"))
+    if status == "clarification_required" or clarification_payload:
+        return (
+            str(
+                clarification_payload.get("reason")
+                or strategy_meta.get("clarification_reason")
+                or strategy_meta.get("turn_policy_blocked_reason")
+                or "clarification"
+            ).strip()
+            or "clarification"
+        )
+    count_status = str(strategy_meta.get("count_contract_validation_status") or "").strip().lower()
+    if count_status == "invalid":
+        return str(strategy_meta.get("count_contract_invalid_reason") or "planner_count_contract").strip()
+    return None
+
+
+def _build_unresolved_constraint_snapshot(
+    *,
+    intent_payload: Any,
+    answer_meta: Dict[str, Any],
+) -> tuple[Optional[str], Dict[str, Any], Dict[str, Any]]:
+    normalized_intent = _normalized_intent_payload(intent_payload)
+    question_analysis = _question_analysis_payload(intent_payload)
+    strategy_meta = _strategy_meta_payload(intent_payload)
+    filters = _as_payload(question_analysis.get("filters"))
+    turn_interpretation = _as_payload(strategy_meta.get("turn_interpretation"))
+    requested_refinement = _as_payload(turn_interpretation.get("requested_refinement"))
+    question = _first_text(
+        question_analysis.get("retrieval_query"),
+        normalized_intent.get("retrieval_query"),
+        strategy_meta.get("requested_token"),
+    )
+
+    constraints: Dict[str, Any] = {}
+    for key in (
+        "base_route",
+        "action",
+        "output_type",
+        "year_from",
+        "year_to",
+        "org_role",
+    ):
+        value = _first_text(normalized_intent.get(key), question_analysis.get(key))
+        if value:
+            constraints[key] = value
+    for key in (
+        "years",
+        "perf_types",
+        "title",
+        "project_tag_filters",
+        "perf_tag_filters",
+        "tag_filters",
+    ):
+        values = _clean_list(normalized_intent.get(key) or filters.get(key))
+        if values:
+            constraints[key] = values
+
+    role = _researcher_role_from_question(question)
+    if role:
+        constraints["researcher_role"] = role
+    subject_kind_hint = _infer_subject_kind_hint(question, normalized_intent, strategy_meta)
+    if subject_kind_hint:
+        constraints["subject_kind_hint"] = subject_kind_hint
+
+    if answer_meta:
+        constraints["answer_kind"] = str(answer_meta.get("answer_kind") or "").strip() or None
+        constraints = {key: value for key, value in constraints.items() if value not in (None, "", [], {})}
+
+    return question or None, constraints, requested_refinement
 
 
 def _subject_seed_from_intent(intent_payload: Any) -> tuple[Optional[str], Optional[str]]:
@@ -260,6 +409,8 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
             "last_answer_publishability": "blocked",
             "last_followup_rights": "none",
             "clarification_reason": context.reason,
+            "unresolved_question": context.unresolved_question,
+            "unresolved_constraint_keys": sorted((context.unresolved_constraints or {}).keys()),
         }
 
     return base
@@ -331,6 +482,8 @@ def build_current_context(
         return EmptyContext()
 
     answer_meta = dict(selected_answer_meta or {})
+    strategy_meta = _strategy_meta_payload(intent_payload)
+    clarification_reason = _clarification_reason_from_payload(answer_meta, strategy_meta)
     publishability = str(answer_meta.get("answer_publishability") or "").strip().lower()
     visible_snapshot = getattr(view_state, "visible_answer_manifest", None)
     active_scope = getattr(view_state, "active_scope", None)
@@ -360,8 +513,17 @@ def build_current_context(
     if publishability == "publishable" and isinstance(focus, FocusEntity):
         return DetailAnchorContext(anchor=focus)
 
-    if answer_meta.get("clarification") or answer_meta.get("answer_kind") == "clarification":
-        return ClarificationContext(reason=str(answer_meta.get("clarification_reason") or "clarification"))
+    if clarification_reason:
+        unresolved_question, unresolved_constraints, requested_refinement = _build_unresolved_constraint_snapshot(
+            intent_payload=intent_payload,
+            answer_meta=answer_meta,
+        )
+        return ClarificationContext(
+            reason=clarification_reason,
+            unresolved_question=unresolved_question,
+            unresolved_constraints=unresolved_constraints,
+            requested_refinement=requested_refinement,
+        )
 
     return EmptyContext()
 

@@ -41,6 +41,20 @@ _SUBJECT_REFINEMENT_CUES = (
     "최근",
     "연도",
     "년도",
+    "연구책임자",
+    "책임자",
+    "참여연구원",
+    "참여 연구원",
+    "참여자",
+    "pi",
+    "principal investigator",
+    "역할",
+    "최신순",
+    "오래된순",
+    "상위",
+    "하위",
+    "건만",
+    "개만",
 )
 
 
@@ -115,8 +129,10 @@ def _has_subject_refinement_cue(question: str) -> bool:
     if parse_source_reference(text) is not None or parse_ordinal_reference(text) is not None:
         return False
     if parse_relative_reference(text) is not None or is_referential_followup(text):
-        return False
-    return bool(_YEAR_OR_RANGE_RE.search(text) or any(cue in text for cue in _SUBJECT_REFINEMENT_CUES))
+        if not any(cue in text.lower() for cue in _SUBJECT_REFINEMENT_CUES) and not _YEAR_OR_RANGE_RE.search(text):
+            return False
+    lowered = text.lower()
+    return bool(_YEAR_OR_RANGE_RE.search(text) or any(cue in lowered for cue in _SUBJECT_REFINEMENT_CUES))
 
 
 def _has_subject_context(summary: Dict[str, Any]) -> bool:
@@ -159,6 +175,14 @@ def _heuristic_turn_trigger(
             reason="ordinal_token",
         )
 
+    if _has_subject_context(summary) and _has_subject_refinement_cue(question):
+        return TurnTriggerResult(
+            turn_intent="followup",
+            reference_style="refinement",
+            confidence=0.9,
+            reason="subject_refinement",
+        )
+
     if not _has_previous_state(summary):
         return TurnTriggerResult(
             turn_intent="fresh",
@@ -173,14 +197,6 @@ def _heuristic_turn_trigger(
             reference_style="deictic",
             confidence=0.62,
             reason="referential_cue",
-        )
-
-    if _has_subject_context(summary) and _has_subject_refinement_cue(question):
-        return TurnTriggerResult(
-            turn_intent="followup",
-            reference_style="refinement",
-            confidence=0.9,
-            reason="subject_refinement",
         )
 
     return TurnTriggerResult(

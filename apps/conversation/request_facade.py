@@ -36,7 +36,7 @@ from apps.conversation.turn_interpreter import (
 )
 from apps.conversation.turn_policy import TurnPolicyResult, resolve_turn_policy
 from apps.conversation.turn_trigger import TurnTriggerResult, run_turn_trigger
-from apps.conversation.session_memory import SessionMemory, view_state_from_current_context
+from apps.conversation.session_memory import ClarificationContext, SessionMemory, view_state_from_current_context
 from apps.platform.settings import MAX_TOP_K_SIZE
 from apps.api.runtime_helpers import log_event
 from apps.planner.planner_defaults import (
@@ -150,7 +150,26 @@ _SUBJECT_REFINEMENT_CUES = (
     "연도",
     "년도",
     "최근",
+    "연구책임자",
+    "책임자",
+    "참여연구원",
+    "참여 연구원",
+    "참여자",
+    "pi",
+    "principal investigator",
+    "역할",
+    "최신순",
+    "오래된순",
+    "상위",
+    "하위",
+    "건만",
+    "개만",
 )
+_SHORT_SUBJECT_WITH_AFFILIATION_RE = re.compile(
+    r"^\s*(?P<name>[가-힣A-Za-z][가-힣A-Za-z0-9·.\-&\s]{1,30}?)\s*"
+    r"\((?P<affiliation>[^()]{2,80})\)\s*$"
+)
+_SHORT_SUBJECT_BARE_RE = re.compile(r"^\s*(?P<name>[가-힣]{2,6}|[A-Za-z][A-Za-z .\-]{1,40})\s*$")
 _SUBJECT_TERM_STOPWORDS = {
     "그",
     "그런",
@@ -560,7 +579,8 @@ def _has_subject_refinement_signal(question: str, normalized_intent_base: Any) -
         if any(str(value or "").strip() for value in iterable):
             return True
     text = str(question or "").strip()
-    return bool(text and any(cue in text for cue in _SUBJECT_REFINEMENT_CUES))
+    lowered = text.lower()
+    return bool(text and any(cue in lowered for cue in _SUBJECT_REFINEMENT_CUES))
 
 
 def _apply_subject_context_seed(normalized_intent: Any, *, subject_kind: str, subject_name: str) -> Any:
@@ -661,6 +681,163 @@ def _merge_unique_terms(values: Any, *terms: Any) -> list[str]:
         seen.add(text)
         merged.append(text)
     return merged
+
+
+def _has_field_value(source: Any, field: str) -> bool:
+    values = _get_field(source, field, None)
+    if isinstance(values, (list, tuple, set)):
+        return any(str(value or "").strip() for value in values)
+    return bool(str(values or "").strip())
+
+
+def _parse_short_subject_supplement(question: str, constraints: Dict[str, Any]) -> Dict[str, str]:
+    text = re.sub(r"\s+", " ", str(question or "").strip())
+    if not text or len(text) > 90:
+        return {}
+    if any(token in text for token in ("?", "？", "보여", "알려", "정리", "찾아", "만", "까지", "부터")):
+        return {}
+
+    match = _SHORT_SUBJECT_WITH_AFFILIATION_RE.fullmatch(text)
+    if match:
+        name = _clean_explicit_subject_term(match.group("name"))
+        affiliation = _clean_explicit_subject_term(match.group("affiliation"))
+        if name:
+            return {
+                "kind": str(constraints.get("subject_kind_hint") or "people").strip().lower() or "people",
+                "name": name,
+                "affiliation": affiliation,
+            }
+
+    match = _SHORT_SUBJECT_BARE_RE.fullmatch(text)
+    if match:
+        name = _clean_explicit_subject_term(match.group("name"))
+        if name:
+            return {
+                "kind": str(constraints.get("subject_kind_hint") or "people").strip().lower() or "people",
+                "name": name,
+            }
+
+    return {}
+
+
+def _apply_unresolved_constraints_to_intent(
+    normalized_intent: Any,
+    *,
+    constraints: Dict[str, Any],
+    current_question: str,
+    unresolved_question: Optional[str],
+) -> Any:
+    updates: Dict[str, Any] = {}
+    for field in ("years", "perf_types", "title", "project_tag_filters", "perf_tag_filters", "tag_filters"):
+        values = constraints.get(field)
+        if values and not _has_field_value(normalized_intent, field):
+            updates[field] = _merge_unique_terms([], *(values if isinstance(values, (list, tuple, set)) else [values]))
+
+    if updates.get("years"):
+        if not _has_field_value(normalized_intent, "year_from"):
+            updates["year_from"] = updates["years"][0]
+        if not _has_field_value(normalized_intent, "year_to"):
+            updates["year_to"] = updates["years"][-1]
+    else:
+        for field in ("year_from", "year_to"):
+            value = str(constraints.get(field) or "").strip()
+            if value and not _has_field_value(normalized_intent, field):
+                updates[field] = value
+
+    for field in ("base_route", "action", "output_type"):
+        value = str(constraints.get(field) or "").strip().lower()
+        current_value = str(_get_field(normalized_intent, field, "") or "").strip().lower()
+        if value and (not current_value or current_value in {"topic", "summary"}):
+            updates[field] = value
+
+    role = str(constraints.get("researcher_role") or "").strip()
+    if role:
+        updates["keywords"] = _merge_unique_terms(_get_field(normalized_intent, "keywords", []) or [], role)
+
+    current_retrieval_query = str(_get_field(normalized_intent, "retrieval_query", "") or "").strip()
+    previous_query = str(unresolved_question or "").strip()
+    if previous_query and previous_query not in current_retrieval_query:
+        combined = f"{str(current_question or '').strip()} {previous_query}".strip()
+        if combined:
+            updates["retrieval_query"] = combined
+
+    return _replace_fields(normalized_intent, **updates) if updates else normalized_intent
+
+
+def _recover_clarification_subject_supplement(
+    *,
+    question: str,
+    normalized_intent_base: Any,
+    session_memory: Optional[SessionMemory],
+) -> tuple[Any, Dict[str, Any]]:
+    context = getattr(session_memory, "current_context", None) if session_memory is not None else None
+    if not isinstance(context, ClarificationContext):
+        return normalized_intent_base, {}
+
+    constraints = dict(context.unresolved_constraints or {})
+    if not constraints:
+        return normalized_intent_base, {}
+
+    supplement = _parse_short_subject_supplement(question, constraints)
+    if not supplement:
+        return normalized_intent_base, {}
+
+    kind = str(supplement.get("kind") or constraints.get("subject_kind_hint") or "people").strip().lower()
+    name = _clean_explicit_subject_term(supplement.get("name"))
+    affiliation = _clean_explicit_subject_term(supplement.get("affiliation"))
+    if not name or kind not in {"people", "org"}:
+        return normalized_intent_base, {}
+
+    recovered = normalized_intent_base
+    if kind == "people":
+        recovered = _replace_fields(
+            recovered,
+            people_terms=_merge_unique_terms(_get_field(recovered, "people_terms", []) or [], name),
+        )
+        if affiliation:
+            recovered = _replace_fields(
+                recovered,
+                people_affiliation_org_terms=_merge_unique_terms(
+                    _get_field(recovered, "people_affiliation_org_terms", []) or [],
+                    affiliation,
+                ),
+                org_role=str(_get_field(recovered, "org_role", "") or "").strip().lower() or "affiliation",
+            )
+    else:
+        recovered = _replace_fields(
+            recovered,
+            org_terms=_merge_unique_terms(_get_field(recovered, "org_terms", []) or [], name),
+        )
+
+    recovered = _apply_unresolved_constraints_to_intent(
+        recovered,
+        constraints=constraints,
+        current_question=question,
+        unresolved_question=context.unresolved_question,
+    )
+
+    return recovered, {
+        "applied": True,
+        "source": "clarification_context",
+        "reason": context.reason,
+        "subject_kind": kind,
+        "subject_name": name,
+        "affiliation": affiliation or None,
+        "restored_fields": sorted(
+            key
+            for key in (
+                "years",
+                "year_from",
+                "year_to",
+                "perf_types",
+                "output_type",
+                "action",
+                "base_route",
+                "researcher_role",
+            )
+            if constraints.get(key)
+        ),
+    }
 
 
 def _has_subject_axis_request(question: str, normalized_intent: Any) -> bool:
@@ -1332,6 +1509,7 @@ def _build_strategy_meta(
     turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
     context_router: Optional[Dict[str, Any]] = None,
+    clarification_recovery: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
 
     def _dump_meta_model(value: Any) -> Dict[str, Any]:
@@ -1378,6 +1556,7 @@ def _build_strategy_meta(
     turn_policy = dict(turn_policy or {})
     turn_candidates = list(turn_candidates or [])
     count_validation = dict(count_validation or {})
+    clarification_recovery = dict(clarification_recovery or {})
     context_router = dict(context_router or {})
     hard_contract = _dump_meta_model(_get_field(question_analysis, "hard_contract", None))
     soft_strategy_hints = _dump_meta_model(_get_field(question_analysis, "soft_strategy_hints", None))
@@ -1486,6 +1665,8 @@ def _build_strategy_meta(
         "context_router_invoked": bool(context_router.get("invoked")),
         "recent_mention_count": context_router.get("recent_mention_count"),
         "rewritten_query_hint": context_router.get("rewritten_query_hint"),
+        "clarification_recovery": clarification_recovery,
+        "clarification_recovery_applied": bool(clarification_recovery.get("applied")),
 
     }
 
@@ -1506,6 +1687,7 @@ def _build_intent_payload_object(
     turn_candidates: Optional[List[Dict[str, Any]]] = None,
     count_validation: Optional[Dict[str, Any]] = None,
     context_router: Optional[Dict[str, Any]] = None,
+    clarification_recovery: Optional[Dict[str, Any]] = None,
 ) -> Any:
 
     strategy_meta = _build_strategy_meta(
@@ -1520,6 +1702,7 @@ def _build_intent_payload_object(
         turn_candidates=turn_candidates,
         count_validation=count_validation,
         context_router=context_router,
+        clarification_recovery=clarification_recovery,
     )
 
     try:
@@ -1758,15 +1941,27 @@ async def build_intent_payload(
     )
     question_analysis = None
     planner_failed = 0
+    previous_turn_contract = dict(getattr(active_view_state, "last_query_contract", {}) or {})
+    normalized_intent_base, clarification_recovery_meta = _recover_clarification_subject_supplement(
+        question=question,
+        normalized_intent_base=normalized_intent_base,
+        session_memory=session_memory,
+    )
     base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
     base_ids_map = (normalized_intent_base.get("ids_map") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "ids_map", None)) or {}
     source_reference_requested = parse_source_reference(question) is not None
     ordinal_reference_requested = parse_ordinal_reference(question) is not None
-    previous_turn_contract = dict(getattr(active_view_state, "last_query_contract", {}) or {})
     has_explicit_id_seed = has_explicit_precheck_signals(precheck) or _has_ids_map_values(base_ids_map)
-    has_named_subject_seed = _has_explicit_named_subject_seed(question, normalized_intent_base)
+    has_named_subject_seed = _has_explicit_named_subject_seed(question, normalized_intent_base) or bool(clarification_recovery_meta)
     explicit_seed_kind = "named_subject" if has_named_subject_seed else ("id" if has_explicit_id_seed else None)
     has_explicit_seed = bool(has_explicit_id_seed or has_named_subject_seed)
+    if clarification_recovery_meta:
+        log_event(
+            "TURN.CLARIFICATION_RECOVERY",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            **clarification_recovery_meta,
+        )
     subject_refinement_kind, subject_refinement_name = (None, None)
     if not has_explicit_seed:
         subject_refinement_kind, subject_refinement_name = _resolve_subject_refinement_seed(
@@ -2238,11 +2433,14 @@ async def build_intent_payload(
         )
     force_planner_for_explicit_seed = bool(
         has_explicit_seed
-        and _should_force_planner_for_explicit_seed(
-            question=question,
-            normalized_intent=normalized_intent_base,
-            anchor=anchor,
-            followup_resolution=followup_resolution,
+        and (
+            bool(clarification_recovery_meta)
+            or _should_force_planner_for_explicit_seed(
+                question=question,
+                normalized_intent=normalized_intent_base,
+                anchor=anchor,
+                followup_resolution=followup_resolution,
+            )
         )
     )
     if force_planner_for_explicit_seed:
@@ -2421,6 +2619,7 @@ async def build_intent_payload(
             ],
             count_validation=count_validation,
             context_router=context_router_meta,
+            clarification_recovery=clarification_recovery_meta,
         ),
         question_analysis,
     )

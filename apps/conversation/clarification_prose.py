@@ -119,6 +119,10 @@ def _template_for_reason(blocked_reason: str, ctx: dict[str, Any], labels: list[
     if reason in {"recent_mention_year_ambiguity", "recent_mention_ambiguity", "reference_ambiguity"} and labels:
         return reason, "최근 언급한 대상이 여러 개입니다. 번호나 제목으로 지정해 주세요."
     if reason == "refinement_target_missing":
+        subject_name = _norm(ctx.get("subject_name") or ctx.get("subject_title"))
+        refinement_label = _norm(ctx.get("refinement_label")) or "요청한 조건"
+        if subject_name:
+            return reason, f"{subject_name} {subject}를 기준으로 {refinement_label}을 적용하려면 먼저 대상 맥락을 확인해야 합니다. 같은 이름의 다른 대상을 뜻했다면 소속기관이나 식별자를 함께 알려 주세요."
         return reason, "무엇을 기준으로 좁힐지 먼저 목록이나 상세 대상을 정해 주세요."
     if reason == "reference_missing_context":
         return reason, "이전 결과 목록이나 상세 맥락이 없어 무엇을 가리키는지 판단하기 어렵습니다. 먼저 목록을 확인해 주세요."
@@ -150,7 +154,10 @@ def _template_for_reason(blocked_reason: str, ctx: dict[str, Any], labels: list[
     if reason == "non_publishable_previous_turn":
         return reason, "직전 응답은 번호나 출처를 재사용할 수 있는 publishable 목록이 아닙니다. 대상을 다시 지정해 주세요."
     if reason == "same_kind_candidates_missing":
-        return reason, "질문에서 요구한 대상 축에 맞는 후보가 없어 대상을 특정할 수 없습니다. 대상을 다시 지정해 주세요."
+        subject_name = _norm(ctx.get("subject_name") or ctx.get("subject_title"))
+        if subject_name:
+            return reason, f"현재 기준은 {subject_name} {subject}입니다. 질문에서 추가로 요구한 대상 종류를 이 맥락에서 찾지 못해 다시 지정이 필요합니다."
+        return reason, "현재 맥락에서 질문이 요구한 종류의 후보를 찾지 못했습니다. 대상을 다시 지정해 주세요."
     if labels:
         return reason, "어떤 대상을 가리키는지 확인해 주세요."
     return reason, "이전 대화의 어떤 대상을 가리키는지 다시 지정해 주세요."
@@ -314,6 +321,15 @@ def compose_clarification_message(
 
     started_at = time.perf_counter()
     safe_ctx = dict(ctx or {})
+    summary = dict(view_state_summary or {})
+    if not _norm(safe_ctx.get("subject_name") or safe_ctx.get("subject")):
+        focus_title = _norm(summary.get("focus_title") or summary.get("subject_name"))
+        if focus_title:
+            safe_ctx.setdefault("subject_name", focus_title)
+    if not _norm(safe_ctx.get("subject_kind") or safe_ctx.get("context_kind")):
+        focus_kind = _norm(summary.get("focus_kind") or summary.get("subject_kind"))
+        if focus_kind:
+            safe_ctx.setdefault("subject_kind", focus_kind)
     labels = _suggestion_labels(suggestions)
     seed_template_id, seed = _template_for_reason(blocked_reason, safe_ctx, labels)
     seed = _append_suggestions(seed, labels)
@@ -346,4 +362,3 @@ def compose_clarification_message(
         started_at=started_at,
     )
     return message
-

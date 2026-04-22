@@ -110,11 +110,23 @@ heuristic이 resolved를 내면 LLM은 호출되지 않는다. 이 최적화는 
 
 불변: `planner strategy output`(mode/relation/target_cols/join_key_mode)은 turn interpreter가 절대 건드리지 않는다. anchor/entity 선택만 한다.
 
+### Scope C 보정 — Subject-Preserving Refinement
+
+`SessionMemory.current_context`가 `SubjectQueryContext`일 때 "해당 연구자 + 기간", "해당 연구원 + 연구책임자만" 같은 질문은 후보 재선택이 아니라 **현재 subject를 유지한 조건 축소**로 판정한다.
+
+- `turn_trigger`는 명시적 source/ordinal/reference hard signal 다음, 일반 deictic 판정보다 먼저 subject refinement cue를 평가한다.
+- 연구책임자/참여연구원/PI 등 역할 표현은 people 후보 재선택 cue가 아니라 현재 subject의 role/facet narrowing cue로 취급한다.
+- 직전 턴이 clarification이고 다음 턴이 `신동구(한국과학기술정보연구원)`처럼 짧은 subject 보충이면, clarification context에 저장된 `years`, `perf_types`, `output_type`, role/refinement metadata를 planner 입력으로 복원한다.
+- 복원은 public API shape를 바꾸지 않는다. 내부 `SessionMemory.current_context`의 clarification payload만 다음 턴 truth로 확장한다.
+
+불변: 명시적 ID/source/ordinal reference는 계속 hard signal 우선이다. `pjt_id`/`pjt_no` 의미와 SEARCH/LOOKUP/JOIN 경계는 변경하지 않는다.
+
 ### Observability
 
 - `DISAMBIGUATION.LABEL.ENRICHED` — {duplicate_before, duplicate_after, disambiguator_source: heuristic|llm|fallback, llm_attempted, reason, fallback_reason?}
 - `CLARIFICATION.PROSE` — {blocked_reason, seed_template_id, prose_source: template|llm, generation_latency_ms}
 - `TURN.INTERPRETATION.LLM_FIRST` — {trigger: view_state|current_context|hard_miss, validator: ok|diverged|skipped, candidate_count}
+- `TURN.CLARIFICATION_RECOVERY` — {source: clarification_context, subject_kind, subject_name, restored_fields}
 - 기존 `CONTEXT.ROUTER`, `CONTEXT.ROUTER.FALLBACK`, `FOCUS.ENTITY.SET`, `FOLLOWUP.FACT_RESOLVED`와 동일한 포맷으로 emit.
 
 ## non-negotiables (이 ADR도 유지)

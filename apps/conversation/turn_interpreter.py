@@ -66,6 +66,15 @@ _SOURCE_PRIORITY = {
     "subject_index": 4,
 }
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+_RESEARCHER_ROLE_REFINEMENTS = (
+    ("연구책임자", "principal_investigator"),
+    ("책임자", "principal_investigator"),
+    ("principal investigator", "principal_investigator"),
+    ("pi", "principal_investigator"),
+    ("참여연구원", "participant_researcher"),
+    ("참여 연구원", "participant_researcher"),
+    ("참여자", "participant_researcher"),
+)
 
 
 class TurnCandidate(BaseModel):
@@ -340,6 +349,11 @@ def _build_requested_refinement(question: str) -> RequestedRefinement:
     question_text = _normalized_text(question)
     if "최근" in question_text:
         refinement.time_filter = "recent"
+    lowered = question_text.lower()
+    for cue, source_filter in _RESEARCHER_ROLE_REFINEMENTS:
+        if cue in lowered:
+            refinement.source_filter = source_filter
+            break
     if "상위" in question_text or "top" in question_text.lower():
         refinement.sort_dir = "desc"
     return refinement
