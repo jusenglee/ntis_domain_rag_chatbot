@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 
 
+from apps.conversation.clarification_prose import compose_clarification_message
 from apps.conversation.followup_anchor import (
 
     focus_entity_from_mention,
@@ -629,11 +630,11 @@ def _build_clarification_payload(
 
     *,
 
+    question: str,
+
     clarification_type: str,
 
     reason: str,
-
-    message: str,
 
     latest_snapshot: Optional[Any],
 
@@ -641,7 +642,29 @@ def _build_clarification_payload(
 
     focus_entity: Optional[FocusEntity] = None,
 
+    ctx: Optional[Dict[str, Any]] = None,
+
 ) -> Dict[str, Any]:
+
+    view_state_summary = {
+        "has_visible_answer_manifest": latest_snapshot is not None,
+        "manifest_visible_count": int(getattr(latest_snapshot, "visible_count", 0) or 0),
+        "display_view_id": getattr(latest_snapshot, "view_id", None),
+        "focus_kind": getattr(focus_entity, "kind", None),
+        "focus_source": getattr(focus_entity, "source", None),
+        "focus_title": getattr(focus_entity, "title_text", None),
+    }
+    message = compose_clarification_message(
+        question=question,
+        blocked_reason=reason,
+        suggestions=list(candidates or []),
+        focus_entity=focus_entity,
+        view_state_summary=view_state_summary,
+        ctx={
+            "clarification_type": clarification_type,
+            **dict(ctx or {}),
+        },
+    )
 
     return {
 
@@ -731,7 +754,6 @@ def resolve_scope_decision(
 
             first_kind = str((child_reference["candidates"][0] or {}).get("context_kind") or "").strip().lower() or None
 
-        subject = _CHILD_SUBJECT.get(first_kind or "people", "대상")
         return ScopeDecision(
 
             followup_type="ambiguous_followup",
@@ -740,16 +762,19 @@ def resolve_scope_decision(
 
             clarification_payload=_build_clarification_payload(
 
+                question=question,
+
                 clarification_type="child_entity_ambiguity",
 
                 reason="child_entity_ambiguity",
 
-                message=f"현재 상세 안에서 어떤 {subject}를 가리키는지 다시 지정해 주세요.",
                 latest_snapshot=latest_snapshot,
 
                 candidates=child_reference["candidates"],
 
                 focus_entity=scope_focus_entity,
+
+                ctx={"subject": _CHILD_SUBJECT.get(first_kind or "people", "대상"), "subject_kind": first_kind or "people"},
 
             ),
 
@@ -763,7 +788,6 @@ def resolve_scope_decision(
 
             first_kind = str((child_reference["candidates"][0] or {}).get("context_kind") or "").strip().lower() or None
 
-        subject = _CHILD_SUBJECT.get(first_kind or "people", "대상")
         return ScopeDecision(
 
             followup_type="ambiguous_followup",
@@ -772,16 +796,19 @@ def resolve_scope_decision(
 
             clarification_payload=_build_clarification_payload(
 
+                question=question,
+
                 clarification_type="child_entity_missing_id",
 
                 reason="child_entity_missing_id",
 
-                message=f"현재 상세 안에서 언급된 {subject}는 찾았지만, 정확한 식별자를 확인할 수 없습니다. 다른 기준으로 다시 지정해 주세요.",
                 latest_snapshot=latest_snapshot,
 
                 candidates=child_reference["candidates"],
 
                 focus_entity=scope_focus_entity,
+
+                ctx={"subject": _CHILD_SUBJECT.get(first_kind or "people", "대상"), "subject_kind": first_kind or "people"},
 
             ),
 
@@ -829,11 +856,6 @@ def resolve_scope_decision(
 
                 )
             if recent_candidates:
-                clarification_message = (
-                    "최근 언급한 과제는 묶음 수준 식별자만 있어 개별 상세를 바로 특정할 수 없습니다. 제목이나 개별 과제를 다시 지정해 주세요."
-                    if recent_reason == "detail_requires_instance_project_id"
-                    else "최근 언급한 대상이 여러 개입니다. 어떤 대상을 좁힐지 번호나 제목으로 지정해 주세요."
-                )
 
                 return ScopeDecision(
 
@@ -843,16 +865,19 @@ def resolve_scope_decision(
 
                     clarification_payload=_build_clarification_payload(
 
+                        question=question,
+
                         clarification_type="refinement_target_missing",
 
                         reason=recent_reason or "refinement_target_missing",
 
-                        message=clarification_message,
                         latest_snapshot=latest_snapshot,
 
                         candidates=recent_candidates,
 
                         focus_entity=scope_focus_entity,
+
+                        ctx={"status": "unresolved", "reference_kind": "refinement"},
 
                     ),
 
@@ -865,16 +890,19 @@ def resolve_scope_decision(
 
                 clarification_payload=_build_clarification_payload(
 
+                    question=question,
+
                     clarification_type="refinement_target_missing",
 
                     reason="refinement_target_missing",
 
-                    message="무엇을 기준으로 좁힐지 먼저 목록이나 상세 대상을 정해 주세요.",
                     latest_snapshot=latest_snapshot,
 
                     candidates=[],
 
                     focus_entity=scope_focus_entity,
+
+                    ctx={"reference_kind": "refinement"},
 
                 ),
 
@@ -923,18 +951,6 @@ def resolve_scope_decision(
 
                 )
             if recent_candidates:
-
-                candidate_titles = [
-                    str(candidate.get("title") or "untitled")
-                    for candidate in recent_candidates[:5]
-                ]
-
-                candidates_text = " / ".join(candidate_titles)
-                clarification_message = (
-                    "최근 언급한 과제는 묶음 수준 식별자만 있어 개별 상세를 바로 특정할 수 없습니다. 제목이나 개별 과제를 다시 지정해 주세요."
-                    if recent_reason == "detail_requires_instance_project_id"
-                    else f"최근 언급한 대상이 여러 개입니다: {candidates_text} — 번호나 제목으로 지정해 주세요."
-                )
                 clarification_type = (
                     "reference_missing_context"
                     if recent_reason == "detail_requires_instance_project_id"
@@ -949,17 +965,19 @@ def resolve_scope_decision(
 
                     clarification_payload=_build_clarification_payload(
 
+                        question=question,
+
                         clarification_type=clarification_type,
 
                         reason=recent_reason or "reference_ambiguity",
-
-                        message=clarification_message,
 
                         latest_snapshot=latest_snapshot,
 
                         candidates=recent_candidates,
 
                         focus_entity=scope_focus_entity,
+
+                        ctx={"status": "unresolved", "reference_kind": "recent_mention"},
 
                     ),
 
@@ -973,16 +991,19 @@ def resolve_scope_decision(
 
                 clarification_payload=_build_clarification_payload(
 
+                    question=question,
+
                     clarification_type="reference_ambiguity",
 
                     reason="reference_missing_context",
 
-                    message="이전 결과 목록이나 상세 맥락이 없어 무엇을 가리키는지 판단하기 어렵습니다. 먼저 목록을 확인해 주세요.",
                     latest_snapshot=latest_snapshot,
 
                     candidates=[],
 
                     focus_entity=scope_focus_entity,
+
+                    ctx={"reference_kind": "reference"},
 
                 ),
 
@@ -996,16 +1017,19 @@ def resolve_scope_decision(
 
             clarification_payload=_build_clarification_payload(
 
+                question=question,
+
                 clarification_type="reference_ambiguity",
 
                 reason="unresolved_reference",
 
-                message="이전 결과 중 어떤 항목을 뜻하는지 다시 지정해 주세요.",
                 latest_snapshot=latest_snapshot,
 
                 candidates=[],
 
                 focus_entity=scope_focus_entity,
+
+                ctx={"reference_kind": "reference"},
 
             ),
 

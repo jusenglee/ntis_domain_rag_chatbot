@@ -2031,6 +2031,7 @@ async def build_intent_payload(
             candidates=turn_candidates,
             interpretation=turn_interpretation,
             blocked_reason=str(hard_result.reason or "hard_signal_block").strip() or "hard_signal_block",
+            view_state=active_view_state,
         )
         followup_resolution = {
             "followup_resolution_status": "clarification_required",
@@ -2071,6 +2072,7 @@ async def build_intent_payload(
             candidates=turn_candidates,
             interpretation=turn_interpretation,
             blocked_reason=blocked_reason,
+            view_state=active_view_state,
         )
         followup_resolution = {
             "followup_resolution_status": "clarification_required",

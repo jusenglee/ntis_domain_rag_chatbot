@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from apps.api.runtime_helpers import log_event
 from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
+from apps.conversation.clarification_prose import compose_clarification_message
 from apps.conversation.entity_registry import detect_entity_kind_from_text, normalize_entity_kind
 from apps.conversation.followup_anchor import (
     is_referential_followup,
@@ -112,6 +113,23 @@ class ClarificationSuggestion(BaseModel):
     label: str
     candidate_id: Optional[str] = None
     entity_kind: Optional[str] = None
+    # ADR-0014 Scope A: disambiguator와 aux는 동명 후보 구분을 위한 부가 정보.
+    # None/빈 값이면 직렬화에서 제거된다 (기존 API 응답 포맷과의 호환을 위해).
+    disambiguator: Optional[str] = None
+    aux: Dict[str, Any] = Field(default_factory=dict)
+
+    def to_payload(self) -> Dict[str, Any]:
+        """None/빈 aux는 생략하여 기존 payload와 동치 유지."""
+        payload: Dict[str, Any] = {"label": self.label}
+        if self.candidate_id:
+            payload["candidate_id"] = self.candidate_id
+        if self.entity_kind:
+            payload["entity_kind"] = self.entity_kind
+        if self.disambiguator:
+            payload["disambiguator"] = self.disambiguator
+        if self.aux:
+            payload["aux"] = dict(self.aux)
+        return payload
 
 
 def _normalized_text(value: Any) -> str:
@@ -608,31 +626,55 @@ def build_clarification_payload(
     candidates: list[TurnCandidate],
     interpretation: Optional[TurnInterpretationResult],
     blocked_reason: str,
+    view_state: Optional[ConversationViewState] = None,
 ) -> dict[str, Any]:
+    # ADR-0014 Scope A: 동명 후보 disambiguator enrichment (sync-touch).
+    # view_state가 None이면 labeler는 heuristic만 돌리며 aux는 비게 된다
+    # (기존 동작과 동치 + 라벨에 (kind)만 붙음).
+    from apps.conversation.clarification_labeler import enrich_candidate_labels, render_label
+
     filtered = _filtered_candidates_for_question(question, candidates)
-    suggestions: list[ClarificationSuggestion] = []
+    eligible: list[TurnCandidate] = []
     for candidate in filtered[:3]:
-        label = _normalized_text(candidate.display_name) or candidate.subject_id or candidate.candidate_id
-        if candidate.entity_kind and label:
-            suggestions.append(
-                ClarificationSuggestion(
-                    label=f"{label} ({candidate.entity_kind})",
-                    candidate_id=candidate.candidate_id,
-                    entity_kind=candidate.entity_kind,
-                )
+        display_seed = _normalized_text(candidate.display_name) or candidate.subject_id or candidate.candidate_id
+        if candidate.entity_kind and display_seed:
+            eligible.append(candidate)
+    enriched = enrich_candidate_labels(candidates=eligible, view_state=view_state)
+
+    suggestions: list[ClarificationSuggestion] = []
+    for candidate, aux, disambiguator in enriched:
+        display_seed = _normalized_text(candidate.display_name) or candidate.subject_id or candidate.candidate_id
+        label = render_label(
+            display_name=display_seed,
+            entity_kind=candidate.entity_kind,
+            disambiguator=disambiguator,
+        )
+        suggestions.append(
+            ClarificationSuggestion(
+                label=label,
+                candidate_id=candidate.candidate_id,
+                entity_kind=candidate.entity_kind,
+                disambiguator=disambiguator,
+                aux=aux or {},
             )
-    if suggestions:
-        names = ", ".join(suggestion.label for suggestion in suggestions[:3])
-        message = f"어떤 대상을 가리키는지 확인해 주세요. 예: {names}"
-    elif blocked_reason == "non_publishable_previous_turn":
-        message = "직전 답변은 번호/출처 재사용이 가능한 publishable 목록이 아니었습니다. 대상을 다시 지정해 주세요."
-    else:
-        message = "이전 대화의 어떤 대상을 가리키는지 다시 지정해 주세요."
+        )
+    message = compose_clarification_message(
+        question=question,
+        blocked_reason=blocked_reason,
+        suggestions=suggestions,
+        focus_entity=get_active_focus_entity(view_state) if view_state is not None else None,
+        view_state_summary=_view_state_summary(view_state),
+        ctx={
+            "clarification_type": "turn_interpretation",
+            "selected_candidate_ids": list((interpretation.selected_candidate_ids if interpretation else []) or []),
+            "target_entity_kind": getattr(interpretation, "target_entity_kind", None) if interpretation else None,
+        },
+    )
     return {
         "clarification_type": "turn_interpretation",
         "reason": blocked_reason,
         "message": message,
-        "candidates": [suggestion.model_dump() for suggestion in suggestions],
+        "candidates": [suggestion.to_payload() for suggestion in suggestions],
         "selected_candidate_ids": list((interpretation.selected_candidate_ids if interpretation else []) or []),
     }
 

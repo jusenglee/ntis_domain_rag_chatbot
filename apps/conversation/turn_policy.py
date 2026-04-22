@@ -66,6 +66,7 @@ def _clarification_result(
     trigger: TurnTriggerResult,
     interpretation: Optional[TurnInterpretationResult],
     candidates: list[TurnCandidate],
+    view_state: Optional[ConversationViewState] = None,
 ) -> TurnPolicyResult:
     return TurnPolicyResult(
         execution_path="clarification",
@@ -77,6 +78,7 @@ def _clarification_result(
             candidates=candidates,
             interpretation=interpretation,
             blocked_reason=reason,
+            view_state=view_state,
         ),
         selected_candidate_ids=list((interpretation.selected_candidate_ids if interpretation else []) or []),
         policy_source="validator_block",
@@ -166,6 +168,7 @@ def resolve_turn_policy(
                 candidates=candidate_list,
                 interpretation=None,
                 blocked_reason="missing_interpretation",
+                view_state=view_state,
             ),
             policy_source="validator_block",
         )
@@ -178,6 +181,7 @@ def resolve_turn_policy(
             trigger=trigger,
             interpretation=interpretation_model,
             candidates=candidate_list,
+            view_state=view_state,
         )
 
     if (
@@ -190,6 +194,7 @@ def resolve_turn_policy(
             trigger=trigger,
             interpretation=interpretation_model,
             candidates=candidate_list,
+            view_state=view_state,
         )
 
     if (
@@ -201,6 +206,7 @@ def resolve_turn_policy(
             trigger=trigger,
             interpretation=interpretation_model,
             candidates=candidate_list,
+            view_state=view_state,
         )
     interpretation_policy_source = _policy_source_for_interpretation(interpretation_model)
 
@@ -220,6 +226,7 @@ def resolve_turn_policy(
             trigger=trigger,
             interpretation=interpretation_model,
             candidates=candidate_list,
+            view_state=view_state,
         )
 
     if trigger.reference_style in {"ordinal", "source_reference"}:
@@ -229,6 +236,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if not has_manifest:
             return _clarification_result(
@@ -236,6 +244,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if previous_followup_rights == "none":
             return _clarification_result(
@@ -243,6 +252,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if selected_candidates and any(candidate.source != "manifest_item" for candidate in selected_candidates):
             return _clarification_result(
@@ -250,6 +260,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         return TurnPolicyResult(
             execution_path="reuse_manifest",
@@ -268,6 +279,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if not has_manifest:
             return _clarification_result(
@@ -275,6 +287,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if selected_candidates and any(candidate.source != "manifest_item" for candidate in selected_candidates):
             return _clarification_result(
@@ -282,6 +295,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         return TurnPolicyResult(
             execution_path="reuse_manifest",
@@ -304,6 +318,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if selected_candidates and any(candidate.source == "manifest_item" for candidate in selected_candidates):
             return _clarification_result(
@@ -311,6 +326,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         if not selected_candidates and not has_anchor_context:
             return _clarification_result(
@@ -318,6 +334,7 @@ def resolve_turn_policy(
                 trigger=trigger,
                 interpretation=interpretation_model,
                 candidates=candidate_list,
+                view_state=view_state,
             )
         return TurnPolicyResult(
             execution_path="reuse_anchor",

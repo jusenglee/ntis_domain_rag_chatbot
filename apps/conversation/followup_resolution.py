@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional
 
+from apps.conversation.clarification_prose import compose_clarification_message
 from apps.conversation.entity_reference import ClarificationRequest, ResolvedEntityRef
 
 _ORDINAL_WORD_TO_INDEX = {
@@ -323,42 +324,42 @@ def build_followup_clarification_message(strategy_meta: Dict[str, Any]) -> Optio
     status = _normalize_text((strategy_meta or {}).get("followup_resolution_status")).lower()
     if not status or status in {"none", "resolved"}:
         return None
-    if status == "clarification_required":
-        payload = dict((strategy_meta or {}).get("clarification_payload") or {})
-        message = _normalize_text(payload.get("message") or (strategy_meta or {}).get("clarification_message"))
-        if message:
-            return message
-        reason = _normalize_text(payload.get("reason") or (strategy_meta or {}).get("clarification_reason")).lower()
-        if reason == "child_entity_ambiguity":
-            return "현재 상세 안에서 어떤 대상을 뜻하는지 다시 지정해 주세요."
-        if reason == "child_entity_missing_id":
-            return "현재 상세 안의 대상은 보이지만 정확한 식별자를 확인할 수 없습니다. 다른 기준으로 다시 지정해 주세요."
-        if reason == "refinement_target_missing":
-            return "무엇을 기준으로 좁힐지 먼저 목록이나 상세 대상을 정해 주세요."
-        if reason == "reference_missing_context":
-            return "이전 결과 목록이나 상세 맥락이 없어 무엇을 가리키는지 판단하기 어렵습니다. 먼저 목록을 확인해 주세요."
-        return "무엇을 가리키는지 다시 확인해 주세요."
+    payload = dict((strategy_meta or {}).get("clarification_payload") or {})
+    suggestions = [
+        item
+        for item in (payload.get("candidates") or (strategy_meta or {}).get("candidate_items") or [])
+        if isinstance(item, dict)
+    ]
     reference_kind = _normalize_text((strategy_meta or {}).get("followup_reference_kind")).lower()
-    available_count = int((strategy_meta or {}).get("available_count") or 0)
-    if reference_kind == "source_reference":
-        if status == "missing_context":
-            return "\uc774\uc804 \ucd9c\ucc98 \ubaa9\ub85d\uc774 \uc5c6\uc5b4 \uba87 \ubc88\uc9f8 \ucd9c\ucc98\uc778\uc9c0 \ud310\ub2e8\ud558\uae30 \uc5b4\ub835\uc2b5\ub2c8\ub2e4. \uba3c\uc800 \ubaa9\ub85d\uc744 \ud655\uc778\ud55c \ub4a4 \ub2e4\uc2dc \uc9c8\ubb38\ud574 \uc8fc\uc138\uc694."
-        if status == "out_of_range":
-            return f"\uc774\uc804 \ucd9c\ucc98 \ubaa9\ub85d\uc5d0\ub294 {available_count}\uac1c\ub9cc \uc788\uc2b5\ub2c8\ub2e4. \uba87 \ubc88\uc9f8 \ucd9c\ucc98\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ub2e4\uc2dc \uc54c\ub824\uc8fc\uc138\uc694."
-        if status == "unresolved":
-            return "\uc774\uc804 \ubaa9\ub85d\uc5d0\uc11c \uc5b4\ub290 \ucd9c\ucc98\ub97c \ub9d0\uc500\ud558\uc2dc\ub294\uc9c0 \ud655\uc778\ud574 \uc8fc\uc138\uc694."
     selected_prev_item = (strategy_meta or {}).get("selected_prev_item") or {}
-    context_kind = _normalize_text(selected_prev_item.get("context_kind") or (strategy_meta or {}).get("selected_prev_context_kind") or "project").lower()
-    subject_map = {"project": "과제", "perf": "성과", "people": "연구자", "org": "소속기관"}
-    subject = _decode_token(subject_map.get(context_kind, "항목"))
-    available_count = int((strategy_meta or {}).get("available_count") or 0)
-    if status == "missing_context":
-        return f"이전 목록이 없어 몇 번째 {subject}인지 판단하기 어렵습니다. 먼저 목록을 확인한 뒤 다시 질문해 주세요."
-    if status == "out_of_range":
-        return f"이전 목록에는 {available_count}개만 있습니다. 몇 번째 {subject}를 말씀하시는지 다시 알려주세요."
-    if status == "unresolved":
-        return f"이전 목록에서 어느 {subject}를 말씀하시는지 확인해 주세요."
-    return None
+    context_kind = _normalize_text(
+        selected_prev_item.get("context_kind") or (strategy_meta or {}).get("selected_prev_context_kind") or "project"
+    ).lower()
+    available_count = int((strategy_meta or {}).get("available_count") or 0)
+    if status == "clarification_required":
+        reason = _normalize_text(payload.get("reason") or (strategy_meta or {}).get("clarification_reason")).lower()
+        blocked_reason = reason or "clarification_required"
+    elif reference_kind == "source_reference":
+        blocked_reason = f"source_reference_{status}"
+    else:
+        blocked_reason = f"ordinal_{status}"
+    return compose_clarification_message(
+        question=_normalize_text((strategy_meta or {}).get("question") or (strategy_meta or {}).get("user_query")),
+        blocked_reason=blocked_reason,
+        suggestions=suggestions,
+        focus_entity=None,
+        view_state_summary={
+            "display_view_id": (strategy_meta or {}).get("display_view_id"),
+            "has_visible_answer_manifest": bool(available_count),
+        },
+        ctx={
+            "status": status,
+            "reference_kind": reference_kind or "ordinal",
+            "available_count": available_count,
+            "context_kind": context_kind,
+            "clarification_type": payload.get("clarification_type") or (strategy_meta or {}).get("clarification_type"),
+        },
+    )
 
 
 def build_followup_clarification_payload(strategy_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
