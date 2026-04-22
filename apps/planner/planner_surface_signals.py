@@ -130,6 +130,19 @@ def _scan_followup_cues(question: str) -> list[str]:
     return [cue for cue in _FOLLOWUP_CUES if cue in q]
 
 
+def _scan_unstructured_entity_terms(question: str) -> list[str]:
+    """괄호가 없는 일반 텍스트에서 인명/기관명 후보를 추출합니다."""
+    # NTIS 도메인에서 제외할 공통 키워드
+    exclusions = {"과제", "성과", "연구자", "활동기록", "활동내역", "참여이력", "목록", "리스트", "보여줘", "알려줘", "찾아줘"}
+    candidates: list[str] = []
+    for token in _tokenize(question):
+        # 2~4글자의 한글 토큰 중 제외 키워드가 아닌 것을 후보로 간주
+        if 2 <= len(token) <= 5 and all("\uac00" <= c <= "\ud7a3" for c in token):
+            if token not in exclusions:
+                candidates.append(token)
+    return candidates
+
+
 def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSignals:
     normalized_people = [
         str(value).strip()
@@ -142,7 +155,11 @@ def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSig
         if str(value).strip()
     ]
     fallback_people, fallback_orgs = _scan_parenthesized_entity_terms(question)
-    people_terms = _dedupe(normalized_people or fallback_people)
+    
+    # 추가: 일반 텍스트 스캔 결과 병합
+    unstructured_candidates = _scan_unstructured_entity_terms(question)
+    
+    people_terms = _dedupe(normalized_people or fallback_people or unstructured_candidates)
     org_terms = _dedupe(normalized_orgs or fallback_orgs)
     perf_types = _dedupe(
         [

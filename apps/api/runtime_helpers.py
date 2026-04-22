@@ -227,8 +227,40 @@ def has_payload_index(client: Any, collection_name: str, field_name: str) -> boo
     return field_name in payload_schema
 
 
+def _render_pretty_log(name: str, fields: Dict[str, Any]) -> Optional[str]:
+    """운영 로그(JSON)와 별개로 콘솔에서 사람이 읽기 편한 시각적 요약을 생성합니다."""
+    
+    # 에이전트 의사결정 시각화
+    if name == "AGENT.DECISION":
+        dtype = fields.get("decision_type", "unknown")
+        icon = {"call_tool": "🛠️", "direct_answer": "💬", "ask_clarification": "❓"}.get(dtype, "🤖")
+        tool = f" -> [{fields.get('tool_name')}]" if dtype == "call_tool" else ""
+        reason = fields.get("reasoning_summary", "")
+        return f"\033[94m{icon} [Agent Decision] {dtype}{tool}\033[0m\n   \033[90mㄴ Reason: {reason}\033[0m"
+
+    # 도구 관측 결과 시각화
+    if name == "AGENT.TOOL_OBSERVATION":
+        otype = fields.get("observation_type", "unknown")
+        icon = {"planned_intent": "✅", "error": "❌", "contract_violation": "🛡️", "no_results": "⚠️"}.get(otype, "👁️")
+        summary = fields.get("summary", "")
+        return f"\033[96m{icon} [Tool Result] {otype}\033[0m\n   \033[90mㄴ {summary}\033[0m"
+
+    # 플래너 단계 시각화
+    if name.startswith("PLANNER.STAGE"):
+        stage = name.replace("PLANNER.", "")
+        conf = fields.get("confidence", 0.0)
+        return f"\033[95m🧠 [{stage}] Conf: {conf:.2f}\033[0m"
+
+    # 최종 결과 요약
+    if name == "REQ.SUMMARY":
+        ms = fields.get("total_ms", 0)
+        return f"\033[92m✨ [Request Done] {ms}ms | Model: {fields.get('selected_model')}\033[0m"
+
+    return None
+
+
 def log_event(name: str, **fields: Any) -> None:
-    """Log an operations event with shared fingerprint and policy metadata."""
+    """Operations 이벤트를 로깅합니다. 콘솔에는 시각적으로 가독성 높은 요약을 출력합니다."""
 
     payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
     if fields.get("policy_mode") is None:
@@ -241,7 +273,15 @@ def log_event(name: str, **fields: Any) -> None:
         if value is None:
             continue
         payload[key] = value
+    
+    # 1. 원본 JSON 로그 (파일 기록용)
     logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
+
+    # 2. 콘솔 가독성을 위한 Pretty 요약 출력
+    pretty = _render_pretty_log(name, payload)
+    if pretty:
+        # 표준 로거 대신 직접 출력하여 포맷 겹침 방지 (또는 전용 채널 사용)
+        print(f"\n{pretty}\n")
 
 
 def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:

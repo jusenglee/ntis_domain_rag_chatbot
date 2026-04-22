@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Optional
 
 from apps.api.contracts.runtime_contracts import (
@@ -21,8 +22,8 @@ from apps.api.contracts.runtime_contracts import (
     sanitize_ids_map_semantics,
 )
 from apps.api.contracts.workflow_models import HardContractV1, QuestionAnalysis, SoftStrategyHintsV1
-from apps.api.runtime_helpers import log_event
-from apps.chat.llm_json import sanitize_llm_json
+from apps.api.runtime_helpers import log_event, mask_query_for_log
+from apps.chat.llm_json import iter_json_candidates, sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
 
 from apps.platform.langchain_compat import BaseMessage, ChatPromptTemplate, PydanticOutputParser, SystemMessage
@@ -114,6 +115,128 @@ _EXPLICIT_ORG_QUERY_CUES = tuple(str(cue or "").strip().lower() for cue in ORG_C
     "company",
     "org",
 )
+
+
+def _message_content(value: Any) -> str:
+    return str(getattr(value, "content", value) or "")
+
+
+def _payload_char_counts(payload: dict[str, Any]) -> dict[str, int]:
+    return {key: len(str(value or "")) for key, value in payload.items()}
+
+
+def _planner_stage_common_fields(
+    *,
+    stage_label: str,
+    prompt_version: str,
+    question: str,
+    input_payload: dict[str, Any],
+    llm_settings: dict[str, Any],
+) -> dict[str, Any]:
+    input_payload_fields = _payload_char_counts(input_payload)
+    return {
+        "planner_stage": stage_label,
+        "prompt_version": prompt_version,
+        "question_preview": mask_query_for_log(question, max_len=120),
+        "question_chars": len(str(question or "")),
+        "input_payload_chars": sum(input_payload_fields.values()),
+        "input_payload_fields": input_payload_fields,
+        **llm_settings,
+    }
+
+
+def _log_planner_stage_error(
+    *,
+    event_prefix: str,
+    request_id: Optional[str],
+    conversation_id: str,
+    common_fields: dict[str, Any],
+    phase: str,
+    exc: Exception,
+    dt_ms: float,
+    output_json_chars: int = 0,
+    json_candidate_count: int = 0,
+    raw_content_chars: int = 0,
+) -> None:
+    log_event(
+        f"{event_prefix}.ERROR",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        **common_fields,
+        error_phase=phase,
+        error_type=type(exc).__name__,
+        error_message=str(exc)[:500],
+        dt_ms=round(dt_ms, 1),
+        raw_content_chars=raw_content_chars,
+        json_candidate_count=json_candidate_count,
+        output_json_chars=output_json_chars,
+    )
+
+
+async def _invoke_planner_stage_json(
+    *,
+    event_prefix: str,
+    stage_label: str,
+    request_id: Optional[str],
+    conversation_id: str,
+    common_fields: dict[str, Any],
+    runnable: Any,
+    input_payload: dict[str, Any],
+    start_fields: Optional[dict[str, Any]] = None,
+) -> tuple[str, dict[str, Any]]:
+    log_event(
+        f"{event_prefix}.START",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        **common_fields,
+        **(start_fields or {}),
+    )
+    started_at = time.perf_counter()
+    raw_text = ""
+    candidates: list[str] = []
+    phase = "llm_invoke"
+    try:
+        raw_msg = await runnable.ainvoke(input_payload)
+        raw_text = _message_content(raw_msg)
+        candidates = iter_json_candidates(raw_text)
+        dt_ms = (time.perf_counter() - started_at) * 1000.0
+        log_event(
+            f"{event_prefix}.LLM_RESULT",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            **common_fields,
+            dt_ms=round(dt_ms, 1),
+            raw_content_chars=len(raw_text),
+            empty_content=int(not raw_text.strip()),
+            json_candidate_count=len(candidates),
+        )
+        phase = "json_extract"
+        json_text = sanitize_llm_json(
+            raw_msg,
+            source_stage=stage_label,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+        return json_text, {
+            "dt_ms": dt_ms,
+            "raw_content_chars": len(raw_text),
+            "json_candidate_count": len(candidates),
+            "output_json_chars": len(json_text),
+        }
+    except Exception as exc:
+        dt_ms = (time.perf_counter() - started_at) * 1000.0
+        _log_planner_stage_error(
+            event_prefix=event_prefix,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase=phase,
+            exc=exc,
+            dt_ms=dt_ms,
+            raw_content_chars=len(raw_text),
+            json_candidate_count=len(candidates),
+        )
+        raise
 
 
 def _normalize_stage2_slots_payload(
@@ -646,24 +769,78 @@ async def run_planner_stage1(
             ),
         ]
     )
+    llm_bind_settings = {
+        "reasoning_effort": "high",
+        "include_reasoning": True,
+        "temperature": PLANNER_TEMPERATURE,
+        "top_p": 1.0,
+        "max_tokens": 2048,
+    }
     planner_llm = llm.bind(
         reasoning_effort="high",
         include_reasoning=True,
         #disable_thinking=PLANNER_DISABLE_THINKING,
         temperature=PLANNER_TEMPERATURE,
         top_p=1.0,
-        max_tokens=250,
+        max_tokens=2048, # 250에서 1024로 상향
     )
-    chain = prompt | planner_llm | sanitize_llm_json | parser
-    stage1 = await chain.ainvoke(
-        {
-            "format_instructions": parser.get_format_instructions(),
-            "question": question,
-            "history": history_str or "NONE",
-            "prev_context": prev_context_text or "NONE",
-            "intent_snapshot": json.dumps(intent_snapshot(normalized_intent), ensure_ascii=False),
-        }
+    planner_llm = planner_llm.bind(
+        request_id=request_id,
+        conversation_id=conversation_id,
+        planner_stage="stage1",
+        planner_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
     )
+    input_payload = {
+        "format_instructions": parser.get_format_instructions(),
+        "question": question,
+        "history": history_str or "NONE",
+        "prev_context": prev_context_text or "NONE",
+        "intent_snapshot": json.dumps(intent_snapshot(normalized_intent), ensure_ascii=False),
+    }
+    common_fields = _planner_stage_common_fields(
+        stage_label="stage1",
+        prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        question=question,
+        input_payload=input_payload,
+        llm_settings={
+            "model_name": "solar_vllm_0",
+            "disable_thinking": "not_set",
+            **llm_bind_settings,
+        },
+    )
+    json_text, stage_stats = await _invoke_planner_stage_json(
+        event_prefix="PLANNER.STAGE1",
+        stage_label="stage1",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        common_fields=common_fields,
+        runnable=prompt | planner_llm,
+        input_payload=input_payload,
+        start_fields={
+            "history_turns": len(chat_history[-4:]),
+            "prev_context_docs": len(prev_context),
+            "canonical_evidence_count": len(canonical_evidence),
+            "display_snapshot_items": len(getattr(display_snapshot, "items", []) or []),
+            "prev_context_chars": len(prev_context_text or ""),
+        },
+    )
+    parse_started_at = time.perf_counter()
+    try:
+        stage1 = parser.parse(json_text)
+    except Exception as exc:
+        _log_planner_stage_error(
+            event_prefix="PLANNER.STAGE1",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase="parse",
+            exc=exc,
+            dt_ms=(time.perf_counter() - parse_started_at) * 1000.0,
+            raw_content_chars=stage_stats.get("raw_content_chars", 0),
+            json_candidate_count=stage_stats.get("json_candidate_count", 0),
+            output_json_chars=stage_stats.get("output_json_chars", 0),
+        )
+        raise
     log_event(
         "PLANNER.STAGE1",
         request_id=request_id,
