@@ -25,6 +25,7 @@ from apps.evidence.canonical_context import (
     render_canonical_evidence_debug_text,
     render_canonical_evidence_text,
 )
+from apps.conversation.session_memory import build_current_context
 from apps.conversation.view_state import get_active_result_snapshot, set_visible_answer_manifest
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.evidence.canonical_evidence import build_canonical_evidence
@@ -1341,6 +1342,16 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             next_view_state,
             snapshot=view_state_manifest_snapshot,
         )
+    selected_answer_meta = (
+        selected_artifact.to_meta_dict()
+        if isinstance(selected_artifact, AnswerArtifact)
+        else selected_meta
+    )
+    next_current_context = build_current_context(
+        view_state=next_view_state,
+        selected_answer_meta=selected_answer_meta,
+        intent_payload=getattr(state, "intent_payload", None),
+    )
 
     merge_debug = {
         "policy": _DUAL_MODEL_MERGE_POLICY,
@@ -1444,7 +1455,8 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "final_answer_artifact": selected_artifact,
         "answer_solar_raw": answer_solar_raw,
         "merge_debug": merge_debug,
-        "selected_answer_meta": (selected_artifact.to_meta_dict() if isinstance(selected_artifact, AnswerArtifact) else selected_meta),
+        "selected_answer_meta": selected_answer_meta,
+        "next_current_context": next_current_context,
         "answer_groundedness_snapshot": groundedness_snapshot_model,
         "answer_groundedness_verdict": AnswerGroundednessVerdict.model_validate(selected_groundedness),
         "answer_state_consistency_snapshot": (

@@ -9,6 +9,7 @@ from apps.conversation.turn_interpreter import (
     TurnInterpretationResult,
     build_clarification_payload,
 )
+from apps.conversation.session_memory import SessionMemory, current_context_followup_contract
 from apps.conversation.turn_trigger import TurnTriggerResult
 from apps.conversation.view_state import (
     ConversationViewState,
@@ -21,6 +22,7 @@ ExecutionPath = Literal["reuse_manifest", "reuse_anchor", "fresh_retrieval", "cl
 FollowupRights = Literal["ordinal_allowed", "source_allowed", "none"]
 
 _INTERPRETATION_CONFIDENCE_THRESHOLD = 0.35
+_AGGRESSIVE_AUTO_REASONS = {"single_same_kind_candidate_auto"}
 
 
 class TurnPolicyResult(BaseModel):
@@ -51,6 +53,13 @@ def _has_manifest(view_state: Optional[ConversationViewState]) -> bool:
     return view_state is not None and getattr(view_state, "visible_answer_manifest", None) is not None
 
 
+def _policy_source_for_interpretation(interpretation: TurnInterpretationResult) -> str:
+    reason = _normalized_text(interpretation.reason)
+    if reason in _AGGRESSIVE_AUTO_REASONS:
+        return "aggressive_auto"
+    return "validated_interpretation"
+
+
 def _clarification_result(
     *,
     reason: str,
@@ -79,6 +88,7 @@ def resolve_turn_policy(
     turn_trigger: TurnTriggerResult | Dict[str, Any],
     interpretation: Optional[TurnInterpretationResult],
     view_state: Optional[ConversationViewState],
+    session_memory: Optional[SessionMemory] = None,
     has_explicit_seed: bool,
     explicit_seed_kind: Optional[str] = None,
     candidates: Optional[list[TurnCandidate]] = None,
@@ -96,11 +106,22 @@ def resolve_turn_policy(
     candidate_list = list(candidates or [])
     candidate_map = {candidate.candidate_id: candidate for candidate in candidate_list}
 
-    last_query_contract = dict(getattr(view_state, "last_query_contract", {}) or {}) if view_state is not None else {}
-    previous_publishability = _normalized_text(last_query_contract.get("answer_publishability")) or "not_applicable"
-    previous_followup_rights = _normalized_text(last_query_contract.get("followup_rights")) or "none"
-    has_manifest = _has_manifest(view_state)
-    has_anchor_context = _has_anchor_context(view_state)
+    if session_memory is not None:
+        context_contract = current_context_followup_contract(session_memory)
+        previous_publishability = _normalized_text(context_contract.get("previous_publishability")) or "not_applicable"
+        previous_followup_rights = _normalized_text(context_contract.get("previous_followup_rights")) or "none"
+        has_manifest = bool(context_contract.get("has_manifest"))
+        has_anchor_context = bool(context_contract.get("has_anchor_context"))
+        anchor_reuse_allowed = bool(context_contract.get("anchor_reuse_allowed"))
+        current_context_type = _normalized_text(context_contract.get("context_type"))
+    else:
+        last_query_contract = dict(getattr(view_state, "last_query_contract", {}) or {}) if view_state is not None else {}
+        previous_publishability = _normalized_text(last_query_contract.get("answer_publishability")) or "not_applicable"
+        previous_followup_rights = _normalized_text(last_query_contract.get("followup_rights")) or "none"
+        has_manifest = _has_manifest(view_state)
+        has_anchor_context = _has_anchor_context(view_state)
+        anchor_reuse_allowed = has_anchor_context
+        current_context_type = ""
 
     if has_explicit_seed:
         blocked_reason = "explicit_named_subject_seed_bypass" if explicit_seed_kind == "named_subject" else "explicit_seed_bypass"
@@ -181,6 +202,7 @@ def resolve_turn_policy(
             interpretation=interpretation_model,
             candidates=candidate_list,
         )
+    interpretation_policy_source = _policy_source_for_interpretation(interpretation_model)
 
     if interpretation_model.chosen_action == "fresh_retrieval":
         return TurnPolicyResult(
@@ -189,7 +211,7 @@ def resolve_turn_policy(
             skip_followup_resolution=True,
             blocked_reason=interpretation_model.reason,
             selected_candidate_ids=selected_candidate_ids,
-            policy_source="validated_interpretation",
+            policy_source=interpretation_policy_source,
         )
 
     if interpretation_model.chosen_action == "clarification":
@@ -236,7 +258,7 @@ def resolve_turn_policy(
             allow_manifest_reuse=True,
             skip_followup_resolution=False,
             selected_candidate_ids=selected_candidate_ids,
-            policy_source="validated_interpretation",
+            policy_source=interpretation_policy_source,
         )
 
     if interpretation_model.chosen_action == "reuse_manifest":
@@ -268,10 +290,21 @@ def resolve_turn_policy(
             allow_manifest_reuse=True,
             skip_followup_resolution=False,
             selected_candidate_ids=selected_candidate_ids,
-            policy_source="validated_interpretation",
+            policy_source=interpretation_policy_source,
         )
 
     if interpretation_model.chosen_action == "reuse_anchor":
+        if not anchor_reuse_allowed:
+            return _clarification_result(
+                reason=(
+                    "followup_rights_blocked"
+                    if current_context_type == "subject_query"
+                    else "missing_anchor_context"
+                ),
+                trigger=trigger,
+                interpretation=interpretation_model,
+                candidates=candidate_list,
+            )
         if selected_candidates and any(candidate.source == "manifest_item" for candidate in selected_candidates):
             return _clarification_result(
                 reason="anchor_candidate_required",
@@ -292,7 +325,7 @@ def resolve_turn_policy(
             skip_followup_resolution=False,
             blocked_reason="manifest_not_required",
             selected_candidate_ids=selected_candidate_ids,
-            policy_source="validated_interpretation",
+            policy_source=interpretation_policy_source,
         )
 
     return TurnPolicyResult(

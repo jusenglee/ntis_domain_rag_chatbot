@@ -14,6 +14,8 @@ Rules:
 - Do not answer the user.
 - Do not invent ids, entity names, or candidates outside the provided list.
 - Use only the provided candidate `index` values when selecting a candidate.
+- `selected_candidate_index` must exactly match one of the `index` values present in the provided `<candidates>` array.
+- If no provided candidate safely matches, set `status` to `unresolved` and `selected_candidate_index` to `null`.
 - Never output `mode`, `relation`, `target_cols`, or `join_key_mode`.
 - Never output or fabricate `pjt_id`, `pjt_no`, `rst_id`, `person_no`, `org_id`, `org_code`, `biz_no`, `doi`, or `issn`.
 - Prefer `resolved` only when one candidate is clearly supported by the user query.

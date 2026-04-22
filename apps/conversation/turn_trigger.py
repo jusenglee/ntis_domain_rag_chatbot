@@ -16,6 +16,7 @@ from apps.conversation.followup_anchor import (
     parse_relative_reference,
     parse_source_reference,
 )
+from apps.conversation.session_memory import SessionMemory, current_context_summary
 from apps.conversation.view_state import ConversationViewState, get_recent_mentions
 from apps.planner.planner_defaults import PLANNER_DISABLE_THINKING, PLANNER_TEMPERATURE
 from apps.planner.prompt_asset_paths import planner_prompt_path
@@ -62,22 +63,35 @@ def _view_state_summary(view_state: Optional[ConversationViewState]) -> Dict[str
             "last_turn_kind": None,
             "last_answer_publishability": None,
             "last_followup_rights": None,
+            "subject_kind": None,
+            "subject_name": None,
+            "refinement_allowed": False,
         }
     snapshot = getattr(view_state, "visible_answer_manifest", None)
     active_scope = getattr(view_state, "active_scope", None)
+    active_focus = getattr(active_scope, "focus", None)
     last_query_contract = dict(getattr(view_state, "last_query_contract", {}) or {})
     subject_index = getattr(view_state, "subject_index", {}) or {}
     recent_mentions = get_recent_mentions(view_state)
+    subject_kind = str(last_query_contract.get("subject_kind") or "").strip().lower() or None
+    subject_name = str(last_query_contract.get("subject_name") or "").strip() or None
+    focus_kind = str(getattr(active_focus, "kind", "") or "").strip().lower()
+    if not subject_kind and focus_kind in {"people", "org"}:
+        subject_kind = focus_kind
+        subject_name = str(getattr(active_focus, "title_text", "") or "").strip() or subject_name
     return {
         "has_visible_answer_manifest": snapshot is not None,
         "manifest_visible_count": int(getattr(snapshot, "visible_count", 0) or 0),
-        "has_active_focus": getattr(active_scope, "focus", None) is not None,
+        "has_active_focus": active_focus is not None,
         "has_child_anchor": getattr(active_scope, "child_anchor", None) is not None,
         "subject_index_count": len(subject_index),
         "recent_mention_count": len(recent_mentions),
         "last_turn_kind": str(last_query_contract.get("turn_kind") or "").strip().lower() or None,
         "last_answer_publishability": str(last_query_contract.get("answer_publishability") or "").strip().lower() or None,
         "last_followup_rights": str(last_query_contract.get("followup_rights") or "").strip().lower() or None,
+        "subject_kind": subject_kind,
+        "subject_name": subject_name,
+        "refinement_allowed": bool(last_query_contract.get("refinement_allowed")) or bool(subject_kind and subject_name),
     }
 
 
@@ -89,6 +103,7 @@ def _has_previous_state(summary: Dict[str, Any]) -> bool:
             bool(summary.get("has_child_anchor")),
             int(summary.get("subject_index_count") or 0) > 0,
             int(summary.get("recent_mention_count") or 0) > 0,
+            bool(summary.get("last_turn_kind")),
         ]
     )
 
@@ -102,6 +117,14 @@ def _has_subject_refinement_cue(question: str) -> bool:
     if parse_relative_reference(text) is not None or is_referential_followup(text):
         return False
     return bool(_YEAR_OR_RANGE_RE.search(text) or any(cue in text for cue in _SUBJECT_REFINEMENT_CUES))
+
+
+def _has_subject_context(summary: Dict[str, Any]) -> bool:
+    return bool(
+        summary.get("current_context_type") == "subject_query"
+        or summary.get("refinement_allowed")
+        or (summary.get("subject_kind") and summary.get("subject_name"))
+    )
 
 
 def _heuristic_turn_trigger(
@@ -120,14 +143,6 @@ def _heuristic_turn_trigger(
             reason=reason,
         )
 
-    if not _has_previous_state(summary):
-        return TurnTriggerResult(
-            turn_intent="fresh",
-            reference_style="none",
-            confidence=0.96,
-            reason="no_previous_state",
-        )
-
     if parse_source_reference(question) is not None:
         return TurnTriggerResult(
             turn_intent="followup",
@@ -144,6 +159,14 @@ def _heuristic_turn_trigger(
             reason="ordinal_token",
         )
 
+    if not _has_previous_state(summary):
+        return TurnTriggerResult(
+            turn_intent="fresh",
+            reference_style="none",
+            confidence=0.96,
+            reason="no_previous_state",
+        )
+
     if is_referential_followup(question):
         return TurnTriggerResult(
             turn_intent="ambiguous",
@@ -152,7 +175,7 @@ def _heuristic_turn_trigger(
             reason="referential_cue",
         )
 
-    if _has_subject_refinement_cue(question):
+    if _has_subject_context(summary) and _has_subject_refinement_cue(question):
         return TurnTriggerResult(
             turn_intent="followup",
             reference_style="refinement",
@@ -172,12 +195,13 @@ async def run_turn_trigger(
     *,
     question: str,
     view_state: Optional[ConversationViewState],
+    session_memory: Optional[SessionMemory] = None,
     has_explicit_seed: bool,
     explicit_seed_kind: Optional[str] = None,
     request_id: Optional[str],
     conversation_id: str,
 ) -> TurnTriggerResult:
-    summary = _view_state_summary(view_state)
+    summary = current_context_summary(session_memory) if session_memory is not None else _view_state_summary(view_state)
     heuristic = _heuristic_turn_trigger(
         question=question,
         has_explicit_seed=has_explicit_seed,

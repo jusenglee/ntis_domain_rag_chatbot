@@ -121,8 +121,8 @@
   - `3D 반도체 공급망 강화를 위한 실증 기반구축 과제의 상세정보를 알려줘`
   - `해당 과제에 참여한 최성순 연구자가 다른 과제에도 참여한 이력이 있는지?`
 - expected keep: detail turn persists child subject truth into `subject_index` and the next turn resolves the named subject after session-memory reload
-- expected keep: `conversation:v2:{cid}:view_state` roundtrip preserves `active_scope`, `visible_answer_manifest`, `subject_index`
-- expected keep: old unversioned Redis key alone does not restore session truth
+- expected keep: `conversation:v3:{cid}:session_memory.current_context` roundtrip preserves the official next-turn truth
+- expected keep: legacy `conversation:v2:{cid}:history|last_canonical_evidence|last_render_profile|view_state` keys alone do not restore session truth
 - expected ban: answer-visible child name disappearing just because per-person exact id was absent in the previous detail row
 
 ### 11G. Visible answer manifest owns ordinal truth
@@ -254,6 +254,31 @@
 - expected keep: one provisional `people | org | perf` subject resolves as `child_entity_followup`
 - expected keep: two or more same-kind provisional candidates raise `clarification_required`
 - expected ban: unconditional fresh search or unconditional clarification for every name-only child follow-up
+
+### 11H-3. Follow-up entity registry and candidate recall stay contract-bound
+- query: people-axis follow-up when only project candidates exist
+- expected keep: same-kind fail-closed clarification with no project example candidates.
+- expected ban: people 질문이 project 후보로 fallback되어 project clarification을 출력하는 것
+- query: more than 16 visible candidates where a named same-kind tail candidate is referenced
+- expected keep: deterministic/prompt candidate selection recalls the named tail candidate before the LLM prompt limit is applied.
+- expected ban: `_MAX_CANDIDATES_FOR_PROMPT`가 전체 후보 회수 한계처럼 동작하는 것
+- query: single same-kind anchor candidate with no ordinal/source reference
+- expected keep: `policy_source=aggressive_auto` only after candidate id validation.
+- expected ban: non-publishable manifest, wrong entity kind, or unknown candidate id를 aggressive auto가 우회하는 것
+- expected keep: `route_context()` is deterministic-only; constrained LLM fallback is only available through `run_context_router()`.
+- expected keep: registry entries are Pydantic-validated; duplicate kind, invalid regex, unapproved keyword collision, or same-priority shared keyword fails at validation time.
+- expected keep: approved shared keyword resolution follows registry priority.
+- expected keep: router year matching uses registry `temporal_keys`, not a hardcoded candidate field.
+- expected keep: context-router prompt requires `selected_candidate_index` to be one of the provided candidate `index` values or returns `unresolved`.
+
+### 11H-4. SessionMemory v3 is the only persisted follow-up truth
+- expected keep: load reads only `conversation:v3:{cid}:session_memory`; missing or corrupt v3 starts with `EmptyContext`.
+- expected keep: save writes only v3 session memory and best-effort deletes v2 `history`, `last_canonical_evidence`, `last_render_profile`, and `view_state` keys.
+- expected keep: `SubjectQueryContext` restores subject focus and refinement rights without restoring a visible manifest for ordinal/source reuse.
+- expected keep: `PublishedManifestContext` is the only context that restores visible manifest ordinal/source rights.
+- expected keep: `turn_trigger`, turn-interpreter prompt summaries, and `turn_policy` consume `SessionMemory.current_context` directly when present; stale `view_state.last_query_contract` cannot grant reuse rights.
+- expected keep: persistence prefers explicit `next_current_context` from runtime/answer nodes and fails closed to `EmptyContext` if missing; save-time view-state inference is forbidden.
+- expected ban: v2 `view_state.visible_answer_manifest` resurrecting stale ordinal/source follow-up truth.
 
 ## Safety / contract bans
 ### 12. No fallback chat

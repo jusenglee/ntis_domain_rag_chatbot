@@ -9,12 +9,14 @@ from pydantic import BaseModel, Field
 from apps.api.runtime_helpers import log_event
 from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
+from apps.conversation.entity_registry import detect_entity_kind_from_text, normalize_entity_kind
 from apps.conversation.followup_anchor import (
     is_referential_followup,
     parse_ordinal_reference,
     parse_relative_reference,
     parse_source_reference,
 )
+from apps.conversation.session_memory import SessionMemory, current_context_summary
 from apps.conversation.turn_trigger import TurnTriggerResult
 from apps.conversation.view_state import (
     ConversationViewState,
@@ -35,7 +37,7 @@ CandidateSource = Literal[
     "subject_index",
     "recent_mention",
 ]
-EntityKind = Literal["project", "perf", "people", "org"]
+EntityKind = str
 ChosenAction = Literal[
     "reuse_manifest",
     "reuse_anchor",
@@ -46,6 +48,13 @@ ChosenAction = Literal[
 _MAX_CANDIDATES_FOR_PROMPT = 16
 _INTERPRETER_LOW_CONFIDENCE = 0.45
 _IDENTITY_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
+_HEURISTIC_DIRECT_REASONS = {
+    "named_candidate_heuristic",
+    "relative_candidate_heuristic",
+    "single_anchor_context",
+    "single_filtered_candidate",
+    "single_same_kind_candidate_auto",
+}
 _SOURCE_PRIORITY = {
     "child_anchor": 0,
     "focus_entity": 1,
@@ -110,10 +119,7 @@ def _normalized_text(value: Any) -> str:
 
 
 def _normalize_entity_kind(value: Any) -> EntityKind:
-    text = _normalized_text(value).lower()
-    if text in {"project", "perf", "people", "org"}:
-        return text  # type: ignore[return-value]
-    return "project"
+    return normalize_entity_kind(value, default="project")
 
 
 def _normalize_ids_map(values: Any) -> Dict[str, list[str]]:
@@ -236,26 +242,36 @@ def _candidate_matches_name(question: str, candidate: TurnCandidate) -> bool:
 
 
 def _question_entity_kind(question: str) -> Optional[EntityKind]:
-    text = _normalized_text(question).lower()
-    if not text:
-        return None
-    if any(token in text for token in ("논문", "성과", "특허", "보고서", "paper", "patent", "performance", "result")):
-        return "perf"
-    if any(token in text for token in ("연구자", "연구원", "person", "researcher")):
-        return "people"
-    if any(token in text for token in ("기관", "조직", "회사", "org", "organization", "institution", "agency")):
-        return "org"
-    if any(token in text for token in ("과제", "project")):
-        return "project"
-    return None
+    return detect_entity_kind_from_text(question)
 
 
 def _filtered_candidates_for_question(question: str, candidates: list[TurnCandidate]) -> list[TurnCandidate]:
     target_kind = _question_entity_kind(question)
     if target_kind is None:
         return list(candidates)
-    filtered = [candidate for candidate in candidates if candidate.entity_kind == target_kind]
+    filtered = [candidate for candidate in candidates if normalize_entity_kind(candidate.entity_kind, default="") == target_kind]
     return filtered
+
+
+def _select_prompt_candidates(
+    question: str,
+    candidates: list[TurnCandidate],
+    *,
+    limit: int = _MAX_CANDIDATES_FOR_PROMPT,
+) -> list[TurnCandidate]:
+    filtered = _filtered_candidates_for_question(question, candidates)
+    if limit <= 0 or not filtered:
+        return []
+    text = _normalized_text(question)
+
+    def score(candidate: TurnCandidate) -> tuple[int, int, int, int]:
+        name_match = 0 if _candidate_matches_name(text, candidate) else 1
+        source_rank = _SOURCE_PRIORITY.get(candidate.source, 99)
+        display_rank = int(candidate.display_rank or 9999)
+        recency_rank = -int(candidate.turn_index or 0)
+        return (name_match, source_rank, display_rank, recency_rank)
+
+    return sorted(filtered, key=score)[:limit]
 
 
 def _relative_candidates(question: str, candidates: list[TurnCandidate]) -> list[TurnCandidate]:
@@ -633,20 +649,33 @@ def _view_state_summary(view_state: Optional[ConversationViewState]) -> Dict[str
             "last_turn_kind": None,
             "last_answer_publishability": None,
             "last_followup_rights": None,
+            "subject_kind": None,
+            "subject_name": None,
+            "refinement_allowed": False,
         }
     snapshot = getattr(view_state, "visible_answer_manifest", None)
     active_scope = getattr(view_state, "active_scope", None)
+    active_focus = getattr(active_scope, "focus", None)
     last_query_contract = dict(getattr(view_state, "last_query_contract", {}) or {})
+    subject_kind = _normalized_text(last_query_contract.get("subject_kind")).lower() or None
+    subject_name = _normalized_text(last_query_contract.get("subject_name")) or None
+    focus_kind = _normalized_text(getattr(active_focus, "kind", "")).lower()
+    if not subject_kind and focus_kind in {"people", "org"}:
+        subject_kind = focus_kind
+        subject_name = _normalized_text(getattr(active_focus, "title_text", "")) or subject_name
     return {
         "has_visible_answer_manifest": snapshot is not None,
         "manifest_visible_count": int(getattr(snapshot, "visible_count", 0) or 0),
-        "has_active_focus": getattr(active_scope, "focus", None) is not None,
+        "has_active_focus": active_focus is not None,
         "has_child_anchor": getattr(active_scope, "child_anchor", None) is not None,
         "subject_index_count": len(getattr(view_state, "subject_index", {}) or {}),
         "recent_mention_count": len(get_recent_mentions(view_state)),
         "last_turn_kind": _normalized_text(last_query_contract.get("turn_kind")).lower() or None,
         "last_answer_publishability": _normalized_text(last_query_contract.get("answer_publishability")).lower() or None,
         "last_followup_rights": _normalized_text(last_query_contract.get("followup_rights")).lower() or None,
+        "subject_kind": subject_kind,
+        "subject_name": subject_name,
+        "refinement_allowed": bool(last_query_contract.get("refinement_allowed")) or bool(subject_kind and subject_name),
     }
 
 
@@ -714,11 +743,12 @@ def _heuristic_turn_interpretation(
             rewritten_user_intent=_normalized_text(question) or None,
         )
 
+    target_kind = _question_entity_kind(question)
     filtered = _filtered_candidates_for_question(question, candidates)
-    if _question_entity_kind(question) is not None and not filtered:
+    if target_kind is not None and not filtered:
         return TurnInterpretationResult(
             chosen_action="clarification",
-            target_entity_kind=_question_entity_kind(question),
+            target_entity_kind=target_kind,
             requested_refinement=_build_requested_refinement(question),
             confidence=0.88,
             reason="same_kind_candidates_missing",
@@ -740,7 +770,7 @@ def _heuristic_turn_interpretation(
     if len(named_matches) > 1:
         return TurnInterpretationResult(
             chosen_action="clarification",
-            target_entity_kind=_question_entity_kind(question),
+            target_entity_kind=target_kind,
             requested_refinement=_build_requested_refinement(question),
             confidence=0.28,
             reason="named_candidate_ambiguous",
@@ -773,9 +803,21 @@ def _heuristic_turn_interpretation(
             rewritten_user_intent=_normalized_text(question) or None,
         )
 
+    if target_kind is not None and len(filtered) == 1:
+        selected = filtered[0]
+        return TurnInterpretationResult(
+            chosen_action=_candidate_action(selected),
+            selected_candidate_ids=[selected.candidate_id],
+            target_entity_kind=selected.entity_kind,
+            requested_refinement=_build_requested_refinement(question),
+            confidence=0.72,
+            reason="single_same_kind_candidate_auto",
+            rewritten_user_intent=_normalized_text(question) or None,
+        )
+
     return TurnInterpretationResult(
         chosen_action="clarification",
-        target_entity_kind=_question_entity_kind(question),
+        target_entity_kind=target_kind,
         requested_refinement=_build_requested_refinement(question),
         confidence=0.24,
         reason="heuristic_ambiguity",
@@ -788,6 +830,7 @@ async def run_turn_interpreter(
     *,
     question: str,
     view_state: Optional[ConversationViewState],
+    session_memory: Optional[SessionMemory] = None,
     candidates: list[TurnCandidate],
     trigger: TurnTriggerResult,
     has_explicit_seed: bool,
@@ -800,11 +843,20 @@ async def run_turn_interpreter(
         trigger=trigger,
         has_explicit_seed=has_explicit_seed,
     )
-    prompt_candidates = _filtered_candidates_for_question(question, candidates)
-    candidate_payload = [_compact_candidate(candidate) for candidate in prompt_candidates[:_MAX_CANDIDATES_FOR_PROMPT]]
-    summary = _view_state_summary(view_state)
+    prompt_candidates = _select_prompt_candidates(question, candidates)
+    candidate_payload = [_compact_candidate(candidate) for candidate in prompt_candidates]
+    summary = current_context_summary(session_memory) if session_memory is not None else _view_state_summary(view_state)
 
-    if has_explicit_seed or trigger.turn_intent == "fresh" or trigger.reference_style == "refinement" or not prompt_candidates:
+    if (
+        has_explicit_seed
+        or trigger.turn_intent == "fresh"
+        or trigger.reference_style == "refinement"
+        or not prompt_candidates
+        or (
+            heuristic.chosen_action != "clarification"
+            and str(heuristic.reason or "").strip().lower() in _HEURISTIC_DIRECT_REASONS
+        )
+    ):
         log_event(
             "TURN.INTERPRETATION",
             request_id=request_id,

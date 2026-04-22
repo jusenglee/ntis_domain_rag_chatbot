@@ -36,6 +36,7 @@ from apps.conversation.turn_interpreter import (
 )
 from apps.conversation.turn_policy import TurnPolicyResult, resolve_turn_policy
 from apps.conversation.turn_trigger import TurnTriggerResult, run_turn_trigger
+from apps.conversation.session_memory import SessionMemory, view_state_from_current_context
 from apps.platform.settings import MAX_TOP_K_SIZE
 from apps.api.runtime_helpers import log_event
 from apps.planner.planner_defaults import (
@@ -126,6 +127,12 @@ _NAMED_SUBJECT_SUFFIX_RE = re.compile(
     r"소속기관|수행기관|주관기관|참여기관|협력기관|기관|회사|조직|"
     r"과제|프로젝트|성과|논문|특허|보고서)\s*(?:[:=은는이가]\s*)?"
     r"(?P<term>[가-힣A-Za-z][가-힣A-Za-z0-9·.\-&()]{1,60})"
+)
+_DEICTIC_SUBJECT_REFERENCE_RE = re.compile(
+    r"^\s*(?:그|이|해당|저)\s*(?:"
+    r"연구책임자|참여\s*연구원|참여연구원|연구자|연구원|참여자|사람|"
+    r"소속기관|수행기관|주관기관|참여기관|협력기관|기관|회사|조직|"
+    r"과제|프로젝트|성과|논문|특허|보고서)"
 )
 _SUBJECT_REFINEMENT_CUES = (
     "활동",
@@ -501,6 +508,8 @@ def _has_explicit_named_subject_seed(question: str, normalized_intent_base: Any)
         return False
     text = str(question or "").strip()
     if not text:
+        return False
+    if _DEICTIC_SUBJECT_REFERENCE_RE.search(text):
         return False
     has_axis_cue = any(cue in text for cue in _NAMED_SUBJECT_CUES)
     intent_kind, intent_term = _intent_subject_terms(normalized_intent_base)
@@ -1706,6 +1715,7 @@ async def build_intent_payload(
     turn_id: Optional[str],
     canonical_evidence: Optional[List[Dict[str, Any]]] = None,
     view_state: Optional[ConversationViewState] = None,
+    session_memory: Optional[SessionMemory] = None,
 ) -> tuple[Any, Any]:
     precheck = _cheap_precheck(question)
 
@@ -1730,7 +1740,11 @@ async def build_intent_payload(
         hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
 
     )
-    active_view_state = view_state or ConversationViewState()
+    active_view_state = (
+        view_state_from_current_context(session_memory)
+        if session_memory is not None
+        else (view_state or ConversationViewState())
+    )
     question_analysis = None
     planner_failed = 0
     base_route = str((normalized_intent_base.get("base_route") if isinstance(normalized_intent_base, dict) else getattr(normalized_intent_base, "base_route", None)) or "project").strip().lower() or "project"
@@ -1865,6 +1879,7 @@ async def build_intent_payload(
         turn_trigger_result = run_turn_trigger(
             question=question,
             view_state=active_view_state,
+            session_memory=session_memory,
             has_explicit_seed=has_explicit_seed,
             explicit_seed_kind=explicit_seed_kind,
             request_id=request_id,
@@ -1874,6 +1889,7 @@ async def build_intent_payload(
         turn_interpretation_result = run_turn_interpreter(
             question=question,
             view_state=active_view_state,
+            session_memory=session_memory,
             candidates=turn_candidates,
             trigger=turn_trigger,
             has_explicit_seed=has_explicit_seed,
@@ -1887,6 +1903,7 @@ async def build_intent_payload(
         turn_trigger=turn_trigger,
         interpretation=turn_interpretation,
         view_state=active_view_state,
+        session_memory=session_memory,
         has_explicit_seed=has_explicit_seed,
         explicit_seed_kind=explicit_seed_kind,
         candidates=turn_candidates,
@@ -1907,6 +1924,7 @@ async def build_intent_payload(
         skip_followup_resolution=int(turn_policy.skip_followup_resolution),
         previous_answer_publishability=previous_turn_contract.get("answer_publishability"),
         previous_followup_rights=previous_turn_contract.get("followup_rights"),
+        memory_source=("current_context" if session_memory is not None else "view_state"),
     )
     resolution_view_state = active_view_state
     if turn_policy.execution_path == "reuse_anchor":

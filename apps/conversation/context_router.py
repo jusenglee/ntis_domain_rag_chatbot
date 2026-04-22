@@ -19,6 +19,12 @@ from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm, load_prompt_file
 from apps.planner.query_intent import normalize_korean_temporal_years
 from apps.planner.planner_defaults import PLANNER_DISABLE_THINKING, PLANNER_TEMPERATURE
+from apps.conversation.entity_registry import (
+    candidate_temporal_value,
+    deictic_patterns_for,
+    detect_entity_kind_from_text,
+    normalize_entity_kind,
+)
 
 from apps.conversation.followup_anchor import (
     _RELATIVE_LAST_PATTERNS as _LAST_PATTERNS,
@@ -31,6 +37,7 @@ from apps.conversation.view_state import RecentMentionRecord
 
 logger = logging.getLogger("Chatbot_Server")
 _ROUTER_LLM_CONFIDENCE_THRESHOLD = 0.45
+_ROUTER_LLM_CANDIDATE_LIMIT = 12
 
 
 # ---------------------------------------------------------------------------
@@ -47,45 +54,28 @@ class ContextRouterDecision(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Deterministic matchers (공유 패턴은 followup_anchor에서 import)
+# Deterministic matchers (공유 패턴은 followup_anchor/entity_registry에서 import)
 # ---------------------------------------------------------------------------
 
-_DEICTIC_PROJECT = (
-    re.compile(r"그\s*과제"),
-    re.compile(r"이\s*과제"),
-    re.compile(r"해당\s*과제"),
-)
-_DEICTIC_PERF = (
-    re.compile(r"그\s*(?:성과|논문|특허|보고서)"),
-    re.compile(r"이\s*(?:성과|논문|특허|보고서)"),
-    re.compile(r"해당\s*(?:성과|논문|특허|보고서)"),
-)
 _YEAR_PATTERN = re.compile(r"(\d{4})\s*년\s*(?:꺼|것|거|도)?")
-
-_KIND_KEYWORDS = {
-    "project": ("과제", "프로젝트"),
-    "perf": ("성과", "논문", "특허", "보고서", "기술"),
-    "people": ("연구자", "연구원", "사람"),
-    "org": ("기관", "회사", "조직"),
-}
 
 
 def _detect_kind(question: str) -> Optional[str]:
-    text = str(question or "").strip()
-    for kind, keywords in _KIND_KEYWORDS.items():
-        if any(kw in text for kw in keywords):
-            return kind
-    return None
+    return detect_entity_kind_from_text(question)
 
 
 def _filter_by_kind(candidates: List[RecentMentionRecord], kind: Optional[str]) -> List[RecentMentionRecord]:
     if not kind:
         return candidates
-    return [c for c in candidates if str(c.entity_kind or "").strip().lower() == kind]
+    normalized_kind = normalize_entity_kind(kind, default="")
+    return [c for c in candidates if normalize_entity_kind(c.entity_kind, default="") == normalized_kind]
 
 
-def _filter_by_year(candidates: List[RecentMentionRecord], year: str) -> List[RecentMentionRecord]:
-    return [c for c in candidates if c.year == year]
+def _filter_by_year(candidates: List[RecentMentionRecord], year: str, *, kind: Optional[str] = None) -> List[RecentMentionRecord]:
+    return [
+        candidate for candidate in candidates
+        if candidate_temporal_value(candidate, kind or candidate.entity_kind) == year
+    ]
 
 
 def _latest_project_group_key(candidates: List[RecentMentionRecord]) -> Optional[str]:
@@ -103,10 +93,37 @@ def _compact_candidate(index: int, candidate: RecentMentionRecord) -> Dict[str, 
         "index": index,
         "entity_kind": str(candidate.entity_kind or "").strip().lower() or None,
         "title": candidate.title_text,
-        "year": candidate.year,
+        "year": candidate_temporal_value(candidate, candidate.entity_kind),
         "lead_org": candidate.lead_org,
         "source": candidate.source,
     }
+
+
+def _select_router_prompt_candidates(
+    *,
+    question: str,
+    candidates: List[RecentMentionRecord],
+    limit: int = _ROUTER_LLM_CANDIDATE_LIMIT,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    text = str(question or "").strip()
+    kind = _detect_kind(text)
+    year_match = _YEAR_PATTERN.search(text)
+    year = year_match.group(1) if year_match else None
+
+    def score(item: tuple[int, RecentMentionRecord]) -> tuple[int, int, int, int, int]:
+        index, candidate = item
+        candidate_kind = normalize_entity_kind(candidate.entity_kind, default="")
+        title = str(candidate.title_text or "").strip()
+        kind_miss = 0 if not kind or candidate_kind == kind else 1
+        year_miss = 0 if not year or candidate_temporal_value(candidate, kind or candidate_kind) == year else 1
+        title_miss = 0 if title and title in text else 1
+        source_rank = 0 if candidate.source in {"detail_focus", "child_anchor"} else 1
+        return (kind_miss, year_miss, title_miss, source_rank, -index)
+
+    ranked = sorted(enumerate(candidates), key=score)
+    return [_compact_candidate(index, candidate) for index, candidate in ranked[:limit]]
 
 
 def _should_call_llm_fallback(
@@ -121,6 +138,8 @@ def _should_call_llm_fallback(
     if not text:
         return False
     if decision.status == "resolved":
+        return False
+    if decision.reason == "same_kind_candidates_missing":
         return False
     if _YEAR_PATTERN.search(text):
         return True
@@ -140,8 +159,13 @@ def _deterministic_resolve(
     text = str(question or "").strip()
     kind = _detect_kind(text)
     filtered = _filter_by_kind(candidates, kind) if kind else candidates
-    if not filtered:
-        filtered = candidates
+    if kind and not filtered:
+        return ContextRouterDecision(
+            status="unresolved",
+            source="deterministic_recent_mentions",
+            confidence=0.0,
+            reason="same_kind_candidates_missing",
+        )
 
     # "마지막/최근/방금" → 마지막 항목 (최근 temporal guard 적용)
     temporal_guard = _is_temporal_choegeun(text)
@@ -192,7 +216,7 @@ def _deterministic_resolve(
     elif temporal_years:
         year_str = temporal_years[0]
     if year_str:
-        year_filtered = _filter_by_year(filtered, year_str)
+        year_filtered = _filter_by_year(filtered, year_str, kind=kind)
         if (kind or "project") == "project":
             latest_group_key = _latest_project_group_key(filtered)
             if latest_group_key:
@@ -220,7 +244,7 @@ def _deterministic_resolve(
             )
 
     # 직시적 참조: "그 과제", "그 성과" — 후보 1개면 확정
-    deictic_patterns = _DEICTIC_PROJECT if kind == "project" else _DEICTIC_PERF if kind == "perf" else []
+    deictic_patterns = deictic_patterns_for(kind) if kind else ()
     for pattern in deictic_patterns:
         if pattern.search(text):
             if len(filtered) == 1:
@@ -271,12 +295,10 @@ async def run_context_router(
     if not _should_call_llm_fallback(question=question, candidates=recent_mentions, decision=decision):
         return decision
 
-    candidate_payload = [
-        _compact_candidate(index, candidate)
-        for index, candidate in enumerate(recent_mentions[:12])
-    ]
+    candidate_payload = _select_router_prompt_candidates(question=question, candidates=recent_mentions)
     if not candidate_payload:
         return decision
+    valid_indices = {int(candidate["index"]) for candidate in candidate_payload if candidate.get("index") is not None}
 
     try:
         llm = build_llm(model_name="solar_vllm_0")
@@ -315,7 +337,7 @@ async def run_context_router(
         )
         selected_index = result.selected_candidate_index
         if result.status == "resolved":
-            if selected_index is None or not 0 <= int(selected_index) < len(candidate_payload):
+            if selected_index is None or int(selected_index) not in valid_indices:
                 raise ValueError("invalid_candidate_index")
             if float(result.confidence or 0.0) < _ROUTER_LLM_CONFIDENCE_THRESHOLD:
                 return decision.model_copy(update={"reason": "low_confidence_fallback"})
@@ -336,11 +358,14 @@ def route_context(
     recent_mentions: List[RecentMentionRecord],
     active_scope_summary: Optional[Dict[str, Any]] = None,
 ) -> ContextRouterDecision:
-    """제약형 Context Router. deterministic 해석 우선, LLM fallback은 향후 확장.
+    """Deterministic-only Context Router.
 
     Returns:
         ContextRouterDecision — 선택된 후보 index + rewrite hint.
         mode/relation/target_cols/join_key_mode는 절대 포함하지 않는다.
+
+    LLM fallback은 공개 API를 명시적으로 `run_context_router()`로 호출한 경우에만
+    제한된 후보 payload와 index 출력 계약 안에서 수행한다.
     """
     if not recent_mentions:
         return ContextRouterDecision(status="unresolved", source="none", reason="no_recent_mentions")
@@ -348,14 +373,5 @@ def route_context(
     decision = _deterministic_resolve(question, recent_mentions)
     if decision.status == "resolved":
         return decision
-
-    # LLM fallback은 1차 구현에서 placeholder로 둔다.
-    # 조건: explicit id 없고, scope_resolver 결과가 clarification이고,
-    #        recent_mention 후보가 1개 이상 있고, deterministic으로 못 고른 경우.
-    # 향후 LLM fallback 구현 시 아래 조건에서만 호출:
-    # - 후보 리스트에는 title/year/lead_org/entity_kind/index만 넣음
-    # - 출력은 index만
-    # - mode, relation, target_cols, join_key_mode 출력 금지
-    # - pjt_id, pjt_no 등 내부 키 생성 금지
 
     return decision

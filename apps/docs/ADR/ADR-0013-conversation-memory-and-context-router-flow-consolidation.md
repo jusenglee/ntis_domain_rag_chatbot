@@ -10,7 +10,8 @@ Proposed
 
 NTIS RAG 시스템의 "대화 플로우 + 메모리" 축은 다음 구성요소로 분산되어 있다.
 
-- `apps/conversation/conversation_store.py` — history, canonical_evidence, render_profile, view_state 저장 (Redis TTL)
+- `apps/conversation/conversation_store.py` — v3 `SessionMemory` 단일 저장 (`conversation:v3:{conversation_id}:session_memory`, Redis TTL)
+- `apps/conversation/session_memory.py` — `current_context` official truth와 runtime view-state projection
 - `apps/conversation/raw_payload_store.py` — 원본 payload (gzip+base64) 보관, active 1 + inactive N (`RAW_PAYLOAD_RECENT_ANCHOR_LIMIT`) + TTL
 - `apps/conversation/view_state.py` — focus_entity, subject_index, recent_mentions, visible_answer_manifest
 - `apps/conversation/context_router.py` — recent_mentions에서 deterministic matcher + 제약형 LLM fallback
@@ -30,7 +31,9 @@ NTIS RAG 시스템의 "대화 플로우 + 메모리" 축은 다음 구성요소�
 - `raw_payload_store`는 Redis에 `conversation:v2:{conversation_id}:raw_payload_store` 키로 저장되며, `ex=history_ttl_seconds` TTL이 적용된다 (`REDIS_TTL`=3600s).
 - `_prune_records`는 만료된 record 제거 + active 1 + inactive N(기본 3) LRU(`updated_at` 기준) 정책을 적용한다.
 - `sync_active_anchor_record`는 view_state의 활성 entity에 맞춰 `active` 플래그를 동기화한다.
-- `conversation_store`는 한 번 save 시 history/canonical_evidence/render_profile/view_state 전체를 JSON으로 덮어쓴다.
+- `conversation_store`는 v2 분산 키를 load fallback으로 사용하지 않는다. v3 `SessionMemory.current_context`가 다음 턴 follow-up official truth이며, save 시 v2 `history`, `last_canonical_evidence`, `last_render_profile`, `view_state` 키는 best-effort delete한다.
+- Follow-up runtime gates now consume `SessionMemory.current_context` directly when session memory exists. `view_state` projection remains for candidate materialization/rendering compatibility and must not grant publishability or reuse rights over current-context policy.
+- Answer/runtime nodes now emit explicit `next_current_context` for persistence. Session-memory persistence fails closed to `EmptyContext` when this value is missing; save-time `view_state` inference is no longer used as a fallback.
 
 ### Follow-up 재사용 경로
 1. `request_facade.build_intent_payload` → hard signal precheck → turn_trigger/interpreter/policy

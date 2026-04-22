@@ -24,6 +24,7 @@ from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.platform.schemas import IntentPayloadV3
 from apps.platform.settings import MAX_TOP_K_SIZE
 from apps.platform.storage import KVStore
+from apps.conversation.session_memory import CurrentContext, SessionMemory
 from apps.conversation.view_state import ConversationViewState
 
 
@@ -399,6 +400,8 @@ class AgentState(BaseModel):
     context: List[Dict] = Field(default_factory=list)
     canonical_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     render_profile: Dict[str, Any] = Field(default_factory=dict)
+    session_memory: SessionMemory = Field(default_factory=SessionMemory)
+    next_current_context: Optional[CurrentContext] = None
     view_state: ConversationViewState = Field(default_factory=ConversationViewState)
     no_result_message: Optional[str] = None
     rendered_context_used: Annotated[bool, merge_bool_flag] = False

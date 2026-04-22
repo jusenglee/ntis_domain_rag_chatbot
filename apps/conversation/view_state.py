@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+from apps.conversation.entity_registry import normalize_entity_kind
 
 DETAIL_CACHE_SCHEMA_VERSION = 2
 _SYNTHETIC_TITLE_PRIMARY_TYPES = {
@@ -16,7 +17,7 @@ _META_TITLE_KEYS = ("kor_pjt_nm", "eng_pjt_nm", "title", "paper_nm")
 
 
 class ChildEntityRef(BaseModel):
-    kind: Literal["people", "org", "perf"]
+    kind: str
     display_name: str
     ids_map: Dict[str, List[str]] = Field(default_factory=dict)
     subject_id: str = ""
@@ -28,6 +29,7 @@ class ChildEntityRef(BaseModel):
     @model_validator(mode="after")
     def _normalize_entity_ref(self) -> "ChildEntityRef":
         ids_map = _normalize_child_ids_map(self.ids_map)
+        self.kind = _normalize_kind(self.kind, default="unknown")
         display_name = _first_text(self.display_name) or ""
         role = _first_text(self.role)
         affiliation = _first_text(self.affiliation)
@@ -179,7 +181,7 @@ class RecentMentionRecord(BaseModel):
 
     답변 텍스트 파싱이 아니라 구조화된 retrieval state에서만 생성한다.
     """
-    entity_kind: Literal["project", "perf", "people", "org"]
+    entity_kind: str
     title_text: Optional[str] = None
     pjt_id: Optional[str] = None
     pjt_no: Optional[str] = None
@@ -716,8 +718,7 @@ def _researcher_names_from_child_refs(child_refs: List[ChildEntityRef]) -> List[
 
 
 def _normalize_kind(value: Any, *, default: str) -> str:
-    text = str(value or "").strip().lower()
-    return text or default
+    return normalize_entity_kind(value, default=default)
 
 
 def _infer_entity_kind(*, context_kind: str, doc: Dict[str, Any], evidence: Dict[str, Any], ids: Dict[str, Any], rank_item: Dict[str, Any]) -> str:

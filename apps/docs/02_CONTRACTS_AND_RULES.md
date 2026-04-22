@@ -43,6 +43,18 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 *   질문 안에 `신동구 연구자`, `한국과학기술정보연구원 기관`처럼 명시 주체명과 주체 축 cue가 함께 있으면 `ExplicitNamedSubjectSeed`로 본다. 이 경우 이전 ambiguous context나 stale manifest를 재사용하지 않고 fresh search로 진입한다.
 *   `2010~2015년도의 활동내역은?`, `논문만`, `다른 연도 활동`처럼 주체명 없이 필터만 바뀐 질문은 직전 current subject가 people/org로 확정되어 있을 때만 `SubjectRefinement`로 처리한다. 이는 `1번`, `출처 2`, `그 항목` 같은 `ReferenceFollowup`과 분리한다.
 *   질문의 대상 축이 명시된 경우 후보 해석은 같은 entity kind로 fail-closed 한다. 예를 들어 people 질문에 people 후보가 없으면 project 후보로 fallback하지 않고 clarification 또는 fresh path로 빠진다.
+*   Entity kind의 키워드, 직시 패턴, 대표 ID 키는 `apps.conversation.entity_registry`의 Pydantic registry entry를 기준으로 관리한다. `ConversationViewState` 저장 모델은 문자열 kind를 보존하므로 새 도메인 kind가 추가되어도 상태 저장 단계에서 폐기하지 않는다.
+*   Registry 로드 시 kind 중복, 빈 keyword, invalid regex, 승인되지 않은 keyword collision은 실패해야 한다. 승인된 shared keyword는 kind별 `priority`가 달라야 하며, priority가 낮은 kind가 우선한다.
+*   도메인별 시간 축은 registry의 `temporal_keys`로 정의한다. Router는 `candidate.year`에 직접 묶이지 않고 `temporal_keys` 순서에 따라 후보의 시간 값을 비교한다.
+*   LLM에 주입하는 후보 수 제한은 프롬프트 예산 제한일 뿐 전체 후보군 탐색 제한이 아니다. 후보 선택은 전체 후보군에서 같은 kind, 명시 이름, 연도, 활성 anchor 우선순위로 1차 회수한 뒤 제한된 수만 prompt payload로 보낸다.
+*   `route_context()`는 deterministic-only API다. LLM fallback은 `run_context_router()`에서만 수행하며, 후보 payload는 `index/title/year/lead_org/entity_kind/source`로 제한하고 planner 전략 필드나 내부 ID를 생성하지 않는다. LLM이 `candidates`에 없는 index를 반환하면 런타임에서 거부한다.
+*   단일 same-kind 후보처럼 확신 가능한 경우에만 `aggressive_auto` 정책 소스를 남기며 자동 재사용할 수 있다. 이 경우에도 publishability, followup rights, `pjt_id`/`pjt_no` 계약은 우회하지 않는다.
+*   다음 턴 참조 truth는 `conversation:v3:{conversation_id}:session_memory.current_context` 하나다. 기존 `conversation:v2:*:history`, `last_canonical_evidence`, `last_render_profile`, `view_state` 키는 load fallback으로 사용하지 않으며, save 시 best-effort delete 대상이다.
+*   `view_state`는 렌더링/materialization 상태로 유지할 수 있지만 follow-up 공식 truth가 아니다. Runtime은 `current_context`에서 복원한 view-state projection만 follow-up 해석에 사용한다.
+
+*   Runtime follow-up gates (`turn_trigger`, `turn_interpreter` prompt summaries, and `turn_policy`) must consume `SessionMemory.current_context` directly when `SessionMemory` is available. Stale `view_state.last_query_contract` must not override current-context publishability or follow-up rights.
+*   `view_state_from_current_context()` is compatibility materialization for candidate construction and rendering only. It is not the official next-turn truth.
+*   Answer/runtime nodes must publish an explicit `next_current_context` for persistence. If this value is missing, session memory persistence fails closed to `EmptyContext`; `view_state` inference is not used as a save-time fallback.
 
 ---
 

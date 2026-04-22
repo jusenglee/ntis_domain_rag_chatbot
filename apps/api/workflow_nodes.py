@@ -27,6 +27,7 @@ from apps.conversation.raw_payload_store import (
 )
 from apps.conversation.memory_observer import log_memory_snapshot
 from apps.conversation.request_facade import build_intent_payload
+from apps.conversation.session_memory import EmptyContext
 from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
 from apps.platform.settings import REDIS_TTL
 
@@ -53,7 +54,7 @@ async def node_load_memory(state: Any) -> Dict[str, Any]:
     """Restore conversation memory into the workflow-state shape."""
 
     cid = state.conversation_id
-    loaded_history, canonical_evidence, render_profile, view_state = await load_conversation_memory_from_store(
+    loaded_history, canonical_evidence, render_profile, view_state, session_memory = await load_conversation_memory_from_store(
         cid,
         kv_store=getattr(state, "kv_store", None),
         logger=logger,
@@ -99,6 +100,7 @@ async def node_load_memory(state: Any) -> Dict[str, Any]:
         "prev_context": effective_prev_context,
         "canonical_evidence": canonical_evidence,
         "render_profile": render_profile,
+        "session_memory": session_memory,
         "view_state": view_state,
         "raw_payload_memory": raw_payload_memory,
         "turn_id": turn_id,
@@ -154,6 +156,7 @@ async def node_analyze_question(state: Any) -> Dict[str, Any]:
         prev_context=state.prev_context,
         canonical_evidence=getattr(state, "canonical_evidence", None) or [],
         view_state=getattr(state, "view_state", None),
+        session_memory=getattr(state, "session_memory", None),
         request_id=getattr(state, "request_id", None),
         turn_id=getattr(state, "turn_id", None),
     )
@@ -183,6 +186,7 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
         "final_answer_text": response_text,
         "final_answer_artifact": artifact,
         "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": EmptyContext(),
         "merge_debug": {
             "selected_model": "direct",
             "selected_answer_source": "direct_answer",
@@ -210,7 +214,12 @@ async def node_save_history(state: Any) -> Dict[str, Any]:
         canonical_evidence=save_payload["canonical_evidence"],
         render_profile=save_payload["render_profile"],
         view_state=save_payload["view_state"],
+        selected_answer_meta=save_payload.get("selected_answer_meta"),
+        intent_payload=save_payload.get("intent_payload"),
+        next_current_context=save_payload.get("next_current_context"),
+        turn_journal_tail=save_payload.get("turn_journal_tail"),
         history_ttl_seconds=REDIS_TTL,
+        logger_obj=logger,
     )
     raw_saved = await save_raw_payload_memory(
         kv_store=kv_store,
