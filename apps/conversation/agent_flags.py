@@ -2,29 +2,26 @@ from __future__ import annotations
 
 import os
 
+
 def env_int(name: str, default: int, *, min_value: int | None = None) -> int:
-    raw = str(os.getenv(name, str(default)) or "").strip()
+    """Read an integer environment value with a bounded fallback."""
+
     try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-    if min_value is not None and value < min_value:
-        raise ValueError(f"{name} must be >= {min_value}") from None
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
     return value
 
 
-def agent_tool_enabled(flag_name: str | None) -> bool:
-    """Return whether an implemented agent tool can execute.
-
-    Agentic dialogue is now the normal front-controller path, so implemented
-    tools are not runtime-gated by rollout flags. Tools that are not ready must
-    stay declared with ``implemented=False`` in the registry.
-    """
-
-    return True
-
-
 def agentic_max_steps() -> int:
-    """Return the reserved agent loop guard threshold for tool execution."""
+    """Maximum number of agent tool calls allowed per request."""
 
     return env_int("AGENTIC_MAX_STEPS", 3, min_value=1)
+
+
+def agentic_decision_repair_max_attempts() -> int:
+    """Maximum number of schema-only AgentDecision repair attempts."""
+
+    return env_int("AGENTIC_DECISION_REPAIR_MAX_ATTEMPTS", 1, min_value=1)

@@ -10,9 +10,9 @@ Date
 Implementation update (2026-04-22)
 
 사용자 지시에 따라 신규 Agent 계약에서는 `fallback_legacy_pipeline` decision을 만들지 않는다.
-Agent가 안전한 tool call을 만들 수 없거나, 미구현 tool을 선택하거나, LLM 응답이 검증에 실패하면 legacy pipeline으로 넘기지 않고 clarification으로 fail-closed 한다.
-현재 workflow graph는 `AGENTIC_DIALOGUE_ENABLED=true`일 때 `rule_precheck` 이후 agent state card -> Dialogue Agent -> direct/tool/clarification 경로로 분기한다.
-`search_ntis_domain` / `refine_current_subject`가 guarded intent를 만들면 기존 knowledge sufficiency -> retrieval -> answer path에 합류하고, 미구현 tool / disabled tool / contract violation은 legacy fallback 없이 clarification 또는 contract block으로 종료한다.
+Agent가 안전한 tool call을 만들 수 없으면 사용자 모호성일 때만 clarification으로 fail-closed 한다. LLM 응답 parse/schema/tool validation 실패는 이전 front-controller 경로로 넘기지 않고 1회 self-repair 후 `agent_internal_error`로 종료한다.
+현재 workflow graph는 `agentic front-controller`일 때 `rule_precheck` 이후 agent state card -> Dialogue Agent -> direct/tool/clarification/internal-error 경로로 분기한다.
+`search_ntis_domain` / `refine_current_subject`가 guarded intent를 만들면 기존 knowledge sufficiency -> retrieval -> answer path에 합류하고, 미구현 tool / contract violation은 이전 front-controller 경로 없이 executor contract block으로 종료한다.
 
 Related ADRs
 ADR-0013: SessionMemory / CurrentContext 기반 대화 메모리 정리
@@ -303,6 +303,7 @@ decision_type: Literal[
 "direct_answer",
 "call_tool",
 "ask_clarification",
+"agent_internal_error",
 ]
 tool_name: Optional[str] = None
 tool_args: Dict[str, Any] = Field(default_factory=dict)
@@ -310,6 +311,8 @@ response_text: Optional[str] = None
 clarification_question: Optional[str] = None
 confidence: float
 reasoning_summary: str
+
+`agent_internal_error`는 LLM invoke 실패, JSON parse 실패, schema/tool validation 실패 후 self-repair 실패 같은 시스템 오류에만 사용한다. 사용자 대상이 실제로 모호한 경우에만 `ask_clarification`을 사용한다.
 
 apps/conversation/agent_dialogue_router.py
 
@@ -571,7 +574,7 @@ answer publication 가능 여부 판단
    → save_history
    9.2 New Workflow
 
-Feature flag enabled일 때:
+Production workflow:
 
 load_memory
 → rule_precheck
@@ -586,18 +589,11 @@ load_memory
 → answer_validation
 → publish_context
 → save_history
-10. Feature Flags
-    AGENTIC_DIALOGUE_ENABLED=false
-    AGENTIC_TOOL_SEARCH_ENABLED=false
-    AGENTIC_TOOL_REFINE_SUBJECT_ENABLED=false
-    AGENTIC_TOOL_LOOKUP_ENABLED=false
-    AGENTIC_TOOL_JOIN_ENABLED=false
-    AGENTIC_CLARIFICATION_ENABLED=false
-    AGENTIC_MAX_STEPS=3
-    AGENTIC_TOOL_TIMEOUT_MS=8000
-
+10. Runtime Guardrails
+    agentic front-controller
+AGENTIC_MAX_STEPS=3
 초기값은 모두 off.
-dark launch에서 request override로만 활성화한다.
+Agentic front-controller is the normal production path; old front-controller and shadow branches are not runtime modes.
 
 11. State and Memory Design
     11.1 유지할 내부 구조
@@ -703,20 +699,20 @@ Prompt 핵심
   Modify
   apps/api/workflow_builder.py
 
-Feature flag on일 때:
+Production path:
 
 load_memory
 → rule_precheck
 → dialogue_agent
 → ...
 
-Feature flag off일 때 기존 pipeline 유지.
+Old front-controller pipeline is not a runtime mode.
 
 Phase 5. request_facade 강등
 Modify
 apps/conversation/request_facade.py
 
-기존 build_intent_payload()는 유지하되, agent tool backend에서 호출 가능하도록 adapter화한다.
+agent tool backend는 build_agent_intent_payload()로 old turn front-controller 없이 planner / QuestionAnalysisV3 / HardContractV1 검증을 통과한다.
 
 새 함수:
 
@@ -866,16 +862,19 @@ Tool backend에서 pjt_no group semantics 유지
 신규 이벤트:
 
 AGENT.DECISION
+AGENT.PARSE_ERROR
+AGENT.SELF_REPAIR.START
+AGENT.SELF_REPAIR.SUCCESS
+AGENT.SELF_REPAIR.FAILED
+AGENT.INVOKE_ERROR
 AGENT.TOOL_CALL
 AGENT.TOOL_OBSERVATION
 AGENT.CLARIFICATION
 AGENT.CONTRACT_BLOCKED
 AGENT.STATE_CARD.BUILT
 AGENT.DIRECT_ANSWER
-AGENT.LEGACY_FALLBACK
+AGENT.INTERNAL_ERROR
 AGENT.LOOP_GUARD.TRIGGERED
-LEGACY.PIPELINE.DECISION
-AGENT.LEGACY_DIFF
 
 예:
 
@@ -889,17 +888,14 @@ AGENT.LEGACY_DIFF
 "subject_name": "신동구"
 }
 17. Rollout Plan
-Stage 0. Dark Launch (historical)
+Agentic front-controller is the normal production path; old front-controller and shadow branches are not runtime modes.
 Agent decision만 생성
-실제 user-visible 실행은 기존 workflow graph가 담당하되, Agent decision 결과에는 legacy fallback을 두지 않는다.
-AGENTIC_DIALOGUE_ENABLED=false
-AGENTIC_SHADOW_MODE=true
+실제 user-visible 실행은 기존 workflow graph가 담당하되, Agent decision 결과에는 이전 front-controller 경로을 두지 않는다.
+agentic front-controller
 Stage 1. Guarded Tool Path (current)
-`AGENTIC_DIALOGUE_ENABLED=true`이면 user-visible workflow가 agent direct/tool/clarification path로 진입한다.
-`search_ntis_domain`과 `refine_current_subject`는 각 tool flag가 켜진 경우 guarded intent를 만들어 기존 retrieval path에 합류한다. 단계적 rollout에서 disabled data tool은 `AGENT.LEGACY_FALLBACK`을 남기고 legacy pipeline으로 넘길 수 있으나, unknown/unimplemented tool과 contract violation은 clarification 또는 contract block으로 닫는다.
-AGENTIC_DIALOGUE_ENABLED=true
-AGENTIC_TOOL_REFINE_SUBJECT_ENABLED=true
-AGENTIC_TOOL_SEARCH_ENABLED=true
+`agentic front-controller`이면 user-visible workflow가 agent direct/tool/clarification/internal-error path로 진입한다.
+`search_ntis_domain`과 `refine_current_subject`는 guarded intent를 만들어 기존 retrieval path에 합류한다. unknown tool은 self-repair 대상이고, registry에 선언되었으나 미구현인 tool과 contract violation은 `AGENT.CONTRACT_BLOCKED` / contract block으로 닫는다.
+agentic front-controller
     Stage 2. Search Tool Enable
     명시적 새 검색도 Agent가 search_ntis_domain 호출
 Stage 3. Lookup / Join Enable
@@ -929,14 +925,14 @@ R3. 답변 자연스러움은 좋아지나 재현성이 낮아질 수 있음
 대응:
 
 Agent decision logging
-shadow mode 비교
+front-controller log verification
 golden regression 유지
 final answer validation 유지
 R4. 기존 코드와 병렬 운영 복잡도 증가
 
 대응:
 
-Phase별 feature flag
+single production path with guarded tools
 agent tool adapter를 기존 request_facade 위에 얇게 구성
 기존 runtime graph는 agent path가 대체 가능한 단위부터 제거한다.
 19. Acceptance Criteria
@@ -948,7 +944,7 @@ agent tool adapter를 기존 request_facade 위에 얇게 구성
 첫 턴 final answer가 일부 withheld여도, subject context는 dialogue continuity 용도로 유지된다.
 LLM이 직접 ID를 생성하지 않는다.
 기존 HardContractV1, QuestionAnalysisV3 검증은 tool backend에서 계속 적용된다.
-Feature flag off 시 기존 pipeline과 동일하게 동작한다.
+Agentic front-controller is the only supported production workflow path.
 Agent decision, tool call, observation이 모두 로그로 남는다.
 20. Final Decision Summary
 
