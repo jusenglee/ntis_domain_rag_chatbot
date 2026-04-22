@@ -48,6 +48,7 @@ class SubjectQueryContext(BaseModel):
     subject_ids_map: Dict[str, List[str]] = Field(default_factory=dict)
     result_kind: str = "project"
     result_manifest: Optional[DisplaySnapshot] = None
+    publication_status: Optional[str] = None
     followup_rights: FollowupRights = Field(
         default_factory=lambda: FollowupRights(refinement_allowed=True)
     )
@@ -493,13 +494,27 @@ def build_current_context(
     followup_rights = str(contract.get("followup_rights") or "source_allowed").strip().lower()
     subject_kind, subject_name = _subject_seed_from_intent(intent_payload)
 
-    if publishability == "publishable" and subject_kind and subject_name:
+    subject_manifest = active_snapshot if isinstance(active_snapshot, DisplaySnapshot) else visible_snapshot
+    subject_can_be_retained = (
+        publishability == "publishable"
+        or (
+            publishability in {"withheld_partial", "blocked"}
+            and isinstance(subject_manifest, DisplaySnapshot)
+        )
+    )
+    if subject_can_be_retained and subject_kind and subject_name:
+        publication_status = (
+            "publishable"
+            if publishability == "publishable"
+            else "answer_withheld_subject_retained"
+        )
         manifest = active_snapshot if isinstance(active_snapshot, DisplaySnapshot) else visible_snapshot
         return SubjectQueryContext(
             subject_kind=subject_kind,
             subject_name=subject_name,
             result_kind=str(getattr(manifest, "context_kind", None) or contract.get("context_kind") or "project"),
             result_manifest=manifest,
+            publication_status=publication_status,
             followup_rights=FollowupRights(refinement_allowed=True),
         )
 
@@ -579,6 +594,14 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
         )
 
     if isinstance(context, SubjectQueryContext):
+        publication_status = str(context.publication_status or "").strip()
+        answer_publishability = (
+            "publishable"
+            if publication_status == "publishable" or not publication_status
+            else "withheld_partial"
+            if publication_status == "answer_withheld_subject_retained"
+            else "blocked"
+        )
         focus = FocusEntity(
             kind=context.subject_kind,
             source="subject_query_context",
@@ -598,7 +621,8 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
                     "context_kind": context.result_kind,
                     "subject_kind": context.subject_kind,
                     "subject_name": context.subject_name,
-                    "answer_publishability": "publishable" if context.followup_rights.refinement_allowed else "blocked",
+                    "answer_publishability": answer_publishability,
+                    "publication_status": publication_status or answer_publishability,
                     "followup_rights": "none",
                     "refinement_allowed": bool(context.followup_rights.refinement_allowed),
                 },

@@ -1,3 +1,10 @@
+"""
+검색된 근거(Evidence)를 바탕으로 최종 사용자 답변을 생성하고 품질을 검증하는 모듈입니다.
+
+단순한 텍스트 생성을 넘어, 답변 내용이 실제 검색 결과와 일치하는지(Consistency), 
+허구의 정보가 포함되지 않았는지(Groundedness)를 2중으로 체크하여 신뢰성을 확보합니다.
+"""
+
 from __future__ import annotations
 
 import os

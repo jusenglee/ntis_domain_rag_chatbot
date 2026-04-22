@@ -1,7 +1,9 @@
-"""Stagewise planner orchestration helpers.
+"""
+사용자 질문을 다단계(Stagewise)로 분석하여 실행 전략을 수립하는 플래너 런타임입니다.
 
-This module owns the LLM-driven stage-1/stage-2 planner flow so the app entry
-module can stay focused on composition-root concerns.
+ADR-0001 체제에서 플래너는 에이전트의 도구 호출을 검증하고, 
+데이터 조회를 위한 엄격한 L1 계약(IntentContract)을 컴파일하는 역할을 수행합니다.
+Stage 1 (의도 분류) -> Stage 1.5 (개념 추출) -> Stage 2 (세부 필터 수립) 순으로 진행됩니다.
 """
 
 from __future__ import annotations
@@ -646,8 +648,8 @@ async def run_planner_stage1(
     )
     planner_llm = llm.bind(
         reasoning_effort="high",
-        include_reasoning=False,
-        disable_thinking=PLANNER_DISABLE_THINKING,
+        include_reasoning=True,
+        #disable_thinking=PLANNER_DISABLE_THINKING,
         temperature=PLANNER_TEMPERATURE,
         top_p=1.0,
         max_tokens=250,

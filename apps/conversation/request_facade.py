@@ -1,3 +1,10 @@
+"""
+자연어 질문을 시스템 실행 계획(IntentPayloadV3)으로 변환하는 통합 패사드(Facade) 모듈입니다.
+
+이 모듈은 대화 맥락 유지, 후속 질문 해석, 플래너 호출 등 복잡한 전처리 과정을 오케스트레이션합니다.
+에이전틱 모드에서는 도구 실행기(AgentToolExecutor)가 이 모듈을 호출하여 에이전트의 의도를 구체적인 실행 계획으로 전환합니다.
+"""
+
 from __future__ import annotations
 
 import os
@@ -1897,6 +1904,107 @@ def _build_explicit_only_hint(question: str) -> Dict[str, Any]:
         "perf_types": extract_perf_types(question),
         "title_terms": extract_title_terms(question),
     }
+
+
+async def build_agent_intent_payload(
+    *,
+    question: str,
+    conversation_id: str,
+    chat_history: List[BaseMessage],
+    prev_context: List[Dict[str, Any]],
+    request_id: Optional[str],
+    turn_id: Optional[str],
+    canonical_evidence: Optional[List[Dict[str, Any]]] = None,
+    view_state: Optional[ConversationViewState] = None,
+    session_memory: Optional[SessionMemory] = None,
+) -> tuple[Any, Any]:
+    """Build guarded planner outputs after the Dialogue Agent has selected a tool.
+
+    This path intentionally skips the old turn front-controller. The agent already
+    decided whether this turn is a new search, a current-subject refinement, or a
+    clarification. The backend only compiles planner/contract truth.
+    """
+
+    explicit_only_hint = _build_explicit_only_hint(question)
+    kws: List[str] = []
+    raw_intent = classify_query_intent(question, kws, hint=explicit_only_hint)
+    normalized_intent_base = normalize_intent(
+        raw_intent,
+        query=question,
+        keywords=kws,
+        hint_years=list(explicit_only_hint.get("years", [])),
+        hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
+        hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
+    )
+    active_view_state = (
+        view_state_from_current_context(session_memory)
+        if session_memory is not None
+        else (view_state or ConversationViewState())
+    )
+
+    question_analysis = await run_question_analysis(
+        question=question,
+        conversation_id=conversation_id,
+        chat_history=chat_history,
+        prev_context=prev_context,
+        canonical_evidence=canonical_evidence or [],
+        view_state=active_view_state,
+        request_id=request_id,
+        normalized_intent_base=normalized_intent_base,
+    )
+    count_validation = _resolve_question_analysis_count(
+        question_analysis,
+        question=question,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    normalized_intent, planner_applied = apply_question_analysis_v3(
+        normalized_intent_base,
+        question_analysis,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    turn_contract = _build_turn_contract(
+        normalized_intent=normalized_intent,
+        question_analysis=question_analysis,
+        count_validation=count_validation,
+    )
+    log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="agent_intent_build",
+        status="success",
+        front_controller="agent",
+        planner_applied=int(planner_applied),
+        planner_failed=0,
+        planner_stagewise_enabled=int(True),
+        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
+        planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
+        planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
+        schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
+    )
+    return (
+        _build_intent_payload_object(
+            normalized_intent,
+            question_analysis,
+            followup_resolution={
+                "followup_resolution_status": "agent_tool",
+                "explicit_followup": False,
+                "followup_reference_kind": None,
+            },
+            turn_id=turn_id,
+            turn_contract=turn_contract,
+            count_validation=count_validation,
+            context_router={
+                "invoked": False,
+                "status": "not_applicable",
+                "source": "agent_front_controller",
+                "confidence": 0.0,
+            },
+        ),
+        question_analysis,
+    )
 
 
 async def build_intent_payload(

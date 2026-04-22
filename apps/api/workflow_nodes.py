@@ -14,7 +14,7 @@ from apps.api.runtime_helpers import (
     logger,
     truncate_text,
 )
-from apps.api.streaming.contracts import AnswerArtifact
+from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact
 from apps.conversation.agent_contracts import AgentDecision
 from apps.conversation.agent_dialogue_router import run_dialogue_agent
 from apps.conversation.agent_flags import agentic_max_steps
@@ -38,7 +38,7 @@ from apps.conversation.raw_payload_store import (
 )
 from apps.conversation.memory_observer import log_memory_snapshot
 from apps.conversation.entity_reference import ClarificationRequest
-from apps.conversation.session_memory import ClarificationContext, EmptyContext
+from apps.conversation.session_memory import ClarificationContext, EmptyContext, SessionMemory
 from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
 from apps.platform.settings import REDIS_TTL
 
@@ -553,6 +553,56 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
         "merge_debug": {
             "selected_model": "agent",
             "selected_answer_source": "agent_clarification",
+            "selected_answer_kind": artifact.answer_kind,
+        },
+        "messages": [AIMessage(content=response_text)],
+    }
+
+
+async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
+    """Publish a generic internal-error artifact without creating clarification state."""
+
+    decision = getattr(state, "agent_decision", None)
+    response_text = "요청을 처리하는 중 문제가 발생했습니다. 다시 시도해 주세요."
+    session_memory = getattr(state, "session_memory", None)
+    next_context = session_memory.current_context if isinstance(session_memory, SessionMemory) else EmptyContext()
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="error",
+        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        error=ErrorArtifact(
+            error_code="AGENT_INTERNAL_ERROR",
+            reason=str(getattr(decision, "reasoning_summary", "") or "agent_internal_error"),
+            retryable=True,
+        ),
+        meta={
+            "answer_source": "agent_internal_error",
+            "model_key": "agent",
+            "agent_decision": _agent_decision_meta(decision),
+        },
+    )
+    log_event(
+        "AGENT.INTERNAL_ERROR",
+        **_agent_base_fields(state),
+        **_agent_context_fields(state),
+        **_agent_decision_fields(decision),
+        internal_error_reason=str(getattr(decision, "reasoning_summary", "") or ""),
+        answer_chars=len(response_text),
+    )
+    return {
+        "answer_gemma": response_text,
+        "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": next_context,
+        "merge_debug": {
+            "selected_model": "agent",
+            "selected_answer_source": "agent_internal_error",
             "selected_answer_kind": artifact.answer_kind,
         },
         "messages": [AIMessage(content=response_text)],
