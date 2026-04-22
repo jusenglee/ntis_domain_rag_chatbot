@@ -26,6 +26,13 @@
 
 시스템은 2층 계약 철학을 실현하기 위해 다음과 같은 4개 물리 계층으로 구성된다.
 
+### Agentic migration note
+
+ADR-0001에 따라 대화 제어권은 `Dialogue Agent`가 점진적으로 가져간다.
+신규 agent 경로에서는 legacy fallback decision을 두지 않으며, 안전하게 실행할 수 없는 판단은 clarification으로 fail-closed 한다.
+Planner / Contract / Retrieval은 삭제 대상이 아니라 Agent tool backend의 contract guard로 유지한다.
+현재 workflow graph는 `AGENTIC_DIALOGUE_ENABLED=true`일 때 `rule_precheck` 이후 `Dialogue Agent` 경로로 진입한다. Agent의 `direct_answer` / `ask_clarification`은 바로 저장 가능한 답변 artifact를 만들고, `call_tool`은 `agent_tool_executor`가 만든 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 기존 retrieval pipeline에 넘긴다.
+
 | 계층 | 역할 | 주요 산출물 | 비고 |
 |---|---|---|---|
 | **Planner** | 의도 컴파일러 (L1) | `IntentContract` | 사용자 질문 -> 시스템 언어 번역 |

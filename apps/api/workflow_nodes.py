@@ -14,6 +14,12 @@ from apps.api.runtime_helpers import (
     truncate_text,
 )
 from apps.api.streaming.contracts import AnswerArtifact
+from apps.conversation.agent_contracts import AgentDecision
+from apps.conversation.agent_dialogue_router import run_dialogue_agent
+from apps.conversation.agent_observation import AgentObservation, AgentToolExecutionResult
+from apps.conversation.agent_tool_executor import execute_agent_tool
+from apps.conversation.agent_tools import default_agent_tool_specs
+from apps.conversation.conversation_state_card import build_conversation_state_card
 from apps.conversation.conversation_store import (
     build_save_history_payload,
     load_conversation_memory_from_store,
@@ -27,7 +33,8 @@ from apps.conversation.raw_payload_store import (
 )
 from apps.conversation.memory_observer import log_memory_snapshot
 from apps.conversation.request_facade import build_intent_payload
-from apps.conversation.session_memory import EmptyContext
+from apps.conversation.entity_reference import ClarificationRequest
+from apps.conversation.session_memory import ClarificationContext, EmptyContext
 from apps.evidence.canonical_context import rehydrate_prev_context_from_canonical_evidence
 from apps.platform.settings import REDIS_TTL
 
@@ -190,6 +197,211 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
         "merge_debug": {
             "selected_model": "direct",
             "selected_answer_source": "direct_answer",
+            "selected_answer_kind": artifact.answer_kind,
+        },
+        "messages": [AIMessage(content=response_text)],
+    }
+
+
+async def node_build_conversation_state_card(state: Any) -> Dict[str, Any]:
+    """Build the LLM-readable state card from official session memory."""
+
+    card = build_conversation_state_card(
+        session_memory=getattr(state, "session_memory", None),
+        view_state=getattr(state, "view_state", None),
+        selected_answer_meta=getattr(state, "selected_answer_meta", None),
+    )
+    log_event(
+        "AGENT.STATE_CARD.BUILT",
+        request_id=getattr(state, "request_id", None),
+        conversation_id=getattr(state, "conversation_id", None),
+        card_chars=len(card),
+    )
+    return {"conversation_state_card": card}
+
+
+async def node_run_dialogue_agent(state: Any) -> Dict[str, Any]:
+    """Run the LLM-first dialogue agent and store its decision."""
+
+    messages = list(getattr(state, "messages", []) or [])
+    latest_content = getattr(messages[-1], "content", "") if messages else ""
+    decision = await run_dialogue_agent(
+        question=str(getattr(state, "question", None) or latest_content),
+        conversation_state_card=str(getattr(state, "conversation_state_card", "") or ""),
+        recent_chat=list(getattr(state, "chat_history", []) or []),
+        available_tools=default_agent_tool_specs(),
+        request_id=str(getattr(state, "request_id", "") or ""),
+        conversation_id=str(getattr(state, "conversation_id", "") or ""),
+    )
+    return {"agent_decision": decision}
+
+
+def _agent_decision_meta(decision: Any) -> Dict[str, Any]:
+    if isinstance(decision, AgentDecision):
+        return decision.model_dump()
+    if hasattr(decision, "model_dump"):
+        try:
+            return dict(decision.model_dump())
+        except Exception:
+            pass
+    if isinstance(decision, dict):
+        return dict(decision)
+    return {}
+
+
+def _agent_observation_meta(observation: Any) -> Dict[str, Any]:
+    if isinstance(observation, AgentObservation):
+        return observation.model_dump()
+    if hasattr(observation, "model_dump"):
+        try:
+            return dict(observation.model_dump())
+        except Exception:
+            pass
+    if isinstance(observation, dict):
+        return dict(observation)
+    return {}
+
+
+def _coerce_agent_tool_result(result: Any) -> AgentToolExecutionResult:
+    if isinstance(result, AgentToolExecutionResult):
+        return result
+    if isinstance(result, AgentObservation):
+        return AgentToolExecutionResult(observation=result)
+    observation = getattr(result, "observation", None)
+    if isinstance(observation, AgentObservation):
+        return AgentToolExecutionResult(
+            observation=observation,
+            intent_payload=getattr(result, "intent_payload", None),
+            question_analysis=getattr(result, "question_analysis", None),
+        )
+    return AgentToolExecutionResult(
+        observation=AgentObservation(
+            observation_type="error",
+            summary="Agent tool returned an invalid execution result.",
+            warnings=["invalid_tool_result"],
+        )
+    )
+
+
+async def node_execute_agent_tool(state: Any) -> Dict[str, Any]:
+    """Execute a validated agent tool and expose guarded planner outputs."""
+
+    decision = getattr(state, "agent_decision", None)
+    tool_name = str(getattr(decision, "tool_name", "") or "")
+    tool_args = dict(getattr(decision, "tool_args", None) or {})
+    result = _coerce_agent_tool_result(
+        await execute_agent_tool(tool_name=tool_name, tool_args=tool_args, state=state)
+    )
+    observation = result.observation
+    updates: Dict[str, Any] = {
+        "agent_observation": observation,
+        "agent_tool_intent_payload": result.intent_payload,
+        "agent_tool_question_analysis": result.question_analysis,
+    }
+    if observation.observation_type == "planned_intent" and result.intent_payload and result.question_analysis:
+        updates["intent_payload"] = result.intent_payload
+        updates["question_analysis"] = result.question_analysis
+    log_event(
+        "AGENT.TOOL_OBSERVATION",
+        request_id=getattr(state, "request_id", None),
+        conversation_id=getattr(state, "conversation_id", None),
+        tool_name=tool_name,
+        observation_type=observation.observation_type,
+        warnings=list(observation.warnings or []),
+    )
+    return updates
+
+
+async def node_agent_direct_answer(state: Any) -> Dict[str, Any]:
+    """Publish a direct answer chosen by the dialogue agent."""
+
+    decision = getattr(state, "agent_decision", None)
+    response_text = str(getattr(decision, "response_text", None) or "").strip()
+    if not response_text:
+        response_text = "요청을 처리하려면 질문을 조금 더 구체적으로 작성해 주세요."
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="direct_answer",
+        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        meta={
+            "answer_source": "agent_direct_answer",
+            "model_key": "agent",
+            "agent_decision": _agent_decision_meta(decision),
+        },
+    )
+    return {
+        "answer_gemma": response_text,
+        "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": EmptyContext(),
+        "merge_debug": {
+            "selected_model": "agent",
+            "selected_answer_source": "agent_direct_answer",
+            "selected_answer_kind": artifact.answer_kind,
+        },
+        "messages": [AIMessage(content=response_text)],
+    }
+
+
+async def node_agent_clarification(state: Any) -> Dict[str, Any]:
+    """Publish an agent clarification or contract-block response."""
+
+    decision = getattr(state, "agent_decision", None)
+    observation = getattr(state, "agent_observation", None)
+    observation_type = str(getattr(observation, "observation_type", "") or "")
+    decision_question = str(getattr(decision, "clarification_question", None) or "").strip()
+    observation_summary = str(getattr(observation, "summary", None) or "").strip()
+    if decision_question:
+        response_text = decision_question
+    elif observation_type == "contract_violation":
+        response_text = "요청을 안전하게 실행할 수 없습니다. 조회할 대상이나 조건을 더 구체적으로 지정해 주세요."
+    elif observation_summary:
+        response_text = observation_summary
+    else:
+        response_text = "조회 대상을 안전하게 특정하려면 대상 이름, ID, 기간 같은 조건을 더 구체적으로 알려 주세요."
+
+    tool_args = dict(getattr(decision, "tool_args", None) or {})
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="clarification",
+        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        clarification=ClarificationRequest(
+            clarification_type="agent_clarification",
+            message=response_text,
+            candidates=[],
+            resume_token={"tool_args": tool_args} if tool_args else {},
+        ),
+        meta={
+            "answer_source": "agent_clarification",
+            "model_key": "agent",
+            "agent_decision": _agent_decision_meta(decision),
+            "agent_observation": _agent_observation_meta(observation),
+        },
+    )
+    return {
+        "answer_gemma": response_text,
+        "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": ClarificationContext(
+            reason="agent_clarification",
+            unresolved_question=str(getattr(state, "question", "") or ""),
+            unresolved_constraints=tool_args,
+        ),
+        "merge_debug": {
+            "selected_model": "agent",
+            "selected_answer_source": "agent_clarification",
             "selected_answer_kind": artifact.answer_kind,
         },
         "messages": [AIMessage(content=response_text)],

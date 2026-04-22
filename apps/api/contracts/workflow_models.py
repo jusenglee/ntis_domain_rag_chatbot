@@ -24,6 +24,8 @@ from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.platform.schemas import IntentPayloadV3
 from apps.platform.settings import MAX_TOP_K_SIZE
 from apps.platform.storage import KVStore
+from apps.conversation.agent_contracts import AgentDecision
+from apps.conversation.agent_observation import AgentObservation
 from apps.conversation.session_memory import CurrentContext, SessionMemory
 from apps.conversation.view_state import ConversationViewState
 
@@ -447,6 +449,11 @@ class AgentState(BaseModel):
     question_analysis: Optional[QuestionAnalysis] = None
     knowledge_sufficiency: Optional[KnowledgeSufficiency] = None
     intent_payload: Optional[IntentPayloadV3] = None
+    conversation_state_card: str = ""
+    agent_decision: Optional[AgentDecision] = None
+    agent_observation: Optional[AgentObservation] = None
+    agent_tool_intent_payload: Optional[IntentPayloadV3] = None
+    agent_tool_question_analysis: Optional[QuestionAnalysis] = None
     search_retry_count: int = 0
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:

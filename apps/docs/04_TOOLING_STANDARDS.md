@@ -32,6 +32,20 @@ orchestrator-facing tool은 모두 `ToolResult`를 반환한다.
 
 ## 현재 tool 구성
 
+### Agent-facing tool adapter
+
+ADR-0001 전환을 위해 `apps.conversation`에 agent-facing tool 계약을 추가했다.
+이 계층은 LLM Dialogue Agent가 호출할 의미 수준 tool을 정의하고, 기존 planner / contract 검증을 통과시키는 얇은 adapter 역할을 한다.
+
+- `agent_tools.py`: `search_ntis_domain`, `refine_current_subject`, `ask_user_for_clarification`의 tool spec과 아직 미구현인 `lookup_specific_entity`, `join_project_perf` 선언
+- `agent_contracts.py`: workflow state와 router가 공유하는 `AgentDecision` 계약
+- `agent_observation.py`: `AgentObservation` 표준 관측 결과와 guarded planner 산출물을 함께 싣는 `AgentToolExecutionResult`
+- `agent_tool_executor.py`: `search_ntis_domain`, `refine_current_subject`를 `build_intent_payload()`로 연결해 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 생성
+- `conversation_state_card.py`: `SessionMemory.current_context`를 LLM이 읽을 수 있는 state card로 투영
+
+신규 agent 계약에는 `fallback_legacy_pipeline` tool이나 decision이 없다.
+미구현 tool 선택, feature flag 비활성, contract violation은 legacy로 우회하지 않고 `contract_violation` 또는 `clarification_required` observation으로 닫는다.
+
 ### `project_tools.py`
 
 - `fetch_project_detail(pjt_id, target_cols, collaborators)`
