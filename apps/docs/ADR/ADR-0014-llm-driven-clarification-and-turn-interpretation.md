@@ -74,10 +74,11 @@ heuristic이 resolved를 내면 LLM은 호출되지 않는다. 이 최적화는 
 
 - **스키마 확장** — 기존 `{label, candidate_id, entity_kind}` + 신규 `disambiguator: Optional[str]`, `aux: Optional[Dict]`. `aux`에는 `person_no`/`org_id`/`pjt_no`/최근 연관 과제 수/대표 기관명 등 view_state에서 안전하게 도출 가능한 값만 담는다. (LLM이 ID를 새로 생성하지 못하도록, aux는 항상 매핑 결과.)
 - **신규 모듈** — `apps/conversation/clarification_labeler.py`
-  - `enrich_candidate_labels(question, candidates, view_state_summary) -> list[ClarificationSuggestion]`
+  - 호환 entrypoint: `enrich_candidate_labels(*, candidates, view_state) -> list[tuple[candidate, aux, disambiguator]]`
+  - ADR helper: `enrich_candidate_labels_for_summary(*, question, candidates, view_state_summary) -> list[tuple[candidate, aux, disambiguator]]`
   - 기본 경로: heuristic으로 `disambiguator`를 조립 (소속기관, 최근 등장 연도, 묶음 ID 접미 등).
-  - 여전히 동일 라벨이 2개 이상 남을 때만 LLM을 호출해 `disambiguator`만 생성. prompt에는 **ids_map + aux만** 주입하고, raw payload는 주입하지 않는다.
-  - LLM 실패/timeout 시 `disambiguator = None`으로 두고 기존 포맷으로 polyfill.
+  - 여전히 동일 라벨이 2개 이상 남을 때만 LLM을 호출해 `disambiguator`만 생성. prompt에는 **candidate_id, entity_kind, display_name, ids_map, aux**만 주입하고, raw payload는 주입하지 않는다.
+  - LLM 실패/timeout/invalid output 시 deterministic heuristic fallback으로 되돌린다.
 - **렌더링** — 최종 label은 `f"{label}{' — ' + disambiguator if disambiguator else ''} ({entity_kind})"` 형태로 합성.
 
 불변: ID 생성 금지, ids_map은 candidate에서만 가져옴, dedup 키(`_candidate_id`) 불변.
@@ -102,7 +103,7 @@ heuristic이 resolved를 내면 LLM은 호출되지 않는다. 이 최적화는 
 
 `request_facade.build_intent_payload`와 `turn_interpreter` 내 "hard signal → LLM fallback" 순서를 **"LLM interpretation 먼저, heuristic을 cross-checker로"** 구조로 뒤집는다. 단 조건부:
 
-- **Trigger gate**: view_state에 candidate가 존재하고 hard signal이 miss일 때만 LLM-first 활성화. 명시적 ID(`pjt_id` 등 L1에 잡히는 식별자)가 이미 있으면 LLM은 호출하지 않는다.
+- **Trigger gate**: view_state 또는 `SessionMemory.current_context` projection에 candidate/context가 존재하고 hard signal이 miss일 때만 LLM-first 활성화. `current_context`가 공식 truth이며, 여기서 복원되는 projection은 view-state-equivalent context로 인정한다. 명시적 ID(`pjt_id` 등 L1에 잡히는 식별자)가 이미 있으면 LLM은 호출하지 않는다.
 - **Validator**: LLM이 반환한 `selected_candidate_ids`와 heuristic이 계산한 `sorted(candidates)[:K]`가 교집합이 비면 `ambiguity_reason="llm_heuristic_divergence"`로 ambiguous 처리 → clarification 경로로 폴백. LLM이 heuristic의 top-K 안에 있는 candidate를 고르면 해당 결과를 신뢰.
 - **Cost/latency 가드**: 한 턴에 LLM interpretation은 1회만. `context_router` LLM fallback과 double-charge 방지를 위해 interpretation 결과가 `resolved`면 router는 deterministic만 돌리고 LLM 단계는 스킵.
 - **Reason 확장**: `TurnInterpretationResult.reason`에 `llm_first`, `llm_first_validator_ok`, `llm_first_validator_diverged` 값을 추가.
@@ -111,9 +112,9 @@ heuristic이 resolved를 내면 LLM은 호출되지 않는다. 이 최적화는 
 
 ### Observability
 
-- `DISAMBIGUATION.LABEL.ENRICHED` — {duplicate_before, duplicate_after, disambiguator_source: heuristic|llm}
+- `DISAMBIGUATION.LABEL.ENRICHED` — {duplicate_before, duplicate_after, disambiguator_source: heuristic|llm|fallback, llm_attempted, reason, fallback_reason?}
 - `CLARIFICATION.PROSE` — {blocked_reason, seed_template_id, prose_source: template|llm, generation_latency_ms}
-- `TURN.INTERPRETATION.LLM_FIRST` — {trigger: view_state|hard_miss, validator: ok|diverged|skipped, candidate_count}
+- `TURN.INTERPRETATION.LLM_FIRST` — {trigger: view_state|current_context|hard_miss, validator: ok|diverged|skipped, candidate_count}
 - 기존 `CONTEXT.ROUTER`, `CONTEXT.ROUTER.FALLBACK`, `FOCUS.ENTITY.SET`, `FOLLOWUP.FACT_RESOLVED`와 동일한 포맷으로 emit.
 
 ## non-negotiables (이 ADR도 유지)

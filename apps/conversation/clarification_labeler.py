@@ -9,7 +9,8 @@
   ID를 생성하지 않는다** (ADR-0013/ADR-0014 non-negotiables).
 - raw payload는 주입하지 않는다.
 - heuristic disambiguator가 실패하고, flag로 LLM enrichment가 켜져 있을
-  때에만 LLM을 호출한다. LLM 실패/timeout은 fail-open (disambiguator=None).
+  때에만 LLM을 호출한다. LLM 실패/timeout/invalid output은 deterministic
+  heuristic fallback으로 되돌린다.
 - dedup 키 `_candidate_id`는 건드리지 않는다. 렌더링 레이어 전용이다.
 
 Env flags
@@ -27,21 +28,49 @@ Env flags
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
+from apps.api.runtime_helpers import log_event
+from apps.chat.llm_json import sanitize_llm_json
+from apps.chat.llm_runtime import build_llm, load_prompt_file
 from apps.conversation.view_state import (
     ConversationViewState,
     RecentMentionRecord,
     SubjectIndexEntry,
 )
+from apps.platform.langchain_compat import ChatPromptTemplate, PydanticOutputParser, SystemMessage
+from apps.planner.planner_defaults import PLANNER_DISABLE_THINKING, PLANNER_TEMPERATURE
+from apps.planner.prompt_asset_paths import planner_prompt_path
+from pydantic import BaseModel, Field
 
 
 __all__ = [
     "enrich_candidate_labels",
+    "enrich_candidate_labels_for_summary",
     "render_label",
     "llm_disambiguation_enabled",
+    "summarize_view_state_for_labeler",
 ]
+
+
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+_LLM_MODEL_NAME = "solar_vllm_0"
+_LLM_TIMEOUT_SECONDS = 3.0
+
+
+class ClarificationLabelerItem(BaseModel):
+    candidate_id: str
+    disambiguator: Optional[str] = None
+
+
+class ClarificationLabelerResult(BaseModel):
+    labels: List[ClarificationLabelerItem] = Field(default_factory=list)
+    reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +88,24 @@ def _norm_lower(value: Any) -> str:
 
 def llm_disambiguation_enabled() -> bool:
     """ADR-0014 Scope A의 LLM enrichment hook이 켜져 있는지 판정."""
-    return str(os.getenv("LLM_DISAMBIGUATION_LABEL_ENABLED", "0")).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-    )
+    return _norm_lower(os.getenv("LLM_DISAMBIGUATION_LABEL_ENABLED", "0")) in _TRUTHY_ENV_VALUES
+
+
+def _timeout_seconds() -> float:
+    raw = _norm(os.getenv("LLM_DISAMBIGUATION_LABEL_TIMEOUT_SECONDS"))
+    if not raw:
+        return _LLM_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _LLM_TIMEOUT_SECONDS
+    return value if value > 0 else _LLM_TIMEOUT_SECONDS
+
+
+def _field(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
 
 
 def _id_suffix(value: Optional[str], *, tail: int = 6) -> Optional[str]:
@@ -115,6 +156,76 @@ def _recent_mentions_by_name(
     return index
 
 
+def summarize_view_state_for_labeler(view_state: Optional[ConversationViewState]) -> Dict[str, Any]:
+    """Build the small, raw-payload-free summary used by Scope A label enrichment."""
+    if view_state is None:
+        return {"subject_index_entries": [], "recent_mentions": []}
+
+    subject_index_entries: List[Dict[str, Any]] = []
+    raw_subject_index = getattr(view_state, "subject_index", {}) or {}
+    if isinstance(raw_subject_index, dict):
+        for value in raw_subject_index.values():
+            try:
+                entry = value if isinstance(value, SubjectIndexEntry) else SubjectIndexEntry.model_validate(value)
+            except Exception:
+                continue
+            subject_index_entries.append(
+                {
+                    "display_name": _norm(entry.display_name),
+                    "kind": _norm(entry.kind),
+                    "affiliation": _norm(entry.affiliation),
+                    "role": _norm(entry.role),
+                }
+            )
+
+    recent_mentions: List[Dict[str, Any]] = []
+    for mention in getattr(view_state, "recent_mentions", []) or []:
+        if not isinstance(mention, RecentMentionRecord):
+            continue
+        recent_mentions.append(
+            {
+                "title_text": _norm(getattr(mention, "title_text", None)),
+                "entity_kind": _norm(getattr(mention, "entity_kind", None)),
+                "year": _norm(getattr(mention, "year", None)),
+                "lead_org": _norm(getattr(mention, "lead_org", None)),
+            }
+        )
+    return {
+        "subject_index_entries": subject_index_entries,
+        "recent_mentions": recent_mentions,
+    }
+
+
+def _subject_index_by_name_from_summary(view_state_summary: Optional[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    summary = view_state_summary if isinstance(view_state_summary, dict) else {}
+    for entry in list(summary.get("subject_index_entries") or []):
+        if not isinstance(entry, dict):
+            continue
+        name_key = _norm_lower(entry.get("display_name"))
+        kind_key = _norm_lower(entry.get("kind"))
+        if not name_key:
+            continue
+        index.setdefault((name_key, kind_key), dict(entry))
+    return index
+
+
+def _recent_mentions_by_name_from_summary(
+    view_state_summary: Optional[Dict[str, Any]],
+) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    index: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    summary = view_state_summary if isinstance(view_state_summary, dict) else {}
+    for mention in list(summary.get("recent_mentions") or []):
+        if not isinstance(mention, dict):
+            continue
+        name_key = _norm_lower(mention.get("title_text"))
+        kind_key = _norm_lower(mention.get("entity_kind"))
+        if not name_key:
+            continue
+        index.setdefault((name_key, kind_key), []).append(dict(mention))
+    return index
+
+
 def _ids_map_value(candidate: Any, key: str) -> Optional[str]:
     ids_map = getattr(candidate, "ids_map", None) or {}
     if not isinstance(ids_map, dict):
@@ -135,12 +246,12 @@ def _ids_map_value(candidate: Any, key: str) -> Optional[str]:
 def _build_people_aux(
     candidate: Any,
     *,
-    subject_entry: Optional[SubjectIndexEntry],
+    subject_entry: Optional[Any],
 ) -> Dict[str, Any]:
     aux: Dict[str, Any] = {}
     if subject_entry is not None:
-        affiliation = _norm(subject_entry.affiliation)
-        role = _norm(subject_entry.role)
+        affiliation = _norm(_field(subject_entry, "affiliation"))
+        role = _norm(_field(subject_entry, "role"))
         if affiliation:
             aux["affiliation"] = affiliation
         if role:
@@ -154,11 +265,11 @@ def _build_people_aux(
 def _build_project_aux(
     candidate: Any,
     *,
-    mentions: List[RecentMentionRecord],
+    mentions: List[Any],
 ) -> Dict[str, Any]:
     aux: Dict[str, Any] = {}
-    years = [m.year for m in mentions if _norm(m.year)]
-    lead_orgs = [m.lead_org for m in mentions if _norm(m.lead_org)]
+    years = [_field(m, "year") for m in mentions if _norm(_field(m, "year"))]
+    lead_orgs = [_field(m, "lead_org") for m in mentions if _norm(_field(m, "lead_org"))]
     if years:
         aux["year"] = _norm(years[-1])  # 가장 최근 등장 연도
     if lead_orgs:
@@ -189,8 +300,8 @@ def _build_org_aux(candidate: Any) -> Dict[str, Any]:
 def _build_aux_for_candidate(
     candidate: Any,
     *,
-    subject_entry: Optional[SubjectIndexEntry],
-    mentions: List[RecentMentionRecord],
+    subject_entry: Optional[Any],
+    mentions: List[Any],
 ) -> Dict[str, Any]:
     kind = _norm_lower(getattr(candidate, "entity_kind", ""))
     if kind == "people":
@@ -241,6 +352,245 @@ def _compose_disambiguator(aux: Dict[str, Any], *, kind: str) -> Optional[str]:
     return text or None
 
 
+def _compact_ids_map(ids_map: Any) -> Dict[str, List[str]]:
+    if not isinstance(ids_map, dict):
+        return {}
+    compact: Dict[str, List[str]] = {}
+    for key, raw_values in ids_map.items():
+        if isinstance(raw_values, str):
+            values = [raw_values]
+        elif isinstance(raw_values, (list, tuple, set)):
+            values = list(raw_values)
+        else:
+            values = [raw_values]
+        normalized = [_norm(value) for value in values if _norm(value)]
+        if normalized:
+            compact[_norm(key)] = normalized
+    return compact
+
+
+def _rendered_label_counts(enriched: List[Tuple[Any, Dict[str, Any], Optional[str]]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for candidate, _aux, disamb in enriched:
+        label = render_label(
+            display_name=getattr(candidate, "display_name", None),
+            entity_kind=getattr(candidate, "entity_kind", None),
+            disambiguator=disamb,
+            fallback_id=getattr(candidate, "candidate_id", None),
+        )
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _duplicate_rendered_candidate_ids(enriched: List[Tuple[Any, Dict[str, Any], Optional[str]]]) -> set[str]:
+    counts = _rendered_label_counts(enriched)
+    duplicate_ids: set[str] = set()
+    for candidate, _aux, disamb in enriched:
+        label = render_label(
+            display_name=getattr(candidate, "display_name", None),
+            entity_kind=getattr(candidate, "entity_kind", None),
+            disambiguator=disamb,
+            fallback_id=getattr(candidate, "candidate_id", None),
+        )
+        candidate_id = _norm(getattr(candidate, "candidate_id", None))
+        if candidate_id and counts.get(label, 0) > 1:
+            duplicate_ids.add(candidate_id)
+    return duplicate_ids
+
+
+def _apply_deterministic_fallback(
+    enriched: List[Tuple[Any, Dict[str, Any], Optional[str]]],
+    *,
+    base_label_count: Dict[Tuple[str, str], int],
+) -> List[Tuple[Any, Dict[str, Any], Optional[str]]]:
+    label_signature: Dict[Tuple[str, str, str], int] = {}
+    final_with_fallback: List[Tuple[Any, Dict[str, Any], Optional[str]]] = []
+    for candidate, aux, disamb in enriched:
+        name_key = _norm_lower(getattr(candidate, "display_name", ""))
+        kind_key = _norm_lower(getattr(candidate, "entity_kind", ""))
+        if base_label_count.get((name_key, kind_key), 0) <= 1:
+            final_with_fallback.append((candidate, aux, disamb))
+            continue
+        effective = disamb
+        key = (name_key, kind_key, _norm(effective))
+        while effective is None or label_signature.get(key, 0) > 0:
+            fallback_parts: List[str] = []
+            if effective:
+                fallback_parts.append(effective)
+            for id_key in ("person_no_suffix", "pjt_id_suffix", "pjt_no_suffix", "org_id_suffix", "biz_no_suffix"):
+                suffix = aux.get(id_key)
+                if suffix:
+                    fallback_parts.append(f"{id_key.removesuffix('_suffix')} ···{suffix}")
+                    break
+            if not fallback_parts:
+                cand_id = _norm(getattr(candidate, "candidate_id", ""))
+                if cand_id:
+                    fallback_parts.append(f"id ···{_id_suffix(cand_id)}")
+            new_disamb = " · ".join(fallback_parts) if fallback_parts else None
+            if new_disamb == effective:
+                break
+            effective = new_disamb
+            key = (name_key, kind_key, _norm(effective))
+        label_signature[key] = label_signature.get(key, 0) + 1
+        final_with_fallback.append((candidate, aux, effective))
+    return final_with_fallback
+
+
+def _llm_candidate_payload(
+    enriched: List[Tuple[Any, Dict[str, Any], Optional[str]]],
+    *,
+    target_ids: set[str],
+) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for candidate, aux, _disamb in enriched:
+        candidate_id = _norm(getattr(candidate, "candidate_id", None))
+        if candidate_id not in target_ids:
+            continue
+        item = {
+            "candidate_id": candidate_id,
+            "entity_kind": _norm(getattr(candidate, "entity_kind", None)) or None,
+            "display_name": _norm(getattr(candidate, "display_name", None)) or None,
+            "ids_map": _compact_ids_map(getattr(candidate, "ids_map", None)),
+            "aux": dict(aux or {}),
+        }
+        payload.append({key: value for key, value in item.items() if value not in (None, {}, [], "")})
+    return payload
+
+
+async def _invoke_disambiguation_label_llm_async(
+    *,
+    question: str,
+    candidate_payload: List[Dict[str, Any]],
+) -> ClarificationLabelerResult:
+    llm = build_llm(model_name=_LLM_MODEL_NAME)
+    parser = PydanticOutputParser(pydantic_object=ClarificationLabelerResult)
+    system_prompt = await load_prompt_file(planner_prompt_path("clarification_labeler_v1.md"))
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=system_prompt),
+            (
+                "human",
+                "{format_instructions}\n"
+                "<user_query>{question}</user_query>\n"
+                "<candidates>{candidates}</candidates>",
+            ),
+        ]
+    )
+    labeler_llm = llm.bind(
+        reasoning_effort="low",
+        include_reasoning=False,
+        disable_thinking=PLANNER_DISABLE_THINKING,
+        temperature=PLANNER_TEMPERATURE,
+        top_p=1.0,
+        max_tokens=220,
+    )
+    chain = prompt | labeler_llm | sanitize_llm_json | parser
+    return await chain.ainvoke(
+        {
+            "format_instructions": parser.get_format_instructions(),
+            "question": _norm(question),
+            "candidates": json.dumps(candidate_payload, ensure_ascii=False),
+        }
+    )
+
+
+def _run_disambiguation_label_llm(
+    *,
+    question: str,
+    candidate_payload: List[Dict[str, Any]],
+) -> Any:
+    timeout = _timeout_seconds()
+    coro = asyncio.wait_for(
+        _invoke_disambiguation_label_llm_async(
+            question=question,
+            candidate_payload=candidate_payload,
+        ),
+        timeout=timeout,
+    )
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(lambda: asyncio.run(coro))
+    try:
+        return future.result(timeout=timeout + 0.5)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _coerce_labeler_items(result: Any) -> List[Dict[str, Any]]:
+    if isinstance(result, ClarificationLabelerResult):
+        return [item.model_dump() for item in result.labels]
+    if isinstance(result, dict):
+        raw_items = result.get("labels") or result.get("items") or result.get("candidates") or []
+    elif isinstance(result, list):
+        raw_items = result
+    else:
+        raw_items = getattr(result, "labels", [])
+    items: List[Dict[str, Any]] = []
+    for item in list(raw_items or []):
+        if hasattr(item, "model_dump"):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            raise ValueError("invalid_label_item")
+        items.append(dict(item))
+    return items
+
+
+def _validate_llm_label_output(
+    result: Any,
+    *,
+    target_ids: set[str],
+    candidates_by_id: Dict[str, Any],
+) -> Dict[str, str]:
+    labels: Dict[str, str] = {}
+    for item in _coerce_labeler_items(result):
+        candidate_id = _norm(item.get("candidate_id"))
+        if not candidate_id:
+            raise ValueError("missing_candidate_id")
+        if candidate_id not in target_ids:
+            raise ValueError("invalid_candidate_id")
+        if candidate_id in labels:
+            raise ValueError("duplicate_candidate_id")
+        disamb = " ".join(_norm(item.get("disambiguator")).split())
+        if not disamb:
+            raise ValueError("missing_disambiguator")
+        if len(disamb) > 120:
+            raise ValueError("invalid_disambiguator")
+        labels[candidate_id] = disamb
+
+    if set(labels) != set(target_ids):
+        raise ValueError("missing_candidate_id")
+
+    rendered: Dict[str, str] = {}
+    for candidate_id, disamb in labels.items():
+        candidate = candidates_by_id[candidate_id]
+        label = render_label(
+            display_name=getattr(candidate, "display_name", None),
+            entity_kind=getattr(candidate, "entity_kind", None),
+            disambiguator=disamb,
+            fallback_id=getattr(candidate, "candidate_id", None),
+        )
+        if label in rendered:
+            raise ValueError("duplicate_disambiguator")
+        rendered[label] = candidate_id
+    return labels
+
+
+def _apply_llm_disambiguators(
+    enriched: List[Tuple[Any, Dict[str, Any], Optional[str]]],
+    *,
+    disambiguators: Dict[str, str],
+) -> List[Tuple[Any, Dict[str, Any], Optional[str]]]:
+    updated: List[Tuple[Any, Dict[str, Any], Optional[str]]] = []
+    for candidate, aux, disamb in enriched:
+        candidate_id = _norm(getattr(candidate, "candidate_id", None))
+        updated.append((candidate, aux, disambiguators.get(candidate_id, disamb)))
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -265,21 +615,22 @@ def render_label(
     return label
 
 
-def enrich_candidate_labels(
+def enrich_candidate_labels_for_summary(
     *,
+    question: str,
     candidates: List[Any],
-    view_state: Optional[ConversationViewState],
+    view_state_summary: Optional[Dict[str, Any]],
 ) -> List[Tuple[Any, Dict[str, Any], Optional[str]]]:
     """각 candidate에 대해 (candidate, aux, disambiguator)를 반환.
 
     - 기본 경로는 heuristic이다.
     - 동일 base label (`display_name` + `entity_kind`)을 가진 candidate가
       2개 이상 남고, LLM flag가 켜져 있으면 LLM enrichment를 시도한다.
-    - LLM 경로는 이 ADR 단계에서는 placeholder다 (후속 ADR-0015에서
-      prompt/호출 구체화). 현재는 heuristic만 동작.
+    - LLM은 `disambiguator`만 생성할 수 있으며 candidate ID/kind/ids_map은
+      원본 candidate 값을 그대로 보존한다.
     """
-    subject_index = _subject_index_by_name(view_state)
-    recent_index = _recent_mentions_by_name(view_state)
+    subject_index = _subject_index_by_name_from_summary(view_state_summary)
+    recent_index = _recent_mentions_by_name_from_summary(view_state_summary)
 
     decorated: List[Tuple[Any, Dict[str, Any], Optional[str]]] = []
     base_label_count: Dict[Tuple[str, str], int] = {}
@@ -310,44 +661,84 @@ def enrich_candidate_labels(
         else:
             finalized.append((candidate, aux, disamb))
 
-    # 3rd pass — 동명 후보 중 여전히 disambiguator가 None이거나 중복이면
-    # ID suffix로 최후 fallback을 채운다. (LLM 경로는 후속에서 여기 훅)
-    label_signature: Dict[Tuple[str, str, str], int] = {}
-    final_with_fallback: List[Tuple[Any, Dict[str, Any], Optional[str]]] = []
-    for candidate, aux, disamb in finalized:
-        name_key = _norm_lower(getattr(candidate, "display_name", ""))
-        kind_key = _norm_lower(getattr(candidate, "entity_kind", ""))
-        if base_label_count.get((name_key, kind_key), 0) <= 1:
-            final_with_fallback.append((candidate, aux, disamb))
-            continue
-        effective = disamb
-        key = (name_key, kind_key, _norm(effective))
-        while effective is None or label_signature.get(key, 0) > 0:
-            # 같은 disambiguator가 이미 쓰였으면 ID 접미로 보강
-            fallback_parts: List[str] = []
-            if effective:
-                fallback_parts.append(effective)
-            for id_key in ("person_no_suffix", "pjt_id_suffix", "pjt_no_suffix", "org_id_suffix", "biz_no_suffix"):
-                suffix = aux.get(id_key)
-                if suffix:
-                    fallback_parts.append(f"{id_key.removesuffix('_suffix')} ···{suffix}")
-                    break
-            if not fallback_parts:
-                # 그래도 못 찾으면 candidate_id 자체를 마지막 수단으로
-                cand_id = _norm(getattr(candidate, "candidate_id", ""))
-                if cand_id:
-                    fallback_parts.append(f"id ···{_id_suffix(cand_id)}")
-            new_disamb = " · ".join(fallback_parts) if fallback_parts else None
-            if new_disamb == effective:
-                break  # 더 이상 구분 불가 — 무한 루프 방지
-            effective = new_disamb
-            key = (name_key, kind_key, _norm(effective))
-        label_signature[key] = label_signature.get(key, 0) + 1
-        final_with_fallback.append((candidate, aux, effective))
+    final_result = list(finalized)
+    duplicate_target_ids = _duplicate_rendered_candidate_ids(finalized)
+    llm_attempted = False
+    disambiguator_source = "heuristic"
+    reason = "heuristic"
+    fallback_reason: Optional[str] = None
 
-    # LLM enrichment hook — flag on일 때 아직도 None인 동명 후보가 있으면 시도
-    if llm_disambiguation_enabled():
-        # placeholder: ADR-0015에서 구체 prompt/호출을 붙인다. 현재는 no-op.
+    if llm_disambiguation_enabled() and duplicate_target_ids:
+        llm_attempted = True
+        started_at = time.perf_counter()
+        try:
+            candidates_by_id = {
+                _norm(getattr(candidate, "candidate_id", None)): candidate
+                for candidate, _aux, _disamb in finalized
+                if _norm(getattr(candidate, "candidate_id", None))
+            }
+            candidate_payload = _llm_candidate_payload(finalized, target_ids=duplicate_target_ids)
+            result = _run_disambiguation_label_llm(
+                question=question,
+                candidate_payload=candidate_payload,
+            )
+            disambiguators = _validate_llm_label_output(
+                result,
+                target_ids=duplicate_target_ids,
+                candidates_by_id=candidates_by_id,
+            )
+            final_result = _apply_llm_disambiguators(finalized, disambiguators=disambiguators)
+            if sum(count for count in _rendered_label_counts(final_result).values() if count > 1) > 0:
+                raise ValueError("duplicate_label_after_llm")
+            disambiguator_source = "llm"
+            reason = "llm_enriched"
+        except Exception as exc:
+            final_result = _apply_deterministic_fallback(finalized, base_label_count=base_label_count)
+            disambiguator_source = "fallback"
+            fallback_reason = type(exc).__name__
+            reason = f"llm_fallback:{type(exc).__name__}"
+        finally:
+            llm_latency_ms = round((time.perf_counter() - started_at) * 1000, 3)
+    else:
+        llm_latency_ms = None
+        if llm_disambiguation_enabled():
+            reason = "no_duplicate_label_after_heuristic"
+        else:
+            reason = "flag_off"
+
+    if not llm_attempted or disambiguator_source != "llm":
+        final_result = _apply_deterministic_fallback(final_result, base_label_count=base_label_count)
+
+    duplicate_before = sum(count for count in base_label_count.values() if count > 1)
+    rendered_label_count = _rendered_label_counts(final_result)
+    duplicate_after = sum(count for count in rendered_label_count.values() if count > 1)
+    try:
+        event_payload: Dict[str, Any] = {
+            "duplicate_before": duplicate_before,
+            "duplicate_after": duplicate_after,
+            "disambiguator_source": disambiguator_source,
+            "llm_attempted": llm_attempted,
+            "reason": reason,
+        }
+        if fallback_reason:
+            event_payload["fallback_reason"] = fallback_reason
+        if llm_latency_ms is not None:
+            event_payload["llm_latency_ms"] = llm_latency_ms
+        log_event("DISAMBIGUATION.LABEL.ENRICHED", **event_payload)
+    except Exception:
         pass
 
-    return final_with_fallback
+    return final_result
+
+
+def enrich_candidate_labels(
+    *,
+    candidates: List[Any],
+    view_state: Optional[ConversationViewState],
+) -> List[Tuple[Any, Dict[str, Any], Optional[str]]]:
+    """Backward-compatible Scope A entry point."""
+    return enrich_candidate_labels_for_summary(
+        question="",
+        candidates=candidates,
+        view_state_summary=summarize_view_state_for_labeler(view_state),
+    )

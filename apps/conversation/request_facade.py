@@ -13,7 +13,7 @@ else:
     BaseMessage = Any
 
 from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
-from apps.conversation.context_router import run_context_router
+from apps.conversation.context_router import route_context, run_context_router
 from apps.conversation.memory_observer import log_context_router_transition
 from apps.conversation.followup_anchor import (
     anchor_to_seed_map,
@@ -235,6 +235,7 @@ async def _apply_context_router_decision(
     scope_decision: Any,
     normalized_intent_base: Any,
     context_router_meta: Dict[str, Any],
+    deterministic_only: bool = False,
 ) -> tuple[Any, Optional[Any], Dict[str, Any]]:
     """Context Router 호출·scope_decision 패치·observability 방출을 한 곳에서 처리.
 
@@ -253,14 +254,23 @@ async def _apply_context_router_decision(
         return scope_decision, context_router_anchor, context_router_meta
 
     context_router_meta["invoked"] = True
-    context_router_result = run_context_router(
-        question=question,
-        recent_mentions=recent_mentions,
-        active_scope_summary=_build_context_router_scope_summary(active_view_state),
-    )
-    context_router_decision = (
-        await context_router_result if isawaitable(context_router_result) else context_router_result
-    )
+    active_scope_summary = _build_context_router_scope_summary(active_view_state)
+    if deterministic_only:
+        context_router_decision = route_context(
+            question=question,
+            recent_mentions=recent_mentions,
+            active_scope_summary=active_scope_summary,
+        )
+        context_router_meta["llm_skipped_reason"] = "llm_first_resolved"
+    else:
+        context_router_result = run_context_router(
+            question=question,
+            recent_mentions=recent_mentions,
+            active_scope_summary=active_scope_summary,
+        )
+        context_router_decision = (
+            await context_router_result if isawaitable(context_router_result) else context_router_result
+        )
     context_router_meta.update(
         {
             "status": context_router_decision.status,
@@ -302,6 +312,7 @@ async def _apply_context_router_decision(
         context_router_confidence=context_router_meta.get("confidence"),
         recent_mentions_count=context_router_meta.get("recent_mention_count"),
         rewritten_query_hint=context_router_meta.get("rewritten_query_hint"),
+        llm_skipped_reason=context_router_meta.get("llm_skipped_reason"),
         clarification_avoided=clarification_avoided,
     )
     # ADR-0013: heuristic↔LLM fallback 전환 경로를 별도 이벤트로 추적한다.
@@ -1941,6 +1952,12 @@ async def build_intent_payload(
         "rewritten_query_hint": None,
         "recent_mention_count": len(recent_mentions),
     }
+    llm_first_resolved = bool(
+        turn_interpretation is not None
+        and str(turn_interpretation.reason or "").strip().lower() == "llm_first_validator_ok"
+        and str(turn_interpretation.chosen_action or "").strip().lower() in {"reuse_manifest", "reuse_anchor"}
+        and list(turn_interpretation.selected_candidate_ids or [])
+    )
     scope_decision = resolve_scope_decision(
         question=question,
         view_state=resolution_view_state,
@@ -1962,6 +1979,7 @@ async def build_intent_payload(
         scope_decision=scope_decision,
         normalized_intent_base=normalized_intent_base,
         context_router_meta=context_router_meta,
+        deterministic_only=llm_first_resolved,
     )
     log_event(
         "SCOPE.DECISION",

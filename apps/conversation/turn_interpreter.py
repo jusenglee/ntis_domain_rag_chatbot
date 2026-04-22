@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, Literal, Optional
 
 from apps.platform.langchain_compat import ChatPromptTemplate, PydanticOutputParser, SystemMessage
@@ -47,6 +48,7 @@ ChosenAction = Literal[
 ]
 
 _MAX_CANDIDATES_FOR_PROMPT = 16
+_LLM_FIRST_VALIDATOR_TOP_K = 5
 _INTERPRETER_LOW_CONFIDENCE = 0.45
 _IDENTITY_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
 _HEURISTIC_DIRECT_REASONS = {
@@ -63,6 +65,7 @@ _SOURCE_PRIORITY = {
     "recent_mention": 3,
     "subject_index": 4,
 }
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "y", "on"}
 
 
 class TurnCandidate(BaseModel):
@@ -134,6 +137,10 @@ class ClarificationSuggestion(BaseModel):
 
 def _normalized_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def turn_interpretation_llm_first_enabled() -> bool:
+    return _normalized_text(os.getenv("TURN_INTERPRETATION_LLM_FIRST", "0")).lower() in _TRUTHY_ENV_VALUES
 
 
 def _normalize_entity_kind(value: Any) -> EntityKind:
@@ -631,7 +638,11 @@ def build_clarification_payload(
     # ADR-0014 Scope A: 동명 후보 disambiguator enrichment (sync-touch).
     # view_state가 None이면 labeler는 heuristic만 돌리며 aux는 비게 된다
     # (기존 동작과 동치 + 라벨에 (kind)만 붙음).
-    from apps.conversation.clarification_labeler import enrich_candidate_labels, render_label
+    from apps.conversation.clarification_labeler import (
+        enrich_candidate_labels_for_summary,
+        render_label,
+        summarize_view_state_for_labeler,
+    )
 
     filtered = _filtered_candidates_for_question(question, candidates)
     eligible: list[TurnCandidate] = []
@@ -639,7 +650,11 @@ def build_clarification_payload(
         display_seed = _normalized_text(candidate.display_name) or candidate.subject_id or candidate.candidate_id
         if candidate.entity_kind and display_seed:
             eligible.append(candidate)
-    enriched = enrich_candidate_labels(candidates=eligible, view_state=view_state)
+    enriched = enrich_candidate_labels_for_summary(
+        question=question,
+        candidates=eligible,
+        view_state_summary=summarize_view_state_for_labeler(view_state),
+    )
 
     suggestions: list[ClarificationSuggestion] = []
     for candidate, aux, disambiguator in enriched:
@@ -868,6 +883,131 @@ def _heuristic_turn_interpretation(
     )
 
 
+async def _invoke_turn_interpretation_llm(
+    *,
+    question: str,
+    trigger: TurnTriggerResult,
+    summary: Dict[str, Any],
+    candidate_payload: list[dict[str, Any]],
+    heuristic: TurnInterpretationResult,
+) -> TurnInterpretationResult:
+    llm = build_llm(model_name="solar_vllm_0")
+    parser = PydanticOutputParser(pydantic_object=TurnInterpretationResult)
+    system_prompt = await load_prompt_file(planner_prompt_path("turn_interpreter_v1.md"))
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessage(content=system_prompt),
+            (
+                "human",
+                "{format_instructions}\n"
+                "<user_query>{question}</user_query>\n"
+                "<turn_trigger>{turn_trigger}</turn_trigger>\n"
+                "<view_state_summary>{view_state_summary}</view_state_summary>\n"
+                "<candidates>{candidates}</candidates>\n"
+                "<heuristic_hint>{heuristic_hint}</heuristic_hint>",
+            ),
+        ]
+    )
+    interpreter_llm = llm.bind(
+        reasoning_effort="low",
+        include_reasoning=False,
+        disable_thinking=PLANNER_DISABLE_THINKING,
+        temperature=PLANNER_TEMPERATURE,
+        top_p=1.0,
+        max_tokens=260,
+    )
+    chain = prompt | interpreter_llm | sanitize_llm_json | parser
+    return await chain.ainvoke(
+        {
+            "format_instructions": parser.get_format_instructions(),
+            "question": question,
+            "turn_trigger": json.dumps(trigger.model_dump(), ensure_ascii=False),
+            "view_state_summary": json.dumps(summary, ensure_ascii=False),
+            "candidates": json.dumps(candidate_payload, ensure_ascii=False),
+            "heuristic_hint": json.dumps(heuristic.model_dump(), ensure_ascii=False),
+        }
+    )
+
+
+def _llm_first_gate(
+    *,
+    has_explicit_seed: bool,
+    trigger: TurnTriggerResult,
+    prompt_candidates: list[TurnCandidate],
+    summary: Dict[str, Any],
+) -> bool:
+    # ADR-0014 Scope C: SessionMemory.current_context is official truth.
+    # A current_context summary is treated as view-state-equivalent context
+    # for this LLM-first gate.
+    has_view_state_equivalent_context = bool(
+        summary.get("has_visible_answer_manifest")
+        or summary.get("has_active_focus")
+        or summary.get("has_child_anchor")
+        or int(summary.get("subject_index_count") or 0) > 0
+        or int(summary.get("recent_mention_count") or 0) > 0
+        or (summary.get("current_context_type") and summary.get("current_context_type") != "empty")
+    )
+    return bool(
+        turn_interpretation_llm_first_enabled()
+        and not has_explicit_seed
+        and trigger.turn_intent != "fresh"
+        and trigger.reference_style != "refinement"
+        and has_view_state_equivalent_context
+        and prompt_candidates
+    )
+
+
+def _llm_first_trigger_source(summary: Dict[str, Any]) -> str:
+    if summary.get("memory_source") == "current_context":
+        return "current_context"
+    return "view_state"
+
+
+def _validate_llm_first_result(
+    *,
+    result: TurnInterpretationResult,
+    heuristic: TurnInterpretationResult,
+    prompt_candidates: list[TurnCandidate],
+) -> tuple[TurnInterpretationResult, str]:
+    valid_candidate_ids = {candidate.candidate_id for candidate in prompt_candidates}
+    selected_candidate_ids = list(result.selected_candidate_ids or [])
+    if any(candidate_id not in valid_candidate_ids for candidate_id in selected_candidate_ids):
+        raise ValueError("invalid_candidate_id")
+    if float(result.confidence or 0.0) < _INTERPRETER_LOW_CONFIDENCE and result.chosen_action != "clarification":
+        return heuristic.model_copy(update={"reason": "low_confidence_fallback"}), "skipped"
+    if result.chosen_action == "clarification":
+        return result.model_copy(update={"reason": "llm_first"}), "skipped"
+    if result.chosen_action == "fresh_retrieval" or not selected_candidate_ids:
+        return (
+            result.model_copy(
+                update={
+                    "chosen_action": "clarification",
+                    "selected_candidate_ids": [],
+                    "ambiguity_reason": "llm_heuristic_divergence",
+                    "confidence": min(float(result.confidence or 0.0), 0.34),
+                    "reason": "llm_first_validator_diverged",
+                }
+            ),
+            "diverged",
+        )
+    if selected_candidate_ids:
+        top_candidate_ids = {candidate.candidate_id for candidate in prompt_candidates[:_LLM_FIRST_VALIDATOR_TOP_K]}
+        if not top_candidate_ids.intersection(selected_candidate_ids):
+            return (
+                result.model_copy(
+                    update={
+                        "chosen_action": "clarification",
+                        "selected_candidate_ids": [],
+                        "ambiguity_reason": "llm_heuristic_divergence",
+                        "confidence": min(float(result.confidence or 0.0), 0.34),
+                        "reason": "llm_first_validator_diverged",
+                    }
+                ),
+                "diverged",
+            )
+    return result.model_copy(update={"reason": "llm_first_validator_ok"}), "ok"
+
+
 async def run_turn_interpreter(
     *,
     question: str,
@@ -888,6 +1028,94 @@ async def run_turn_interpreter(
     prompt_candidates = _select_prompt_candidates(question, candidates)
     candidate_payload = [_compact_candidate(candidate) for candidate in prompt_candidates]
     summary = current_context_summary(session_memory) if session_memory is not None else _view_state_summary(view_state)
+
+    if _llm_first_gate(
+        has_explicit_seed=has_explicit_seed,
+        trigger=trigger,
+        prompt_candidates=prompt_candidates,
+        summary=summary,
+    ):
+        llm_first_trigger_source = _llm_first_trigger_source(summary)
+        try:
+            result = await _invoke_turn_interpretation_llm(
+                question=question,
+                trigger=trigger,
+                summary=summary,
+                candidate_payload=candidate_payload,
+                heuristic=heuristic,
+            )
+            validated, validator = _validate_llm_first_result(
+                result=result,
+                heuristic=heuristic,
+                prompt_candidates=prompt_candidates,
+            )
+            log_event(
+                "TURN.INTERPRETATION.LLM_FIRST",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                trigger=llm_first_trigger_source,
+                validator=validator,
+                candidate_count=len(prompt_candidates),
+                top_k=_LLM_FIRST_VALIDATOR_TOP_K,
+                selected_candidate_ids=list(result.selected_candidate_ids or []),
+                reason=validated.reason,
+            )
+            if validator == "skipped" and validated.reason == "low_confidence_fallback":
+                log_event(
+                    "TURN.INTERPRETATION",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    source="heuristic_fallback",
+                    chosen_action=validated.chosen_action,
+                    selected_candidate_ids=list(validated.selected_candidate_ids or []),
+                    confidence=round(float(validated.confidence or 0.0), 3),
+                    reason=validated.reason,
+                    candidate_count=len(candidates),
+                    fallback_reason="low_confidence",
+                    target_entity_kind=validated.target_entity_kind,
+                )
+                return validated
+            log_event(
+                "TURN.INTERPRETATION",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                source="llm_first",
+                chosen_action=validated.chosen_action,
+                selected_candidate_ids=list(validated.selected_candidate_ids or []),
+                confidence=round(float(validated.confidence or 0.0), 3),
+                reason=validated.reason,
+                candidate_count=len(candidates),
+                target_entity_kind=validated.target_entity_kind,
+            )
+            return validated
+        except Exception as exc:
+            fallback = heuristic.model_copy(update={"reason": f"llm_first_error_fallback:{type(exc).__name__}"})
+            log_event(
+                "TURN.INTERPRETATION.LLM_FIRST",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                trigger=llm_first_trigger_source,
+                validator="skipped",
+                candidate_count=len(prompt_candidates),
+                top_k=_LLM_FIRST_VALIDATOR_TOP_K,
+                selected_candidate_ids=[],
+                reason=f"llm_first_error_fallback:{type(exc).__name__}",
+                fallback_reason=type(exc).__name__,
+            )
+            log_event(
+                "TURN.INTERPRETATION",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                source="heuristic_fallback",
+                chosen_action=fallback.chosen_action,
+                selected_candidate_ids=list(fallback.selected_candidate_ids or []),
+                confidence=round(float(fallback.confidence or 0.0), 3),
+                reason=fallback.reason,
+                candidate_count=len(candidates),
+                fallback_reason=type(exc).__name__,
+                target_entity_kind=fallback.target_entity_kind,
+            )
+            return fallback
 
     if (
         has_explicit_seed
@@ -914,41 +1142,12 @@ async def run_turn_interpreter(
         return heuristic
 
     try:
-        llm = build_llm(model_name="solar_vllm_0")
-        parser = PydanticOutputParser(pydantic_object=TurnInterpretationResult)
-        system_prompt = await load_prompt_file(planner_prompt_path("turn_interpreter_v1.md"))
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                SystemMessage(content=system_prompt),
-                (
-                    "human",
-                    "{format_instructions}\n"
-                    "<user_query>{question}</user_query>\n"
-                    "<turn_trigger>{turn_trigger}</turn_trigger>\n"
-                    "<view_state_summary>{view_state_summary}</view_state_summary>\n"
-                    "<candidates>{candidates}</candidates>\n"
-                    "<heuristic_hint>{heuristic_hint}</heuristic_hint>",
-                ),
-            ]
-        )
-        interpreter_llm = llm.bind(
-            reasoning_effort="low",
-            include_reasoning=False,
-            disable_thinking=PLANNER_DISABLE_THINKING,
-            temperature=PLANNER_TEMPERATURE,
-            top_p=1.0,
-            max_tokens=260,
-        )
-        chain = prompt | interpreter_llm | sanitize_llm_json | parser
-        result = await chain.ainvoke(
-            {
-                "format_instructions": parser.get_format_instructions(),
-                "question": question,
-                "turn_trigger": json.dumps(trigger.model_dump(), ensure_ascii=False),
-                "view_state_summary": json.dumps(summary, ensure_ascii=False),
-                "candidates": json.dumps(candidate_payload, ensure_ascii=False),
-                "heuristic_hint": json.dumps(heuristic.model_dump(), ensure_ascii=False),
-            }
+        result = await _invoke_turn_interpretation_llm(
+            question=question,
+            trigger=trigger,
+            summary=summary,
+            candidate_payload=candidate_payload,
+            heuristic=heuristic,
         )
         valid_candidate_ids = {candidate.candidate_id for candidate in prompt_candidates}
         if any(candidate_id not in valid_candidate_ids for candidate_id in result.selected_candidate_ids):

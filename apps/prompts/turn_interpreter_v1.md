@@ -24,6 +24,8 @@ Rules:
 - Do not answer the user.
 - Do not invent candidates, ids, or entity names outside the provided candidate list.
 - `selected_candidate_ids` must contain only provided `candidate_id` values.
+- Return only candidate ids that appear in the provided `candidates` array.
+- Do not create or modify planner strategy fields such as `mode`, `relation`, `target_cols`, `join_key_mode`, filters, or retrieval mode.
 - If no valid candidate exists, choose `clarification`.
 - If the query is too ambiguous, choose `clarification`.
 - If confidence is low, prefer `clarification`.
