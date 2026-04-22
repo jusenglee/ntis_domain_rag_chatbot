@@ -1,103 +1,176 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-from langgraph.graph import StateGraph, END
+from typing import Any
 
-from apps.platform.schemas import AgentState
+from apps.api.contracts.workflow_models import AgentState
 from apps.api.workflow_nodes import (
-    node_rule_precheck,
-    node_analyze_question,
-    node_judge_knowledge_sufficiency,
-    node_rag_search,
-    node_answer_generation,
-    node_agent_entry,
-    node_agent_router,
-    node_agent_execute_tool,
-    node_agent_direct_answer,
     node_agent_clarification,
+    node_agent_direct_answer,
+    node_agent_internal_error,
+    node_build_conversation_state_card,
+    node_direct_answer,
+    node_execute_agent_tool,
+    node_join_answers,
+    node_load_memory,
+    node_rule_precheck,
+    node_run_dialogue_agent,
+    node_save_history,
 )
-from apps.conversation.agent_flags import agent_enabled
+from apps.chat.answer_generation import (
+    node_generate_answer_gemma,
+    node_generate_answer_solar,
+    node_merge_answers,
+)
+from apps.retrieval.runtime_routing import decide_post_retrieval_route
+from apps.retrieval.retrieval_workflow import node_knowledge_sufficiency, node_rag_search, node_relax_and_retry
 
 
-def build_request_workflow() -> StateGraph:
-    """
-    NTIS RAG 시스템의 전체 실행 워크플로우를 정의하고 빌드합니다.
-    ADR-0001에 따라 '에이전틱 모드'와 '레거시 모드'를 지원합니다.
-    """
-    
-    # 1. 시스템 상태(AgentState)를 기반으로 상태 그래프 초기화
-    workflow = StateGraph(AgentState)
+def route_after_rule(state: Any) -> str:
+    """Route direct-answer prechecks or the normal agent front-controller path."""
 
-    # 2. 공통 노드 등록: 사전 규칙 체크
-    workflow.add_node("rule_precheck", node_rule_precheck)
+    rule_decision = getattr(state, "rule_decision", None)
+    if rule_decision and getattr(rule_decision, "action", None) == "direct_answer":
+        return "direct_answer"
+    return "build_conversation_state_card"
 
-    # --- 에이전틱 경로 (Agentic Path) ---
-    # 에이전트가 대화의 주도권을 가지고 도구를 호출하거나 직접 답하는 경로입니다.
-    workflow.add_node("agent_entry", node_agent_entry)           # 상태 카드 생성 및 에이전트 준비
-    workflow.add_node("agent_router", node_agent_router)         # 에이전트 의사결정 (LLM)
-    workflow.add_node("agent_execute_tool", node_agent_execute_tool) # 도구 실행 및 플래너 연결
-    workflow.add_node("agent_direct_answer", node_agent_direct_answer) # 즉시 답변 처리
-    workflow.add_node("agent_clarification", node_agent_clarification) # 확인 요청 처리
 
-    # --- 레거시 경로 (Legacy Path) ---
-    # 코드 기반의 결정론적 파이프라인으로 질문을 분석합니다.
-    workflow.add_node("analyze_question", node_analyze_question)
+def route_after_agent_decision(state: Any) -> str:
+    """Route the dialogue-agent decision as the front-controller decision."""
 
-    # --- 공통 실행 경로 (Execution Path) ---
-    # 에이전트가 도구를 호출했거나 레거시 분석이 끝난 후 실제로 데이터를 찾는 단계입니다.
-    workflow.add_node("judge_sufficiency", node_judge_knowledge_sufficiency)
-    workflow.add_node("rag_search", node_rag_search)
-    workflow.add_node("answer_generation", node_answer_generation)
+    decision = getattr(state, "agent_decision", None)
+    decision_type = str(getattr(decision, "decision_type", "") or "").strip()
+    if decision_type == "direct_answer":
+        return "agent_direct_answer"
+    if decision_type == "call_tool":
+        return "execute_agent_tool"
+    if decision_type == "ask_clarification":
+        return "agent_clarification"
+    return "agent_internal_error"
 
-    # 3. 엣지(Edge) 및 분기 정의
-    workflow.set_entry_point("rule_precheck")
 
-    def route_after_precheck(state: AgentState) -> str:
-        """피처 플래그에 따라 에이전틱 모드 진입 여부를 결정합니다."""
-        if agent_enabled():
-            return "agent_entry"
-        return "analyze_question"
+def route_after_agent_tool(state: Any) -> str:
+    """Continue to retrieval only when the tool produced a guarded intent."""
 
-    workflow.add_conditional_edges(
-        "rule_precheck",
-        route_after_precheck,
-        {
-            "agent_entry": "agent_entry",
-            "analyze_question": "analyze_question"
-        }
+    observation = getattr(state, "agent_observation", None)
+    if (
+        str(getattr(observation, "observation_type", "") or "") == "planned_intent"
+        and getattr(state, "agent_tool_intent_payload", None) is not None
+        and getattr(state, "agent_tool_question_analysis", None) is not None
+    ):
+        return "judge_knowledge_sufficiency"
+    return "agent_clarification"
+
+
+def route_after_knowledge_sufficiency(state: Any) -> str | list[str]:
+    """Run answer generation in parallel when previous context is already sufficient."""
+
+    knowledge_sufficiency = getattr(state, "knowledge_sufficiency", None)
+    prev_context = getattr(state, "prev_context", None)
+    if (
+        knowledge_sufficiency is not None
+        and getattr(knowledge_sufficiency, "requires_new_knowledge", None) == "low"
+        and prev_context
+    ):
+        return ["generate_answer_solar", "generate_answer_gemma"]
+    return "rag_search"
+
+
+def route_after_rag_search(state: Any) -> str | list[str]:
+    """Route empty retrieval results to bounded answer generation or configured retry."""
+
+    qa = getattr(state, "question_analysis", None)
+    return decide_post_retrieval_route(
+        context=getattr(state, "context", None) or [],
+        retry_count=getattr(state, "search_retry_count", 0) or 0,
+        qa_mode=getattr(qa, "mode", ""),
+        join_key_mode=getattr(qa, "join_key_mode", None),
+        retrieval_runtime_meta=getattr(state, "retrieval_runtime_meta", None) or {},
     )
 
-    # 에이전트 의사결정에 따른 분기
-    def route_agent_decision(state: AgentState) -> str:
-        decision = state.get("agent_decision")
-        if not decision: return "agent_clarification"
-        
-        if decision.decision_type == "call_tool": return "agent_execute_tool"
-        if decision.decision_type == "direct_answer": return "agent_direct_answer"
-        return "agent_clarification"
 
-    workflow.add_edge("agent_entry", "agent_router")
-    workflow.add_conditional_edges("agent_router", route_agent_decision)
+def build_request_workflow() -> Any:
+    """Assemble the fixed request workflow using module-owned nodes."""
 
-    # 도구 실행 후 검색 파이프라인 합류 또는 확인 요청
-    def route_after_tool(state: AgentState) -> str:
-        obs = state.get("agent_observation")
-        if obs and obs.observation_type == "planned_intent":
-            return "judge_sufficiency"
-        return "agent_clarification"
+    from langgraph.graph import END, StateGraph
 
-    workflow.add_conditional_edges("agent_execute_tool", route_after_tool)
+    workflow = StateGraph(AgentState)
+    workflow.add_node("load_memory", node_load_memory)
+    workflow.add_node("rule_precheck", node_rule_precheck)
+    workflow.add_node("build_conversation_state_card", node_build_conversation_state_card)
+    workflow.add_node("run_dialogue_agent", node_run_dialogue_agent)
+    workflow.add_node("execute_agent_tool", node_execute_agent_tool)
+    workflow.add_node("agent_direct_answer", node_agent_direct_answer)
+    workflow.add_node("agent_clarification", node_agent_clarification)
+    workflow.add_node("agent_internal_error", node_agent_internal_error)
+    workflow.add_node("judge_knowledge_sufficiency", node_knowledge_sufficiency)
+    workflow.add_node("rag_search", node_rag_search)
+    workflow.add_node("relax_and_retry", node_relax_and_retry)
+    workflow.add_node("generate_answer_gemma", node_generate_answer_gemma)
+    workflow.add_node("generate_answer_solar", node_generate_answer_solar)
+    workflow.add_node("join_answers", node_join_answers)
+    workflow.add_node("direct_answer", node_direct_answer)
+    workflow.add_node("merge_answers", node_merge_answers)
+    workflow.add_node("save_history", node_save_history)
 
-    # 레거시 분석 후 검색 파이프라인 진행
-    workflow.add_edge("analyze_question", "judge_sufficiency")
+    workflow.set_entry_point("load_memory")
+    workflow.add_edge("load_memory", "rule_precheck")
+    workflow.add_conditional_edges(
+        "rule_precheck",
+        route_after_rule,
+        {
+            "direct_answer": "direct_answer",
+            "build_conversation_state_card": "build_conversation_state_card",
+        },
+    )
 
-    # 검색 및 답변 생성 흐름
-    workflow.add_edge("judge_sufficiency", "rag_search")
-    workflow.add_edge("rag_search", "answer_generation")
-    
-    # 최종 종료 엣지들
-    workflow.add_edge("answer_generation", END)
-    workflow.add_edge("agent_direct_answer", END)
-    workflow.add_edge("agent_clarification", END)
+    workflow.add_edge("build_conversation_state_card", "run_dialogue_agent")
+    workflow.add_conditional_edges(
+        "run_dialogue_agent",
+        route_after_agent_decision,
+        {
+            "agent_direct_answer": "agent_direct_answer",
+            "execute_agent_tool": "execute_agent_tool",
+            "agent_clarification": "agent_clarification",
+            "agent_internal_error": "agent_internal_error",
+        },
+    )
+    workflow.add_conditional_edges(
+        "execute_agent_tool",
+        route_after_agent_tool,
+        {
+            "judge_knowledge_sufficiency": "judge_knowledge_sufficiency",
+            "agent_clarification": "agent_clarification",
+        },
+    )
 
+    workflow.add_conditional_edges(
+        "judge_knowledge_sufficiency",
+        route_after_knowledge_sufficiency,
+        {
+            "generate_answer_solar": "generate_answer_solar",
+            "generate_answer_gemma": "generate_answer_gemma",
+            "rag_search": "rag_search",
+        },
+    )
+
+    workflow.add_conditional_edges(
+        "rag_search",
+        route_after_rag_search,
+        {
+            "relax_and_retry": "relax_and_retry",
+            "generate_answer_gemma": "generate_answer_gemma",
+            "generate_answer_solar": "generate_answer_solar",
+        },
+    )
+
+    workflow.add_edge("relax_and_retry", "rag_search")
+    workflow.add_edge("generate_answer_gemma", "join_answers")
+    workflow.add_edge("generate_answer_solar", "join_answers")
+    workflow.add_edge("join_answers", "merge_answers")
+    workflow.add_edge("direct_answer", "save_history")
+    workflow.add_edge("agent_direct_answer", "save_history")
+    workflow.add_edge("agent_clarification", "save_history")
+    workflow.add_edge("agent_internal_error", "save_history")
+    workflow.add_edge("merge_answers", "save_history")
+    workflow.add_edge("save_history", END)
     return workflow
