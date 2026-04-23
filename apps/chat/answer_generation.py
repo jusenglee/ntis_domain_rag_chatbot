@@ -967,9 +967,18 @@ async def generate_answer(
         or getattr(last_message, "content", "")
         or ""
     ).strip()
+    # ADR-0015 C1 Option B: agent_answer_context.note가 있으면 프롬프트에 주입.
+    # 값 없을 때 기존 프롬프트와 완전 동일 (빈 문자열 fallback).
+    agent_answer_context = getattr(state, "agent_answer_context", None)
+    agent_observation_note = ""
+    if agent_answer_context is not None:
+        note_value = getattr(agent_answer_context, "note", None)
+        if isinstance(note_value, str) and note_value.strip():
+            agent_observation_note = f"[결과 주석]\n{note_value.strip()}\n\n"
     human_prompt = (
         f"[질문 요약]\n{question_summary or '없음'}\n\n"
         f"[원본 질문]\n{getattr(last_message, 'content', '')}\n\n"
+        f"{agent_observation_note}"
         f"[제공된 정보]\n{context_text}"
     )
     log_section("Reference Context", debug_context_text)

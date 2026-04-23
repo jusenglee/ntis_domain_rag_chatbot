@@ -381,12 +381,21 @@ observation_type: Literal[
 "no_results",
 "contract_violation",
 "error",
+"planned_intent",
 ]
 summary: str
 structured_refs: dict[str, Any] = Field(default_factory=dict)
 evidence_count: int = 0
 warnings: list[str] = Field(default_factory=list)
 next_suggested_actions: list[str] = Field(default_factory=list)
+
+# 2026-04-23 C1 Option B 추가: Agent가 tool decision 맥락에서 생성한
+# "답변 생성 노드로 전달할 짧은 메모". generate_answer_* 프롬프트의
+# {agent_observation_note} placeholder에 주입되는 **정보성** 문자열이며
+# truth(ids_map, mode, relation 등)를 재정의하지 않는다.
+# 값이 None/빈 문자열이면 placeholder는 빈 문자열로 대체되어 기존 답변
+# 품질이 변하지 않도록 보장한다 (정적 fallback guard).
+answer_note: Optional[str] = None
 6. Tool Design
    6.1 search_ntis_domain
 
@@ -603,6 +612,21 @@ load_memory
 - Agent는 tool을 1회 호출하고 그 결과를 기존 retrieval→answer 파이프라인으로 넘긴다.
   Observation 기반 2차 Agent 호출(self-iterating loop)은 현 단계에서 도입하지 않으며,
   `AGENTIC_MAX_STEPS` 는 향후 loop 도입 시의 상한을 선언한다.
+
+Implementation update 2026-04-23 (C1 Option B 최소 observation 훅):
+- `AgentState`에 `agent_answer_context: Optional[AgentAnswerContext]` 필드 추가.
+  `AgentAnswerContext`는 `note: Optional[str]`, `source_observation_type: Optional[str]`만 담는
+  순수 정보 계약이며, 전략 필드(mode/relation/target_cols/join_key_mode 등)는 금지된다.
+- `node_execute_agent_tool`과 `node_retry_dialogue_agent_after_tool_error`가 성공 경로에서
+  `AgentObservation.answer_note`를 복사해 `agent_answer_context`로 승격한다.
+  실패/contract_violation 경로에서는 `agent_answer_context`를 None으로 유지한다.
+- `node_generate_answer_gemma` / `node_generate_answer_solar`는 prompt template의
+  `{agent_observation_note}` placeholder를 `agent_answer_context.note or ""`로 채운다.
+  값이 없으면 빈 문자열로 대체되어 기존 프롬프트와 문법적으로 동일해진다 (정적 fallback guard).
+- 본 훅은 Planner truth·HardContract·VisibleAnswerManifest를 건드리지 않으며,
+  실패 시 무시되도록 모든 소비자는 None/빈값 fallback을 강제 유지한다.
+- 운영 관측: `AGENT.ANSWER_NOTE.ATTACHED` 이벤트를 `execute_agent_tool` 단계에서 1회 발행하여
+  note 길이/source observation_type만 기록 (내용 전문은 로그 금지).
 10. Runtime Guardrails
     agentic front-controller
 AGENTIC_MAX_STEPS=3

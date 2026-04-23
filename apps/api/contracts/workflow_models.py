@@ -390,6 +390,22 @@ class RuleDecision(BaseModel):
     reason: str
 
 
+class AgentAnswerContext(BaseModel):
+    """ADR-0015 C1 Option B: merge_answers 관측 훅 대체 구조.
+
+    Tool backend가 Agent 결정 이전에 남긴 '짧은 결과 주석(note)'만 실어
+    generate_answer_* 프롬프트가 인식할 수 있게 한다.
+    - note: AgentObservation.answer_note에서 복사한 프로즈 힌트.
+    - source_observation_type: 어느 observation_type에서 유래했는지(디버깅·로그용).
+    ✗ 전략 필드(strategy, contract, scope) 금지. 순수한 '결과 주석 전달'만 허용.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: Optional[str] = None
+    source_observation_type: Optional[str] = None
+
+
 class AgentState(BaseModel):
     """Shared execution state container for the LangGraph workflow."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -458,6 +474,9 @@ class AgentState(BaseModel):
     agent_tool_retry_count: int = 0
     agent_tool_retry_reason: Optional[str] = None
     agent_tool_retry_observation: Optional[AgentObservation] = None
+    # ADR-0015 C1 Option B: Tool observation.answer_note → prompt 입력용 컨텍스트.
+    # node_execute_agent_tool 및 retry 노드에서 복사되며 generate_answer_*가 참조.
+    agent_answer_context: Optional[AgentAnswerContext] = None
     search_retry_count: int = 0
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:

@@ -22,6 +22,9 @@ class AgentObservation(BaseModel):
     evidence_count: int = 0
     warnings: List[str] = Field(default_factory=list)
     next_suggested_actions: List[str] = Field(default_factory=list)
+    # ADR-0015 C1 Option B: 최소 결과 주석 훅 (merge_answers 대안).
+    # Tool backend가 Agent에게 전달할 '짧은 프로즈 힌트'. 전략·스코어·구성 요소 금지.
+    answer_note: Optional[str] = None
 
 
 class AgentToolExecutionResult(BaseModel):

@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
-from apps.api.contracts.workflow_models import RuleDecision
+from apps.api.contracts.workflow_models import AgentAnswerContext, RuleDecision
 from apps.api.runtime_helpers import (
     _state_log_summary_fields,
     compute_total_ms_from_start,
@@ -379,12 +379,28 @@ async def node_retry_dialogue_agent_after_tool_error(state: Any) -> Dict[str, An
         retry_count=retry_count + 1,
         retry_reason=retry_reason,
     )
-    return {
+    updates: Dict[str, Any] = {
         "agent_decision": decision,
         "agent_tool_retry_count": retry_count + 1,
         "agent_tool_retry_reason": retry_reason,
         "agent_tool_retry_observation": observation,
     }
+    # ADR-0015 C1 Option B: 재시도 시점에도 observation.answer_note 보존.
+    retry_answer_note = getattr(observation, "answer_note", None)
+    if isinstance(retry_answer_note, str) and retry_answer_note.strip():
+        updates["agent_answer_context"] = AgentAnswerContext(
+            note=retry_answer_note.strip(),
+            source_observation_type=getattr(observation, "observation_type", None),
+        )
+        log_event(
+            "AGENT.ANSWER_NOTE.ATTACHED",
+            **_agent_base_fields(state),
+            **_agent_context_fields(state),
+            source_observation_type=getattr(observation, "observation_type", None),
+            note_chars=len(retry_answer_note.strip()),
+            retry_count=retry_count + 1,
+        )
+    return updates
 
 
 def _agent_decision_meta(decision: Any) -> Dict[str, Any]:
@@ -488,6 +504,21 @@ async def node_execute_agent_tool(state: Any) -> Dict[str, Any]:
         "agent_tool_question_analysis": result.question_analysis,
         "execution_trace": execution_trace,
     }
+    # ADR-0015 C1 Option B: observation.answer_note → AgentAnswerContext 전달.
+    answer_note_value = getattr(observation, "answer_note", None)
+    if isinstance(answer_note_value, str) and answer_note_value.strip():
+        updates["agent_answer_context"] = AgentAnswerContext(
+            note=answer_note_value.strip(),
+            source_observation_type=observation.observation_type,
+        )
+        log_event(
+            "AGENT.ANSWER_NOTE.ATTACHED",
+            **_agent_base_fields(state),
+            **context_fields,
+            tool_name=tool_name,
+            source_observation_type=observation.observation_type,
+            note_chars=len(answer_note_value.strip()),
+        )
     if observation.observation_type == "planned_intent" and result.intent_payload and result.question_analysis:
         updates["intent_payload"] = result.intent_payload
         updates["question_analysis"] = result.question_analysis

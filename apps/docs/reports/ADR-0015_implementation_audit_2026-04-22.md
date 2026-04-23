@@ -254,11 +254,16 @@ if subject_can_be_retained and subject_kind and subject_name:
     - `node_retry_dialogue_agent_after_tool_error` (workflow_nodes.py:344) — tool 에러 시 `run_dialogue_agent`를 card에 feedback을 주입해 1회 재호출. `AGENT.TOOL_RETRY.START` / `AGENT.TOOL_RETRY.DECISION` 이벤트 로깅.
     - 즉 **에러 관측 루프는 존재**, **성공 관측 루프는 없음**.
   - **현재 구조의 정확한 성격**: Agent는 (1회 tool 발행) + (에러 시 1회 재시도) 구조. self-iterating loop는 아니지만 1-step retry는 있음.
+- **사용자 확정 정책 (2026-04-22 병렬 커밋, `06_운영과_환경.md:146`, `07_회귀기준과_점검.md:57,133` 반영)**:
+  - Tool backend의 `planner_error` / `LLMJSONExtractionError` / `PLANNER.STAGE*.ERROR`는 **사용자 모호성으로 해석 금지**. `AGENT.TOOL_OBSERVATION(error) → AGENT.TOOL_RETRY.START → AGENT.TOOL_RETRY.DECISION` 순서 강제.
+  - 재시도 후에도 guarded intent가 없으면 `AGENT.INTERNAL_ERROR`로 닫는다. `ClarificationContext` 저장 금지.
+  - `AGENT.CLARIFICATION`은 Agent decision이 `ask_clarification`일 때만 허용. 그 외 경로에서 clarification을 방출하려 하면 `AGENT.CLARIFICATION.BLOCKED` 로깅 + `node_agent_internal_error` fallback (workflow_nodes.py `node_agent_clarification` 진입 방어 구현).
+  - LLM parse/schema/tool validation 실패 → 1회 self-repair → 실패 시 `agent_internal_error`. clarification 전환 금지.
+  - declared-but-unimplemented tool → executor contract violation.
+  - 즉 Gap 1의 P1 decision point는 "성공 경로 self-iteration loop는 도입하지 않고, 오류 경로만 1회 observation retry"로 **확정**. `AGENTIC_MAX_STEPS=3`은 향후 loop 도입 시의 상한 선언으로만 남음.
 - **남은 (사용자 결정 필요) 포인트**:
-  - (P1) 성공 경로에서도 Agent observation loop을 도입할지 여부 — e.g. "첫 tool 결과를 본 뒤 다른 tool을 추가 호출하거나 answer strategy를 다시 선택"하는 multi-step loop.
-  - (P2) 현 1-step retry 구조를 채택하고 `AGENTIC_MAX_STEPS=3` 플래그를 `1` 또는 `retry_limit` 의미로 재정의할지, 아니면 선언을 남겨둔 채 미래 확장 대비할지.
-  - (P3) merge_answers 내부에 Agent가 observation 요약을 남기는 훅을 추가할지 (지금은 retrieval이 blind로 answer 생성).
-  - 위 세 가지는 모두 워크플로우 구조/플래그 의미를 바꾸는 결정이므로 **사용자 확인 없이 코드 수정하지 않음**.
+  - (P3) `merge_answers` 내부에 Agent가 observation 요약을 남기는 훅을 추가할지 — 2026-04-23 [ADR-0015 구조적 결정 초안 C1](./ADR-0015_structural_decisions_draft_2026-04-23.md)으로 옵션/권장 정리됨 (권장: Option B 최소 훅).
+  - (Gap 3 잔여) legacy 5개 파일 최종 삭제 시점 — 동일 초안 C2로 정리 (권장: Option B' 2단계 집행).
 
 ### Gap 2 — publication_status 타입/값 계약 약화 (🟡 타입 안전성)
 - **위치**: session_memory.py:51
@@ -304,7 +309,7 @@ if subject_can_be_retained and subject_kind and subject_name:
 
 ## 12. 제안 다음 단계 (참고용, 실행 아님)
 
-1. **Gap 1**: ✅ ADR 9.2 갱신 + 부분 observation loop(에러 재시도) 확인 완료 (2026-04-22). 남은 결정 포인트(P1/P2/P3)는 사용자 확인 필요 — 이후 self-iteration loop 도입 여부에 따라 별도 ADR 개정.
+1. **Gap 1**: ✅ ADR 9.2 갱신 + 에러 경로 1회 retry 정책 확정 (2026-04-22, 06/07 문서 + `node_agent_clarification` 진입 방어). `AGENT.CLARIFICATION.BLOCKED` + `AGENT.INTERNAL_ERROR`로 오류가 clarification으로 새는 경로 차단. 잔여 P3(merge_answers 내 observation 훅)는 별도 개선 주제.
 2. **Gap 2**: ✅ `publication_status` Literal 강화 + `_migrate_legacy_publication_status` 검증기 추가 완료 (2026-04-22).
 3. **Gap 3**: ✅ 호출 그래프 조사 완료 + DEPRECATED docstring 마커 적용 (2026-04-22). 다음 단계는 테스트 마이그레이션(별도 task) → 최종 삭제.
 4. 위 3개 gap 반영 후 acceptance criteria #1, #2 golden test 실측.
@@ -315,7 +320,7 @@ if subject_can_be_retained and subject_kind and subject_name:
 
 | Gap | 이전 상태 | 2026-04-22 조치 | 결과 |
 |---|---|---|---|
-| Gap 1 | 🔴 구조적 gap | ADR 9.2 갱신 (option a 채택), 부분 observation loop(에러 retry) 존재 확인 | 🟡 부분 구현 + 남은 decision point는 사용자 확인 대기 |
+| Gap 1 | 🔴 구조적 gap | ADR 9.2 갱신 (option a 채택), 에러 경로 1회 observation retry 정책 확정 (06/07 문서), 성공 경로 self-iteration loop는 도입 안 함 확정 | ✅ P1 확정 (1-step retry → internal_error, clarification 우회 금지), P3만 후속 개선 주제로 남음 |
 | Gap 2 | 🟡 타입 약화 | `SubjectQueryContext.publication_status: Optional[Literal[...]]` + legacy 값 마이그레이션 validator | ✅ 타입 안전 |
 | Gap 3 | 🟡 legacy 잔존 | 5개 파일에 DEPRECATED docstring 마커, 삭제는 test 마이그레이션 선행 필요로 분리 | 🟡 보존 + 명시 |
 | Gap 4 (문서) | 🟢 ADR-코드 이름 불일치 | `build_intent_payload_for_agent_tool` → `build_agent_intent_payload`로 ADR 갱신 | ✅ 동기화 |
@@ -329,4 +334,32 @@ if subject_can_be_retained and subject_kind and subject_name:
 
 ---
 
-*본 보고서는 2026-04-22 최초 audit 이후 동일 세션에서 Gap 2/3/4 저위험 수정과 Gap 1 후속 조사를 추가 반영했습니다. Gap 1의 남은 결정 포인트(P1/P2/P3)는 구조적 결정이므로 사용자 확인이 필요합니다.*
+## 14. 2026-04-23 C1/C2 구조 결정 집행 요약
+
+[근거 문서] `ADR-0015_structural_decisions_draft_2026-04-23.md` (Status: Accepted).
+
+| 결정 | 선택지 | 집행 결과 |
+|---|---|---|
+| C1 (merge_answers observation 훅) | **Option B — 최소 훅** | ✅ 집행 완료. `AgentObservation.answer_note: Optional[str]` 추가, `AgentAnswerContext(note, source_observation_type)` pydantic 모델 신설, `AgentState.agent_answer_context` 필드 추가, `node_execute_agent_tool` / `node_retry_dialogue_agent_after_tool_error`에서 `observation.answer_note → agent_answer_context`로 복사, `AGENT.ANSWER_NOTE.ATTACHED` 이벤트 로깅, `generate_answer()` 프롬프트에 `[결과 주석]` 섹션 조건부 주입 (값 없을 때 기존 프롬프트와 완전 동일). |
+| C2 (legacy 삭제) | **Option B' — 2단계 집행** | 🟡 Stage 1 완료 / Stage 2 보류. 11개 legacy-front-controller 의존 pytest 파일에 `pytestmark = pytest.mark.skip(...)` 삽입으로 회귀 대상에서 명시적으로 격리. 해당 테스트들은 모두 untracked 상태이며 9개는 디스크 상에 사전부터 truncate 돼 있어 실제로 수집·실행되지 않음. Stage 2(실제 삭제)는 agentic 경로 커버리지 확인 이후 실행 예정. |
+
+**2026-04-23 적용 파일 목록**:
+- `apps/conversation/agent_observation.py` (AgentObservation.answer_note 추가)
+- `apps/api/contracts/workflow_models.py` (AgentAnswerContext 신설 + AgentState 필드 추가)
+- `apps/api/workflow_nodes.py` (node_execute_agent_tool + retry 노드에서 answer_note 복사 + AGENT.ANSWER_NOTE.ATTACHED 로깅)
+- `apps/chat/answer_generation.py` (generate_answer 프롬프트에 [결과 주석] 섹션 조건부 주입)
+- `tests/conversation/test_*.py` + `tests/test_request_facade_*.py` 11개 (pytestmark skip 마커)
+
+**C1 관측 항목 (런타임 가드)**: LLM 호출 환경이 아니므로 pytest 회귀는 사용하지 않음(`feedback_no_pytest_regression`). 대신 다음 정적·런타임 근거로 정책 준수를 확인한다.
+- 정적: `AgentAnswerContext.model_config = ConfigDict(extra="forbid")` — strategy/contract/scope 필드 주입 시도는 pydantic 레벨에서 거부.
+- 로그: `AGENT.ANSWER_NOTE.ATTACHED` 이벤트가 `tool_name` / `source_observation_type` / `note_chars`만 남기므로 운영 관측에서 확장 시도 감시 가능.
+- Prompt: 값 없을 때 `agent_observation_note == ""`로 fallback되어 기존 프롬프트와 동일 — diff 기반 regression 근거 확보.
+
+**C2 잔여 작업 (Stage 2)**:
+- agentic 경로 (`test_agentic_dialogue_contract.py`, `test_agentic_workflow.py`, `test_agentic_dialogue_shindonggu.py`) 커버리지로 legacy 대체 확인.
+- 확인 후 11개 legacy 테스트 파일 + `apps/conversation/request_facade.build_intent_payload` + `apps/conversation/turn_trigger.py` / `turn_interpreter.py` / `turn_policy.py` / `context_router.py` 중 Agent 경로에서 호출되지 않는 함수 실제 삭제.
+- 삭제 전 `workflow_builder.py`의 `build_workflow_graph`가 legacy 노드를 참조하지 않음을 재확인 (2026-04-22 커밋 5a60981에서 이미 LLM-driven agentic workflow로 전환됐음).
+
+---
+
+*본 보고서는 2026-04-22 최초 audit 이후 (1) Gap 2/3/4 저위험 수정 + Gap 1 후속 조사를 반영하고, (2) 사용자가 병렬로 커밋한 "tool-backend planner 오류 → 1회 Agent retry → `agent_internal_error`, `AGENT.CLARIFICATION` 우회 금지" 정책과 `node_agent_clarification` 진입 방어(`AGENT.CLARIFICATION.BLOCKED`) 구현을 반영해 Gap 1을 확정 처리한 뒤, (3) 2026-04-23 C1/C2 구조 결정 초안(Accepted) 을 집행해 merge_answers observation 훅(C1 Option B)과 legacy 테스트 격리(C2 Option B' Stage 1)를 반영했습니다. 정책 계약은 `06_운영과_환경.md` / `07_회귀기준과_점검.md`에 상시 유지됩니다.*
