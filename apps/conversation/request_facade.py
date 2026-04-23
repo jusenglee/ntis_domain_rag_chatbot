@@ -2019,6 +2019,19 @@ async def build_intent_payload(
     view_state: Optional[ConversationViewState] = None,
     session_memory: Optional[SessionMemory] = None,
 ) -> tuple[Any, Any]:
+    """DEPRECATED (ADR-0015, 2026-04-22).
+
+    Legacy deterministic intent-building pipeline (turn_trigger → turn_interpreter →
+    context_router → turn_policy). Production workflow (apps/api/workflow_builder.py)
+    no longer reaches this path; the Agent front-controller uses
+    `build_agent_intent_payload` instead.
+
+    This function is preserved SOLELY because the existing test suite
+    (tests/ conversation/*) still calls it and patches the underlying
+    `run_turn_trigger` / `run_turn_interpreter` / `run_context_router` hooks.
+    Do NOT call it from new production code. Deletion requires migrating
+    those tests first (tracked as separate work).
+    """
     precheck = _cheap_precheck(question)
 
     explicit_only_hint = _build_explicit_only_hint(question)

@@ -770,19 +770,19 @@ async def run_planner_stage1(
         ]
     )
     llm_bind_settings = {
-        "reasoning_effort": "high",
-        "include_reasoning": True,
+        "reasoning_effort": "low",
+        "include_reasoning": False,
         "temperature": PLANNER_TEMPERATURE,
         "top_p": 1.0,
-        "max_tokens": 2048,
+        "max_tokens": 300,
     }
     planner_llm = llm.bind(
-        reasoning_effort="high",
-        include_reasoning=True,
+        reasoning_effort="low",
+        include_reasoning=False,
         #disable_thinking=PLANNER_DISABLE_THINKING,
         temperature=PLANNER_TEMPERATURE,
         top_p=1.0,
-        max_tokens=2048, # 250에서 1024로 상향
+        max_tokens=800, # 250에서 1024로 상향
     )
     planner_llm = planner_llm.bind(
         request_id=request_id,
@@ -845,11 +845,16 @@ async def run_planner_stage1(
         "PLANNER.STAGE1",
         request_id=request_id,
         conversation_id=conversation_id,
+        planner_stage="stage1",
         action=stage1.action,
         head=stage1.head,
         relation_candidate=stage1.relation_candidate,
         referential_followup=int(stage1.referential_followup),
         confidence=round(stage1.confidence, 3),
+        dt_ms=round(stage_stats.get("dt_ms", 0.0), 1),
+        raw_content_chars=stage_stats.get("raw_content_chars", 0),
+        json_candidate_count=stage_stats.get("json_candidate_count", 0),
+        output_json_chars=stage_stats.get("output_json_chars", 0),
         planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
         prev_context_source="display_snapshot" if display_snapshot and display_snapshot.items else "canonical_evidence" if canonical_evidence else "prev_context_snapshot",
     )
@@ -880,33 +885,94 @@ async def run_planner_stage15(
             ),
         ]
     )
+    llm_bind_settings = {
+        "reasoning_effort": "low",
+        "include_reasoning": False,
+        "disable_thinking": PLANNER_DISABLE_THINKING,
+        "temperature": PLANNER_TEMPERATURE,
+        "top_p": 1.0,
+        "max_tokens": 800,
+    }
     planner_llm = llm.bind(
-        reasoning_effort="high",
-        include_reasoning=False,
-        disable_thinking=PLANNER_DISABLE_THINKING,
-        temperature=PLANNER_TEMPERATURE,
-        top_p=1.0,
-        max_tokens=250,
+        **llm_bind_settings,
+        request_id=request_id,
+        conversation_id=conversation_id,
+        planner_stage="stage15",
+        planner_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
     )
-    chain = prompt | planner_llm | sanitize_llm_json | parser
-    stage15 = await chain.ainvoke(
-        {
-            "format_instructions": parser.get_format_instructions(),
-            "question": question,
-            "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
-            "surface_signals": json.dumps(_signals_payload(signals), ensure_ascii=False),
-        }
+    locked_strategy_payload = json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False)
+    surface_signals_payload = json.dumps(_signals_payload(signals), ensure_ascii=False)
+    input_payload = {
+        "format_instructions": parser.get_format_instructions(),
+        "question": question,
+        "locked_strategy": locked_strategy_payload,
+        "surface_signals": surface_signals_payload,
+    }
+    common_fields = _planner_stage_common_fields(
+        stage_label="stage15",
+        prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
+        question=question,
+        input_payload=input_payload,
+        llm_settings={
+            "model_name": "solar_vllm_0",
+            **llm_bind_settings,
+        },
     )
+    json_text, stage_stats = await _invoke_planner_stage_json(
+        event_prefix="PLANNER.STAGE15",
+        stage_label="stage15",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        common_fields=common_fields,
+        runnable=prompt | planner_llm,
+        input_payload=input_payload,
+        start_fields={
+            "gate_mode": locked_strategy.mode,
+            "gate_relation": locked_strategy.relation,
+            "gate_join_key_mode": locked_strategy.join_key_mode,
+            "gate_target_cols": locked_strategy.target_cols,
+            "surface_people_terms": list(signals.people_terms),
+            "surface_org_terms": list(signals.org_terms),
+            "surface_perf_types": list(signals.perf_types),
+            "locked_strategy_chars": len(locked_strategy_payload),
+            "surface_signals_chars": len(surface_signals_payload),
+        },
+    )
+    parse_started_at = time.perf_counter()
+    try:
+        stage15 = parser.parse(json_text)
+    except Exception as exc:
+        _log_planner_stage_error(
+            event_prefix="PLANNER.STAGE15",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase="parse",
+            exc=exc,
+            dt_ms=(time.perf_counter() - parse_started_at) * 1000.0,
+            raw_content_chars=stage_stats.get("raw_content_chars", 0),
+            json_candidate_count=stage_stats.get("json_candidate_count", 0),
+            output_json_chars=stage_stats.get("output_json_chars", 0),
+        )
+        raise
     log_event(
         "PLANNER.STAGE15",
         request_id=request_id,
         conversation_id=conversation_id,
+        planner_stage="stage15",
         confidence=round(stage15.confidence, 3),
         org_role_hint=stage15.org_role_hint,
         anchor_required=int(stage15.anchor_required),
         semantic_kind=stage15.semantic_kind,
         perf_type_policy=stage15.perf_type_policy,
         must_keep_terms=stage15.must_keep_terms,
+        people_terms_to_keep=stage15.people_terms_to_keep,
+        org_terms_to_keep=stage15.org_terms_to_keep,
+        perf_type_hints=stage15.perf_type_hints,
+        dt_ms=round(stage_stats.get("dt_ms", 0.0), 1),
+        raw_content_chars=stage_stats.get("raw_content_chars", 0),
+        json_candidate_count=stage_stats.get("json_candidate_count", 0),
+        output_json_chars=stage_stats.get("output_json_chars", 0),
         planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
     )
     return stage15
@@ -994,45 +1060,142 @@ async def run_planner_stage2(
             ),
         ]
     )
+    llm_bind_settings = {
+        "reasoning_effort": "low",
+        "include_reasoning": False,
+        "disable_thinking": PLANNER_DISABLE_THINKING,
+        "temperature": PLANNER_TEMPERATURE,
+        "top_p": 1.0,
+        "max_tokens": 300,
+    }
     planner_llm = llm.bind(
-        reasoning_effort="low",
-        include_reasoning=False,
-        disable_thinking=PLANNER_DISABLE_THINKING,
-        temperature=PLANNER_TEMPERATURE,
-        top_p=1.0,
-        max_tokens=300,
-    )
-    chain = prompt | planner_llm | sanitize_llm_json
-    raw_slots = await chain.ainvoke(
-        {
-            "format_instructions": parser.get_format_instructions(),
-            "question": question,
-            "locked_strategy": json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False),
-            "hard_contract": json.dumps(hard_contract.model_dump(), ensure_ascii=False),
-            "soft_strategy_hints": json.dumps(soft_strategy_hints.model_dump(), ensure_ascii=False),
-            "surface_signals": json.dumps(_signals_payload(signals), ensure_ascii=False),
-            "entity_role_plan": json.dumps(_entity_role_payload(entity_role_plan), ensure_ascii=False),
-            "validation_hints": json.dumps(validation_hints or {}, ensure_ascii=False),
-            "previous_output": json.dumps(previous_output or {}, ensure_ascii=False),
-        }
-    )
-    normalized_slots = _normalize_stage2_slots_payload(
-        raw_slots,
+        **llm_bind_settings,
         request_id=request_id,
         conversation_id=conversation_id,
+        planner_stage="stage2",
+        planner_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
     )
-    slots = parser.parse(json.dumps(normalized_slots, ensure_ascii=False))
-    slots = _sanitize_stage2_structured_filters(
-        slots=slots,
-        entity_role_plan=entity_role_plan,
+    locked_strategy_payload = json.dumps(locked_strategy.to_prompt_payload(), ensure_ascii=False)
+    hard_contract_payload = json.dumps(hard_contract.model_dump(), ensure_ascii=False)
+    soft_strategy_hints_payload = json.dumps(soft_strategy_hints.model_dump(), ensure_ascii=False)
+    surface_signals_payload = json.dumps(_signals_payload(signals), ensure_ascii=False)
+    entity_role_payload = json.dumps(_entity_role_payload(entity_role_plan), ensure_ascii=False)
+    validation_hints_payload = json.dumps(validation_hints or {}, ensure_ascii=False)
+    previous_output_payload = json.dumps(previous_output or {}, ensure_ascii=False)
+    input_payload = {
+        "format_instructions": parser.get_format_instructions(),
+        "question": question,
+        "locked_strategy": locked_strategy_payload,
+        "hard_contract": hard_contract_payload,
+        "soft_strategy_hints": soft_strategy_hints_payload,
+        "surface_signals": surface_signals_payload,
+        "entity_role_plan": entity_role_payload,
+        "validation_hints": validation_hints_payload,
+        "previous_output": previous_output_payload,
+    }
+    stage2_attempt = 2 if validation_hints or previous_output else 1
+    common_fields = _planner_stage_common_fields(
+        stage_label="stage2",
+        prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
+        question=question,
+        input_payload=input_payload,
+        llm_settings={
+            "model_name": "solar_vllm_0",
+            **llm_bind_settings,
+        },
+    )
+    raw_slots, stage_stats = await _invoke_planner_stage_json(
+        event_prefix="PLANNER.STAGE2",
+        stage_label="stage2",
         request_id=request_id,
         conversation_id=conversation_id,
+        common_fields=common_fields,
+        runnable=prompt | planner_llm,
+        input_payload=input_payload,
+        start_fields={
+            "stage2_attempt": stage2_attempt,
+            "gate_mode": locked_strategy.mode,
+            "gate_relation": locked_strategy.relation,
+            "gate_join_key_mode": locked_strategy.join_key_mode,
+            "gate_target_cols": locked_strategy.target_cols,
+            "entity_semantic_kind": entity_role_plan.semantic_kind,
+            "entity_perf_type_policy": entity_role_plan.perf_type_policy,
+            "entity_must_keep_terms": entity_role_plan.must_keep_terms,
+            "validation_hints_chars": len(validation_hints_payload),
+            "previous_output_chars": len(previous_output_payload),
+        },
     )
+    normalize_started_at = time.perf_counter()
+    try:
+        normalized_slots = _normalize_stage2_slots_payload(
+            raw_slots,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+    except Exception as exc:
+        _log_planner_stage_error(
+            event_prefix="PLANNER.STAGE2",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase="normalize",
+            exc=exc,
+            dt_ms=(time.perf_counter() - normalize_started_at) * 1000.0,
+            raw_content_chars=stage_stats.get("raw_content_chars", 0),
+            json_candidate_count=stage_stats.get("json_candidate_count", 0),
+            output_json_chars=stage_stats.get("output_json_chars", 0),
+        )
+        raise
+    parse_started_at = time.perf_counter()
+    try:
+        slots = parser.parse(json.dumps(normalized_slots, ensure_ascii=False))
+    except Exception as exc:
+        _log_planner_stage_error(
+            event_prefix="PLANNER.STAGE2",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase="parse",
+            exc=exc,
+            dt_ms=(time.perf_counter() - parse_started_at) * 1000.0,
+            raw_content_chars=stage_stats.get("raw_content_chars", 0),
+            json_candidate_count=stage_stats.get("json_candidate_count", 0),
+            output_json_chars=stage_stats.get("output_json_chars", 0),
+        )
+        raise
+    sanitize_started_at = time.perf_counter()
+    try:
+        slots = _sanitize_stage2_structured_filters(
+            slots=slots,
+            entity_role_plan=entity_role_plan,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
+    except Exception as exc:
+        _log_planner_stage_error(
+            event_prefix="PLANNER.STAGE2",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            common_fields=common_fields,
+            phase="sanitize",
+            exc=exc,
+            dt_ms=(time.perf_counter() - sanitize_started_at) * 1000.0,
+            raw_content_chars=stage_stats.get("raw_content_chars", 0),
+            json_candidate_count=stage_stats.get("json_candidate_count", 0),
+            output_json_chars=stage_stats.get("output_json_chars", 0),
+        )
+        raise
     log_event(
         "PLANNER.STAGE2",
         request_id=request_id,
         conversation_id=conversation_id,
+        planner_stage="stage2",
+        stage2_attempt=stage2_attempt,
         confidence=round(slots.confidence, 3),
+        dt_ms=round(stage_stats.get("dt_ms", 0.0), 1),
+        raw_content_chars=stage_stats.get("raw_content_chars", 0),
+        json_candidate_count=stage_stats.get("json_candidate_count", 0),
+        output_json_chars=stage_stats.get("output_json_chars", 0),
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         retrieval_query=str(getattr(slots, "retrieval_query", "") or ""),
         filters=dict(getattr(slots, "filters", {}) or {}),

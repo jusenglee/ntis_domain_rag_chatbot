@@ -4,15 +4,12 @@
 후속 context builder가 예측 가능한 canonical shape를 받게 만든다.
 """
 
-import logging
+import sys
 from typing import Dict, Any, List
 from copy import deepcopy
+from loguru import logger
 from apps.api.rag_mapper.mapping_config import get_schema_registry
 from apps.api.rag_mapper.schema_types import DataTag, TagSchema
-
-
-logger = logging.getLogger(__name__)
-
 
 
 class MappingError(Exception):
@@ -129,7 +126,7 @@ class RagMapper:
         try:
             tag = DataTag(tag_value)
         except ValueError:
-            logger.warning("unsupported tag received", extra={"tag": tag_value, "keys": sorted(item.keys())})
+            logger.exception(f"unsupported tag received: {tag_value}")
             raise MappingError(f"지원하지 않는 tag입니다: {tag_value}")
 
         registry = get_schema_registry()

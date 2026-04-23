@@ -50,7 +50,8 @@ from apps.conversation.view_state import (
 from apps.retrieval.rag_retriever import CustomRAGRetriever, has_active_anchor_seed, resolve_rag_queries
 
 from apps.api.contracts.workflow_models import KnowledgeSufficiency
-from apps.api.runtime_helpers import log_event, logger, measure_latency
+from apps.api.runtime_helpers import log_event, measure_latency
+from loguru import logger
 from apps.api.streaming.contracts import AnswerArtifact
 
 from apps.conversation.entity_reference import ClarificationRequest, ResolvedEntityRef
@@ -2044,7 +2045,7 @@ async def node_knowledge_sufficiency(state: Any) -> Dict[str, Any]:
         )
         return {"knowledge_sufficiency": result}
     except Exception as exc:
-        logger.error("Knowledge Sufficiency Error: %s", exc)
+        logger.exception("Knowledge Sufficiency Error")
         return {
             "knowledge_sufficiency": KnowledgeSufficiency(
                 requires_new_knowledge="high",
@@ -3078,7 +3079,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
     except Exception as exc:
 
-        logger.error("RAG Error: %s", exc)
+        logger.exception("RAG Error")
 
         log_event(
 

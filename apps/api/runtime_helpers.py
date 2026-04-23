@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import logging.handlers
 import os
 import re
 import time
@@ -30,42 +28,21 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def setup_file_logging(*, logger_name: str, log_path: str = "logs/app.log") -> logging.Logger:
-    """파일과 stderr에 동시 기록하는 애플리케이션 logger를 초기화한다.
-    rotating file handler, stream handler, vLLM/OpenAI compat logger level을 한 지점에서 맞추는 운영 헬퍼다.
-    """
+from loguru import logger
+
+def setup_file_logging(*, log_path: str = "logs/app.log"):
+    """loguru에 파일 sink를 추가하여 로그를 파일로 기록한다."""
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-    app_logger = logging.getLogger(logger_name)
-    app_logger.setLevel(logging.INFO)
-    app_logger.propagate = False
-
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-    fh = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=50 * 1024 * 1024, backupCount=10, encoding="utf-8"
+    logger.add(
+        log_path,
+        rotation="50 MB",
+        retention=10,
+        encoding="utf-8",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level="INFO",
     )
-    fh.setFormatter(fmt)
-    fh.setLevel(logging.INFO)
 
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    sh.setLevel(logging.INFO)
-
-    app_logger.handlers.clear()
-    app_logger.addHandler(fh)
-    app_logger.addHandler(sh)
-
-    vllm_client_level = os.getenv("VLLM_CLIENT_LOG_LEVEL", "INFO").upper()
-    logging.getLogger("openai_compat_llm").setLevel(getattr(logging, vllm_client_level, logging.INFO))
-    return app_logger
-
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
-logger = setup_file_logging(logger_name="Chatbot_Server")
+setup_file_logging()
 measure_latency = partial(measure_latency_impl, logger_obj=logger)
 _SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "4096"))
 _FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "4096"))

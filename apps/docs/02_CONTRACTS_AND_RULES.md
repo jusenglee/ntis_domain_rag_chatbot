@@ -53,7 +53,7 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 *   `view_state`는 렌더링/materialization 상태로 유지할 수 있지만 follow-up 공식 truth가 아니다. Runtime은 `current_context`에서 복원한 view-state projection만 follow-up 해석에 사용한다.
 
 *   Runtime front-control belongs to the Dialogue Agent. `turn_trigger`, `turn_interpreter`, and `turn_policy` are not on the production front-controller path; `SessionMemory.current_context` remains the official next-turn truth.
-*   Dialogue Agent 출력 parse/schema/tool validation 실패는 사용자 모호성이 아니다. Router는 1회 schema-only self-repair를 시도하고, 실패하거나 primary LLM invoke가 실패하면 `agent_internal_error`로 종료한다. 이 경로에서는 `ClarificationContext`를 새로 저장하지 않는다.
+*   Dialogue Agent 출력 parse/schema/tool validation 실패는 사용자 모호성이 아니다. Router는 1회 schema-only self-repair를 시도하고, 실패하거나 primary LLM invoke가 실패하면 `agent_internal_error`로 종료한다. Tool backend planner 오류(`planner_error`, `LLMJSONExtractionError`, `PLANNER.STAGE*.ERROR`)도 사용자 모호성이 아니므로 `AGENT.CLARIFICATION`으로 변환하지 않는다. 이 경우 compact observation을 Agent에 1회 되돌려 corrected `call_tool`을 유도하고, 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫는다. 이 경로에서는 `ClarificationContext`를 새로 저장하지 않는다.
 *   `view_state_from_current_context()` is compatibility materialization for candidate construction and rendering only. It is not the official next-turn truth.
 *   Answer/runtime nodes must publish an explicit `next_current_context` for persistence. If this value is missing, session memory persistence fails closed to `EmptyContext`; `view_state` inference is not used as a save-time fallback.
 

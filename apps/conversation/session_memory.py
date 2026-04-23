@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
 
 from apps.conversation.view_state import (
     ActiveScope,
@@ -41,6 +41,19 @@ class DetailAnchorContext(BaseModel):
     followup_rights: FollowupRights = Field(default_factory=FollowupRights)
 
 
+SubjectPublicationStatus = Literal[
+    "answer_published",
+    "answer_withheld_subject_retained",
+    "clarification_pending",
+]
+
+
+_LEGACY_PUBLICATION_STATUS_MIGRATION: Dict[str, SubjectPublicationStatus] = {
+    # 2026-04-22 이전 코드는 "publishable" 값을 썼다. ADR-0015 어휘로 정렬.
+    "publishable": "answer_published",
+}
+
+
 class SubjectQueryContext(BaseModel):
     context_type: Literal["subject_query"] = "subject_query"
     subject_kind: str
@@ -48,10 +61,20 @@ class SubjectQueryContext(BaseModel):
     subject_ids_map: Dict[str, List[str]] = Field(default_factory=dict)
     result_kind: str = "project"
     result_manifest: Optional[DisplaySnapshot] = None
-    publication_status: Optional[str] = None
+    # ADR-0015 section 11.3: dialogue continuity 상태를 명시적으로 추적.
+    # 기본값 None 은 "아직 publication 판정 전" 의 초기 상태.
+    publication_status: Optional[SubjectPublicationStatus] = None
     followup_rights: FollowupRights = Field(
         default_factory=lambda: FollowupRights(refinement_allowed=True)
     )
+
+    @field_validator("publication_status", mode="before")
+    @classmethod
+    def _migrate_legacy_publication_status(cls, value: Any) -> Any:
+        """구버전 SessionMemory 에 저장된 'publishable' 값을 신규 어휘로 이관."""
+        if isinstance(value, str):
+            return _LEGACY_PUBLICATION_STATUS_MIGRATION.get(value, value)
+        return value
 
 
 class ClarificationContext(BaseModel):
@@ -503,8 +526,8 @@ def build_current_context(
         )
     )
     if subject_can_be_retained and subject_kind and subject_name:
-        publication_status = (
-            "publishable"
+        publication_status: SubjectPublicationStatus = (
+            "answer_published"
             if publishability == "publishable"
             else "answer_withheld_subject_retained"
         )
@@ -595,9 +618,11 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
 
     if isinstance(context, SubjectQueryContext):
         publication_status = str(context.publication_status or "").strip()
+        # SubjectQueryContext.publication_status (ADR-0015 어휘) 를
+        # last_query_contract.answer_publishability (기존 파이프라인 어휘) 로 매핑.
         answer_publishability = (
             "publishable"
-            if publication_status == "publishable" or not publication_status
+            if publication_status == "answer_published" or not publication_status
             else "withheld_partial"
             if publication_status == "answer_withheld_subject_retained"
             else "blocked"

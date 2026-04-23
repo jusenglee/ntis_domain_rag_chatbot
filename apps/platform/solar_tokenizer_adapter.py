@@ -5,7 +5,8 @@ import math
 from functools import lru_cache
 from typing import Any
 
-from apps.platform.settings import SOLAR_TOKENIZER_NAME_OR_PATH, logger
+from apps.platform.settings import SOLAR_TOKENIZER_NAME_OR_PATH
+from loguru import logger
 
 
 def serialize_json(obj: Any) -> str:
@@ -23,7 +24,7 @@ def _load_solar_tokenizer() -> Any:
 
         return AutoTokenizer.from_pretrained(SOLAR_TOKENIZER_NAME_OR_PATH, trust_remote_code=True)
     except Exception as exc:  # pragma: no cover - environment-dependent
-        logger.warning("[evidence.tokenizer] solar tokenizer unavailable: %s", exc)
+        logger.warning("solar tokenizer unavailable: {exc}", exc=exc)
         return None
 
 
@@ -51,7 +52,7 @@ def count_text(text: str) -> int:
         except TypeError:  # pragma: no cover - tokenizer API variance
             return len(tokenizer.encode(normalized))
         except Exception as exc:  # pragma: no cover - tokenizer runtime variance
-            logger.warning("[evidence.tokenizer] solar token count failed: %s", exc)
+            logger.warning("solar token count failed: {exc}", exc=exc)
 
     encoder = _load_tiktoken_encoder()
     if encoder is not None:

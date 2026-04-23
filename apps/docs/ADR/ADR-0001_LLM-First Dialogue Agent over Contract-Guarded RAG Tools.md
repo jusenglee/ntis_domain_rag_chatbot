@@ -574,21 +574,35 @@ answer publication 가능 여부 판단
    → save_history
    9.2 New Workflow
 
-Production workflow:
+Production workflow (2026-04-22 실제 구현 기준, workflow_builder.py):
 
 load_memory
 → rule_precheck
-→ build_conversation_state_card
-→ dialogue_agent
-→ route_agent_decision
-├─ direct_answer
-├─ execute_agent_tool
-│   → observe
-│   → dialogue_agent_final
-└─ ask_clarification
-→ answer_validation
-→ publish_context
-→ save_history
+   ├─(direct_answer precheck)→ direct_answer → save_history
+   └─(normal)→ build_conversation_state_card
+→ run_dialogue_agent
+   ├─ agent_direct_answer    → save_history
+   ├─ agent_clarification    → save_history
+   ├─ agent_internal_error   → save_history
+   └─ execute_agent_tool
+        ├─(observation_type == "planned_intent")
+        │   → judge_knowledge_sufficiency
+        │     ├─(prev_context sufficient)→ generate_answer_solar / generate_answer_gemma
+        │     └─(else)→ rag_search
+        │         ├─ relax_and_retry → rag_search
+        │         └─ generate_answer_* → join_answers → merge_answers → save_history
+        └─(contract violation / no planned_intent)→ agent_clarification → save_history
+
+설계 메모:
+- ADR 원안의 `dialogue_agent_final`, `answer_validation`, `publish_context` 별도 노드는 도입하지 않는다.
+  그 책임은 다음 위치에 흡수된다.
+  * `dialogue_agent_final` 역할: 기존 answer generation (generate_answer_solar / generate_answer_gemma)
+    그리고 `merge_answers` 노드가 Agent observation을 이어받아 자연어 답변을 조립한다.
+  * `answer_validation` / `publish_context` 역할: `merge_answers` 내부의 publication gate와
+    기존 HardContract / QuestionAnalysisV3 검증, 그리고 `save_history` 내부의 context publish 로직.
+- Agent는 tool을 1회 호출하고 그 결과를 기존 retrieval→answer 파이프라인으로 넘긴다.
+  Observation 기반 2차 Agent 호출(self-iterating loop)은 현 단계에서 도입하지 않으며,
+  `AGENTIC_MAX_STEPS` 는 향후 loop 도입 시의 상한을 선언한다.
 10. Runtime Guardrails
     agentic front-controller
 AGENTIC_MAX_STEPS=3
@@ -638,11 +652,18 @@ subject_ids_map: dict[str, list[str]]
 result_kind: str = "project"
 result_manifest: Optional[DisplaySnapshot] = None
 followup_rights: FollowupRights
-publication_status: Literal[
+publication_status: Optional[Literal[
 "answer_published",
 "answer_withheld_subject_retained",
 "clarification_pending",
-] = "answer_published"
+]] = None
+# 기본값 None은 "값 미정/초기 상태"를 뜻한다. build_current_context 는
+# publishability=="publishable" 이면 "answer_published",
+# publishability in {"withheld_partial","blocked"} 이고 subject manifest 가
+# 유지되면 "answer_withheld_subject_retained"를 설정한다.
+# "clarification_pending"은 ClarificationContext 가 별도로 존재하므로
+# 사용되지 않을 수 있으며, 향후 subject context가 clarification을 끌고 가는
+# 케이스가 필요해지면 그 때 사용한다.
 12. File-level Migration Plan
     Phase 0. 준비
     변경 없음
@@ -714,15 +735,26 @@ apps/conversation/request_facade.py
 
 agent tool backend는 build_agent_intent_payload()로 old turn front-controller 없이 planner / QuestionAnalysisV3 / HardContractV1 검증을 통과한다.
 
-새 함수:
+실제 구현 함수 (2026-04-22 업데이트: 이름/시그니처 반영):
 
-async def build_intent_payload_for_agent_tool(
+async def build_agent_intent_payload(
 *,
-tool_name: str,
-tool_args: dict[str, Any],
-state: AgentState,
+question: str,
+conversation_id: str,
+chat_history: list[BaseMessage],
+prev_context: list[dict] | None,
+request_id: str,
+turn_id: str,
+canonical_evidence: list[dict] | None,
+view_state: ConversationViewState | None,
+session_memory: SessionMemory | None,
 ) -> tuple[IntentPayloadV3, QuestionAnalysisV3]:
-...
+    """
+    run_turn_trigger / run_turn_interpreter / run_turn_policy / run_context_router 를
+    호출하지 않고, run_question_analysis → apply_question_analysis_v3 만으로
+    guarded IntentPayloadV3 / QuestionAnalysisV3를 생성한다.
+    Agent tool executor의 search_ntis_domain / refine_current_subject 경로가 이 함수를 사용한다.
+    """
 Phase 6. Publication Context 조정
 Modify
 apps/conversation/session_memory.py

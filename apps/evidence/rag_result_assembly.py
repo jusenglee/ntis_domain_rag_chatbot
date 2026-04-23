@@ -7,7 +7,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from apps.platform.rag_constants import COL_PERF, COL_PROJECT, TAG_PJT_INFO, TAG_PJT_MP, TAG_PJT_ORG
 from apps.platform.rag_types import RagResult
-from apps.platform.settings import RAG_COLLECTION_ALLOWLIST, logger
+from apps.platform.settings import RAG_COLLECTION_ALLOWLIST
+from loguru import logger
 from apps.retrieval.rag_executor_support import get_meta, payload_title
 from apps.retrieval.rag_hydration_runtime import hydrate_points_payload
 from apps.retrieval.rag_join_runtime import build_join_hop_context, compose_join_context
@@ -635,7 +636,7 @@ def assemble_rag_result(
 
     merged_hits = collect_merged_hits(sources, hit_key=hit_key)
     logger.info(
-        f"[PERF][{stack}] execution_mode={mode} planner_mode_hint={plan_mode} "
+        f"execution_mode={mode} planner_mode_hint={plan_mode} "
         f"base={base_route} action={action} rel={relation} "
         f"kw_det={timings.get('phase.kw_det',0):.4f}s, search={timings.get('phase.dense_search',0):.4f}s, "
         f"rrf={timings.get('phase.rrf_merge',0):.4f}s, rerank={timings.get('phase.final_rerank',0):.4f}s, "
@@ -847,7 +848,6 @@ class SearchLookupResultOrchestrator:
             coerce_int=_coerce_int,
             get_attr=_get_attr,
             hydrate_points_payload=lambda points: _hydrate_points(points, qdr=self.state.qdr),
-            logger=logger,
             timing_put=record_timing,
             mode=self.request.mode,
             output_type=self.request.output_type,

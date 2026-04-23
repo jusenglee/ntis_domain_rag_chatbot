@@ -4,11 +4,21 @@ Router는 전략을 결정하지 않는다.
 - mode, relation, target_cols, join_key_mode 출력 금지
 - pjt_id / pjt_no / rst_id 생성 금지 (로컬 매핑으로만 복원)
 - deterministic matcher 우선, LLM fallback은 clarification 직전 한정
+
+DEPRECATED (ADR-0015, 2026-04-22):
+Part of the legacy deterministic pipeline (turn_trigger → turn_interpreter →
+context_router → turn_policy). Production workflow (apps/api/workflow_builder.py)
+now routes through the Agent front-controller and no longer invokes this module.
+
+Preserved only because the existing test suite still patches
+`run_context_router` and calls `build_intent_payload` in
+`apps/conversation/request_facade.py`. Do NOT add new production callers.
+Deletion requires migrating those tests first.
 """
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 import re
 from typing import Any, Dict, List, Literal, Optional
 
@@ -35,7 +45,6 @@ from apps.conversation.followup_anchor import (
 from apps.planner.prompt_asset_paths import planner_prompt_path
 from apps.conversation.view_state import RecentMentionRecord
 
-logger = logging.getLogger("Chatbot_Server")
 _ROUTER_LLM_CONFIDENCE_THRESHOLD = 0.45
 _ROUTER_LLM_CANDIDATE_LIMIT = 12
 
@@ -344,7 +353,7 @@ async def run_context_router(
             return result.model_copy(update={"source": "llm_recent_mentions"})
         return result.model_copy(update={"source": "llm_recent_mentions"})
     except Exception as exc:
-        logger.warning("[CONTEXT_ROUTER] LLM fallback failed: %s", exc)
+        logger.warning("LLM fallback failed: {exc}", exc=exc)
         return decision.model_copy(update={"reason": f"llm_error_fallback:{type(exc).__name__}"})
 
 

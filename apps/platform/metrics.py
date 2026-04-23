@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import math
 import os
 from collections.abc import AsyncIterable
@@ -12,6 +11,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from loguru import logger
 
 """프로메테우스 지표를 수집하고 요약 스냅샷으로 노출하는 독립 모듈입니다."""
 
@@ -27,8 +27,6 @@ GPU_UTIL_QUERY = os.getenv(
     "GPU_UTIL_QUERY",
     'avg(DCGM_FI_DEV_GPU_UTIL{job="dcgm-ntis3", gpu=~"0|2"})',
 )
-
-logger = logging.getLogger(__name__)
 
 
 class MetricSnapshot(BaseModel):

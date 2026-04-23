@@ -1,3 +1,13 @@
+"""DEPRECATED (ADR-0015, 2026-04-22) — legacy turn_policy.
+
+Part of the legacy deterministic pipeline (turn_trigger → turn_interpreter →
+context_router → turn_policy). Production workflow (apps/api/workflow_builder.py)
+now routes through the Agent front-controller and no longer invokes this module.
+
+Preserved only because the existing test suite still calls
+`build_intent_payload` in `apps/conversation/request_facade.py`. Do NOT add
+new production callers. Deletion requires migrating those tests first.
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, Literal, Optional

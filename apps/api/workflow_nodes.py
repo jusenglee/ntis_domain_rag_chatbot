@@ -131,6 +131,31 @@ def _agent_tool_call_fingerprint(tool_name: str, tool_args: Dict[str, Any]) -> s
     )
 
 
+def _render_tool_retry_feedback(state: Any) -> str:
+    decision = getattr(state, "agent_decision", None)
+    observation = getattr(state, "agent_observation", None)
+    structured_refs = dict(getattr(observation, "structured_refs", {}) or {})
+    generated_question = str(structured_refs.get("generated_question") or "").strip()
+    summary = str(getattr(observation, "summary", "") or "").strip()
+    warnings = [str(item) for item in (getattr(observation, "warnings", []) or []) if str(item).strip()]
+    lines = [
+        "[Agent Tool Observation Feedback]",
+        f"tool_name: {getattr(decision, 'tool_name', None) or structured_refs.get('tool_name') or 'unknown'}",
+        f"observation_type: {getattr(observation, 'observation_type', None) or 'unknown'}",
+        f"warnings: {', '.join(warnings) if warnings else 'none'}",
+    ]
+    if generated_question:
+        lines.append(f"generated_question_preview: {truncate_text(generated_question, _AGENT_QUERY_PREVIEW_LIMIT)}")
+    if summary:
+        lines.append(f"summary: {truncate_text(summary, 300)}")
+    lines.append(
+        "instruction: This is an internal tool-backend observation, not user ambiguity. "
+        "Choose a corrected call_tool if possible. Use ask_clarification only when the user-facing target is truly ambiguous. "
+        "Use agent_internal_error if no safe retry is available."
+    )
+    return "\n".join(lines)
+
+
 def _loop_guard_triggered(state: Any, *, tool_name: str, tool_args: Dict[str, Any]) -> bool:
     trace = list(getattr(state, "execution_trace", []) or [])
     fingerprint = _agent_tool_call_fingerprint(tool_name, tool_args)
@@ -316,6 +341,52 @@ async def node_run_dialogue_agent(state: Any) -> Dict[str, Any]:
     return {"agent_decision": decision}
 
 
+async def node_retry_dialogue_agent_after_tool_error(state: Any) -> Dict[str, Any]:
+    """Give one compact tool-backend observation back to the Agent for retry."""
+
+    retry_count = int(getattr(state, "agent_tool_retry_count", 0) or 0)
+    observation = getattr(state, "agent_observation", None)
+    retry_reason = _observation_reason(observation) or "agent_tool_error"
+    feedback = _render_tool_retry_feedback(state)
+    log_event(
+        "AGENT.TOOL_RETRY.START",
+        **_agent_base_fields(state),
+        **_agent_context_fields(state),
+        **_agent_decision_fields(getattr(state, "agent_decision", None)),
+        retry_count=retry_count + 1,
+        retry_reason=retry_reason,
+        observation_type=getattr(observation, "observation_type", None),
+        warnings=list(getattr(observation, "warnings", []) or []),
+    )
+    messages = list(getattr(state, "messages", []) or [])
+    latest_content = getattr(messages[-1], "content", "") if messages else ""
+    base_card = str(getattr(state, "conversation_state_card", "") or "")
+    retry_card = f"{base_card}\n\n{feedback}".strip()
+    decision = await run_dialogue_agent(
+        question=str(getattr(state, "question", None) or latest_content),
+        conversation_state_card=retry_card,
+        recent_chat=list(getattr(state, "chat_history", []) or []),
+        available_tools=default_agent_tool_specs(),
+        request_id=str(getattr(state, "request_id", "") or ""),
+        conversation_id=str(getattr(state, "conversation_id", "") or ""),
+        turn_id=str(getattr(state, "turn_id", "") or ""),
+    )
+    log_event(
+        "AGENT.TOOL_RETRY.DECISION",
+        **_agent_base_fields(state),
+        **_agent_context_fields(state),
+        **_agent_decision_fields(decision),
+        retry_count=retry_count + 1,
+        retry_reason=retry_reason,
+    )
+    return {
+        "agent_decision": decision,
+        "agent_tool_retry_count": retry_count + 1,
+        "agent_tool_retry_reason": retry_reason,
+        "agent_tool_retry_observation": observation,
+    }
+
+
 def _agent_decision_meta(decision: Any) -> Dict[str, Any]:
     if isinstance(decision, AgentDecision):
         return decision.model_dump()
@@ -496,6 +567,18 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
 
     decision = getattr(state, "agent_decision", None)
     observation = getattr(state, "agent_observation", None)
+    decision_type = str(getattr(decision, "decision_type", "") or "").strip()
+    if decision_type != "ask_clarification":
+        log_event(
+            "AGENT.CLARIFICATION.BLOCKED",
+            **_agent_base_fields(state),
+            **_agent_context_fields(state),
+            **_agent_decision_fields(decision),
+            observation_type=str(getattr(observation, "observation_type", "") or ""),
+            blocked_reason=_observation_reason(observation) or "non_agent_clarification_path",
+        )
+        return await node_agent_internal_error(state)
+
     observation_type = str(getattr(observation, "observation_type", "") or "")
     decision_question = str(getattr(decision, "clarification_question", None) or "").strip()
     observation_summary = str(getattr(observation, "summary", None) or "").strip()
@@ -533,7 +616,11 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
         **_agent_context_fields(state),
         **_agent_decision_fields(decision),
         observation_type=observation_type,
-        clarification_reason=_observation_reason(observation) or str(getattr(decision, "reasoning_summary", "") or ""),
+        clarification_reason=(
+            str(getattr(decision, "reasoning_summary", "") or "")
+            if observation_type == "error"
+            else (_observation_reason(observation) or str(getattr(decision, "reasoning_summary", "") or ""))
+        ),
         answer_chars=len(response_text),
     )
     return {
@@ -563,6 +650,15 @@ async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
     """Publish a generic internal-error artifact without creating clarification state."""
 
     decision = getattr(state, "agent_decision", None)
+    observation = getattr(state, "agent_observation", None)
+    decision_type = str(getattr(decision, "decision_type", "") or "").strip()
+    internal_reason = (
+        str(getattr(decision, "reasoning_summary", "") or "").strip()
+        if decision_type == "agent_internal_error"
+        else ""
+    )
+    if not internal_reason:
+        internal_reason = _observation_reason(observation) or "agent_internal_error"
     response_text = "요청을 처리하는 중 문제가 발생했습니다. 다시 시도해 주세요."
     session_memory = getattr(state, "session_memory", None)
     next_context = session_memory.current_context if isinstance(session_memory, SessionMemory) else EmptyContext()
@@ -573,13 +669,14 @@ async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
         user_visible_final_required=True,
         error=ErrorArtifact(
             error_code="AGENT_INTERNAL_ERROR",
-            reason=str(getattr(decision, "reasoning_summary", "") or "agent_internal_error"),
+            reason=internal_reason,
             retryable=True,
         ),
         meta={
             "answer_source": "agent_internal_error",
             "model_key": "agent",
             "agent_decision": _agent_decision_meta(decision),
+            "agent_observation": _agent_observation_meta(observation),
         },
     )
     log_event(
@@ -587,7 +684,9 @@ async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
         **_agent_base_fields(state),
         **_agent_context_fields(state),
         **_agent_decision_fields(decision),
-        internal_error_reason=str(getattr(decision, "reasoning_summary", "") or ""),
+        observation_type=str(getattr(observation, "observation_type", "") or ""),
+        internal_error_reason=internal_reason,
+        retry_count=int(getattr(state, "agent_tool_retry_count", 0) or 0),
         answer_chars=len(response_text),
     )
     return {

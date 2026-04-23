@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Dict, List, Sequence, Tuple
 
+from loguru import logger
+
 
 def expand_vector_names(names: Sequence[str]) -> List[str]:
     """요청한 vector 이름 목록에 대응하는 base 이름까지 확장한다.
@@ -28,7 +30,6 @@ def build_emb_map_for_collection(
     pre_vecs: Dict[str, Any],
     fallback_emb: Dict[str, Any],
     named_vectors_in_collection: Callable[[Any, str], Any],
-    logger: Any,
 ) -> Dict[str, Any]:
     """특정 컬렉션에서 실제로 쓸 수 있는 embedding만 골라 dense 검색 입력 맵을 만든다."""
     vec_avail = named_vectors_in_collection(qdr, col)
@@ -36,7 +37,7 @@ def build_emb_map_for_collection(
     use_vecs = [v for v in expanded_names if (not isinstance(vec_avail, set) or v in vec_avail)]
     if isinstance(vec_avail, set) and not use_vecs and vector_names:
         logger.warning(
-            "[RAG] no matching vectors for col=%s available=%s requested=%s expanded=%s",
+            "no matching vectors for col=%s available=%s requested=%s expanded=%s",
             col,
             sorted(vec_avail),
             list(vector_names),
@@ -57,7 +58,6 @@ def retrieve_collections(
     pre_vecs: Dict[str, Any],
     fallback_emb: Dict[str, Any],
     named_vectors_in_collection: Callable[[Any, str], Any],
-    logger: Any,
     server_filter_for_col: Callable[[str], Any],
     mode: str,
     plan_mode: str,
@@ -107,7 +107,6 @@ def retrieve_collections(
             pre_vecs=pre_vecs,
             fallback_emb=fallback_emb,
             named_vectors_in_collection=named_vectors_in_collection,
-            logger=logger,
         )
         use_dense_k = topk_dense if emb_map_col else 0
 

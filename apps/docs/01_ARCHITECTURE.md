@@ -31,7 +31,7 @@
 ADR-0001에 따라 대화 제어권은 `Dialogue Agent`가 점진적으로 가져간다.
 신규 agent 경로에서는 이전 front-controller 경로 decision을 두지 않는다. 사용자 대상이 실제로 모호할 때만 clarification으로 fail-closed 하고, LLM 출력 parse/schema 오류나 invoke 오류는 사용자 모호성으로 위장하지 않고 `agent_internal_error`로 닫는다.
 Planner / Contract / Retrieval은 삭제 대상이 아니라 Agent tool backend의 contract guard로 유지한다.
-현재 workflow graph는 `agentic front-controller`일 때 `rule_precheck` 이후 `Dialogue Agent` 경로로 진입한다. Agent의 `direct_answer` / `ask_clarification`은 바로 저장 가능한 답변 artifact를 만들고, `agent_internal_error`는 error artifact를 만들며, `call_tool`은 `agent_tool_executor`가 만든 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 기존 retrieval pipeline에 넘긴다.
+현재 workflow graph는 `agentic front-controller`일 때 `rule_precheck` 이후 `Dialogue Agent` 경로로 진입한다. Agent의 `direct_answer` / `ask_clarification`은 바로 저장 가능한 답변 artifact를 만들고, `agent_internal_error`는 error artifact를 만들며, `call_tool`은 `agent_tool_executor`가 만든 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 기존 retrieval pipeline에 넘긴다. Tool backend의 planner/contract 오류는 사용자 모호성으로 노출하지 않고 compact observation으로 Agent에 1회 되돌린다. 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫으며 `ClarificationContext`를 저장하지 않는다.
 
 | 계층 | 역할 | 주요 산출물 | 비고 |
 |---|---|---|---|

@@ -7,6 +7,7 @@ from apps.api.workflow_nodes import (
     node_agent_clarification,
     node_agent_direct_answer,
     node_agent_internal_error,
+    node_retry_dialogue_agent_after_tool_error,
     node_build_conversation_state_card,
     node_direct_answer,
     node_execute_agent_tool,
@@ -58,7 +59,10 @@ def route_after_agent_tool(state: Any) -> str:
         and getattr(state, "agent_tool_question_analysis", None) is not None
     ):
         return "judge_knowledge_sufficiency"
-    return "agent_clarification"
+    retry_count = int(getattr(state, "agent_tool_retry_count", 0) or 0)
+    if retry_count < 1:
+        return "retry_agent_after_tool_error"
+    return "agent_internal_error"
 
 
 def route_after_knowledge_sufficiency(state: Any) -> str | list[str]:
@@ -99,6 +103,7 @@ def build_request_workflow() -> Any:
     workflow.add_node("build_conversation_state_card", node_build_conversation_state_card)
     workflow.add_node("run_dialogue_agent", node_run_dialogue_agent)
     workflow.add_node("execute_agent_tool", node_execute_agent_tool)
+    workflow.add_node("retry_agent_after_tool_error", node_retry_dialogue_agent_after_tool_error)
     workflow.add_node("agent_direct_answer", node_agent_direct_answer)
     workflow.add_node("agent_clarification", node_agent_clarification)
     workflow.add_node("agent_internal_error", node_agent_internal_error)
@@ -139,7 +144,18 @@ def build_request_workflow() -> Any:
         route_after_agent_tool,
         {
             "judge_knowledge_sufficiency": "judge_knowledge_sufficiency",
+            "retry_agent_after_tool_error": "retry_agent_after_tool_error",
+            "agent_internal_error": "agent_internal_error",
+        },
+    )
+    workflow.add_conditional_edges(
+        "retry_agent_after_tool_error",
+        route_after_agent_decision,
+        {
+            "agent_direct_answer": "agent_direct_answer",
+            "execute_agent_tool": "execute_agent_tool",
             "agent_clarification": "agent_clarification",
+            "agent_internal_error": "agent_internal_error",
         },
     )
 

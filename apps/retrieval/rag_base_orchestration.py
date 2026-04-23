@@ -335,7 +335,6 @@ def execute_base_orchestration(
             pre_vecs=request.pre_vecs,
             fallback_emb=request.fallback_emb,
             named_vectors_in_collection=named_vectors_in_collection,
-            logger=logger,
             server_filter_for_col=server_filter_for_col,
             mode=request.mode,
             plan_mode=request.plan_mode,

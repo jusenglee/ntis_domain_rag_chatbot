@@ -78,13 +78,20 @@ def iter_json_candidates(text: str) -> List[str]:
     return ordered
 
 
-def sanitize_llm_json(msg: Any) -> str:
+def sanitize_llm_json(
+    msg: Any,
+    *,
+    source_stage: Optional[str] = None,
+    request_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> str:
     """Return the first parseable JSON candidate from an LLM message."""
 
     text = msg.content if hasattr(msg, "content") else str(msg)
     last_error: Optional[Exception] = None
+    candidates = iter_json_candidates(text)
 
-    for candidate in iter_json_candidates(text):
+    for candidate in candidates:
         try:
             json.loads(candidate)
             return candidate
@@ -93,5 +100,14 @@ def sanitize_llm_json(msg: Any) -> str:
             continue
 
     preview = summarize_text(text)
-    logger.warning("[llm_json] no valid JSON candidate found: %s", preview)
+    logger.warning(
+        "[llm_json] no valid JSON candidate found: source_stage=%s request_id=%s conversation_id=%s text_chars=%d empty_text=%s candidate_count=%d preview=%s",
+        source_stage,
+        request_id,
+        conversation_id,
+        len(text),
+        int(not str(text or "").strip()),
+        len(candidates),
+        preview,
+    )
     raise LLMJSONExtractionError(f"No valid JSON candidate found. preview={preview!r} last_error={last_error!r}")

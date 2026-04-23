@@ -1,8 +1,8 @@
 ﻿import inspect
-import logging
 import time
 from typing import Any, AsyncIterator, List, Optional
 
+from loguru import logger
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -14,8 +14,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from openai import AsyncOpenAI
 from pydantic import PrivateAttr
-
-logger = logging.getLogger(__name__)
 
 # 이 래퍼는 vLLM/OpenAI-compat 응답을 LangChain 메시지로 정규화한다.
 # 특히 reasoning delta를 content와 분리해 downstream 스트리밍 계층이
@@ -113,25 +111,37 @@ class OpenAICompatChatModel(BaseChatModel):
         return getattr(delta, key, None)
 
     @staticmethod
-    def _resolve_trace_ids(kwargs: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-        """response header와 body에서 추적 가능한 trace/request id를 수집한다.
-        빈 응답이나 provider 오류를 triage할 때 같은 호출을 다시 찾을 수 있게 하는 진단 메타데이터다.
-        """
-        request_id = kwargs.get("request_id")
-        conversation_id = kwargs.get("conversation_id")
-
+    def _resolve_trace_context(kwargs: dict[str, Any]) -> dict[str, Optional[str]]:
+        """Collect request and planner metadata for provider-call triage."""
         config = kwargs.get("config")
         metadata = kwargs.get("metadata")
         if metadata is None and isinstance(config, dict):
             metadata = config.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
 
-        if isinstance(metadata, dict):
-            request_id = request_id or metadata.get("request_id")
-            conversation_id = conversation_id or metadata.get("conversation_id")
+        def pick(key: str) -> Optional[str]:
+            value = kwargs.get(key)
+            if value is None:
+                value = metadata.get(key)
+            text = str(value).strip() if value is not None else ""
+            return text or None
 
-        request_id_str = str(request_id).strip() if request_id is not None else ""
-        conversation_id_str = str(conversation_id).strip() if conversation_id is not None else ""
-        return (request_id_str or None, conversation_id_str or None)
+        return {
+            "request_id": pick("request_id"),
+            "conversation_id": pick("conversation_id"),
+            "planner_stage": pick("planner_stage"),
+            "planner_prompt_version": pick("planner_prompt_version"),
+            "turn_id": pick("turn_id"),
+        }
+
+    @staticmethod
+    def _resolve_trace_ids(kwargs: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        """response header와 body에서 추적 가능한 trace/request id를 수집한다.
+        빈 응답이나 provider 오류를 triage할 때 같은 호출을 다시 찾을 수 있게 하는 진단 메타데이터다.
+        """
+        trace_context = OpenAICompatChatModel._resolve_trace_context(kwargs)
+        return trace_context["request_id"], trace_context["conversation_id"]
 
     def _to_openai_messages(self, messages: List[BaseMessage]) -> List[dict[str, str]]:
         """LangChain message 목록을 OpenAI chat completion 메시지 형식으로 변환한다.
@@ -223,14 +233,13 @@ class OpenAICompatChatModel(BaseChatModel):
                 res = stream.close()
                 if inspect.isawaitable(res):
                     await res
-        except Exception as exc:
-            logger.warning(
-                "[openai_compat_llm] stream close failed: request_id=%s stream_type=%s has_aclose=%s has_close=%s",
+        except Exception:
+            logger.exception(
+                "stream close failed: request_id={} stream_type={} has_aclose={} has_close={}",
                 request_id,
                 stream_type,
                 has_aclose,
                 has_close,
-                exc_info=exc,
             )
             raise
 
@@ -240,7 +249,11 @@ class OpenAICompatChatModel(BaseChatModel):
         `_generate`와 같은 결과 shape를 맞추되, event loop 안에서 직접 await 가능하게 제공한다.
         """
         client = self._get_client()
-        request_id, conversation_id = self._resolve_trace_ids(kwargs)
+        trace_context = self._resolve_trace_context(kwargs)
+        request_id = trace_context["request_id"]
+        conversation_id = trace_context["conversation_id"]
+        planner_stage = trace_context["planner_stage"]
+        planner_prompt_version = trace_context["planner_prompt_version"]
 
         request_kwargs = self._build_openai_request_kwargs(
             request_id=request_id,
@@ -258,7 +271,10 @@ class OpenAICompatChatModel(BaseChatModel):
             **request_kwargs,
         )
 
-        msg = response.choices[0].message if response.choices else None
+        choices = getattr(response, "choices", None) or []
+        choice0 = choices[0] if choices else None
+        finish_reason = getattr(choice0, "finish_reason", None) if choice0 is not None else None
+        msg = choice0.message if choice0 is not None else None
         content = (getattr(msg, "content", None) if msg is not None else None) or ""
         # reasoning은 섞지 않고 참고용으로만 (필요시 로그/메트릭으로 사용)
         reasoning = (
@@ -269,21 +285,52 @@ class OpenAICompatChatModel(BaseChatModel):
 
         dt_ms = (time.monotonic() - t0) * 1000
         usage = response.usage.model_dump() if getattr(response, "usage", None) else None
+        extra_body_keys = sorted(extra_body.keys()) if isinstance(extra_body, dict) else []
+        chat_template_kwargs = extra_body.get("chat_template_kwargs") if isinstance(extra_body, dict) else {}
+        if not isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs = {}
+        include_reasoning = extra_body.get("include_reasoning") if isinstance(extra_body, dict) else None
+        reasoning_effort = extra_body.get("reasoning_effort") if isinstance(extra_body, dict) else None
+        disable_thinking = bool(
+            chat_template_kwargs.get("thinking") is False
+            or chat_template_kwargs.get("enable_thinking") is False
+        )
 
         logger.info(
-            "[openai_compat_llm] non-stream summary: request_id=%s conversation_id=%s model=%s dt_ms=%.1f message_n=%d content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s usage=%s base_url=%s",
+            "non-stream summary: request_id=%s conversation_id=%s planner_stage=%s planner_prompt_version=%s model=%s dt_ms=%.1f message_n=%d choice_count=%d finish_reason=%s content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s include_reasoning=%s reasoning_effort=%s disable_thinking=%s extra_body_keys=%s usage=%s base_url=%s",
             request_id,
             conversation_id,
+            planner_stage,
+            planner_prompt_version,
             self.model_name,
             dt_ms,
             len(messages),
+            len(choices),
+            finish_reason,
             len(content),
             len(reasoning),
             request_kwargs.get("max_tokens"),
             extra_body.get("top_k") if isinstance(extra_body, dict) else None,
+            include_reasoning,
+            reasoning_effort,
+            disable_thinking,
+            extra_body_keys,
             usage,
             self.base_url,
         )
+        if not content:
+            logger.warning(
+                "empty non-stream content: request_id=%s conversation_id=%s planner_stage=%s planner_prompt_version=%s choice_count=%d finish_reason=%s reasoning_char_n=%d usage=%s base_url=%s",
+                request_id,
+                conversation_id,
+                planner_stage,
+                planner_prompt_version,
+                len(choices),
+                finish_reason,
+                len(reasoning),
+                usage,
+                self.base_url,
+            )
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
     async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
@@ -414,7 +461,7 @@ class OpenAICompatChatModel(BaseChatModel):
 
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "[openai_compat_llm] stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
+                "stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
                 "chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d emitted_reasoning_event_n=%d "
                 "content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s finish_reason=%s closed=%s model=%s base_url=%s",
                 request_id,

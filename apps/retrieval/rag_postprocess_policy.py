@@ -4,6 +4,7 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from loguru import logger
 
 TimingPut = Callable[[str, Any], None]
 PayloadGet = Callable[[Dict[str, Any], str], Any]
@@ -100,7 +101,6 @@ def hydrate_reranked_payloads(
     coerce_int: CoerceInt,
     get_attr: GetAttr,
     hydrate_points_payload: HydratePayloads,
-    logger: Any,
     timing_put: TimingPut,
     mode: str = "",
     output_type: Optional[str] = None,
@@ -178,7 +178,7 @@ def hydrate_reranked_payloads(
         if not meta_basic.get("kor_pjt_nm"):
             missing_kor.append(rank)
     logger.info(
-        "[RAG.HYDRATE_CHECK] hydrated=%s top_k=%s missing_meta_basic_kor_pjt_nm=%s",
+        "hydrated=%s top_k=%s missing_meta_basic_kor_pjt_nm=%s",
         len(reranked_for_hydrate),
         check_top_k,
         missing_kor or "none",

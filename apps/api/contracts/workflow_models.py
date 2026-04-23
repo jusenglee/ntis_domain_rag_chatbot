@@ -1,10 +1,10 @@
 ﻿from __future__ import annotations
 
-import logging
 import time
 from functools import wraps
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
+from loguru import logger
 from apps.platform.langchain_compat import BaseMessage
 try:
     from langgraph.graph.message import add_messages
@@ -50,7 +50,6 @@ QUESTION_ANALYSIS_REQUIRED_KEYS = {
     "confidence",
 }
 
-logger = logging.getLogger("Chatbot_Server")
 
 Mode = Literal["SEARCH", "LOOKUP", "JOIN"]
 Head = Literal["project", "perf", "people", "org", "support"]
@@ -456,6 +455,9 @@ class AgentState(BaseModel):
     agent_tool_intent_payload: Optional[IntentPayloadV3] = None
     agent_tool_question_analysis: Optional[QuestionAnalysis] = None
     agent_loop_guard_triggered: bool = False
+    agent_tool_retry_count: int = 0
+    agent_tool_retry_reason: Optional[str] = None
+    agent_tool_retry_observation: Optional[AgentObservation] = None
     search_retry_count: int = 0
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
@@ -489,7 +491,7 @@ def measure_latency(node_name: str, *, logger_obj: Any):
                 latencies = result.get("latencies", state.latencies.copy())
                 latencies[node_name] = round(elapsed, 3)
                 result["latencies"] = latencies
-            logger_obj.info(f"[latency]{node_name}: {elapsed:.3f}s")
+            logger_obj.info(f"{node_name}: {elapsed:.3f}s")
             return result
         return wrapper
     return decorator

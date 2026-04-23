@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import html
 import json
-import logging
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from apps.conversation.session_memory import (
@@ -19,8 +19,6 @@ from apps.conversation.session_memory import (
 )
 from apps.conversation.view_state import ConversationViewState
 from apps.platform.storage import KVStore
-
-logger = logging.getLogger("Chatbot_Server")
 
 
 def _conversation_store_key(conversation_id: str, suffix: str) -> str:
@@ -120,7 +118,7 @@ async def load_conversation_memory_from_store(
     session_payload = safe_json_loads(raw_session, logger=logger, truncate_text=truncate_text)
     session_memory = load_session_memory(session_payload)
     if raw_session and session_payload and session_memory.current_context.context_type == "empty":
-        logger.warning("[memory] invalid v3 session payload; starting empty session (cid=%s)", conversation_id)
+        logger.warning("invalid v3 session payload; starting empty session (cid={cid})", cid=conversation_id)
         session_memory = empty_session_memory()
 
     loaded_history = deserialize_history(session_memory.history_log)
