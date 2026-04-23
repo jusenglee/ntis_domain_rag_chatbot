@@ -53,11 +53,7 @@ def validate_project_key_env_contract(
             f"(got {pjt_id_key!r})"
         )
     if log_info is not None:
-        log_info(
-            "[startup][key-mapping] RAG_KEY_PJT_ID=%s, RAG_KEY_PJT_NO=%s",
-            pjt_id_key,
-            pjt_no_key,
-        )
+        log_info(f"[startup][key-mapping] RAG_KEY_PJT_ID={pjt_id_key}, RAG_KEY_PJT_NO={pjt_no_key}")
     return pjt_id_key, pjt_no_key
 
 

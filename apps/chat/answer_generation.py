@@ -1034,7 +1034,7 @@ async def generate_answer(
     content_chars = int(stream_metrics.get("content_chars") or 0)
 
     logger.info(
-        "[stream_metrics] request_id=%s model=%s ttft_any_ms=%s ttft_content_ms=%s reasoning_chars=%s content_chars=%s",
+        "[stream_metrics] request_id={} model={} ttft_any_ms={} ttft_content_ms={} reasoning_chars={} content_chars={}",
         getattr(state, "request_id", None),
         model_name,
         ttft_any_ms,
@@ -1050,7 +1050,7 @@ async def generate_answer(
 
         if ttft_any_ms is None:
             logger.warning(
-                "[solar_stream_guard] request_id=%s category=stream_not_started_or_stalled ttft_any_ms=%s ttft_content_ms=%s ttft_deadline_exceeded=%s deadline_exceeded=%s",
+                "[solar_stream_guard] request_id={} category=stream_not_started_or_stalled ttft_any_ms={} ttft_content_ms={} ttft_deadline_exceeded={} deadline_exceeded={}",
                 getattr(state, "request_id", None),
                 ttft_any_ms,
                 ttft_content_ms,
@@ -1059,7 +1059,7 @@ async def generate_answer(
             )
         elif ttft_content_ms is None or (content_delay_ms is not None and content_delay_ms >= 500):
             logger.warning(
-                "[solar_stream_guard] request_id=%s category=content_delayed ttft_any_ms=%s ttft_content_ms=%s content_delay_ms=%s reasoning_chars=%s content_chars=%s",
+                "[solar_stream_guard] request_id={} category=content_delayed ttft_any_ms={} ttft_content_ms={} content_delay_ms={} reasoning_chars={} content_chars={}",
                 getattr(state, "request_id", None),
                 ttft_any_ms,
                 ttft_content_ms,
@@ -1069,7 +1069,7 @@ async def generate_answer(
             )
         elif stream_metrics.get("gen_deadline_exceeded"):
             logger.warning(
-                "[solar_stream_guard] request_id=%s category=gen_deadline_exceeded gen_deadline_ms=%s truncated_chars=%s emitted_chars=%s",
+                "[solar_stream_guard] request_id={} category=gen_deadline_exceeded gen_deadline_ms={} truncated_chars={} emitted_chars={}",
                 getattr(state, "request_id", None),
                 _SOLAR_GEN_DEADLINE_MS,
                 len(final_answer),
@@ -1077,14 +1077,14 @@ async def generate_answer(
             )
             if stream_metrics.get("short_output_guard_triggered"):
                 logger.warning(
-                    "[solar_stream_guard] request_id=%s short_output_guard_triggered min_chars=%s emitted_chars=%s",
+                    "[solar_stream_guard] request_id={} short_output_guard_triggered min_chars={} emitted_chars={}",
                     getattr(state, "request_id", None),
                     stream_metrics.get("short_output_guard_min_chars"),
                     stream_metrics.get("emitted_chars"),
                 )
         elif stream_metrics.get("char_limited"):
             logger.warning(
-                "[solar_stream_guard] request_id=%s category=char_limited max_chars=%s truncated_chars=%s",
+                "[solar_stream_guard] request_id={} category=char_limited max_chars={} truncated_chars={}",
                 getattr(state, "request_id", None),
                 _SOLAR_STREAM_MAX_CHARS,
                 len(final_answer),
@@ -1459,7 +1459,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             selected_state=selected_state_diag,
         )
     logger.info(
-        "[merge_selection] request_id=%s selected_model=%s solar_fail_reasons=%s",
+        "[merge_selection] request_id={} selected_model={} solar_fail_reasons={}",
         getattr(state, "request_id", None),
         selected_model,
         solar_fail_reasons,

@@ -75,7 +75,7 @@ def safe_json_loads(raw: Optional[str], *, logger: Any, truncate_text: Any) -> A
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("JSON decode failed for redis payload: %s", truncate_text(raw))
+        logger.warning("JSON decode failed for redis payload: {}", truncate_text(raw))
         return None
 
 
@@ -169,7 +169,7 @@ async def save_conversation_memory(
         try:
             await kv_store.delete(legacy_key)
         except Exception as exc:
-            log.warning("[memory] failed to delete legacy v2 key %s: %s", legacy_key, exc)
+            log.warning("[memory] failed to delete legacy v2 key {}: {}", legacy_key, exc)
 
     return True
 

@@ -209,7 +209,7 @@ def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = Non
     avail = model_ctx - PROMPT_OVERHEAD_TOKENS - int(max_output_tokens) - CTX_SAFETY_MARGIN
 
     budget = int(avail)
-    logger.debug("CTX token budget calculated: %s", budget)
+    logger.debug("CTX token budget calculated: {}", budget)
     return max(int(CTX_MIN_BUDGET), budget)
 
 MODEL_MAX_CONTEXT = {
@@ -259,8 +259,8 @@ def _get_model_timeout_pair(
         deprecated_idle = os.getenv(f"{deprecated_env_prefix}_{request_type}_TIMEOUT_IDLE")
         if deprecated_first is not None:
             logger.warning(
-                "[DEPRECATED] %s_%s_TIMEOUT_FIRST is deprecated and will be removed in v0.5.0. "
-                "Use %s_TIMEOUT_FIRST instead.",
+                "[DEPRECATED] {}_{}_TIMEOUT_FIRST is deprecated and will be removed in v0.5.0. "
+                "Use {}_TIMEOUT_FIRST instead.",
                 deprecated_env_prefix,
                 request_type,
                 request_env_prefix,
@@ -268,8 +268,8 @@ def _get_model_timeout_pair(
             first = _get_env_int(f"{deprecated_env_prefix}_{request_type}_TIMEOUT_FIRST", default_first, min_value=1)
         if deprecated_idle is not None:
             logger.warning(
-                "[DEPRECATED] %s_%s_TIMEOUT_IDLE is deprecated and will be removed in v0.5.0. "
-                "Use %s_TIMEOUT_IDLE instead.",
+                "[DEPRECATED] {}_{}_TIMEOUT_IDLE is deprecated and will be removed in v0.5.0. "
+                "Use {}_TIMEOUT_IDLE instead.",
                 deprecated_env_prefix,
                 request_type,
                 request_env_prefix,

@@ -39,6 +39,8 @@ class RuntimeDispatchPlan:
             "join_observation_only",
             "base_route",
             "observation_only",
+            "detail_guard_reason",
+            "detail_guard_blocked",
             "group_recovery_attempted",
             "group_recovery_applied",
             "recovery_join_axis",
@@ -67,8 +69,13 @@ def build_runtime_dispatch_plan(
     ).strip().lower()
     hard_contract = getattr(qa, "hard_contract", None)
     ids_map = dict(getattr(qa, "ids_map", {}) or {})
+    focus_project_ids = _normalize_text_values(focus_seed_map.get("pjt_id") if isinstance(focus_seed_map, dict) else None)
+    qa_project_ids = _normalize_text_values(ids_map.get("pjt_id"))
+    project_id_candidates = _dedupe_text_values([*focus_project_ids, *qa_project_ids])
+    single_project_id = project_id_candidates[0] if len(project_id_candidates) == 1 else ""
     tool_project_id = str(
-        _first_text_value(
+        single_project_id
+        or _first_text_value(
             (focus_seed_map.get("pjt_id") or [None])[0] if isinstance(focus_seed_map, dict) else None,
             (ids_map.get("pjt_id") or [None])[0],
         )
@@ -112,13 +119,62 @@ def build_runtime_dispatch_plan(
     join_key_mode = str(getattr(qa, "join_key_mode", "") or "").strip().lower()
     join_axis = "pjt_no" if join_key_mode == "group" else "pjt_id"
     join_keys = list(ids_map.get(join_axis) or [])
+    action = str(getattr(qa, "action", "") or "").strip().lower()
+    output_type = str(getattr(qa, "output_type", "") or "").strip().lower()
+    detail_request = bool(action == "detail" or output_type == "detail")
     common_request_meta = {
         "filters": dict(getattr(qa, "filters", {}) or {}),
         "limit": max(1, int(search_num or 1)),
         "is_exact_id_query": exact_id_query,
         "project_axis_locked": project_axis_locked,
         "has_anchor_seed": has_anchor_seed,
+        "pjt_id": single_project_id or None,
+        "pjt_no": tool_project_no or None,
     }
+
+    if not prefer_fresh_retrieval and detail_request and base_route == "project":
+        if not single_project_id:
+            guard_meta = dict(common_request_meta)
+            guard_meta.update(
+                {
+                    "base_route": base_route,
+                    "detail_guard_blocked": True,
+                    "detail_guard_reason": (
+                        "multiple_project_candidates"
+                        if len(project_id_candidates) > 1
+                        else "missing_single_project_candidate"
+                    ),
+                }
+            )
+            return RuntimeDispatchPlan(
+                runtime_owner="detail_guard",
+                policy_name="DETAIL_SINGLE_CANDIDATE_GUARD",
+                orchestrator_owned=True,
+                legacy_retry_allowed=False,
+                use_execution_manager=False,
+                execution_kind="detail_guard_blocked",
+                target_cols=project_target_cols,
+                request_meta=guard_meta,
+            )
+        detail_meta = dict(common_request_meta)
+        detail_meta.update(
+            {
+                "base_route": base_route,
+                "runtime_policy_name": "LOOKUP_MISSING_RECOVERY",
+                "detail_guard_blocked": False,
+                "detail_guard_reason": None,
+            }
+        )
+        return RuntimeDispatchPlan(
+            runtime_owner="execution_manager",
+            policy_name="LOOKUP_MISSING_RECOVERY",
+            orchestrator_owned=True,
+            legacy_retry_allowed=False,
+            use_execution_manager=True,
+            execution_kind="project_lookup",
+            target_cols=project_target_cols,
+            request_meta=detail_meta,
+        )
 
     if not prefer_fresh_retrieval and mode == "LOOKUP" and base_route == "project" and tool_project_id:
         return RuntimeDispatchPlan(
@@ -311,3 +367,27 @@ def _first_text_value(*values: Any) -> str | None:
         if text:
             return text
     return None
+
+
+def _normalize_text_values(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = [values]
+    return [str(value or "").strip() for value in raw_values if str(value or "").strip()]
+
+
+def _dedupe_text_values(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped

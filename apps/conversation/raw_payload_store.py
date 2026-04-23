@@ -154,7 +154,7 @@ async def load_raw_payload_memory_from_store(
     try:
         return load_raw_payload_memory(json.loads(raw))
     except json.JSONDecodeError:
-        logger.warning("JSON decode failed for raw payload memory: %s", truncate_text(raw))
+        logger.warning("JSON decode failed for raw payload memory: {}", truncate_text(raw))
         return load_raw_payload_memory(None)
 
 

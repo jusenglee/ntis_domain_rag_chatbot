@@ -167,7 +167,7 @@ async def run_llm_streaming(
         # 스트림 본문이 비어 있으면 fail-fast로 상위 호출자에 그대로 전달한다.
         raise
     except Exception:
-        logger.exception("run_llm_streaming failed: request_id=%s", request_id)
+        logger.exception("run_llm_streaming failed: request_id={}", request_id)
         raise
     finally:
         aclose = getattr(stream_iter, "aclose", None)

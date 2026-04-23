@@ -98,7 +98,7 @@ def log_section(title: str, content: str) -> None:
 
     header = f"\n\033[96m{'=' * 10} [{title}] {'=' * 10}\033[0m"
     footer = f"\033[96m{'=' * 30}\033[0m\n"
-    logger.info("%s\n%s\n%s", header, content, footer)
+    logger.info("{}\n{}\n{}", header, content, footer)
 
 
 def mask_query_for_log(query: str, *, max_len: int = 80) -> str:
@@ -252,7 +252,7 @@ def log_event(name: str, **fields: Any) -> None:
         payload[key] = value
     
     # 1. 원본 JSON 로그 (파일 기록용)
-    logger.info("[OPS] %s", json.dumps(payload, ensure_ascii=False, default=str))
+    logger.info("[OPS] {}", json.dumps(payload, ensure_ascii=False, default=str))
 
     # 2. 콘솔 가독성을 위한 Pretty 요약 출력
     pretty = _render_pretty_log(name, payload)

@@ -297,7 +297,7 @@ class OpenAICompatChatModel(BaseChatModel):
         )
 
         logger.info(
-            "non-stream summary: request_id=%s conversation_id=%s planner_stage=%s planner_prompt_version=%s model=%s dt_ms=%.1f message_n=%d choice_count=%d finish_reason=%s content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s include_reasoning=%s reasoning_effort=%s disable_thinking=%s extra_body_keys=%s usage=%s base_url=%s",
+            "non-stream summary: request_id={} conversation_id={} planner_stage={} planner_prompt_version={} model={} dt_ms={:.1f} message_n={} choice_count={} finish_reason={} content_char_n={} reasoning_char_n={} request_max_tokens={} request_top_k={} include_reasoning={} reasoning_effort={} disable_thinking={} extra_body_keys={} usage={} base_url={}",
             request_id,
             conversation_id,
             planner_stage,
@@ -320,7 +320,7 @@ class OpenAICompatChatModel(BaseChatModel):
         )
         if not content:
             logger.warning(
-                "empty non-stream content: request_id=%s conversation_id=%s planner_stage=%s planner_prompt_version=%s choice_count=%d finish_reason=%s reasoning_char_n=%d usage=%s base_url=%s",
+                "empty non-stream content: request_id={} conversation_id={} planner_stage={} planner_prompt_version={} choice_count={} finish_reason={} reasoning_char_n={} usage={} base_url={}",
                 request_id,
                 conversation_id,
                 planner_stage,
@@ -461,9 +461,9 @@ class OpenAICompatChatModel(BaseChatModel):
 
             dt_ms = (time.monotonic() - t0) * 1000
             logger.info(
-                "stream summary: request_id=%s conversation_id=%s dt_ms=%.1f ttft_any_ms=%s ttft_content_ms=%s "
-                "chunk_n=%d emitted_any_chunk_n=%d emitted_content_chunk_n=%d emitted_reasoning_event_n=%d "
-                "content_char_n=%d reasoning_char_n=%d request_max_tokens=%s request_top_k=%s finish_reason=%s closed=%s model=%s base_url=%s",
+                "stream summary: request_id={} conversation_id={} dt_ms={:.1f} ttft_any_ms={} ttft_content_ms={} "
+                "chunk_n={} emitted_any_chunk_n={} emitted_content_chunk_n={} emitted_reasoning_event_n={} "
+                "content_char_n={} reasoning_char_n={} request_max_tokens={} request_top_k={} finish_reason={} closed={} model={} base_url={}",
                 request_id,
                 conversation_id,
                 dt_ms,

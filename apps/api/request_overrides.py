@@ -41,6 +41,15 @@ _DSN_FIELD_PATTERNS = {
 }
 
 
+def _format_log_message(message: str, *args: Any) -> str:
+    if not args:
+        return message
+    try:
+        return message % args
+    except Exception:
+        return " ".join([message, *(str(arg) for arg in args)])
+
+
 def _coerce_override_value(key: str, value: Any) -> Any:
     if value is None:
         return None
@@ -102,12 +111,12 @@ class OracleRequestDefaultsLoader:
     def _log_info(self, message: str, *args: Any) -> None:
         log_fn = getattr(self.logger, "info", None)
         if callable(log_fn):
-            log_fn(message, *args)
+            log_fn(_format_log_message(message, *args))
 
     def _log_warning(self, message: str, *args: Any) -> None:
         log_fn = getattr(self.logger, "warning", None)
         if callable(log_fn):
-            log_fn(message, *args)
+            log_fn(_format_log_message(message, *args))
 
     def connector_summary(self) -> Dict[str, Any]:
         return {
@@ -128,12 +137,12 @@ class OracleRequestDefaultsLoader:
         loader = cls(user=user, password=password, dsn=dsn, logger=logger)
         summary = loader.connector_summary()
         loader._log_info(
-            "[request_overrides] Oracle defaults connector configured: user=%s host=%s port=%s service_name=%s table=%s",
-            summary.get("oracle_connector_user"),
-            summary.get("oracle_connector_host"),
-            summary.get("oracle_connector_port"),
-            summary.get("oracle_connector_service_name"),
-            summary.get("oracle_connector_table"),
+            "[request_overrides] Oracle defaults connector configured: "
+            f"user={summary.get('oracle_connector_user')} "
+            f"host={summary.get('oracle_connector_host')} "
+            f"port={summary.get('oracle_connector_port')} "
+            f"service_name={summary.get('oracle_connector_service_name')} "
+            f"table={summary.get('oracle_connector_table')}"
         )
         return loader
 
@@ -185,7 +194,7 @@ class OracleRequestDefaultsLoader:
         except Exception as exc:
             meta["oracle_lookup_status"] = "query_failed"
             meta["oracle_lookup_error"] = str(exc)
-            self._log_warning("[request_overrides] Oracle defaults lookup failed: %s", exc)
+            self._log_warning(f"[request_overrides] Oracle defaults lookup failed: {exc}")
             return {}, meta
         finally:
             if cursor is not None:

@@ -101,7 +101,7 @@ def sanitize_llm_json(
 
     preview = summarize_text(text)
     logger.warning(
-        "[llm_json] no valid JSON candidate found: source_stage=%s request_id=%s conversation_id=%s text_chars=%d empty_text=%s candidate_count=%d preview=%s",
+        "[llm_json] no valid JSON candidate found: source_stage={} request_id={} conversation_id={} text_chars={} empty_text={} candidate_count={} preview={}",
         source_stage,
         request_id,
         conversation_id,

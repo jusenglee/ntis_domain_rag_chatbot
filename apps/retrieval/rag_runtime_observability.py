@@ -106,7 +106,7 @@ def set_log_context(*, request_id: Optional[str] = None, conversation_id: Option
     _REQUEST_ID_CTX.set(request_id)
     _CONVERSATION_ID_CTX.set(conversation_id)
     logger_obj.info(
-        "[RAG] %s",
+        "[RAG] {}",
         json.dumps(
             {
                 "event": "REQ.CONTEXT",
@@ -153,7 +153,7 @@ def log_section(title: str, content: object = None, *, level: str = "info", max_
             payload["request_id"] = request_id
         if conversation_id:
             payload["conversation_id"] = conversation_id
-        log_fn("[RAG] %s", json.dumps(payload, ensure_ascii=False, default=str))
+        log_fn("[RAG] {}", json.dumps(payload, ensure_ascii=False, default=str))
         return
     if _rag_color_on():
         header = f"\n\033[96m{'='*10} [{title}] {'='*10}\033[0m"

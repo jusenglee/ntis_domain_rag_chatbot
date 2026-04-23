@@ -37,7 +37,7 @@ def build_emb_map_for_collection(
     use_vecs = [v for v in expanded_names if (not isinstance(vec_avail, set) or v in vec_avail)]
     if isinstance(vec_avail, set) and not use_vecs and vector_names:
         logger.warning(
-            "no matching vectors for col=%s available=%s requested=%s expanded=%s",
+            "no matching vectors for col={} available={} requested={} expanded={}",
             col,
             sorted(vec_avail),
             list(vector_names),

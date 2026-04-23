@@ -58,7 +58,7 @@ def _resolve_fastembed_cache_dir() -> Optional[str]:
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
     except Exception as e:
-        logger.warning("fastembed cache dir unavailable (%s): %s", cache_dir, e)
+        logger.warning("fastembed cache dir unavailable ({}): {}", cache_dir, e)
         return None
 
 
@@ -127,10 +127,10 @@ def warmup_sparse_encoder(model_id: Optional[str] = None) -> bool:
             return False
         # 첫 요청 지연/캐시 검증 비용을 부팅 시점으로 이동
         next(enc.embed(["warmup"]), None)
-        logger.info("sparse encoder warmup success: model=%s", resolved_model_id)
+        logger.info("sparse encoder warmup success: model={}", resolved_model_id)
         return True
     except Exception as e:  # pragma: no cover
-        logger.warning("sparse encoder warmup failed: model=%s err=%s", resolved_model_id, e)
+        logger.warning("sparse encoder warmup failed: model={} err={}", resolved_model_id, e)
         return False
 
 
@@ -181,7 +181,7 @@ def _qdrant_query_points_sparse(
     """named sparse vector를 사용해 Qdrant query_points를 1회 수행한다."""
     nnz = len(getattr(sparse_vector, "indices", []) or [])
     logger.debug(
-        "sparse_query: col=%s using=%s limit=%d nnz=%d",
+        "sparse_query: col={} using={} limit={} nnz={}",
         collection_name,
         sparse_vector_name,
         int(limit),
@@ -201,7 +201,7 @@ def _qdrant_query_points_sparse(
             timeout=int(timeout),
         )
         logger.debug(
-            "sparse query_points success: col=%s using=%s limit=%d nnz=%d hits=%d",
+            "sparse query_points success: col={} using={} limit={} nnz={} hits={}",
             collection_name,
             sparse_vector_name,
             int(limit),
@@ -232,14 +232,14 @@ def _qdrant_sparse_search(
     sv = _encode_sparse_query(query_text, model_id=model_id)
     if sv is None:
         logger.warning(
-            "sparse_query skipped: encoder unavailable or empty query col=%s using=%s",
+            "sparse_query skipped: encoder unavailable or empty query col={} using={}",
             collection_name,
             sparse_vector_name,
         )
         return []
     if _is_debug_logging_enabled():
         logger.info(
-            "model=%s len=%d nnz=%d head=%r",
+            "model={} len={} nnz={} head={!r}",
             model_id,
             len(query_text or ""),
             len(getattr(sv, "indices", []) or []),
@@ -247,7 +247,7 @@ def _qdrant_sparse_search(
         )
     else:
         logger.info(
-            "model=%s len=%d nnz=%d",
+            "model={} len={} nnz={}",
             model_id,
             len(query_text or ""),
             len(getattr(sv, "indices", []) or []),
@@ -362,14 +362,14 @@ def _qdrant_hybrid_query_once(
     if fusion is None:
         return None
     if _is_debug_logging_enabled():
-        logger.info("hybrid query_points q_len=%d q=%r", len(query_text or ""), _safe_query_preview(query_text))
+        logger.info("hybrid query_points q_len={} q={!r}", len(query_text or ""), _safe_query_preview(query_text))
     else:
-        logger.info("hybrid query_points q_len=%d", len(query_text or ""))
+        logger.info("hybrid query_points q_len={}", len(query_text or ""))
     supports_using = _prefetch_supports_using()
     supports_named_vector = hasattr(models, "NamedVector")
     supports_named_sparse = hasattr(models, "NamedSparseVector")
     logger.debug(
-        "hybrid prefetch support using=%s named_vector=%s named_sparse=%s",
+        "hybrid prefetch support using={} named_vector={} named_sparse={}",
         supports_using,
         supports_named_vector,
         supports_named_sparse,
@@ -382,7 +382,7 @@ def _qdrant_hybrid_query_once(
             continue
         if supports_using:
             logger.debug(
-                "hybrid prefetch dense using path vec_name=%s",
+                "hybrid prefetch dense using path vec_name={}",
                 vec_name,
             )
             prefetch.append(
@@ -394,7 +394,7 @@ def _qdrant_hybrid_query_once(
             )
         elif supports_named_vector:
             logger.debug(
-                "hybrid prefetch dense named_vector path vec_name=%s",
+                "hybrid prefetch dense named_vector path vec_name={}",
                 vec_name,
             )
             prefetch.append(
@@ -405,7 +405,7 @@ def _qdrant_hybrid_query_once(
             )
         else:
             logger.debug(
-                "hybrid prefetch dense unsupported vec_name=%s",
+                "hybrid prefetch dense unsupported vec_name={}",
                 vec_name,
             )
             return None
@@ -416,7 +416,7 @@ def _qdrant_hybrid_query_once(
         return None
     if supports_using:
         logger.debug(
-            "hybrid prefetch sparse using path vec_name=%s",
+            "hybrid prefetch sparse using path vec_name={}",
             sparse_vector_name,
         )
         prefetch.append(
@@ -428,7 +428,7 @@ def _qdrant_hybrid_query_once(
         )
     elif supports_named_sparse:
         logger.debug(
-            "hybrid prefetch sparse named_sparse path vec_name=%s",
+            "hybrid prefetch sparse named_sparse path vec_name={}",
             sparse_vector_name,
         )
         prefetch.append(
@@ -439,7 +439,7 @@ def _qdrant_hybrid_query_once(
         )
     else:
         logger.debug(
-            "hybrid prefetch sparse unsupported vec_name=%s",
+            "hybrid prefetch sparse unsupported vec_name={}",
             sparse_vector_name,
         )
         return None
@@ -915,14 +915,14 @@ def dense_retrieve_hybrid_multi(
     if hybrid_once_eff:
         if not sparse_vector_name or not emb_map:
             msg = (
-                    "[RETRIEVE.HYBRID] skipped: sparse_vector_name=%s emb_map=%s scope=%s"
-                    % (bool(sparse_vector_name), bool(emb_map), contract_scope)
+                    f"[RETRIEVE.HYBRID] skipped: sparse_vector_name={bool(sparse_vector_name)} "
+                    f"emb_map={bool(emb_map)} scope={contract_scope}"
             )
             if force_hybrid_once:
                 raise RuntimeError(msg)
             logger.warning(msg)
             ret = {"dense": {}, "lexical": [], "hybrid": []}
-            logger.info("keys=%s", list(ret.keys()))
+            logger.info("keys={}", list(ret.keys()))
             return ret
         t_hybrid0 = time.perf_counter()
         hybrid_points = _qdrant_hybrid_query_once(
@@ -944,13 +944,13 @@ def dense_retrieve_hybrid_multi(
                 raise RuntimeError(msg)
             logger.warning(msg)
             ret = {"dense": {}, "lexical": [], "hybrid": []}
-            logger.info("keys=%s", list(ret.keys()))
+            logger.info("keys={}", list(ret.keys()))
             return ret
         timings["hybrid_once_hits"] = float(len(hybrid_points))
         timings["dense_queries"] = float(max(int(timings.get("dense_queries", 0.0)), len(emb_map or {})))
         timings["sparse_hits"] = float(max(int(timings.get("sparse_hits", 0.0)), len(hybrid_points)))
         ret = {"dense": {}, "lexical": [], "hybrid": hybrid_points}
-        logger.info("keys=%s", list(ret.keys()))
+        logger.info("keys={}", list(ret.keys()))
         return ret
 
     # -----------------------
@@ -971,11 +971,11 @@ def dense_retrieve_hybrid_multi(
     q_text_for_dense = q or ""
     q_text_for_sparse = q or ""
     logger.info(
-        "q_text_for_dense=%s q_text_for_sparse=%s",
+        "q_text_for_dense={} q_text_for_sparse={}",
         q_text_for_dense,
         q_text_for_sparse,
     )
-    logger.info("filter=%s", _filter_brief(query_filter))
+    logger.info("filter={}", _filter_brief(query_filter))
 
     for vec_name, emb in (emb_map or {}).items():
         t0 = time.perf_counter()
@@ -988,7 +988,7 @@ def dense_retrieve_hybrid_multi(
 
         t0 = time.perf_counter()
         logger.debug(
-            "query_points args types: using=%r(%s) limit=%r(%s) timeout=%r(%s) query_len=%r",
+            "query_points args types: using={!r}({}) limit={!r}({}) timeout={!r}({}) query_len={!r}",
             vec_name, type(vec_name).__name__,
             top_k_dense, type(top_k_dense).__name__,
             _DEFAULT_QDRANT_TIMEOUT, type(_DEFAULT_QDRANT_TIMEOUT).__name__,
@@ -1020,7 +1020,7 @@ def dense_retrieve_hybrid_multi(
             for p in pts:
                 _set_payload_hint(p, collection_name, vec_name)
             dense[vec_name] = pts
-            logger.info("vec=%s hits=%d peek=%s", vec_name, len(pts), _peek(pts))
+            logger.info("vec={} hits={} peek={}", vec_name, len(pts), _peek(pts))
 
             dense_queries += 1
             dense_points += len(pts)
@@ -1066,7 +1066,7 @@ def dense_retrieve_hybrid_multi(
         lexical_fields_eff,
     )
     logger.info(
-        "dense=%s lex=%s",
+        "dense={} lex={}",
         type(with_payload_dense_sparse).__name__,
         type(with_payload_lex).__name__,
     )
@@ -1091,7 +1091,7 @@ def dense_retrieve_hybrid_multi(
             lex_points = list(sp_hits)[: int(top_k_lexical)]
             _ensure_collection_mark(lex_points, collection_name)
             lex_cand = len(sp_hits)
-        logger.info("hits=%d cand=%d peek=%s", len(lex_points), lex_cand, _peek(lex_points))
+        logger.info("hits={} cand={} peek={}", len(lex_points), lex_cand, _peek(lex_points))
     timings["lexical_sparse"] = time.perf_counter() - t_sparse0
     timings["lexical_candidates"] = float(lex_cand)
     timings["lexical_scored"] = float(len(lex_points))
@@ -1099,7 +1099,7 @@ def dense_retrieve_hybrid_multi(
     timings["lexical_total"] = time.perf_counter() - t_lex0
 
     ret = {"dense": dense, "lexical": lex_points}
-    logger.info("keys=%s", list(ret.keys()))
+    logger.info("keys={}", list(ret.keys()))
     return ret
 
 

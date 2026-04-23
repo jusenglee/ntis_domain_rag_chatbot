@@ -34,6 +34,14 @@ def _model_dump(value: Any) -> Dict[str, Any]:
     return dict(getattr(value, "__dict__", {}) or {})
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except Exception:
+        return None
+    return number if number >= 1 else None
+
+
 def _append_filter_parts(parts: list[str], tool_args: Dict[str, Any]) -> None:
     people_name = _first_text(tool_args.get("people_name"))
     org_name = _first_text(tool_args.get("org_name"))
@@ -49,8 +57,9 @@ def _append_filter_parts(parts: list[str], tool_args: Dict[str, Any]) -> None:
             parts.append(value)
     if year_from or year_to:
         parts.append(f"{year_from or ''}~{year_to or ''}")
-    if limit:
-        parts.append(f"{limit} items")
+    limit_value = _coerce_positive_int(limit)
+    if limit_value is not None:
+        parts.append(f"{limit_value}개")
 
 
 def _question_from_search_args(tool_args: Dict[str, Any]) -> Optional[str]:

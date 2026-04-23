@@ -60,7 +60,7 @@ def assemble_runtime_compile_policy(
     lookup_filter_policy = normalize_lookup_filter_policy(lookup_filter_policy_raw)
     if lookup_filter_policy is None:
         logger.warning(
-            "invalid RAG_LOOKUP_FILTER_POLICY=%s, falling back to 'hard'",
+            "invalid RAG_LOOKUP_FILTER_POLICY={}, falling back to 'hard'",
             lookup_filter_policy_raw,
         )
         lookup_filter_policy = "hard"
@@ -69,7 +69,7 @@ def assemble_runtime_compile_policy(
     lookup_title_filter_policy = "soft"
     if lookup_title_filter_policy_raw not in ("", "soft"):
         logger.warning(
-            "title server filter policy is fixed to soft; ignore RAG_LOOKUP_TITLE_FILTER_POLICY=%s",
+            "title server filter policy is fixed to soft; ignore RAG_LOOKUP_TITLE_FILTER_POLICY={}",
             lookup_title_filter_policy_raw,
         )
 
@@ -100,7 +100,7 @@ def assemble_runtime_compile_policy(
     relation_mode_conflict = bool(relation and plan_mode in ("search", "lookup"))
     if relation_mode_conflict:
         logger.warning(
-            "relation-mode conflict detected (mode=%s, relation=%s, payload_mode=%s)",
+            "relation-mode conflict detected (mode={}, relation={}, payload_mode={})",
             plan_mode,
             relation,
             planner_mode,
@@ -131,7 +131,7 @@ def assemble_runtime_compile_policy(
     relation_lookup_policy = str(os.getenv("RAG_RELATION_LOOKUP_POLICY", "filter")).strip().lower()
     if relation_lookup_policy not in ("filter", "join"):
         logger.warning(
-            "invalid RAG_RELATION_LOOKUP_POLICY=%s, falling back to 'filter'",
+            "invalid RAG_RELATION_LOOKUP_POLICY={}, falling back to 'filter'",
             relation_lookup_policy,
         )
         relation_lookup_policy = "filter"
@@ -142,18 +142,18 @@ def assemble_runtime_compile_policy(
     if relation and plan_mode == "lookup":
         if relation_action:
             logger.warning(
-                "lookup+relation(action) requested to join (relation=%s)",
+                "lookup+relation(action) requested to join (relation={})",
                 relation,
             )
         elif relation_lookup_policy == "join" and has_relation_join_ids:
             logger.warning(
-                "lookup+relation requested to join (policy=%s, relation=%s)",
+                "lookup+relation requested to join (policy={}, relation={})",
                 relation_lookup_policy,
                 relation,
             )
         if relation_lookup_enforce:
             logger.warning(
-                "relation_lookup_enforce=1 enforcing relation filters in lookup (policy=%s, relation=%s)",
+                "relation_lookup_enforce=1 enforcing relation filters in lookup (policy={}, relation={})",
                 relation_lookup_policy,
                 relation,
             )

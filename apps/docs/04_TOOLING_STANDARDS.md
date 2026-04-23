@@ -10,6 +10,8 @@
 - tool은 필요한 입력만 받고, 결과는 `ToolResult`로만 반환한다.
 - state merge, retry 여부 판단, trace 기록은 오직 orchestrator가 담당한다.
 - raw -> canonical -> prompt 흐름에서 tool은 raw 결과를 정리해 `canonical_evidence`와 `render_profile`까지만 올린다.
+- Agent-facing tool은 의미 수준 인자만 받는다. DB filter, 식별자 축, JOIN 축은 planner/contract backend가 검증 가능한 형태로 만든다.
+- parser가 인식하지 못하는 자연어 count token을 검색어에 섞지 않는다.
 
 ---
 
@@ -46,6 +48,26 @@ ADR-0001 전환을 위해 `apps.conversation`에 agent-facing tool 계약을 추
 신규 agent 계약에는 이전 front-controller fallback decision이 없다.
 LLM 출력 parse/schema/tool validation 실패는 router가 1회 self-repair한다. repair 실패 또는 invoke 실패는 `agent_internal_error`로 닫으며 clarification으로 변환하지 않는다.
 unknown tool name은 repairable validation error다. Registry에 선언되어 있으나 미구현인 tool 선택은 router가 막지 않고 executor가 `contract_violation` observation으로 닫는다.
+
+### Agent-facing tool 책임 경계
+
+| Tool | 사용해야 하는 경우 | 금지 |
+|---|---|---|
+| `search_ntis_domain` | 명시적으로 새 대상/새 도메인을 검색할 때 | 현재 화면 항목 상세, current subject refinement |
+| `refine_current_subject` | 현재 주체/화면 후보에 기간, 역할, 성과유형, 상세 의도를 더할 때 | current context 없이 임의 대상 생성 |
+| `lookup_specific_entity` | explicit ID 또는 single-candidate guard를 통과한 단일 대상 상세 | 후보 복수 상태에서 임의 첫 항목 조회 |
+| `join_project_perf` | project anchor와 JOIN relation이 contract로 확정된 경우 | `pjt_id`/`pjt_no` 축 추측 |
+| `ask_user_for_clarification` | 사용자 대상이 실제로 복수/모호한 경우 | schema/tool/planner 내부 오류 대체 |
+
+### Query materialization 규칙
+
+Agent tool adapter는 구조화 인자를 우선한다.
+
+- `limit`은 tool args와 planner count contract에 구조화 필드로 전달한다.
+- 검색어 보강이 꼭 필요할 때만 한국어 parser가 인식하는 `1개`, `1건` 같은 token을 사용한다.
+- `1 items`, `10 items` 같은 parser-incompatible 영어 token을 검색어에 붙이면 안 된다.
+- `action=detail` 또는 `output_type=detail`은 materialized query의 count token보다 system contract가 우선하며 `1/1`로 normalize한다.
+- count token은 대상 식별 근거가 아니다. 단일 후보 검증은 current context, active scope, visible manifest, explicit ID에서 별도로 수행한다.
 
 ### `project_tools.py`
 

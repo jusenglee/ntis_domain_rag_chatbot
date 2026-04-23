@@ -1,13 +1,13 @@
 # API 응답 명세
 
 이 문서는 현재 `apps/api/routes.py` 기준의 HTTP/SSE 응답 계약만 정리한다.
-내부 실행 계약(planner, retrieval, follow-up, canonical evidence)은 `02_실행계약과_전략규칙.md`를 참고한다.
+내부 실행 계약(planner, retrieval, follow-up, canonical evidence)은 `02_CONTRACTS_AND_RULES.md`를 참고한다.
 
 ## Source of Truth
 
 - route surface: `apps/api/routes.py`
 - stream envelope: `apps/api/streaming/contracts.py`, `apps/api/streaming/sse_encoder.py`
-- 함께 읽을 문서: `03_운영과_환경.md`, `02_실행계약과_전략규칙.md`
+- 함께 읽을 문서: `06_운영과_환경.md`, `02_CONTRACTS_AND_RULES.md`
 
 ---
 
@@ -21,8 +21,9 @@
 6. [/health](#health)
 7. [/metrics](#metrics)
 8. [/metrics/stream](#metricsstream)
-9. [공통 오류 응답](#공통-오류-응답)
-10. [유지 규칙](#유지-규칙)
+9. [Contract-invalid 및 provider failure](#contract-invalid-및-provider-failure)
+10. [공통 오류 응답](#공통-오류-응답)
+11. [유지 규칙](#유지-규칙)
 
 ---
 
@@ -78,6 +79,8 @@
 - `answer.chunk`는 요청 진행 중의 provisional stream이다. 클라이언트는 같은 UI row에 대해 최초 수신한 `request_id`와 다른 `answer.chunk`/`answer.final`/`reference.set`/`done`을 반영하면 안 된다.
 - `answer.final`은 LLM 스트림 본문을 임의로 덮어쓰기 위한 이벤트가 아니다. 정합성 보완이 필요하면 `meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
 - `reference.set`과 `done`은 정상/오류/강등(degraded) 종료 모두에서 내려보내는 것이 원칙이다.
+- `contract-invalid` 상태에서는 LLM `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 `answer.final` 또는 `clarification`으로 내보내야 한다.
+- 모델 provider가 reasoning만 내보내고 content를 만들지 못하면 provider failure로 간주한다. 이 상태는 사용자 모호성 clarification이 아니다.
 
 ### 공통 SSE envelope
 
@@ -142,6 +145,21 @@
   - route guard가 `answer.final`을 강제로 생성한다.
   - `meta.error_code="MISSING_FINAL_ANSWER"`가 포함된다.
 
+### Contract-invalid 종료 규칙
+
+다음 상태에서는 모델 답변을 사용자에게 스트리밍하지 않는다.
+
+- detail-like 요청이 단일 후보 guard를 통과하지 못함
+- detail 요청이 broad `SEARCH_RECOVERY` list 결과로 확장될 위험이 있음
+- display snapshot의 visible order와 canonical evidence 식별자 축이 맞지 않음
+- answer-state consistency가 final answer publication을 막음
+
+이 경우 API는 다음 중 하나로 닫는다.
+
+- 실제 사용자 대상이 모호하면 `clarification`
+- 시스템/tool/planner 오류면 `answer.final.meta.answer_kind="error"` 또는 degraded terminal message
+- 데이터 없음이면 `answer.final.meta.answer_kind="no_result"`
+
 ### `ClarificationPayload`
 
 ```json
@@ -182,6 +200,9 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 | `visible_answer_manifest_status` | string | 병합 경로 | `approved`, `withheld_partial`, `blocked_*`, `not_applicable` |
 | `visible_answer_manifest` | object | publishable list-family | 다음 turn의 ordinal/source follow-up truth |
 | `visible_answer_manifest_publication` | object | list-family publication | answer-owned publication artifact; `approved` contains `published_manifest`, blocked/withheld statuses must not fall back to stale `view_state.visible_answer_manifest` |
+| `state_consistency_status` | string | summary/debug/merge 경로 | state consistency 축약 상태. `unsupported_count`, `blocked_*`이면 manifest publication을 신뢰하지 않는다. |
+| `agent_current_context_type` | string | Agent 경로 | Agent state card 기준 current context type. `clarification`이면 후속 detail이 stale clarification에 묶였는지 확인해야 한다. |
+| `followup_resolution_status` | string | strategy meta | follow-up 해소 상태. `agent_tool`은 관측용이며 clarification trigger가 아니다. |
 | `error_code` | string | guard/degraded error 경로 | route 또는 strategy 위반 코드 |
 | `reason` | string | guard/degraded error 경로 | 오류 설명 |
 | `degraded` | boolean | degraded 경로 | 사용자 메시지로 강등된 종료 여부 |
@@ -357,6 +378,22 @@ data: {"error":"runtime_not_ready","error_code":"RUNTIME_NOT_READY"}
 
 ---
 
+## Contract-invalid 및 provider failure
+
+`contract-invalid`는 API 오류와 다르다. 요청은 정상 처리됐지만, 실행 계약상 모델 답변을 생성하면 안 되는 상태다.
+
+| 상태 | 사용자 응답 | 로그/메타 |
+|---|---|---|
+| 단일 후보 없는 detail | `clarification` 또는 deterministic 보류 문장 | `RAG.DETAIL.SINGLE_CANDIDATE_GUARD`, `detail_single_candidate_guard_failed` |
+| detail-like broad search 차단 | deterministic 보류 문장 | `RAG.EXECUTION_MANAGER.RESULT`, `DETAIL_SINGLE_CANDIDATE_GUARD` 또는 lookup 정책 전환 |
+| display/canonical mismatch | deterministic 보류 문장 | `DISPLAY.SNAPSHOT.BUILT`, `ANSWER.STATE_DIAG` |
+| Solar content 없음 | Gemma 또는 fallback terminal message | `STREAM.DONE.solar_error_code`, `TTFT_DEADLINE_EXCEEDED` |
+| 두 모델 모두 state-inconsistent | deterministic 보류 문장 | `LLM.RESULT.selection_reason=both_models_state_inconsistent` |
+
+사용자 모호성이 아닌 내부 오류는 `clarification`으로 위장하지 않는다. 이 경우 `agent_internal_error` 또는 degraded terminal answer meta를 사용한다.
+
+---
+
 ## 공통 오류 응답
 
 ### 422 override validation
@@ -386,3 +423,4 @@ data: {"error":"runtime_not_ready","error_code":"RUNTIME_NOT_READY"}
 - retrieval metadata 전체를 route 응답에 직접 dump하지 않는다.
 - reference는 `tag/id/title`의 최소 canonical payload로만 노출한다.
 - `pjt_id`와 `pjt_no` 의미는 reference id 선택에서도 섞지 않는다.
+- 중간 모델 답변은 provisional이다. contract-invalid가 확인된 경우 final answer와 manifest publication guard가 사용자에게 신뢰 가능한 terminal state를 제공해야 한다.

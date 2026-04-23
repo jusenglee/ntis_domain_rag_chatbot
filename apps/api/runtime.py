@@ -86,24 +86,24 @@ async def _initialize_kv_store_with_fallback(
     try:
         redis_client = redis_from_url(redis_url, encoding="utf-8", decode_responses=True)
         await redis_client.ping()
-        logger_obj.info("Redis connected: %s", redis_url)
+        logger_obj.info("Redis connected: {}", redis_url)
         return RedisKVStore(redis_client)
     except Exception as exc:
         try:
             await _close_async_resource(redis_client)
         except Exception:
             logger_obj.warning("Redis cleanup after failed startup connect also failed", exc_info=True)
-        logger_obj.error("Redis connection failed: %s", exc, exc_info=True)
+        logger_obj.error("Redis connection failed: {}", exc, exc_info=True)
 
     fallback_root = str(Path(file_kv_root or "local_kvstore").resolve())
     try:
         file_store = file_store_factory(fallback_root)
         await file_store.ping()
-        logger_obj.warning("KV backend falling back to file store: %s", fallback_root)
-        logger_obj.info("File KV backend ready: %s", fallback_root)
+        logger_obj.warning("KV backend falling back to file store: {}", fallback_root)
+        logger_obj.info("File KV backend ready: {}", fallback_root)
         return file_store
     except Exception as fallback_exc:
-        logger_obj.error("File KV fallback failed: %s", fallback_exc, exc_info=True)
+        logger_obj.error("File KV fallback failed: {}", fallback_exc, exc_info=True)
         return None
 
 
@@ -217,7 +217,7 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
                         schema_type_name = _payload_schema_type_name(collection_name, field_name)
                         if expected_schema_type in schema_type_name:
                             logger.info(
-                                "[startup][payload-index][%s] %s.%s: skip (already exists)",
+                                "[startup][payload-index][{}] {}.{}: skip (already exists)",
                                 label,
                                 collection_name,
                                 field_name,
@@ -226,7 +226,7 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
 
                         if require_payload_probe and not _payload_field_exists_in_collection(collection_name, field_name):
                             logger.info(
-                                "[startup][payload-index][%s] %s.%s: skip (field not observed)",
+                                "[startup][payload-index][{}] {}.{}: skip (field not observed)",
                                 label,
                                 collection_name,
                                 field_name,
@@ -235,14 +235,14 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
 
                         ensure_fn(client, collection_name, field_name)
                         logger.info(
-                            "[startup][payload-index][%s] %s.%s: ensure called",
+                            "[startup][payload-index][{}] {}.{}: ensure called",
                             label,
                             collection_name,
                             field_name,
                         )
                     except Exception as exc:
                         logger.warning(
-                            "[startup][payload-index][%s] %s.%s: warning (%s)",
+                            "[startup][payload-index][{}] {}.{}: warning ({})",
                             label,
                             collection_name,
                             field_name,
@@ -324,7 +324,7 @@ async def shutdown_app_runtime(app: FastAPI) -> None:
             await close_fn()
         except Exception as exc:
             logger.warning(
-                "[shutdown] llm close failed: model=%s error=%s",
+                "[shutdown] llm close failed: model={} error={}",
                 getattr(llm, "model_name", "unknown"),
                 exc,
             )

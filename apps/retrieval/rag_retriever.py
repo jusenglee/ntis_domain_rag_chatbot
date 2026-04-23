@@ -11,7 +11,11 @@ from pydantic import BaseModel, ConfigDict
 
 from apps.platform.pipeline_steps import NormalizedIntent
 from apps.platform.schemas import IntentPayloadV3
-from apps.conversation.followup_resolution import build_followup_clarification_message, build_followup_clarification_payload
+from apps.conversation.followup_resolution import (
+    build_followup_clarification_message,
+    build_followup_clarification_payload,
+    should_short_circuit_followup_clarification,
+)
 
 from apps.evidence.context_helpers import resolve_title_from_payload
 from apps.evidence.detail_contract import FIELD_ALIASES, extract_requested_fields
@@ -714,8 +718,11 @@ class CustomRAGRetriever(BaseModel):
         aggregation rank_items와 일반 hit 경로를 구분해 서비스 계층이 바로 소비할 단일 dict 형태로 반환한다.
         """
         strategy_meta = getattr(self.intent_payload, "strategy_meta", None) or {}
-        clarification = build_followup_clarification_payload(dict(strategy_meta))
-        followup_message = build_followup_clarification_message(dict(strategy_meta))
+        clarification = None
+        followup_message = None
+        if should_short_circuit_followup_clarification(dict(strategy_meta)):
+            clarification = build_followup_clarification_payload(dict(strategy_meta))
+            followup_message = build_followup_clarification_message(dict(strategy_meta))
         if followup_message:
             return {
                 "documents": [],

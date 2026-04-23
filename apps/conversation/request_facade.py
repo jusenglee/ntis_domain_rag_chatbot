@@ -1761,6 +1761,21 @@ def _coerce_positive_int(value: Any) -> Optional[int]:
     return number if number >= 1 else None
 
 
+def _set_question_analysis_count(question_analysis: Any, *, limit: int, display_limit: int) -> bool:
+    try:
+        setattr(question_analysis, "limit", int(limit))
+        setattr(question_analysis, "display_limit", int(display_limit))
+        return True
+    except Exception:
+        pass
+    try:
+        object.__setattr__(question_analysis, "limit", int(limit))
+        object.__setattr__(question_analysis, "display_limit", int(display_limit))
+        return True
+    except Exception:
+        return False
+
+
 
 
 
@@ -1799,7 +1814,7 @@ def _build_count_contract_clarification_payload(
 
 def _resolve_question_analysis_count(question_analysis: Any, *, question: str, request_id: Optional[str], conversation_id: str) -> Dict[str, Any]:
 
-    """Validate the planner-assembled count contract without rewriting it."""
+    """Validate and narrowly normalize the planner-assembled count contract."""
 
     if question_analysis is None:
 
@@ -1835,6 +1850,8 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
     planner_limit_raw = getattr(question_analysis, "limit", None)
 
     planner_display_limit_raw = getattr(question_analysis, "display_limit", None)
+    original_planner_limit_raw = planner_limit_raw
+    original_planner_display_limit_raw = planner_display_limit_raw
 
     planner_limit = _coerce_positive_int(planner_limit_raw)
 
@@ -1846,7 +1863,18 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
         has_explicit_count=has_explicit_count,
     )
     invalid_reason: Optional[str] = None
-    if planner_limit is None:
+    is_detail = output_type == "detail" or action == "detail"
+    count_coerced = False
+    if is_detail:
+        count_coerced = planner_limit != 1 or planner_display_limit != 1
+        if not _set_question_analysis_count(question_analysis, limit=1, display_limit=1):
+            invalid_reason = "detail_count_normalization_failed"
+        else:
+            planner_limit = 1
+            planner_display_limit = 1
+            planner_limit_raw = 1
+            planner_display_limit_raw = 1
+    elif planner_limit is None:
         invalid_reason = "missing_limit"
     elif planner_display_limit is None:
         invalid_reason = "missing_display_limit"
@@ -1854,9 +1882,6 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
         invalid_reason = "max_top_k_exceeded"
     elif planner_display_limit > planner_limit:
         invalid_reason = "display_gt_limit"
-    elif output_type == "detail" or action == "detail":
-        if planner_limit != 1 or planner_display_limit != 1:
-            invalid_reason = "detail_count_contract_violation"
     elif is_list_like and has_explicit_count and planner_display_limit != explicit_count:
         invalid_reason = "explicit_count_mismatch"
     validation_status = "invalid" if invalid_reason else "valid"
@@ -1874,11 +1899,14 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
         "PLANNER.COUNT_CONTRACT",
         request_id=request_id,
         conversation_id=conversation_id,
-        source="planner_invalid" if invalid_reason else "planner_validated",
+        source="planner_invalid" if invalid_reason else ("planner_coerced" if count_coerced else "planner_validated"),
         action=action or None,
         output_type=output_type or None,
-        planner_limit=planner_limit_raw,
-        planner_display_limit=planner_display_limit_raw,
+        planner_limit=planner_limit,
+        planner_display_limit=planner_display_limit,
+        original_planner_limit=original_planner_limit_raw,
+        original_planner_display_limit=original_planner_display_limit_raw,
+        count_coerced=int(bool(count_coerced and not invalid_reason)),
         planner_explicit_count=None if not has_explicit_count else explicit_count,
         planner_count_source=planner_count_source,
         validation_status=validation_status,
@@ -1889,6 +1917,9 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
         "invalid_reason": invalid_reason,
         "planner_limit": planner_limit,
         "planner_display_limit": planner_display_limit,
+        "original_planner_limit": original_planner_limit_raw,
+        "original_planner_display_limit": original_planner_display_limit_raw,
+        "count_coerced": bool(count_coerced and not invalid_reason),
         "planner_explicit_count": explicit_count if has_explicit_count else None,
         "planner_count_source": planner_count_source,
         "clarification_payload": clarification_payload,

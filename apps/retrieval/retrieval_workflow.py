@@ -726,6 +726,28 @@ def _pick_primary_seed_map(seed_map: dict[str, list[str]], preferred_entity_kind
     return {}
 
 
+def _merge_ids_maps(*maps: Any) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for source in maps:
+        if not isinstance(source, dict):
+            continue
+        for key, values in source.items():
+            if isinstance(values, str):
+                raw_values = [values]
+            elif isinstance(values, (list, tuple, set)):
+                raw_values = list(values)
+            else:
+                raw_values = [values]
+            for value in raw_values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                bucket = merged.setdefault(str(key), [])
+                if text not in bucket:
+                    bucket.append(text)
+    return merged
+
+
 def _resolve_detail_entity_ref(
     *,
     strategy_meta: dict[str, Any],
@@ -2126,11 +2148,12 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             except Exception:
                 pass
         focus_entity = get_active_subject_entity(view_state)
-        ids_map_for_detail = getattr(query_intent, "ids_map", None) or {}
+        query_intent_ids_map = getattr(query_intent, "ids_map", None) or {}
 
         if isinstance(query_intent, dict):
 
-            ids_map_for_detail = query_intent.get("ids_map") or {}
+            query_intent_ids_map = query_intent.get("ids_map") or {}
+        ids_map_for_detail = _merge_ids_maps(query_intent_ids_map, getattr(qa, "ids_map", None) or {})
 
         preferred_entity_kind = str(
             getattr(query_intent, "context_owner_lock", None)
@@ -2238,7 +2261,13 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                 base_route=fact_followup_base_route,
             )
 
-        detail_anchor_active = bool(output_type == "detail" and has_active_anchor_seed(state))
+        detail_anchor_active = bool(
+            output_type == "detail"
+            and (
+                has_active_anchor_seed(state)
+                or (isinstance(resolved_entity_ref, ResolvedEntityRef) and bool(resolved_entity_ref.seed_map))
+            )
+        )
         if output_type == "detail" and not detail_anchor_active:
             if bool(
                 strategy_meta.get("explicit_followup")
@@ -2492,7 +2521,66 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             base_route=dispatch_plan.request_meta.get("base_route"),
         )
 
-        if dispatch_plan.use_execution_manager:
+        if dispatch_plan.execution_kind == "detail_guard_blocked":
+            guard_reason = str(dispatch_plan.request_meta.get("detail_guard_reason") or "missing_single_project_candidate")
+            no_result_message = "상세 조회 대상이 하나로 확인되지 않아 답변을 보류합니다. 화면의 번호, 정확한 과제 ID, 또는 단일 대상을 지정해 주세요."
+            clarification = {
+                "status": "clarification_required",
+                "clarification_type": "detail_single_candidate",
+                "reason": guard_reason,
+                "message": no_result_message,
+            }
+            docs = []
+            canonical_evidence = []
+            render_profile = {
+                "context_kind": str(dispatch_plan.request_meta.get("base_route") or "project"),
+                "name": "detail",
+            }
+            answer_context_text = ""
+            debug_answer_context_text = ""
+            actual_retrieval_query = resolved_retrieval_query
+            raw_result_count = 0
+            execution_trace = [
+                {
+                    "step": 0,
+                    "policy": dispatch_plan.policy_name,
+                    "tool_name": None,
+                    "status": "blocked",
+                    "reason": guard_reason,
+                    "observation_codes": ["detail_single_candidate_guard_failed"],
+                }
+            ]
+            diagnostics = {
+                "reason": guard_reason,
+                "clarification": clarification,
+                "recovery_applied": False,
+                "detail_guard_blocked": True,
+            }
+            retrieval_runtime_meta = dispatch_plan.build_runtime_meta(diagnostics=diagnostics)
+            log_event(
+                "RAG.DETAIL.SINGLE_CANDIDATE_GUARD",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                reason=guard_reason,
+                selected_search_query=resolved_retrieval_query,
+                policy_name=dispatch_plan.policy_name,
+                execution_kind=dispatch_plan.execution_kind,
+            )
+            log_event(
+                "RAG.EXECUTION_MANAGER.RESULT",
+                request_id=state.request_id,
+                conversation_id=state.conversation_id,
+                policy_name=dispatch_plan.policy_name,
+                execution_kind=dispatch_plan.execution_kind,
+                policy=dispatch_plan.policy_name,
+                recovery_applied=0,
+                trace_steps=len(execution_trace),
+                docs_found=0,
+                canonical_found=0,
+                observation_codes=["detail_single_candidate_guard_failed"],
+                tool_latency_ms=0.0,
+            )
+        elif dispatch_plan.use_execution_manager:
             execution_target_cols = list(dispatch_plan.target_cols or [])
             if dispatch_plan.execution_kind == "project_join":
                 collaborator_bundle = _build_project_join_collaborators(

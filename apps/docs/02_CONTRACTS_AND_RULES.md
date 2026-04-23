@@ -1,18 +1,43 @@
 # 02 실행 계약과 전략 규칙 (Contracts & Rules)
 
-이 문서는 Planner, Orchestrator, Retrieval 사이에서 지켜야 하는 **실행 약속(Contract)**과 **세부 전략 규칙**을 명시한다.
+이 문서는 Dialogue Agent, Planner, Orchestrator, Retrieval 사이에서 지켜야 하는 **실행 약속(Contract)**과 **세부 전략 규칙**을 명시한다.
 
 ---
 
 ## 1. 의도 진실 (L1 Intent Truth)
 
-Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적/도메인적 근거가 된다.
+**Dialogue Agent**가 확정한 사용자의 전략적 의도와 도구 선택이 시스템 실행의 최상위 "진실(L1)"이 된다. Planner가 생성하는 `IntentContract`는 이 L1 의도를 실행 가능한 기술적 언어로 번역한 **기술적 실행 계약(L2)**이다.
 
-### 핵심 명세 필드
+### L1 의도 요소
+*   **실행 액션 (`action`):** `list`, `detail`, `stats` 등 대화 목적.
+*   **조회 대상 (`subject`):** 어떤 엔티티(과제, 인물 등)를 다루고자 하는가.
+*   **도메인 축 (`axes`):** `pjt_id` vs `pjt_no` 등 식별자 축에 대한 전략적 선택.
+
+### L2 기술적 컴파일 (Planner의 역할)
+Planner는 Agent의 L1 의도에 종속(Subordinate)되며, 이를 달성하기 위한 구체적인 기술 명세를 생성한다.
 *   **조회 모드 (`mode`):** `SEARCH` (벡터 검색), `LOOKUP` (ID 기반), `JOIN` (관계형 검색).
 *   **식별자 맵 (`ids_map`):** `pjt_id`, `pjt_no`, `perf_id` 등 도메인 고유 식별자.
 *   **필터 (`filters`):** 사용자 질문에서 명시된 검색 조건 (`lead_org_name` 등).
 *   **원시 검색어 (`retrieval_query`):** 검색 엔진에 전달할 핵심 키워드.
+*   **표시 계약 (`limit`, `display_limit`, `output_type`):** 답변 형태와 표시 개수. Smart Coercion이 적용되는 주 영역이다.
+
+### Smart Coercion: 계층 간 정렬 (Alignment)
+
+Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 상위 계층(L1 Agent)의 의도와 충돌할 때, 이를 L1에 맞추어 강제로 정렬하는 매커니즘이다. 상세 사항은 [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md)을 참조한다.
+
+허용 (L1 의도에 맞춘 L2 교정):
+
+*   `limit`, `display_limit` 같은 표시/개수 파라미터.
+*   Agent가 상세 조회를 결정(`action=detail`)했으나 Planner가 다수 결과(`limit > 1`)를 요청한 경우, 이를 `limit=1`, `display_limit=1`로 normalize.
+*   Parser 호환성을 위한 query materialization.
+
+금지 (L1 의도 자체의 변조 금지):
+
+*   에이전트가 확정한 대상 식별 및 도메인 head.
+*   에이전트가 결정한 조회 축 및 필터의 핵심 의미.
+*   `SEARCH` / `LOOKUP` / `JOIN` 모드 간의 임의 변경 (단, Planner 내부의 기술적 최적화는 허용).
+
+금지 영역에서 충돌이나 모호성이 발견되면 하위 계층이 임의로 교정하지 않는다. 대신 상위 계층인 Agent에게 Observation으로 되돌려 의도를 재확인(Self-correction)하거나 사용자에게 Clarification을 요청한다.
 
 ---
 
@@ -57,6 +82,18 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 *   `view_state_from_current_context()` is compatibility materialization for candidate construction and rendering only. It is not the official next-turn truth.
 *   Answer/runtime nodes must publish an explicit `next_current_context` for persistence. If this value is missing, session memory persistence fails closed to `EmptyContext`; `view_state` inference is not used as a save-time fallback.
 
+*   `followup_resolution_status="agent_tool"`은 Agent 경유를 나타내는 관측용 상태다. 이 값만으로 follow-up clarification을 생성하거나 retrieval을 차단하면 안 된다.
+
+### Detail / Current-context 규칙
+
+*   `action=detail` 또는 `output_type=detail`은 단일 대상 답변 계약이다. Planner count validation은 `limit=1`, `display_limit=1`로 normalize해야 한다.
+*   count가 `1/1`이어도 단일 후보가 확정되지 않으면 detail을 실행하지 않는다. 단일 후보 검증은 `SessionMemory.current_context`, active result scope, visible answer manifest, explicit ID를 기준으로 수행한다.
+*   project detail에서 단일 `pjt_id`가 확정되면 runtime은 broad search가 아니라 lookup 정책(`LOOKUP_MISSING_RECOVERY`의 primary detail lookup)으로 실행한다.
+*   화면 항목, 대괄호 제목, "상세정보", "그 과제", "2020년에 진행한 프로젝트" 같은 후속 표현은 먼저 current context에서 해소한다.
+*   current context에서 후보가 여러 개이면 broad search로 확장하지 않고 Agent clarification observation 또는 사용자 clarification으로 닫는다.
+*   detail-like query는 `SEARCH_RECOVERY`로 17건/20건 리스트를 만드는 경로로 내려가면 안 된다.
+*   신규 대상명이 명시된 fresh search와 기존 화면/주체 refinement는 분리한다. Agent tool은 신규 검색에 `search_ntis_domain`, 현재 주체/화면 정제에 `refine_current_subject`, 단일 대상 상세에 `lookup_specific_entity` 또는 동등한 detail lookup을 사용해야 한다.
+
 ---
 
 ## 4. 핵심 실행 불변 약속 (Invariants)
@@ -64,6 +101,8 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 *   **검색 모드 불변:** 실행 도중 `SEARCH`, `LOOKUP`, `JOIN` 의미를 서로 바꾸지 않는다.
 *   **L1 진실 보호:** Orchestrator가 L2 정책에 따라 보정을 수행하더라도, L1이 정한 `ids_map`과 `filters`는 최종 답변의 '근거 출처'로서의 자격을 유지해야 한다.
 *   **상태 격리:** 도구(Tools)는 에이전트의 전체 상태를 알 필요가 없으며, 오직 명시적으로 전달된 인자만으로 동작한다.
+*   **부수 교정 제한:** Smart Coercion은 표시/개수 파라미터에만 적용한다. 대상, 축, 필터, 모드는 교정 대상이 아니다.
+*   **Detail fail-closed:** detail 단일 후보가 없으면 retrieval 확장이나 임의 첫 항목 조회로 진행하지 않는다.
 
 ---
 
@@ -71,3 +110,5 @@ Planner가 생성하는 `IntentContract`는 시스템 실행의 유일한 법적
 
 *   **No-result vs Error:** 데이터가 없는 것(No-result)은 시스템 오류(Error)가 아니다. 이를 명확히 구분하여 로그에 기록한다.
 *   **Fuzzy Fallback:** 검색 결과가 부족할 경우, L1 계약을 훼손하지 않는 범위 내에서 검색 가중치를 조절하거나 보조 도구를 호출하는 L2 정책을 실행할 수 있다.
+*   **Internal Error Loop:** schema/tool/planner/backend 오류는 사용자 모호성으로 위장하지 않는다. Compact observation으로 Agent에게 최대 1회 self-correction 기회를 주고, 재시도 실패 시 `agent_internal_error`로 닫는다.
+*   **Clarification 경계:** clarification은 사용자 대상이 실제로 모호할 때만 사용한다. 내부 오류나 parser/schema 실패를 `ClarificationContext`로 저장하면 안 된다.

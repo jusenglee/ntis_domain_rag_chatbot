@@ -829,7 +829,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     yield payload_line
 
             except Exception as exc:
-                logger.error("Stream Error: %s", exc, exc_info=True)
+                logger.error("Stream Error: {}", exc, exc_info=True)
                 error_code = getattr(exc, "error_code", "INTERNAL_ERROR")
                 reason = getattr(exc, "reason", str(exc))
                 total_ms = compute_total_ms_from_start(request_started_at)
@@ -992,7 +992,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             }
 
         except Exception as exc:
-            logger.error("Debug Error: %s", exc, exc_info=True)
+            logger.error("Debug Error: {}", exc, exc_info=True)
             degraded = isinstance(exc, strategy_violation)
             error_code = getattr(exc, "error_code", "INTERNAL_ERROR")
             reason = getattr(exc, "reason", str(exc))

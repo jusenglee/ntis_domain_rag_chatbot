@@ -771,9 +771,9 @@ async def node_save_history(state: Any) -> Dict[str, Any]:
         history_ttl_seconds=REDIS_TTL,
     )
     if not saved:
-        logger.debug("[memory] kv_store unavailable: skip history/context save (cid=%s)", cid)
+        logger.debug("[memory] kv_store unavailable: skip history/context save (cid={})", cid)
     if not raw_saved:
-        logger.debug("[memory] kv_store unavailable: skip raw payload save (cid=%s)", cid)
+        logger.debug("[memory] kv_store unavailable: skip raw payload save (cid={})", cid)
 
     # ADR-0013: save 시점 메모리 스냅샷 (prune 이후 상태 가시화)
     log_memory_snapshot(

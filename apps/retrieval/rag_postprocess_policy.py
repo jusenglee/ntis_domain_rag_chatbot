@@ -178,7 +178,7 @@ def hydrate_reranked_payloads(
         if not meta_basic.get("kor_pjt_nm"):
             missing_kor.append(rank)
     logger.info(
-        "hydrated=%s top_k=%s missing_meta_basic_kor_pjt_nm=%s",
+        "hydrated={} top_k={} missing_meta_basic_kor_pjt_nm={}",
         len(reranked_for_hydrate),
         check_top_k,
         missing_kor or "none",

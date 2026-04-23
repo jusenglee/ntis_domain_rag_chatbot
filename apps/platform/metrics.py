@@ -121,7 +121,7 @@ async def _safe_value(name: str, coro: Any) -> float | None:
     try:
         return await coro
     except Exception:
-        logger.exception("Failed to collect %s from Prometheus", name)
+        logger.exception("Failed to collect {} from Prometheus", name)
         return None
 
 

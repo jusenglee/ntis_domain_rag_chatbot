@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from apps.platform.runtime_strategy_policy import RuntimeStrategyPolicy, resolve_runtime_strategy_policy
+from apps.platform.runtime_strategy_policy import RECOVERY_POLICIES, RuntimeStrategyPolicy, resolve_runtime_strategy_policy
 from apps.retrieval.tools.project_tools import fetch_project_detail, search_projects_by_text
 from apps.retrieval.tools.route_search_tools import search_route_by_text
 from apps.retrieval.tools.relation_tools import fetch_project_performance
@@ -52,6 +52,9 @@ class ExecutionManager:
 
     def execute(self, execution_input: ExecutionInput) -> ExecutionOutcome:
         policy = resolve_runtime_strategy_policy(execution_input.question_analysis)
+        requested_policy_name = str((execution_input.request_meta or {}).get("runtime_policy_name") or "").strip()
+        if requested_policy_name:
+            policy = RECOVERY_POLICIES.get(requested_policy_name) or policy
         if policy is None:
             return ExecutionOutcome(
                 execution_trace=[
@@ -95,7 +98,11 @@ class ExecutionManager:
         qa = execution_input.question_analysis
         ids_map = dict(getattr(qa, "ids_map", {}) or {})
         project_ids = list(ids_map.get("pjt_id") or [])
-        project_id = str(project_ids[0] if project_ids else "").strip()
+        project_id = _first_text_value(
+            project_ids[0] if project_ids else None,
+            execution_input.request_meta.get("pjt_id"),
+            execution_input.request_meta.get("anchor_pjt_id"),
+        )
         filters = dict(execution_input.request_meta.get("filters") or {})
         limit = max(1, int(execution_input.request_meta.get("limit") or 1))
         exact_id_query = bool(execution_input.request_meta.get("is_exact_id_query"))
@@ -683,6 +690,20 @@ def _merge_observation_codes(*sources: Any) -> list[str]:
             seen.add(text)
             merged.append(text)
     return merged
+
+
+def _first_text_value(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                text = str(item or "").strip()
+                if text:
+                    return text
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _build_observation_diagnostics(observation_codes: list[str]) -> dict[str, Any]:
