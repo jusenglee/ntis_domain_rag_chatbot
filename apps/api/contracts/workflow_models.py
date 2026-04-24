@@ -418,6 +418,8 @@ class AgentState(BaseModel):
     canonical_evidence: List[Dict[str, Any]] = Field(default_factory=list)
     render_profile: Dict[str, Any] = Field(default_factory=dict)
     session_memory: SessionMemory = Field(default_factory=SessionMemory)
+    # Staging buffer for the next SessionMemory.current_context. Tool/retrieval
+    # nodes may place a candidate here; answer publication commits or clears it.
     next_current_context: Optional[CurrentContext] = None
     view_state: ConversationViewState = Field(default_factory=ConversationViewState)
     no_result_message: Optional[str] = None

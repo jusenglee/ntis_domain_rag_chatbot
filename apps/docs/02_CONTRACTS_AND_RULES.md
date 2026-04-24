@@ -30,12 +30,13 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   `limit`, `display_limit` 같은 표시/개수 파라미터.
 *   Agent가 상세 조회를 결정(`action=detail`)했으나 Planner가 다수 결과(`limit > 1`)를 요청한 경우, 이를 `limit=1`, `display_limit=1`로 normalize.
 *   Parser 호환성을 위한 query materialization.
+*   Agent tool call이 명시 연구자 anchor와 활동/참여이력 의도를 모두 갖춘 경우, stagewise planner LLM을 생략하고 `mode=LOOKUP`, `head=people`, `action=list`, `filters.participant_researcher_name=[name]`, `target_cols=[project, perf]` 계약으로 직접 컴파일.
 
 금지 (L1 의도 자체의 변조 금지):
 
 *   에이전트가 확정한 대상 식별 및 도메인 head.
 *   에이전트가 결정한 조회 축 및 필터의 핵심 의미.
-*   `SEARCH` / `LOOKUP` / `JOIN` 모드 간의 임의 변경 (단, Planner 내부의 기술적 최적화는 허용).
+*   `SEARCH` / `LOOKUP` / `JOIN` 모드 간의 임의 변경. 단, `head=people` + 명시 연구자 anchor + `list/stats/detail`처럼 문서화된 deterministic gate rule은 broad topic search가 아니라 `LOOKUP`으로 잠근다.
 
 금지 영역에서 충돌이나 모호성이 발견되면 하위 계층이 임의로 교정하지 않는다. 대신 상위 계층인 Agent에게 Observation으로 되돌려 의도를 재확인(Self-correction)하거나 사용자에게 Clarification을 요청한다.
 
@@ -81,8 +82,21 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   Dialogue Agent 출력 parse/schema/tool validation 실패는 사용자 모호성이 아니다. Router는 1회 schema-only self-repair를 시도하고, 실패하거나 primary LLM invoke가 실패하면 `agent_internal_error`로 종료한다. Tool backend planner 오류(`planner_error`, `LLMJSONExtractionError`, `PLANNER.STAGE*.ERROR`)도 사용자 모호성이 아니므로 `AGENT.CLARIFICATION`으로 변환하지 않는다. 이 경우 compact observation을 Agent에 1회 되돌려 corrected `call_tool`을 유도하고, 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫는다. 이 경로에서는 `ClarificationContext`를 새로 저장하지 않는다.
 *   `view_state_from_current_context()` is compatibility materialization for candidate construction and rendering only. It is not the official next-turn truth.
 *   Answer/runtime nodes must publish an explicit `next_current_context` for persistence. If this value is missing, session memory persistence fails closed to `EmptyContext`; `view_state` inference is not used as a save-time fallback.
+*   `next_current_context` is a staging buffer before answer publication completes. Subject activity/refinement tools may stage `SubjectQueryContext(publication_status="clarification_pending")`; `merge_answers()` commits it only after the answer publication guard sees non-internal publishability plus real retrieval evidence/candidates.
 
-*   `followup_resolution_status="agent_tool"`은 Agent 경유를 나타내는 관측용 상태다. 이 값만으로 follow-up clarification을 생성하거나 retrieval을 차단하면 안 된다.
+*   Agent tool 경유 여부는 `followup_resolution_status`에 넣지 않는다. 이 필드는 follow-up resolution 의미만 표현하며, 관측용 정보는 `tool_execution_source`, `planner_llm_skipped`, `execution_trace` 같은 별도 메타 필드에 기록한다.
+*   `SubjectQueryContext.publication_status`는 답변 발행 truth가 아니라 dialogue continuity 상태다. 발행 가능한 답변은 `answer_published`, 최종 답변이 `withheld_partial` 또는 count/display 정합성 보류여도 subject continuity를 유지할 수 있으면 `answer_withheld_subject_retained`로 저장한다. `planner_error`, `tool_error`, `schema_error`, `provider_error` 같은 내부 오류에서는 `SubjectQueryContext`와 `ClarificationContext`를 새로 저장하지 않는다.
+*   state card / follow-up contract는 `subject_publication_status`, `subject_continuity_retained`, `answer_publishability`, `subject_refinement_allowed`, `current_subject_confidence`를 노출한다. 이는 answer publication truth와 dialogue subject continuity truth를 분리하기 위한 신호이며, `followup_resolution_status` 같은 semantic 필드에 관측 메타를 섞지 않는다.
+
+### Subject Activity Tool Backend 규칙
+
+*   P1의 정식 경로는 `search_subject_activity(subject_kind, subject_name, ...)`다. 명시 연구자/기관의 활동기록, 활동내역, 참여이력, 관련 과제/성과 요청은 이 도구가 `QuestionAnalysisV3(mode=LOOKUP, head=people|org, action=list, output_type=list)`로 직접 컴파일한다.
+*   `refine_current_subject(subject_ref="current_subject", ...)`는 `SessionMemory.current_context`가 `SubjectQueryContext`일 때만 허용된다. current subject의 `subject_kind`, `subject_name`, `subject_ids_map`을 seed로 복원하고 stagewise planner LLM을 호출하지 않는다.
+*   `search_ntis_domain` people fast path는 하위 호환 경로로 유지하며 다음 세 조건이 모두 충족될 때만 적용한다: `people` 축, 명시 연구자 anchor, 활동/참여이력/성과/논문/특허/보고서 계열 의도.
+*   단순히 people cue만 있거나, 사람 anchor가 없는 "연구자 지원정책" 같은 broad topic search는 기존 generic planner path를 유지한다.
+*   subject activity direct compile과 current-subject refinement에서는 `run_question_analysis`, `run_planner_stage1`, `run_planner_stage15`, `run_planner_stage2`를 호출하지 않는다.
+*   자연어 query에는 `1 items`, `people 10 items` 같은 parser-incompatible suffix를 붙이지 않는다. 개수 제한은 구조화된 `limit` / `display_limit` 메타로 전달한다.
+*   이 경로의 관측 로그는 `AGENT.TOOL_DIRECT_COMPILE`, `AGENT.REFINE_CURRENT_SUBJECT`, `AGENT.CLARIFICATION.RECOVERY`와 `strategy_meta.tool_execution_source`로 남긴다. `QuestionAnalysisV3.planner_source`는 기존 허용값(`legacy`, `stagewise`, `None`)만 사용한다.
 
 ### Detail / Current-context 규칙
 
@@ -92,7 +106,7 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   화면 항목, 대괄호 제목, "상세정보", "그 과제", "2020년에 진행한 프로젝트" 같은 후속 표현은 먼저 current context에서 해소한다.
 *   current context에서 후보가 여러 개이면 broad search로 확장하지 않고 Agent clarification observation 또는 사용자 clarification으로 닫는다.
 *   detail-like query는 `SEARCH_RECOVERY`로 17건/20건 리스트를 만드는 경로로 내려가면 안 된다.
-*   신규 대상명이 명시된 fresh search와 기존 화면/주체 refinement는 분리한다. Agent tool은 신규 검색에 `search_ntis_domain`, 현재 주체/화면 정제에 `refine_current_subject`, 단일 대상 상세에 `lookup_specific_entity` 또는 동등한 detail lookup을 사용해야 한다.
+*   신규 대상명이 명시된 fresh search와 기존 화면/주체 refinement는 분리한다. Agent tool은 명시 사람/기관 활동기록에 `search_subject_activity`, generic 신규 검색에 `search_ntis_domain`, 현재 주체/화면 정제에 `refine_current_subject`, 단일 대상 상세에 `lookup_specific_entity` 또는 동등한 detail lookup을 사용해야 한다.
 
 ---
 

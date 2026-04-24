@@ -212,6 +212,8 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 
 ### `ReferenceItem`
 
+`ReferenceItem`의 외부 contract는 그대로 `tag` / `id` / `title`만 사용한다. 다만 route 내부적으로 `canonical_evidence`를 fallback source로 쓸 때는 raw qdrant payload가 아니므로, `tag`가 없으면 `source_type` known mapping 또는 `pjt_id -> project` bridge 규칙으로만 `tag`를 복원한다.
+
 ```json
 {
   "tag": "IRD_NAI_PJT_INFO",
@@ -222,13 +224,19 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
-| `tag` | string | `DataTag` enum 값 |
-| `id` | string \| null | source semantics를 보존한 canonical id |
-| `title` | string \| null | 사용자 표시 제목 |
+| `tag` | string | 프론트엔드가 그대로 소비하는 raw tag |
+| `id` | string | 프론트엔드가 그대로 소비하는 식별자 |
+| `title` | string | 프론트엔드가 그대로 소비하는 제목 |
 
 - route는 reference를 `selected_answer_artifact.references -> canonical_evidence -> context hit` 순서로 복구한다.
-- invalid reference payload는 fail-open으로 드롭되며, route 전체를 실패시키지 않는다.
-- project reference는 `pjt_id` 축을 우선하고, performance 계열은 `rst_id/perf_id/paper_id` 축을 우선한다.
+- route는 `tag`, `title`, `id`를 정규화하지 않는다. 프론트엔드에 전달할 최종 `ReferenceItem`만 구성한다.
+- qdrant top-level reference 추출 규칙은 아래와 같다.
+  - `tag`: 최상위 `tag`
+  - `title`: 최상위 `title1` -> `title2` -> `title_text`
+  - `id`: 최상위 `pjt_id` -> `rst_id`
+- route 내부 호환성 때문에 이미 `title`/`id` 형태로 들어온 artifact reference도 마지막 fallback으로 읽을 수 있지만, qdrant 원본 기준의 우선순위는 위 규칙이 source of truth다.
+- invalid reference payload는 fail-open으로 드롭되며, 현재 소스에서 유효한 reference가 하나도 없을 때만 다음 소스로 fallback한다.
+- `tag`, `title`, `id` 중 하나라도 비어 있으면 해당 candidate는 발행하지 않는다.
 
 ---
 

@@ -106,9 +106,12 @@ def _safe_tool_arg_fields(tool_args: Dict[str, Any]) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     for key in (
         "subject_ref",
+        "subject_kind",
+        "subject_name",
         "domain_head",
         "people_name",
         "org_name",
+        "affiliation_org_name",
         "perf_type",
         "year_from",
         "year_to",

@@ -507,7 +507,7 @@
     finalCard.className = "compare-card final-card";
     const finalHead = document.createElement("div");
     finalHead.className = "compare-head";
-    finalHead.innerHTML = `<div class="compare-title">최종 검증 답변</div><div class="pill">FINAL</div>`;
+    finalHead.innerHTML = `<div class="compare-title"></div><div class="pill">FINAL</div>`;
     const finalBody = document.createElement("div");
     finalBody.className = "compare-body";
     finalCard.appendChild(finalHead);
@@ -637,6 +637,13 @@
       renderBodies();
     }
 
+    function appendRawTrace(rawLine) {
+      if (!rawLine) return;
+      logBox.textContent += `${rawLine}\n\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+      console.log(rawLine);
+    }
+
     const payload = {
       model: aKey,
       question: q,
@@ -697,6 +704,12 @@
         const eventRequestId = String(eventPayload?.request_id || "");
         const eventContent = (typeof eventPayload?.content === "string") ? eventPayload.content : "";
         const eventMeta = (eventPayload?.meta && typeof eventPayload.meta === "object") ? eventPayload.meta : {};
+        const shouldTraceRawEvent = eventKind !== "conversation" && eventKind !== "status";
+        const rawTraceLine = `data: ${jsonStr}`;
+
+        if (shouldTraceRawEvent) {
+          appendRawTrace(rawTraceLine);
+        }
 
         if (!activeRequestId && eventRequestId) {
           activeRequestId = eventRequestId;
@@ -755,7 +768,8 @@
             scrollToBottom();
             continue;
           }
-          renderFinalAnswer(eventContent, eventMeta);
+          // answer.final은 사용자에게 미노출 (상태/메타만 처리)
+          // renderFinalAnswer(eventContent, eventMeta); 
           renderBodies();
           scrollToBottom();
           continue;

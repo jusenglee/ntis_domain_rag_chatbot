@@ -32,7 +32,8 @@ def default_agent_tool_specs(*, implemented_only: bool = False) -> List[AgentToo
             description=(
                 "Start a new NTIS domain search for projects, performance, people, "
                 "organizations, or support documents. Use this when the user names "
-                "a new explicit target or asks a new NTIS data question."
+                "a new explicit target or asks a new generic NTIS data question. "
+                "Do not use this for explicit people/org activity-history requests."
             ),
             input_schema=_schema(
                 {
@@ -53,6 +54,31 @@ def default_agent_tool_specs(*, implemented_only: bool = False) -> List[AgentToo
             ),
         ),
         AgentToolSpec(
+            name="search_subject_activity",
+            description=(
+                "Lookup activity history for one explicit researcher or organization. "
+                "Use this for named people/org activity records, participation history, "
+                "projects, and performance history."
+            ),
+            input_schema=_schema(
+                {
+                    "subject_kind": {"type": "string", "enum": ["people", "org"]},
+                    "subject_name": {"type": "string"},
+                    "affiliation_org_name": {"type": ["string", "null"]},
+                    "year_from": {"type": ["integer", "null"]},
+                    "year_to": {"type": ["integer", "null"]},
+                    "role": {"type": ["string", "null"], "enum": ["연구책임자", "참여연구원"]},
+                    "target": {
+                        "type": "string",
+                        "enum": ["project", "perf", "both"],
+                    },
+                    "limit": {"type": ["integer", "null"]},
+                    "query": {"type": ["string", "null"]},
+                },
+                required=["subject_kind", "subject_name"],
+            ),
+        ),
+        AgentToolSpec(
             name="refine_current_subject",
             description=(
                 "Refine the current conversation subject with additional filters "
@@ -67,7 +93,7 @@ def default_agent_tool_specs(*, implemented_only: bool = False) -> List[AgentToo
                     "perf_type": {"type": ["string", "null"]},
                     "target": {
                         "type": "string",
-                        "enum": ["project", "perf", "activity_history", "auto"],
+                        "enum": ["project", "perf", "activity_history", "both"],
                     },
                     "limit": {"type": ["integer", "null"]},
                 },

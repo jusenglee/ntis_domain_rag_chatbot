@@ -83,6 +83,32 @@ def truncate_text(value: Optional[str], limit: int) -> str:
     return text
 
 
+def merge_log_fields(*field_sets: Any, **overrides: Any) -> Dict[str, Any]:
+    """Merge multiple log payload fragments before calling ``log_event``.
+
+    This prevents Python call-site errors such as
+    ``got multiple values for keyword argument 'subject_kind'`` when an explicit
+    field and a ``**meta`` payload carry the same key. Later values override
+    earlier ones.
+    """
+
+    merged: Dict[str, Any] = {}
+    for field_set in field_sets:
+        if field_set is None:
+            continue
+        if isinstance(field_set, dict):
+            merged.update(field_set)
+            continue
+        items = getattr(field_set, "items", None)
+        if callable(items):
+            try:
+                merged.update(dict(items()))
+            except Exception:
+                continue
+    merged.update(overrides)
+    return merged
+
+
 def is_debug_logging_enabled() -> bool:
     """`RAG_DEBUG` 환경변수로 디버그 로깅 상태를 판정한다.
     여러 truthy 표현을 허용해 운영 환경과 로컬 환경의 설정 차이를 흡수한다.

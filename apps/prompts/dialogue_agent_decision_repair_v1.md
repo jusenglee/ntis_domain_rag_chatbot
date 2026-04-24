@@ -21,6 +21,7 @@ Allowed `decision_type` values:
 Allowed `tool_name` values:
 
 - `search_ntis_domain`
+- `search_subject_activity`
 - `refine_current_subject`
 - `lookup_specific_entity`
 - `join_project_perf`

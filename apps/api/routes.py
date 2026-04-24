@@ -1,4 +1,9 @@
-"""NTIS RAG 서버의 HTTP 라우트 계층.\n\n이 모듈은 FastAPI 요청/응답 계약만 맡는다.\n무거운 도메인 로직은 graph와 service helper에 두어 `apps/api/main.py`가 조립 진입점으로 남게 한다.\n"""
+"""NTIS RAG 서버의 HTTP 라우트 계층.
+
+이 모듈은 FastAPI의 요청/응답 계약(Contract)을 관리합니다.
+비즈니스 로직은 workflow graph와 service helper에 위임하며,
+`apps/api/main.py`에서 앱 구성 시 이 라우트들을 등록합니다.
+"""
 
 import asyncio
 import json
@@ -22,14 +27,20 @@ from apps.platform.schemas import strategy_spec_to_response
 
 
 class QueryRequest(BaseModel):
-    """`/query/*` 계열 엔드포인트가 받는 공통 요청 모델이다."""
-    question: str
-    conversation_id: Optional[str] = None
+    """
+    `/query/*` 계열 엔드포인트의 공통 요청 모델.
+    사용자 질문과 대화 ID, 그리고 LLM/RAG 동작을 제어하기 위한 각종 파라미터를 포함합니다.
+    """
+    question: str = Field(..., description="사용자의 질문 텍스트")
+    conversation_id: Optional[str] = Field(None, description="대화 세션을 식별하는 UUID")
+    
+    # LLM 생성 파라미터 오버라이드 (선택 사항)
     temperature: Optional[float] = Field(default=None, alias="Temperature")
     top_p: Optional[float] = Field(default=None, alias="Top-P")
     max_tokens: Optional[int] = Field(default=None, alias="Max-Token")
     top_k: Optional[int] = Field(default=None, alias="Top-K")
 
+    # RAG 검색 알고리즘 파라미터 오버라이드
     rag_min_dense_score: Optional[float] = Field(default=None, alias="RAG_MIN_DENSE_SCORE")
     rag_topk_dense: Optional[int] = Field(default=None, alias="RAG_TOPK_DENSE")
     rag_w_lex: Optional[float] = Field(default=None, alias="RAG_W_LEX")
@@ -37,35 +48,38 @@ class QueryRequest(BaseModel):
 
 @dataclass(frozen=True)
 class RouteDeps:
-    # 라우트 의존성을 명시적으로 유지해 runtime wiring이 숨은 전역 상태에 기대지 않게 한다.
-    # app factory가 조립 진입점 역할을 계속 맡도록 라우트 wiring도 여기서만 받는다.
-    """route 계층이 외부에서 주입받는 의존성 묶음이다.
-
-    전역 숨은 상태를 피하고, app factory가 composition root 역할을 유지하도록
-    라우트가 필요한 logger, graph, mapper, observability helper를 명시적으로 전달한다.
     """
-    template_index_path: Any
-    logger: Any
-    log_event: Any
-    is_debug_logging_enabled: Any
-    mask_query_for_log: Any
-    extract_stream_chunk_text_and_field: Any
-    is_hit_source: Any
-    derive_stream_error_code: Any
-    compute_total_ms_from_start: Any
-    extract_contract_failure_details: Any
-    friendly_strategy_violation_message: Any
-    collect_metrics_snapshot: Any
-    metrics_stream_interval_seconds: float
-    set_log_context: Any
-    rag_mapper: Any
-    human_message: Any
-    strategy_violation: Any
-    request_defaults_loader: Any = None
+    라우트 계층이 외부(Composition Root)에서 주입받는 의존성 묶음.
+    전역 상태를 피하고 테스트 가능성을 높이기 위해 명시적으로 의존성을 관리합니다.
+    """
+    template_index_path: Any  # 인덱스 페이지 템플릿 경로
+    logger: Any               # 표준 로거
+    log_event: Any            # 운영 이벤트 로깅 함수
+    is_debug_logging_enabled: Any  # 디버그 로그 활성화 여부 확인 함수
+    mask_query_for_log: Any        # 로그 기록 시 질문 마스킹 함수
+    extract_stream_chunk_text_and_field: Any # 스트림 청크에서 텍스트 추출
+    is_hit_source: Any             # 검색 결과 소스 판별 함수
+    derive_stream_error_code: Any  # 스트림 메타데이터 기반 에러 코드 추출
+    compute_total_ms_from_start: Any # 경과 시간 계산 함수
+    extract_contract_failure_details: Any # 계약 위반 상세 정보 파싱
+    friendly_strategy_violation_message: Any # 사용자 친화적 에러 메시지 생성
+    collect_metrics_snapshot: Any  # 메트릭 스냅샷 수집 함수
+    metrics_stream_interval_seconds: float # 메트릭 스트리밍 주기
+    set_log_context: Any           # 로그 컨텍스트(ID 등) 설정 함수
+    rag_mapper: Any                # RAG 데이터 매퍼
+    human_message: Any             # LangChain HumanMessage 생성자
+    strategy_violation: Any        # 전략 위반 예외 클래스
+    request_defaults_loader: Any = None # 기본 요청 파라미터 로더
 
 
 def register_routes(app: FastAPI, deps: RouteDeps) -> None:
-    """FastAPI 앱에 query, health, metrics 관련 라우트를 등록한다."""
+    """
+    FastAPI 앱에 질의(Query), 상태(Health), 지표(Metrics) 관련 라우트를 등록합니다.
+    
+    Args:
+        app: FastAPI 인스턴스
+        deps: 주입받을 의존성 객체
+    """
     template_index_path = deps.template_index_path
     logger = deps.logger
     log_event = deps.log_event
@@ -86,19 +100,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
     request_defaults_loader = deps.request_defaults_loader
 
     def _get_graph(request: Request) -> Any:
-        """`app.state`에서 컴파일된 workflow graph를 꺼낸다."""
+        """`app.state`에 등록된 컴파일된 workflow graph를 반환합니다."""
         return getattr(getattr(request.app, "state", None), "graph", None)
 
     def _get_metrics_http(request: Request) -> Any:
-        """`app.state`에서 metrics HTTP 클라이언트를 꺼낸다."""
+        """`app.state`에 등록된 metrics HTTP 클라이언트를 반환합니다."""
         return getattr(getattr(request.app, "state", None), "metrics_http", None)
 
     def _get_kv_store(request: Request) -> Any:
-        """`app.state`에서 대화 메모리용 KV store를 꺼낸다."""
+        """`app.state`에 등록된 대화 메모리용 KV store를 반환합니다."""
         return getattr(getattr(request.app, "state", None), "kv_store", None)
 
     def _dump_model(value: Any) -> Any:
-        """Pydantic 모델이나 유사 객체를 JSON 직렬화 가능한 값으로 바꾼다."""
+        """Pydantic 모델이나 유사 객체를 JSON 직렬화 가능한 dict로 변환합니다."""
         if value is None:
             return None
         model_dump = getattr(value, "model_dump", None)
@@ -107,6 +121,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return value
 
     def _state_get(state: Any, key: str, default: Any = None) -> Any:
+        """상태 객체(dict 또는 object)에서 안전하게 값을 가져옵니다."""
         if state is None:
             return default
         if isinstance(state, dict):
@@ -116,14 +131,17 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return default if value is None else value
 
     def _state_get_list(state: Any, key: str) -> list[Any]:
+        """상태 객체에서 list 타입 값을 가져옵니다."""
         value = _state_get(state, key, [])
         return value if isinstance(value, list) else []
 
     def _state_get_dict(state: Any, key: str) -> dict[str, Any]:
+        """상태 객체에서 dict 타입 값을 가져옵니다."""
         value = _dump_model(_state_get(state, key, {}))
         return dict(value) if isinstance(value, dict) else {}
 
     def _normalize_answer_kind(value: Any) -> str:
+        """답변의 종류(kind)를 표준화된 문자열로 정규화합니다."""
         normalized = str(value or "").strip().lower()
         allowed = {
             "llm_streamed",
@@ -138,6 +156,10 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return normalized if normalized in allowed else "llm_collected"
 
     def _build_final_answer_artifact(state: Any) -> Optional[AnswerArtifact]:
+        """
+        워크플로우 실행 결과 상태에서 최종 답변 아티팩트를 조립합니다.
+        스트리밍 메트릭, 답변 소스, 매니페스트 등을 포함합니다.
+        """
         explicit_artifact = _state_get(state, "final_answer_artifact")
         if isinstance(explicit_artifact, AnswerArtifact):
             return explicit_artifact
@@ -157,9 +179,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         selected_answer_meta = _state_get_dict(state, "selected_answer_meta")
         merge_debug = _state_get_dict(state, "merge_debug")
         view_state = _state_get(state, "view_state")
+        
+        # 답변 매니페스트(프론트엔드 렌더링용 구조화 데이터) 추출 로직
         publication_payload = _dump_model(selected_answer_meta.get("visible_answer_manifest_publication"))
         visible_answer_manifest_publication = dict(publication_payload) if isinstance(publication_payload, dict) else None
         visible_answer_manifest = None
+        
         if isinstance(visible_answer_manifest_publication, dict):
             publication_status = str(visible_answer_manifest_publication.get("publication_status") or "").strip().lower()
             published_manifest = visible_answer_manifest_publication.get("published_manifest")
@@ -169,10 +194,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 visible_answer_manifest = dict(selected_answer_meta.get("visible_answer_manifest") or {})
         else:
             visible_answer_manifest = selected_answer_meta.get("visible_answer_manifest")
+            
         if visible_answer_manifest_publication is None and not isinstance(visible_answer_manifest, dict):
             snapshot = getattr(view_state, "visible_answer_manifest", None)
             if snapshot is not None:
                 visible_answer_manifest = snapshot.model_dump() if hasattr(snapshot, "model_dump") else dict(snapshot)
+                
         return AnswerArtifact(
             text=final_text,
             answer_kind=_normalize_answer_kind(
@@ -189,6 +216,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         )
 
     def _build_clarification_payload_from_artifact(artifact: AnswerArtifact) -> Optional[dict[str, Any]]:
+        """답변 아티팩트에서 명확화(Clarification) 요청 페이로드를 추출합니다."""
         clarification = getattr(artifact, "clarification", None)
         if clarification is None:
             return None
@@ -204,6 +232,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             *,
             selected_artifact: Optional[AnswerArtifact] = None,
     ) -> Optional[dict[str, Any]]:
+        """상태 객체나 아티팩트로부터 명확화 페이로드를 찾아 정규화합니다."""
         clarification_payload = _dump_model(_state_get(state, "clarification"))
         if not isinstance(clarification_payload, dict):
             clarification_payload = None
@@ -230,6 +259,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return normalized
 
     def _normalize_stream_model_key(model_key: str) -> str:
+        """모델 키 값을 표준 소문자 식별자로 변환합니다."""
         normalized = str(model_key or "").strip().lower()
         if normalized in {"solar", "upstage"}:
             return "solar"
@@ -238,14 +268,15 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return normalized
 
     def _stream_data(tag: str, **payload: Any) -> str:
-        """SSE 한 프레임을 현재 route 규약에 맞는 문자열로 인코딩한다."""
+        """SSE 한 프레임을 인코딩합니다."""
         return encode_sse_payload(tag, **payload)
 
     def _stream_legacy_payload(**payload: Any) -> str:
-        """Legacy flat payload는 tag envelope 없이 기존 wire shape로 유지한다."""
+        """하위 호환성을 위한 레거시 SSE 페이로드 인코딩입니다."""
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _resolve_stream_model_label(model_key: str) -> str:
+        """스트림 표시용 모델 라벨(대문자 등)을 결정합니다."""
         normalized = _normalize_stream_model_key(model_key)
         if normalized == "solar":
             return "UPSTAGE"
@@ -254,6 +285,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         return normalized.upper() or "UNKNOWN"
 
     def _stream_chunk(model_key: str, content: str) -> str:
+        """텍스트 조각(Chunk)에 대한 SSE 프레임을 생성합니다."""
         normalized = _normalize_stream_model_key(model_key)
         return _stream_data(
             "chunk",
@@ -262,27 +294,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         )
 
     def _emit_legacy_stream_event(event: StreamEvent) -> list[str]:
+        """표준 StreamEvent 객체를 SSE 라인 리스트로 변환합니다."""
         return [encode_stream_event(event)]
 
-    def _pick_reference_value(reference: Dict[str, Any], doc: Dict[str, Any], *keys: str) -> Optional[str]:
-        """reference payload와 원본 doc를 넘나들며 첫 유효 값을 찾는다."""
+    def _top_level_text_value(doc: Dict[str, Any], *keys: str) -> Optional[str]:
+        """딕셔너리의 여러 키 중 첫 번째로 발견되는 유효한 문자열 값을 반환합니다."""
         for key in keys:
-            value = reference.get(key)
-            if value is None and isinstance(doc, dict):
-                value = doc.get(key)
-            if value is None and isinstance(doc, dict):
-                for meta_key in ("meta_basic", "meta_detail"):
-                    meta = doc.get(meta_key)
-                    if isinstance(meta, dict):
-                        value = meta.get(key)
-                        if value is not None:
-                            break
-            text = str(value or "").strip()
+            text = str(doc.get(key) or "").strip()
             if text:
                 return text
         return None
 
     def _reference_tag_from_source_type(source_type: Any) -> Optional[str]:
+        """데이터 소스 타입에 따른 NTIS 표준 태그를 매핑합니다."""
         normalized = str(source_type or "").strip().lower()
         mapping = {
             "project": DataTag.PROJECT.value,
@@ -302,99 +326,80 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         }
         return mapping.get(normalized)
 
-    def _normalize_reference_tag(tag_value: Any, *, source_type: Any = None) -> Optional[str]:
-        normalized = str(tag_value or "").strip()
-        if normalized:
-            try:
-                return DataTag(normalized).value
-            except ValueError:
-                return None
-        return _reference_tag_from_source_type(source_type)
+    def _reference_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        """검색 결과 문서로부터 프론트엔드 참조 목록에 표시할 최소 페이로드를 추출합니다."""
+        return {
+            "tag": _top_level_text_value(doc, "tag"),
+            "id": _top_level_text_value(doc, "pjt_id", "rst_id", "id"),
+            "title": _top_level_text_value(doc, "title1", "title2", "title_text", "title"),
+        }
 
-    def _is_project_reference_source(reference: Dict[str, Any], doc: Dict[str, Any]) -> bool:
-        """현재 reference가 프로젝트 원본인지 판별한다.
-
-        `pjt_id` 기반 식별자를 우선시하고, 성과 식별자(`rst_id`)와의 의미 충돌을 피한다.
-        """
-        tag = str(reference.get("tag") or doc.get("tag") or "").strip()
-        if tag == DataTag.PROJECT.value:
-            return True
-        return bool(_pick_reference_value(reference, doc, "pjt_id")) and not bool(
-            _pick_reference_value(reference, doc, "rst_id")
-        )
-
-    def _resolve_reference_id(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
-        """source semantics에 맞는 canonical reference id를 결정한다."""
-        if _is_project_reference_source(reference, doc):
-            return _pick_reference_value(reference, doc, "pjt_id", "id")
-        return _pick_reference_value(reference, doc, "rst_id", "perf_id", "paper_id", "id")
-
-    def _resolve_reference_title(reference: Dict[str, Any], doc: Dict[str, Any]) -> Optional[str]:
-        """reference 표시에 쓸 제목을 우선순위 규칙으로 선택한다."""
-        for key in ("title", "title_text", "title1", "title2"):
-            value = reference.get(key)
-            if value is None and isinstance(doc, dict):
-                value = doc.get(key)
-            text = str(value or "").strip()
-            if text:
-                return text
-        meta_basic = doc.get("meta_basic") if isinstance(doc, dict) else None
-        if isinstance(meta_basic, dict):
-            for key in ("kor_pjt_nm", "title", "paper_nm"):
-                text = str(meta_basic.get(key) or "").strip()
-                if text:
-                    return text
+    def _reference_payload_invalid_reason(payload: Dict[str, Optional[str]]) -> Optional[str]:
+        """참조 페이로드가 필수 필드를 모두 갖추었는지 검증합니다."""
+        if not payload.get("tag"):
+            return "missing_tag"
+        if not payload.get("id"):
+            return "missing_project_or_result_id"
+        if not payload.get("title"):
+            return "missing_title"
         return None
 
-    def _normalize_reference_payload(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Fail-open reference normalization for route finalization."""
-        tag = _normalize_reference_tag(doc.get("tag"), source_type=doc.get("source_type"))
-        if tag is None:
-            return None
-
-        source_doc = dict(doc)
-        source_doc["tag"] = tag
-        mapped: Dict[str, Any] = {}
-        try:
-            raw_mapped = rag_mapper.get_references(source_doc)
-        except Exception:
-            raw_mapped = {}
-        if isinstance(raw_mapped, dict):
-            mapped = dict(raw_mapped)
-
-        result = dict(mapped)
-        result["tag"] = tag
-        result["id"] = _resolve_reference_id(result, source_doc)
-        result["title"] = _resolve_reference_title(result, source_doc)
-        if not (result["id"] or result["title"]):
-            return None
-        return result
-
     def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
-        """canonical evidence item??reference payload ?뺢퇋???낅젰 ?뺥깭濡?諛붽씔??"""
+        """내부 증거 객체를 라우트 참조 계약에 맞는 최상위 문서 형식으로 변환합니다."""
         if not isinstance(item, dict):
             return {}
         ids = item.get("ids")
         facts = item.get("facts")
         evidence = item.get("evidence")
-        tag = _normalize_reference_tag(item.get("tag"), source_type=item.get("source_type"))
+        source_type = _top_level_text_value(item, "source_type")
 
-        doc: Dict[str, Any] = {"tag": tag}
+        doc: Dict[str, Any] = {}
+        if source_type:
+            doc["source_type"] = source_type
+
         if isinstance(ids, dict):
-            doc.update(ids)
-        if isinstance(facts, dict):
-            title = str(facts.get("title") or "").strip()
-            if title:
-                doc["title"] = title
+            pjt_id = _top_level_text_value(ids, "pjt_id")
+            rst_id = _top_level_text_value(ids, "rst_id")
+            if pjt_id:
+                doc["pjt_id"] = pjt_id
+            if rst_id:
+                doc["rst_id"] = rst_id
+        if "pjt_id" not in doc:
+            pjt_id = _top_level_text_value(item, "pjt_id")
+            if pjt_id:
+                doc["pjt_id"] = pjt_id
+        if "rst_id" not in doc:
+            rst_id = _top_level_text_value(item, "rst_id")
+            if rst_id:
+                doc["rst_id"] = rst_id
+
+        tag = _top_level_text_value(item, "tag") or _reference_tag_from_source_type(source_type)
+        if not tag and _top_level_text_value(doc, "pjt_id"):
+            tag = DataTag.PROJECT.value
+        if tag:
+            doc["tag"] = tag
+
         if isinstance(evidence, dict):
-            for key in ("title", "title_text", "title1", "title2"):
-                value = evidence.get(key)
-                if value is not None:
+            for key in ("title1", "title2", "title_text"):
+                value = _top_level_text_value(evidence, key)
+                if value:
                     doc[key] = value
+        for key in ("title1", "title2", "title_text"):
+            if key not in doc:
+                value = _top_level_text_value(item, key)
+                if value:
+                    doc[key] = value
+        if not any(_top_level_text_value(doc, key) for key in ("title1", "title2", "title_text")):
+            title = None
+            if isinstance(facts, dict):
+                title = _top_level_text_value(facts, "title")
+            title = title or _top_level_text_value(item, "title")
+            if title:
+                doc["title_text"] = title
         return doc
 
     def _validate_request_override_ranges(overrides: dict[str, Any]) -> None:
-        """잘못된 LLM override 값이 provider backend까지 내려가기 전에 막는다."""
+        """LLM/RAG 파라미터 값이 유효 범위를 벗어나는지 검증합니다."""
         temperature = overrides.get("temperature")
         if temperature is not None and float(temperature) < 0:
             raise HTTPException(status_code=422, detail="Temperature must be >= 0")
@@ -412,7 +417,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             raise HTTPException(status_code=422, detail="Top-K must be >= 1")
 
     def _extract_request_override_values(payload: QueryRequest) -> dict[str, Any]:
-        """요청 payload에서 명시적으로 들어온 override 값만 추출한다."""
+        """요청 페이로드에서 명시적으로 제공된 오버라이드 값만 추출합니다."""
         overrides: dict[str, Any] = {}
 
         if payload.temperature is not None:
@@ -441,7 +446,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             conversation_id: str,
             route_name: str,
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        """요청 payload와 Oracle 기본값을 병합해 최종 override와 source를 반환한다."""
+        """사용자 요청 값과 시스템 기본값(Oracle)을 병합하여 최종 설정을 생성합니다."""
         request_values = _extract_request_override_values(payload)
         oracle_defaults: dict[str, Any] = {}
         supported_override_count = 8
@@ -451,6 +456,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             "oracle_loaded_key_count": 0,
             "oracle_loaded_keys": [],
         }
+        
+        # 모든 값이 요청에 포함되지 않은 경우에만 Oracle에서 기본값을 가져옵니다.
         if request_defaults_loader is not None and len(request_values) < supported_override_count:
             load_defaults_with_meta = getattr(request_defaults_loader, "load_defaults_with_meta", None)
             load_defaults = getattr(request_defaults_loader, "load_defaults", None)
@@ -475,6 +482,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 )
         elif request_defaults_loader is not None:
             oracle_lookup_meta.update({"oracle_lookup_status": "skipped_all_request_values_present"})
+            
         merged, sources = merge_request_overrides(
             request_values=request_values,
             oracle_defaults=oracle_defaults,
@@ -483,6 +491,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             source_name: sum(1 for current_source in sources.values() if current_source == source_name)
             for source_name in sorted(set(sources.values()))
         }
+        
+        # 운영 로그: 요청 파라미터 출처 및 병합 결과 기록
         log_event(
             "REQ.ORACLE.DEFAULTS",
             request_id=request_id,
@@ -500,7 +510,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
 
     async def _runtime_status(request: Request) -> dict[str, Any]:
-        """현재 runtime 상태를 health 응답 형식으로 조립한다."""
+        """워크플로우 엔진 및 데이터베이스 연결 상태를 확인하여 반환합니다."""
         kv_store = _get_kv_store(request)
         graph_ready = _get_graph(request) is not None
         metrics_ready = _get_metrics_http(request) is not None
@@ -521,7 +531,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/", response_class=HTMLResponse)
     async def home() -> HTMLResponse:
-        """기본 UI 템플릿이 있으면 반환하고, 없으면 간단한 fallback HTML을 돌려준다."""
+        """기본 웹 UI(index.html)를 서빙합니다."""
         if not template_index_path.exists():
             return HTMLResponse(
                 content="<html><body><h3>NTIS RAG Chatbot</h3><p>index template unavailable.</p></body></html>",
@@ -531,11 +541,15 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.post("/query/stream")
     async def query_stream(payload: QueryRequest, request: Request) -> StreamingResponse:
-        """질의 처리 결과를 SSE로 스트리밍하는 주 엔드포인트다."""
+        """
+        질의 처리 결과를 SSE(Server-Sent Events)로 실시간 스트리밍합니다.
+        가장 핵심적인 엔드포인트입니다.
+        """
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
 
+        # 1. 설정 병합 및 초기화
         request_overrides, request_override_sources = await _build_request_overrides(
             payload,
             request_id=request_id,
@@ -545,7 +559,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         graph = _get_graph(request)
 
         async def event_generator():
-            """graph 이벤트를 route 레벨 SSE 규약으로 변환해 순차 전송한다."""
+            """그래프 실행 중 발생하는 이벤트를 SSE 형식으로 변환하여 생성하는 제너레이터입니다."""
             route_seq = 0
 
             def _next_route_event(
@@ -556,22 +570,32 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 references: Optional[list[dict[str, Any]]] = None,
                 meta: Optional[Dict[str, Any]] = None,
             ) -> StreamEvent:
+                """다음 순번의 스트림 이벤트 객체를 생성합니다."""
                 nonlocal route_seq
                 route_seq += 1
+
+                # SSE envelope 정합성 보장 (L1/L2 공통 규약 반영)
+                if kind != "reference.set":
+                    effective_references = None
+                else:
+                    effective_references = list(references or [])
+
                 return StreamEvent(
                     kind=kind,
                     request_id=request_id,
                     seq=route_seq,
                     model_key=model_key,
                     content=content,
-                    references=references,
+                    references=effective_references,
                     meta=dict(meta or {}),
                 )
 
+            # 엔진 준비 미비 시 즉시 에러 반환
             if graph is None:
                 for payload_line in _emit_legacy_stream_event(
                     _next_route_event(
-                        kind="error",
+                        kind="answer.final",
+                        content="시스템이 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.",
                         meta={"error": "runtime_not_ready", "error_code": "RUNTIME_NOT_READY", "reason": "compiled graph unavailable"},
                     )
                 ):
@@ -583,6 +607,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
                     yield payload_line
                 return
+
+            # 대화 ID 전송
             for payload_line in _emit_legacy_stream_event(
                 _next_route_event(
                     kind="conversation",
@@ -591,6 +617,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 )
             ):
                 yield payload_line
+
+            # 운영 로그: 요청 시작 알림
             log_event(
                 "REQ.START",
                 request_id=request_id,
@@ -601,6 +629,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 request_overrides=request_overrides or None,
                 request_override_sources=request_override_sources or None,
             )
+            
             request_started_at = time.perf_counter()
             emitter = AsyncStreamEmitter()
             final_state: Optional[Any] = None
@@ -619,7 +648,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     "stream_emitter": emitter,
                 }
 
+                # 2. 워크플로우 실행 (LangGraph astream_events 또는 ainvoke)
                 if not hasattr(graph, "ainvoke") and hasattr(graph, "astream_events"):
+                    # 스트리밍 방식 실행
                     final_state = {
                         "context": [],
                         "merge_debug": {},
@@ -632,6 +663,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         kind = event["event"]
                         node = event.get("metadata", {}).get("langgraph_node", "")
                         data = event.get("data", {})
+                        
+                        # 각 노드 실행 완료 후 상태 업데이트 및 청크 스트리밍
                         if kind == "on_chain_end" and node == "rag_search":
                             output = data.get("output", {}) or {}
                             if isinstance(output.get("context"), list):
@@ -643,20 +676,15 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                             answer_key = "answer_solar" if node == "generate_answer_solar" else "answer_gemma"
                             answer_meta_key = f"{answer_key}_meta"
                             artifact_key = "answer_artifact_solar" if node == "generate_answer_solar" else "answer_artifact_gemma"
-                            answer_text = str(output.get(answer_key) or "").strip()
-                            answer_meta = dict(output.get(answer_meta_key) or {})
-                            final_state[answer_key] = answer_text
-                            final_state[answer_meta_key] = answer_meta
+                            final_state[answer_key] = str(output.get(answer_key) or "").strip()
+                            final_state[answer_meta_key] = dict(output.get(answer_meta_key) or {})
                             if isinstance(output.get(artifact_key), AnswerArtifact):
                                 final_state[artifact_key] = output.get(artifact_key)
-                        if kind == "on_chain_end" and node == "merge_answers":
+                        elif kind == "on_chain_end" and node == "merge_answers":
                             output = data.get("output", {}) or {}
                             final_state.update(output)
                         elif kind == "on_chain_end" and node == "analyze_question":
                             question_analysis = data.get("output", {})
-                        elif kind == "on_chain_end" and node == "direct_answer":
-                            output = data.get("output", {}) or {}
-                            final_state.update(output)
                         elif kind == "on_chat_model_stream" and node in {"generate_answer_solar", "generate_answer_gemma"}:
                             chunk = data.get("chunk")
                             chunk_text, stream_field = extract_stream_chunk_text_and_field(chunk)
@@ -669,6 +697,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                                 yield payload_line
                     final_state = dict(final_state or {})
                 else:
+                    # 일괄 실행 방식 + emitter를 통한 내부 스트리밍
                     graph_task = asyncio.create_task(graph.ainvoke(inputs))
                     for payload_line in _emit_legacy_stream_event(_next_route_event(kind="status", meta={"status": "retrieve"})):
                         yield payload_line
@@ -690,8 +719,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
                     final_state = await graph_task
                     question_analysis = _state_get(final_state, "question_analysis")
+
+                # 3. 답변 및 참조 목록 후처리
                 documents_used = _state_get_list(final_state, "context")
-                selected_answer_meta = _state_get_dict(final_state, "selected_answer_meta")
                 merge_debug = _state_get_dict(final_state, "merge_debug")
                 selected_artifact = _build_final_answer_artifact(final_state)
                 clarification_payload = _normalize_clarification_payload(
@@ -701,102 +731,131 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
                 user_visible_terminal_emitted = False
 
+                # 명확화 요청이 있는 경우 처리
                 if clarification_payload:
                     clarification_message = str(clarification_payload.get("message") or "").strip()
+                    if clarification_message:
+                        for mk in ["solar", "gemma"]:
+                            for payload_line in _emit_legacy_stream_event(
+                                _next_route_event(kind="answer.chunk", model_key=mk, content=clarification_message)
+                            ):
+                                yield payload_line
+
                     clarification_event = _next_route_event(
-                        kind="clarification",
-                        content=clarification_message or None,
+                        kind="answer.final",
+                        content=None,
                         meta={"clarification": clarification_payload},
                     )
                     for payload_line in _emit_legacy_stream_event(clarification_event):
                         yield payload_line
                     user_visible_terminal_emitted = True
 
+                # 최종 답변 텍스트 전송
                 if not clarification_payload and isinstance(selected_artifact, AnswerArtifact) and selected_artifact.text and selected_artifact.user_visible_final_required:
+                    if _normalize_answer_kind(selected_artifact.answer_kind) != "llm_streamed":
+                        model_key = _normalize_stream_model_key(str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "solar"))
+                        for payload_line in _emit_legacy_stream_event(
+                            _next_route_event(kind="answer.chunk", model_key=model_key, content=selected_artifact.text)
+                        ):
+                            yield payload_line
+
                     final_event = _next_route_event(
                         kind="answer.final",
                         model_key=_normalize_stream_model_key(str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "")),
-                        content=selected_artifact.text,
+                        content=None,
                         meta=selected_artifact.to_meta_dict(),
                     )
                     for payload_line in _emit_legacy_stream_event(final_event):
                         yield payload_line
                     user_visible_terminal_emitted = True
 
+                # 답변 누락 방지 가드 (Guard)
                 if not user_visible_terminal_emitted:
                     guard_reason = "route completed without final_answer_artifact/final_answer_text/clarification"
                     guard_message = "응답 생성은 완료되었지만 표시할 최종 답변이 비어 있습니다. 다시 시도해 주세요."
+                    
+                    for mk in ["solar", "gemma"]:
+                        for payload_line in _emit_legacy_stream_event(
+                            _next_route_event(kind="answer.chunk", model_key=mk, content=guard_message)
+                        ):
+                            yield payload_line
+
                     guard_artifact = AnswerArtifact(
                         text=guard_message,
                         answer_kind="error",
                         stream_metrics={},
                         user_visible_final_required=True,
-                        error=ErrorArtifact(
-                            error_code="MISSING_FINAL_ANSWER",
-                            reason=guard_reason,
-                            retryable=True,
-                        ),
+                        error=ErrorArtifact(error_code="MISSING_FINAL_ANSWER", reason=guard_reason, retryable=True),
                         meta={"answer_source": "route_contract_guard", "degraded": True},
                     )
                     guard_event = _next_route_event(
                         kind="answer.final",
-                        content=guard_message,
-                        meta=guard_artifact.to_meta_dict()
-                        | {
-                            "error_code": "MISSING_FINAL_ANSWER",
-                            "reason": guard_reason,
-                            "degraded": True,
-                        },
+                        content=None,
+                        meta=guard_artifact.to_meta_dict() | {"error_code": "MISSING_FINAL_ANSWER", "reason": guard_reason, "degraded": True},
                     )
                     for payload_line in _emit_legacy_stream_event(guard_event):
                         yield payload_line
 
+                # 4. 참조 리스트 조립 및 전송
                 ref_docs = []
                 seen_reference_keys = set()
+                invalid_candidate_count = 0
 
-                def _append_reference_docs(candidates: list[dict[str, Any]]) -> None:
+                def _append_reference_docs(candidates: list[dict[str, Any]], *, candidate_source: str) -> int:
+                    """유효한 참조 문서를 목록에 추가합니다."""
+                    nonlocal invalid_candidate_count
+                    added_count = 0
                     for candidate in candidates:
-                        normalized = _normalize_reference_payload(candidate)
-                        if normalized is None:
-                            logger.warning(
-                                "Skipping invalid reference payload during stream finalization",
-                                extra={
-                                    "request_id": request_id,
-                                    "conversation_id": conversation_id,
-                                    "raw_tag": candidate.get("tag"),
-                                    "source_type": candidate.get("source_type"),
-                                    "keys": sorted(candidate.keys()),
-                                },
+                        normalized = _reference_payload_from_doc(candidate)
+                        invalid_reason = _reference_payload_invalid_reason(normalized)
+                        if invalid_reason is not None:
+                            invalid_candidate_count += 1
+                            # 유효하지 않은 참조 데이터 로깅
+                            log_event(
+                                "REFERENCE.INVALID_PAYLOAD",
+                                request_id=request_id,
+                                conversation_id=conversation_id,
+                                stage="stream_finalization",
+                                candidate_source=candidate_source,
+                                invalid_reason=invalid_reason,
+                                raw_tag=candidate.get("tag"),
+                                source_type=candidate.get("source_type"),
+                                keys=sorted(candidate.keys()),
                             )
                             continue
-                        dedupe_key = (
-                            normalized.get("tag"),
-                            normalized.get("id"),
-                            normalized.get("title"),
-                        )
+                        dedupe_key = (normalized.get("tag"), normalized.get("id"), normalized.get("title"))
                         if dedupe_key in seen_reference_keys:
                             continue
                         seen_reference_keys.add(dedupe_key)
                         ref_docs.append(normalized)
+                        added_count += 1
+                    return added_count
 
+                # 참조 목록을 가져오는 계층적 전략 (Artifact -> Evidence -> Context)
                 artifact_references = list(getattr(selected_artifact, "references", []) or [])
-                if artifact_references:
-                    _append_reference_docs([ref for ref in artifact_references if isinstance(ref, dict)])
-                else:
+                artifact_reference_docs = [ref for ref in artifact_references if isinstance(ref, dict)]
+                _append_reference_docs(artifact_reference_docs, candidate_source="artifact_references")
+                
+                if not ref_docs:
                     canonical_evidence = _state_get_list(final_state, "canonical_evidence")
-                    canonical_reference_docs = [
-                        _canonical_evidence_to_reference_doc(item)
-                        for item in canonical_evidence
-                        if isinstance(item, dict)
-                    ]
-                    canonical_reference_docs = [doc for doc in canonical_reference_docs if doc]
-                    if canonical_reference_docs:
-                        _append_reference_docs(canonical_reference_docs)
-                    else:
-                        _append_reference_docs(
-                            [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
-                        )
+                    canonical_reference_docs = [_canonical_evidence_to_reference_doc(item) for item in canonical_evidence if isinstance(item, dict)]
+                    _append_reference_docs([doc for doc in canonical_reference_docs if doc], candidate_source="canonical_evidence")
+                
+                if not ref_docs:
+                    fallback_docs = [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
+                    _append_reference_docs(fallback_docs, candidate_source="documents_used")
 
+                # 운영 로그: 참조 목록 구성 결과 기록
+                log_event(
+                    "REFERENCE.FINALIZATION",
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    stage="stream_finalization",
+                    invalid_candidate_count=invalid_candidate_count,
+                    emitted_reference_count=len(ref_docs),
+                )
+
+                # 최종 참조 리스트 전송
                 ref_event = _next_route_event(
                     kind="reference.set",
                     content="null",
@@ -806,6 +865,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 for payload_line in _emit_legacy_stream_event(ref_event):
                     yield payload_line
 
+                # 5. 스트림 완료 및 종료 로그
                 solar_done = _state_get_dict(final_state, "answer_solar_meta")
                 gemma_done = _state_get_dict(final_state, "answer_gemma_meta")
                 log_event(
@@ -815,26 +875,22 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     stage="stream_done",
                     solar_error_code=derive_stream_error_code(solar_done),
                     solar_elapsed_ms=solar_done.get("elapsed_ms"),
-                    solar_ttft_any_ms=solar_done.get("ttft_any_ms"),
-                    solar_ttft_content_ms=solar_done.get("ttft_content_ms"),
-                    solar_content_chars=solar_done.get("content_chars"),
                     gemma_error_code=derive_stream_error_code(gemma_done),
                     gemma_elapsed_ms=gemma_done.get("elapsed_ms"),
-                    gemma_ttft_any_ms=gemma_done.get("ttft_any_ms"),
-                    gemma_ttft_content_ms=gemma_done.get("ttft_content_ms"),
-                    gemma_content_chars=gemma_done.get("content_chars"),
                 )
                 done_event = _next_route_event(kind="done", meta={})
                 for payload_line in _emit_legacy_stream_event(done_event):
                     yield payload_line
 
             except Exception as exc:
+                # 예외 처리 및 에러 SSE 전송
                 logger.error("Stream Error: {}", exc, exc_info=True)
                 error_code = getattr(exc, "error_code", "INTERNAL_ERROR")
                 reason = getattr(exc, "reason", str(exc))
                 total_ms = compute_total_ms_from_start(request_started_at)
                 degraded = isinstance(exc, strategy_violation)
-                contract_failure_details = extract_contract_failure_details(reason)
+                
+                # 운영 로그: 요청 에러 기록
                 log_event(
                     "REQ.ERROR",
                     request_id=request_id,
@@ -842,12 +898,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     stage="stream",
                     error_code=error_code,
                     reason=reason,
-                    mode=(str(getattr(question_analysis, "mode", "") or "").upper() or None),
-                    relation=getattr(question_analysis, "relation", None),
                     degraded=int(degraded),
                     total_ms=total_ms,
-                    **contract_failure_details,
+                    **extract_contract_failure_details(reason),
                 )
+                
+                # 전략 위반(차단 정책 등) 시 사용자 친화적 메시지 전송
                 if degraded:
                     user_message = friendly_strategy_violation_message(
                         error_code=error_code,
@@ -877,9 +933,13 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"degraded": True})):
                         yield payload_line
                     return
+                
+                # 일반 시스템 오류 전송
+                error_message = "시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
                 for payload_line in _emit_legacy_stream_event(
                     _next_route_event(
-                        kind="error",
+                        kind="answer.final",
+                        content=error_message,
                         meta={"error": str(exc), "error_code": error_code, "reason": reason},
                     )
                 ):
@@ -900,16 +960,19 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # 디버그 라우트 활성화 여부
     debug_routes_enabled = os.getenv("ENABLE_DEBUG_ROUTES", "false").strip().lower() in {"1", "true", "yes", "on"}
 
     @app.post("/query/debug")
     async def query_debug(payload: QueryRequest, request: Request) -> Dict[str, Any]:
-        """디버그용으로 graph 실행 결과를 JSON으로 그대로 노출한다."""
+        """디버그용 엔드포인트: 워크플로우 실행 결과(전체 상태)를 JSON으로 반환합니다."""
         if not debug_routes_enabled:
             raise HTTPException(status_code=404, detail="not found")
+            
         question = payload.question
         conversation_id = payload.conversation_id or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
+        
         request_overrides, request_override_sources = await _build_request_overrides(
             payload,
             request_id=request_id,
@@ -927,115 +990,89 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             }
 
         request_started_at = time.perf_counter()
-        stage = "debug_request_start"
         try:
             set_log_context(request_id=request_id, conversation_id=conversation_id)
             log_event(
                 "REQ.START",
                 request_id=request_id,
                 conversation_id=conversation_id,
-                stage=stage,
+                stage="debug_request_start",
                 q_len=len(question),
                 request_overrides=request_overrides or None,
                 request_override_sources=request_override_sources or None,
             )
-            user_message = human_message(content=question)
-
-            stage = "planner_memory_build"
+            
             inputs = {
                 "conversation_id": conversation_id,
                 "request_id": request_id,
                 "request_started_at": request_started_at,
-                "messages": [user_message],
+                "messages": [human_message(content=question)],
                 "kv_store": _get_kv_store(request),
                 "request_overrides": request_overrides,
             }
 
+            # 워크플로우 일괄 실행
             final_state = await graph.ainvoke(inputs)
-
-            question_analysis = _state_get(final_state, "question_analysis")
-            knowledge_sufficiency = _state_get(final_state, "knowledge_sufficiency")
-            strategy = _state_get(final_state, "strategy")
 
             total_ms = compute_total_ms_from_start(request_started_at)
             log_event("REQ.END", request_id=request_id, conversation_id=conversation_id, stage="debug_done", total_ms=total_ms)
-            messages = _state_get_list(final_state, "messages")
-            output_message = str(_state_get(final_state, "final_answer_text", "") or "").strip()
-            if not output_message and messages:
-                output_message = str(getattr(messages[-1], "content", "") or "").strip()
-
-            merge_debug = _state_get_dict(final_state, "merge_debug")
-            selected_answer_meta = _state_get_dict(final_state, "selected_answer_meta")
+            
+            # 결과 조립
             selected_artifact = _build_final_answer_artifact(final_state)
-            clarification = _normalize_clarification_payload(
-                final_state,
-                selected_artifact=selected_artifact,
-            )
-
             return {
                 "success": True,
                 "conversation_id": conversation_id,
                 "answer_gemma": _state_get(final_state, "answer_gemma"),
                 "answer_solar": _state_get(final_state, "answer_solar"),
-                "output_message": output_message,
+                "output_message": str(_state_get(final_state, "final_answer_text", "")).strip(),
                 "final_answer_meta": (selected_artifact.to_meta_dict() if isinstance(selected_artifact, AnswerArtifact) else None),
-                "question_analysis": _dump_model(question_analysis),
-                "strategy_summary": strategy_spec_to_response(strategy),
-                "knowledge_sufficiency": _dump_model(knowledge_sufficiency),
+                "question_analysis": _dump_model(_state_get(final_state, "question_analysis")),
+                "strategy_summary": strategy_spec_to_response(_state_get(final_state, "strategy")),
                 "documents_used": len(_state_get_list(final_state, "context")),
                 "latencies": _state_get_dict(final_state, "latencies"),
                 "total_time": total_ms,
-                "processing_strategy": getattr(knowledge_sufficiency, "requires_new_knowledge", None) if knowledge_sufficiency else "unknown",
-                "clarification": clarification,
-                "merge_debug": merge_debug,
-                "selected_answer_meta": selected_answer_meta,
+                "clarification": _normalize_clarification_payload(final_state, selected_artifact=selected_artifact),
+                "merge_debug": _state_get_dict(final_state, "merge_debug"),
             }
 
         except Exception as exc:
             logger.error("Debug Error: {}", exc, exc_info=True)
-            degraded = isinstance(exc, strategy_violation)
+            total_ms = compute_total_ms_from_start(request_started_at)
             error_code = getattr(exc, "error_code", "INTERNAL_ERROR")
-            reason = getattr(exc, "reason", str(exc))
-            contract_failure_details = extract_contract_failure_details(reason)
             log_event(
                 "REQ.ERROR",
                 request_id=request_id,
                 conversation_id=conversation_id,
-                stage=stage,
+                stage="debug",
                 error_type=type(exc).__name__,
                 error_code=error_code,
-                reason=reason,
-                mode=(str(getattr(question_analysis, "mode", "") or "").upper() or None),
-                relation=getattr(question_analysis, "relation", None),
-                degraded=int(degraded),
-                total_ms=compute_total_ms_from_start(request_started_at),
-                **contract_failure_details,
+                reason=str(exc),
+                total_ms=total_ms,
             )
             return {
                 "success": False,
                 "error": str(exc),
                 "error_code": error_code,
-                "reason": reason,
-                **contract_failure_details,
+                "reason": str(exc),
             }
         finally:
             set_log_context(request_id=None, conversation_id=None)
 
     @app.get("/health")
     async def health_check(request: Request) -> JSONResponse:
-        """ready 여부에 따라 200 또는 503을 반환하는 기본 health 엔드포인트다."""
+        """L7 로드밸런서용 기본 헬스체크. 엔진 미준비 시 503을 반환합니다."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200 if payload["ready"] else 503)
 
     @app.get("/health/details")
     async def health_details(request: Request) -> JSONResponse:
-        """상세 health payload를 항상 200으로 반환한다."""
+        """상세 헬스 상태 정보를 항상 200으로 반환합니다."""
         payload = await _runtime_status(request)
         return JSONResponse(content=payload, status_code=200)
 
     @app.get("/metrics", response_model=MetricSnapshot, response_model_by_alias=True)
     async def get_metrics(request: Request) -> MetricSnapshot | JSONResponse:
-        """현재 수집된 metrics snapshot을 반환한다."""
+        """현재 시스템의 메트릭 스냅샷을 반환합니다."""
         metrics_http = _get_metrics_http(request)
         if metrics_http is None:
             return JSONResponse(
@@ -1046,11 +1083,10 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     @app.get("/metrics/stream")
     async def stream_metrics(request: Request) -> StreamingResponse:
-        """metrics snapshot을 주기적으로 SSE로 밀어주는 엔드포인트다."""
+        """메트릭 스냅샷을 SSE로 주기적으로 스트리밍합니다."""
         metrics_http = _get_metrics_http(request)
 
         async def event_generator() -> Any:
-            """metrics snapshot을 끊기 전까지 주기적으로 내보낸다."""
             if metrics_http is None:
                 yield "event: error\ndata: {\"error\":\"runtime_not_ready\",\"error_code\":\"RUNTIME_NOT_READY\"}\n\n"
                 return

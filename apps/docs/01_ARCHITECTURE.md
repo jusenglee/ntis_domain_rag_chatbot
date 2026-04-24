@@ -46,6 +46,8 @@ Planner / Contract / Retrieval은 삭제 대상이 아니라 Agent tool backend�
 
 Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 제한된다. Agent는 DB filter, 식별자, JOIN 축을 직접 만들지 않고 의미 수준 tool call만 만든다. Tool backend는 이를 검증 가능한 planner/retrieval 계약으로 변환한다.
 
+명시 연구자/기관의 활동기록은 P1부터 `search_subject_activity`가 담당한다. 이 도구와 `refine_current_subject`는 generic stagewise planner로 재진입하지 않고 subject activity lookup 계약을 직접 컴파일한다. `search_ntis_domain` people activity fast path는 하위 호환으로 유지하되 정식 선택지는 아니다. direct compile은 Agent 결정을 우회하는 휴리스틱이 아니라 Agent가 선택한 tool 의미를 `QuestionAnalysisV3(mode=LOOKUP, head=people|org, action=list)`로 빠르게 변환하는 Tool Backend Guard 최적화다. P2부터 direct subject tool은 `next_current_context`에 subject continuity 후보를 stage하고, answer publication guard 이후에만 `SessionMemory.current_context`로 커밋한다.
+
 | 계층 | 역할 | 주요 산출물 | 비고 |
 |---|---|---|---|
 | **Dialogue Agent** | 전략적 의도 결정 (**L1**) | `AgentDecision` | 사용자의 실질적 의도 진실 확정 |
@@ -79,7 +81,7 @@ Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 
    └─ Agent가 direct_answer / call_tool / ask_clarification / agent_internal_error를 선택.
 
 3. Guarded Tool Adapter
-   └─ Agent tool call을 `IntentPayloadV3` / `QuestionAnalysisV3`로 변환하고 parser-incompatible query token, count contract, tool schema를 검증.
+   └─ Agent tool call을 `IntentPayloadV3` / `QuestionAnalysisV3`로 변환하고 parser-incompatible query token, count contract, tool schema를 검증. subject activity와 current-subject refinement direct compile은 여기서 수행된다.
 
 4. Planner / Contract Assembly
    └─ L1 truth 생성. detail count는 `1/1`로 normalize하되 대상 단일성은 별도 guard로 검증.
@@ -104,7 +106,7 @@ Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 
 문제가 발생했을 때 로그에서 확인해야 할 주요 신호들이다.
 
 *   **요청 시작:** `REQ.START`
-*   **Agent 판단:** `AGENT.STATE_CARD.BUILT`, `AGENT.DECISION`, `AGENT.TOOL_CALL`, `AGENT.TOOL_OBSERVATION`
+*   **Agent 판단:** `AGENT.STATE_CARD.BUILT`, `AGENT.DECISION`, `AGENT.TOOL_CALL`, `AGENT.TOOL_DIRECT_COMPILE`, `AGENT.REFINE_CURRENT_SUBJECT`, `AGENT.CLARIFICATION.RECOVERY`, `AGENT.TOOL_OBSERVATION`
 *   **질의 해석:** `PLANNER.COUNT_CONTRACT`, `PLANNER.PIPELINE`, `PLANNER.ASSEMBLE`
 *   **실행 전략:** `RAG.EXECUTION_MANAGER.RESULT`, `RAG.PLAN`, `RAG.RETRIEVE`, `RAG.JOIN.POLICY`
 *   **데이터 근거:** `RAG.RESULT.TOP`, `RAG.CONTEXT`, `RAG.CTX`, `DISPLAY.SNAPSHOT.BUILT`

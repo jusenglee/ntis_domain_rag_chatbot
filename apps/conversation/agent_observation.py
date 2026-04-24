@@ -33,6 +33,7 @@ class AgentToolExecutionResult(BaseModel):
     observation: AgentObservation
     intent_payload: Optional[Any] = None
     question_analysis: Optional[Any] = None
+    next_current_context: Optional[Any] = None
 
     @property
     def observation_type(self) -> str:

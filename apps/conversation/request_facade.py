@@ -43,9 +43,10 @@ from apps.conversation.turn_interpreter import (
 )
 from apps.conversation.turn_policy import TurnPolicyResult, resolve_turn_policy
 from apps.conversation.turn_trigger import TurnTriggerResult, run_turn_trigger
-from apps.conversation.session_memory import ClarificationContext, SessionMemory, view_state_from_current_context
+from apps.conversation.session_memory import ClarificationContext, SessionMemory, SubjectQueryContext, view_state_from_current_context
 from apps.platform.settings import MAX_TOP_K_SIZE
-from apps.api.runtime_helpers import log_event
+from apps.api.runtime_helpers import log_event, merge_log_fields
+from apps.api.contracts.workflow_models import HardContractV1, QuestionAnalysis, SoftStrategyHintsV1
 from apps.planner.planner_defaults import (
     PLANNER_STAGE1_PROMPT_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
@@ -1937,6 +1938,393 @@ def _build_explicit_only_hint(question: str) -> Dict[str, Any]:
     }
 
 
+def _normalize_text_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = [value]
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _coerce_direct_compile_limit(
+    *,
+    question: str,
+    tool_args: Dict[str, Any],
+    default_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
+) -> int:
+    explicit_count = parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
+    limit = _coerce_positive_int(tool_args.get("limit"))
+    if limit is None and explicit_count != _DISPLAY_LIMIT_SENTINEL:
+        limit = explicit_count
+    if limit is None:
+        limit = default_limit
+    return max(1, min(MAX_TOP_K_SIZE, int(limit)))
+
+
+def _first_tool_text(tool_args: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        values = _normalize_text_list(tool_args.get(key))
+        if values:
+            return values[0]
+    return ""
+
+
+def _normalize_subject_activity_kind(subject_kind: Any) -> str:
+    kind = str(subject_kind or "").strip().lower()
+    if kind in {"person", "researcher"}:
+        return "people"
+    if kind in {"organization", "institution"}:
+        return "org"
+    if kind not in {"people", "org"}:
+        raise ValueError("subject activity direct compile requires subject_kind people or org")
+    return kind
+
+
+def _target_cols_for_subject_activity(target: Any, perf_type: Any = None) -> List[str]:
+    target_norm = str(target or "").strip().lower() or "both"
+    if target_norm == "activity_history":
+        target_norm = "both"
+    if target_norm == "project":
+        return ["ntis_project_v1"]
+    if target_norm == "perf":
+        return ["ntis_perf_v1"]
+    if target_norm == "both":
+        return ["ntis_project_v1", "ntis_perf_v1"]
+    if str(perf_type or "").strip():
+        return ["ntis_perf_v1"]
+    return ["ntis_project_v1", "ntis_perf_v1"]
+
+
+def _direct_compile_year_bounds(*, question: str, tool_args: Dict[str, Any]) -> tuple[list[str], Optional[str], Optional[str]]:
+    explicit_only_hint = _build_explicit_only_hint(question)
+    years = _normalize_text_list(explicit_only_hint.get("years"))
+    raw_year_from = tool_args.get("year_from")
+    raw_year_to = tool_args.get("year_to")
+    year_from = str(raw_year_from or "").strip() or (years[0] if years else None)
+    year_to = str(raw_year_to or "").strip() or (years[-1] if years else None)
+    return years, year_from, year_to
+
+
+def _subject_activity_filters(
+    *,
+    subject_kind: str,
+    subject_name: str,
+    tool_args: Dict[str, Any],
+    years: List[str],
+) -> Dict[str, Any]:
+    filters: Dict[str, Any] = {}
+    if subject_kind == "people":
+        filters["participant_researcher_name"] = [subject_name]
+        affiliation = _first_tool_text(
+            tool_args,
+            "people_affiliation_org_name",
+            "affiliation_org_name",
+            "affiliation",
+            "org_name",
+        )
+        if affiliation:
+            filters["people_affiliation_org_name"] = [affiliation]
+    else:
+        # Organization activity is anchored to participation records.
+        filters["participant_org_name"] = [subject_name]
+        filters["org_role"] = "participant"
+
+    raw_year_from = tool_args.get("year_from")
+    raw_year_to = tool_args.get("year_to")
+    if raw_year_from not in (None, ""):
+        filters["year_from"] = raw_year_from
+    if raw_year_to not in (None, ""):
+        filters["year_to"] = raw_year_to
+    if raw_year_from in (None, "") and raw_year_to in (None, "") and years:
+        filters["years"] = years
+
+    role = _first_tool_text(tool_args, "role", "researcher_role")
+    if role:
+        filters["researcher_role"] = role
+        filters["participant_researcher_role"] = [role]
+
+    perf_type = _first_tool_text(tool_args, "perf_type", "performance_type")
+    if perf_type:
+        filters["perf_types"] = [perf_type]
+
+    return filters
+
+
+async def build_agent_subject_activity_intent_payload(
+    *,
+    question: str,
+    conversation_id: str,
+    subject_kind: str,
+    subject_name: str,
+    tool_args: Optional[Dict[str, Any]] = None,
+    subject_ids_map: Optional[Dict[str, List[str]]] = None,
+    request_id: Optional[str],
+    turn_id: Optional[str],
+    tool_name: str = "search_subject_activity",
+    tool_execution_source: str = "agent_tool_subject_activity",
+    default_limit: int = 10,
+    current_context_type: Optional[str] = None,
+    publication_status: Optional[str] = None,
+    clarification_recovery: Optional[Dict[str, Any]] = None,
+) -> tuple[Any, Any]:
+    """Direct-compile an Agent-selected people/org activity lookup.
+
+    The Dialogue Agent has already selected the tool and the subject axis. For a
+    structured subject activity request, the backend should compile the execution
+    contract directly instead of re-entering stagewise planner LLMs.
+    """
+
+    args = dict(tool_args or {})
+    kind = _normalize_subject_activity_kind(subject_kind)
+    subject = str(subject_name or "").strip()
+    if not subject:
+        raise ValueError("subject activity direct compile requires subject_name")
+
+    materialized_question = str(question or "").strip() or subject
+    explicit_only_hint = _build_explicit_only_hint(materialized_question)
+    years, year_from, year_to = _direct_compile_year_bounds(question=materialized_question, tool_args=args)
+    limit = _coerce_direct_compile_limit(question=materialized_question, tool_args=args, default_limit=default_limit)
+    affiliation = _first_tool_text(args, "people_affiliation_org_name", "affiliation_org_name", "affiliation", "org_name")
+    role = _first_tool_text(args, "role", "researcher_role")
+    perf_type = _first_tool_text(args, "perf_type", "performance_type")
+    target_cols = _target_cols_for_subject_activity(args.get("target"), perf_type)
+    filters = _subject_activity_filters(subject_kind=kind, subject_name=subject, tool_args=args, years=years)
+    ids_map = {
+        str(key): _normalize_text_list(value)
+        for key, value in dict(subject_ids_map or {}).items()
+        if _normalize_text_list(value)
+    }
+
+    kws: List[str] = []
+    raw_intent = classify_query_intent(materialized_question, kws, hint=explicit_only_hint)
+    normalized_intent_base = normalize_intent(
+        raw_intent,
+        query=materialized_question,
+        keywords=kws,
+        hint_years=list(explicit_only_hint.get("years", [])),
+        hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
+        hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
+    )
+    normalized_intent_base = replace(
+        normalized_intent_base,
+        action="list",
+        base_route=kind,
+        relation=None,
+        mode="lookup",
+        output_type="list",
+        retrieval_query=materialized_question,
+        planner_limit=limit,
+        years=years,
+        year_from=year_from,
+        year_to=year_to,
+        people_terms=[subject] if kind == "people" else [],
+        org_terms=[subject] if kind == "org" else [],
+        participant_org_terms=[subject] if kind == "org" else [],
+        org_role=("participant" if kind == "org" else ("affiliation" if affiliation else None)),
+        people_affiliation_org_terms=[affiliation] if kind == "people" and affiliation else [],
+        perf_types=[perf_type] if perf_type else list(explicit_only_hint.get("perf_types", [])),
+        keywords=[*list(kws or []), *([role] if role else [])],
+        ids_map=ids_map,
+        ids_flat=[value for values in ids_map.values() for value in values],
+        target_cols=target_cols,
+        lookup_filter_policy="name_must",
+    )
+    question_analysis = QuestionAnalysis(
+        mode="LOOKUP",
+        head=kind,
+        action="list",
+        relation=None,
+        join_key_mode=None,
+        output_type="list",
+        ids_map=ids_map,
+        candidate_keys={},
+        filters=filters,
+        target_cols=target_cols,
+        limit=limit,
+        display_limit=limit,
+        retrieval_query=materialized_question,
+        confidence=0.95,
+        hard_contract=HardContractV1(),
+        soft_strategy_hints=SoftStrategyHintsV1(
+            years=years,
+            people_terms=[subject] if kind == "people" else [],
+            org_terms=([subject] if kind == "org" else ([affiliation] if affiliation else [])),
+            must_keep_terms=[subject],
+            semantic_kind="subject_activity",
+            org_role_hint="participant_org" if kind == "org" else ("affiliation_org" if affiliation else None),
+        ),
+        planner_source=None,
+    )
+    count_validation = _resolve_question_analysis_count(
+        question_analysis,
+        question=materialized_question,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    normalized_intent, planner_applied = apply_question_analysis_v3(
+        normalized_intent_base,
+        question_analysis,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    turn_contract = _build_turn_contract(
+        normalized_intent=normalized_intent,
+        question_analysis=question_analysis,
+        count_validation=count_validation,
+    )
+    log_event(
+        "AGENT.TOOL_DIRECT_COMPILE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        tool_name=tool_name,
+        subject_kind=kind,
+        subject_name=subject,
+        publication_status=publication_status,
+        current_context_type=current_context_type,
+        tool_execution_source=tool_execution_source,
+        withheld_but_subject_retained=bool(publication_status == "answer_withheld_subject_retained"),
+        planner_llm_skipped=1,
+        mode="LOOKUP",
+        action="list",
+        target_cols=target_cols,
+        limit=limit,
+    )
+    log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="agent_subject_activity_direct_compile",
+        status="success",
+        front_controller="agent",
+        planner_applied=int(planner_applied),
+        planner_failed=0,
+        planner_stagewise_enabled=0,
+        planner_llm_skipped=1,
+        schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
+    )
+    payload = _build_intent_payload_object(
+        normalized_intent,
+        question_analysis,
+        followup_resolution={
+            "followup_resolution_status": "none",
+            "explicit_followup": False,
+            "followup_reference_kind": None,
+        },
+        turn_id=turn_id,
+        turn_contract=turn_contract,
+        count_validation=count_validation,
+        context_router={
+            "invoked": False,
+            "status": "not_applicable",
+            "source": tool_execution_source,
+            "confidence": 0.0,
+        },
+        clarification_recovery=clarification_recovery,
+    )
+    if hasattr(payload, "strategy_meta") and isinstance(payload.strategy_meta, dict):
+        payload.strategy_meta.update(
+            {
+                "tool_execution_source": tool_execution_source,
+                "planner_llm_skipped": True,
+                "direct_compile_subject_kind": kind,
+                "direct_compile_subject_name": subject,
+                "direct_compile_publication_status": publication_status,
+            }
+        )
+    return payload, question_analysis
+
+
+async def build_agent_people_activity_intent_payload(
+    *,
+    question: str,
+    conversation_id: str,
+    subject_name: str,
+    tool_args: Optional[Dict[str, Any]] = None,
+    request_id: Optional[str],
+    turn_id: Optional[str],
+) -> tuple[Any, Any]:
+    """Backward-compatible wrapper for the legacy search_ntis_domain fast path."""
+
+    return await build_agent_subject_activity_intent_payload(
+        question=question,
+        conversation_id=conversation_id,
+        subject_kind="people",
+        subject_name=subject_name,
+        tool_args=tool_args,
+        request_id=request_id,
+        turn_id=turn_id,
+        tool_name="search_ntis_domain",
+        tool_execution_source="agent_tool_people_fast_path",
+        default_limit=_DEFAULT_RETRIEVAL_LIMIT,
+    )
+
+
+async def build_agent_current_subject_refinement_intent_payload(
+    *,
+    question: str,
+    conversation_id: str,
+    current_context: SubjectQueryContext,
+    tool_args: Optional[Dict[str, Any]] = None,
+    request_id: Optional[str],
+    turn_id: Optional[str],
+    clarification_recovery: Optional[Dict[str, Any]] = None,
+) -> tuple[Any, Any]:
+    """Direct-compile a refinement against SessionMemory.current_context."""
+
+    if not isinstance(current_context, SubjectQueryContext):
+        raise ValueError("refine_current_subject requires SubjectQueryContext")
+    if not bool(current_context.followup_rights.refinement_allowed):
+        raise ValueError("current subject refinement is not allowed")
+
+    args = dict(tool_args or {})
+    args.setdefault("target", "activity_history")
+    log_event(
+        "AGENT.REFINE_CURRENT_SUBJECT",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        tool_name="refine_current_subject",
+        subject_kind=current_context.subject_kind,
+        subject_name=current_context.subject_name,
+        publication_status=current_context.publication_status,
+        current_context_type=current_context.context_type,
+        tool_execution_source="agent_tool_refine_current_subject",
+        withheld_but_subject_retained=bool(current_context.publication_status == "answer_withheld_subject_retained"),
+        planner_llm_skipped=1,
+        year_from=args.get("year_from"),
+        year_to=args.get("year_to"),
+        role=args.get("role"),
+        target=args.get("target"),
+    )
+    return await build_agent_subject_activity_intent_payload(
+        question=question,
+        conversation_id=conversation_id,
+        subject_kind=current_context.subject_kind,
+        subject_name=current_context.subject_name,
+        subject_ids_map=dict(current_context.subject_ids_map or {}),
+        tool_args=args,
+        request_id=request_id,
+        turn_id=turn_id,
+        tool_name="refine_current_subject",
+        tool_execution_source="agent_tool_refine_current_subject",
+        default_limit=10,
+        current_context_type=current_context.context_type,
+        publication_status=current_context.publication_status,
+        clarification_recovery=clarification_recovery,
+    )
+
+
 async def build_agent_intent_payload(
     *,
     question: str,
@@ -2015,27 +2403,32 @@ async def build_agent_intent_payload(
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
     )
-    return (
-        _build_intent_payload_object(
-            normalized_intent,
-            question_analysis,
-            followup_resolution={
-                "followup_resolution_status": "agent_tool",
-                "explicit_followup": False,
-                "followup_reference_kind": None,
-            },
-            turn_id=turn_id,
-            turn_contract=turn_contract,
-            count_validation=count_validation,
-            context_router={
-                "invoked": False,
-                "status": "not_applicable",
-                "source": "agent_front_controller",
-                "confidence": 0.0,
-            },
-        ),
+    payload = _build_intent_payload_object(
+        normalized_intent,
         question_analysis,
+        followup_resolution={
+            "followup_resolution_status": "none",
+            "explicit_followup": False,
+            "followup_reference_kind": None,
+        },
+        turn_id=turn_id,
+        turn_contract=turn_contract,
+        count_validation=count_validation,
+        context_router={
+            "invoked": False,
+            "status": "not_applicable",
+            "source": "agent_front_controller",
+            "confidence": 0.0,
+        },
     )
+    if hasattr(payload, "strategy_meta") and isinstance(payload.strategy_meta, dict):
+        payload.strategy_meta.update(
+            {
+                "tool_execution_source": "agent_tool_stagewise",
+                "planner_llm_skipped": False,
+            }
+        )
+    return payload, question_analysis
 
 
 async def build_intent_payload(
@@ -2110,9 +2503,11 @@ async def build_intent_payload(
     if clarification_recovery_meta:
         log_event(
             "TURN.CLARIFICATION_RECOVERY",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            **clarification_recovery_meta,
+            **merge_log_fields(
+                clarification_recovery_meta,
+                request_id=request_id,
+                conversation_id=conversation_id,
+            ),
         )
     subject_refinement_kind, subject_refinement_name = (None, None)
     if not has_explicit_seed:

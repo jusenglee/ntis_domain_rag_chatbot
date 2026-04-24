@@ -61,9 +61,8 @@ class SubjectQueryContext(BaseModel):
     subject_ids_map: Dict[str, List[str]] = Field(default_factory=dict)
     result_kind: str = "project"
     result_manifest: Optional[DisplaySnapshot] = None
-    # ADR-0015 section 11.3: dialogue continuity 상태를 명시적으로 추적.
-    # 기본값 None 은 "아직 publication 판정 전" 의 초기 상태.
-    publication_status: Optional[SubjectPublicationStatus] = None
+    # Dialogue continuity status is tracked separately from answer publication truth.
+    publication_status: SubjectPublicationStatus = "answer_published"
     followup_rights: FollowupRights = Field(
         default_factory=lambda: FollowupRights(refinement_allowed=True)
     )
@@ -72,6 +71,8 @@ class SubjectQueryContext(BaseModel):
     @classmethod
     def _migrate_legacy_publication_status(cls, value: Any) -> Any:
         """구버전 SessionMemory 에 저장된 'publishable' 값을 신규 어휘로 이관."""
+        if value in (None, ""):
+            return "answer_published"
         if isinstance(value, str):
             return _LEGACY_PUBLICATION_STATUS_MIGRATION.get(value, value)
         return value
@@ -258,6 +259,34 @@ def _clarification_reason_from_payload(answer_meta: Dict[str, Any], strategy_met
     return None
 
 
+def _is_internal_error_answer(answer_meta: Dict[str, Any], strategy_meta: Dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            answer_meta.get("answer_kind"),
+            answer_meta.get("answer_source"),
+            answer_meta.get("error_code"),
+            answer_meta.get("error_reason"),
+            strategy_meta.get("error_type"),
+            strategy_meta.get("tool_execution_error"),
+        )
+    )
+    if "error" in str(answer_meta.get("answer_kind") or "").strip().lower():
+        return True
+    return any(
+        token in haystack
+        for token in (
+            "planner_error",
+            "tool_error",
+            "schema_error",
+            "provider_error",
+            "agent_internal_error",
+            "internal_error",
+            "llmjsonextractionerror",
+        )
+    )
+
+
 def _build_unresolved_constraint_snapshot(
     *,
     intent_payload: Any,
@@ -357,6 +386,29 @@ def _followup_rights_label(rights: Optional[FollowupRights]) -> str:
     return "none"
 
 
+def _answer_publishability_from_subject_status(publication_status: Any) -> str:
+    status = str(publication_status or "").strip()
+    if status == "answer_withheld_subject_retained":
+        return "withheld_partial"
+    if status == "clarification_pending":
+        return "blocked"
+    return "publishable"
+
+
+def _subject_continuity_retained(context: SubjectQueryContext) -> bool:
+    status = str(context.publication_status or "").strip()
+    return bool(context.followup_rights.refinement_allowed and status != "clarification_pending")
+
+
+def _current_subject_confidence(publication_status: Any) -> float:
+    status = str(publication_status or "").strip()
+    if status == "answer_withheld_subject_retained":
+        return 0.85
+    if status == "clarification_pending":
+        return 0.0
+    return 1.0
+
+
 def _snapshot_visible_count(snapshot: Optional[DisplaySnapshot]) -> int:
     if not isinstance(snapshot, DisplaySnapshot):
         return 0
@@ -384,6 +436,11 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
         "refinement_allowed": False,
         "subject_kind": None,
         "subject_name": None,
+        "subject_publication_status": None,
+        "subject_continuity_retained": False,
+        "answer_publishability": None,
+        "subject_refinement_allowed": False,
+        "current_subject_confidence": None,
     }
 
     if isinstance(context, PublishedManifestContext):
@@ -394,24 +451,32 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
             "recent_mention_count": _snapshot_visible_count(context.result_manifest),
             "last_turn_kind": "list",
             "last_answer_publishability": "publishable",
+            "answer_publishability": "publishable",
             "last_followup_rights": _followup_rights_label(context.followup_rights),
             "result_kind": context.result_kind,
         }
 
     if isinstance(context, SubjectQueryContext):
         refinement_allowed = bool(context.followup_rights.refinement_allowed)
+        answer_publishability = _answer_publishability_from_subject_status(context.publication_status)
+        continuity_retained = _subject_continuity_retained(context)
         return {
             **base,
             "has_active_focus": True,
             "subject_index_count": 1,
             "recent_mention_count": 1,
             "last_turn_kind": "subject_query",
-            "last_answer_publishability": "publishable" if refinement_allowed else "blocked",
+            "last_answer_publishability": answer_publishability,
             "last_followup_rights": "none",
             "refinement_allowed": refinement_allowed,
             "subject_kind": context.subject_kind,
             "subject_name": context.subject_name,
             "result_kind": context.result_kind,
+            "subject_publication_status": context.publication_status,
+            "subject_continuity_retained": continuity_retained,
+            "answer_publishability": answer_publishability,
+            "subject_refinement_allowed": refinement_allowed,
+            "current_subject_confidence": _current_subject_confidence(context.publication_status),
         }
 
     if isinstance(context, DetailAnchorContext):
@@ -421,6 +486,7 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
             "recent_mention_count": 1,
             "last_turn_kind": "detail",
             "last_answer_publishability": "publishable",
+            "answer_publishability": "publishable",
             "last_followup_rights": "none",
             "anchor_entity_kind": context.anchor.kind,
             "anchor_reuse_allowed": True,
@@ -431,6 +497,7 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
             **base,
             "last_turn_kind": "clarification",
             "last_answer_publishability": "blocked",
+            "answer_publishability": "blocked",
             "last_followup_rights": "none",
             "clarification_reason": context.reason,
             "unresolved_question": context.unresolved_question,
@@ -453,32 +520,44 @@ def current_context_followup_contract(memory: Optional[SessionMemory]) -> Dict[s
         "has_anchor_context": False,
         "anchor_reuse_allowed": False,
         "refinement_allowed": False,
+        "subject_publication_status": None,
+        "subject_continuity_retained": False,
+        "answer_publishability": "not_applicable",
+        "subject_refinement_allowed": False,
+        "current_subject_confidence": None,
     }
 
     if isinstance(context, PublishedManifestContext):
         contract.update(
             {
                 "previous_publishability": "publishable",
+                "answer_publishability": "publishable",
                 "previous_followup_rights": _followup_rights_label(context.followup_rights),
                 "has_manifest": True,
             }
         )
     elif isinstance(context, SubjectQueryContext):
+        answer_publishability = _answer_publishability_from_subject_status(context.publication_status)
+        refinement_allowed = bool(context.followup_rights.refinement_allowed)
         contract.update(
             {
-                "previous_publishability": (
-                    "publishable" if context.followup_rights.refinement_allowed else "blocked"
-                ),
+                "previous_publishability": answer_publishability,
                 "previous_followup_rights": "none",
-                "refinement_allowed": bool(context.followup_rights.refinement_allowed),
+                "refinement_allowed": refinement_allowed,
                 "subject_kind": context.subject_kind,
                 "subject_name": context.subject_name,
+                "subject_publication_status": context.publication_status,
+                "subject_continuity_retained": _subject_continuity_retained(context),
+                "answer_publishability": answer_publishability,
+                "subject_refinement_allowed": refinement_allowed,
+                "current_subject_confidence": _current_subject_confidence(context.publication_status),
             }
         )
     elif isinstance(context, DetailAnchorContext):
         contract.update(
             {
                 "previous_publishability": "publishable",
+                "answer_publishability": "publishable",
                 "previous_followup_rights": "none",
                 "has_anchor_context": True,
                 "anchor_reuse_allowed": True,
@@ -489,6 +568,7 @@ def current_context_followup_contract(memory: Optional[SessionMemory]) -> Dict[s
         contract.update(
             {
                 "previous_publishability": "blocked",
+                "answer_publishability": "blocked",
                 "previous_followup_rights": "none",
             }
         )
@@ -501,28 +581,50 @@ def build_current_context(
     view_state: Optional[ConversationViewState],
     selected_answer_meta: Optional[Dict[str, Any]] = None,
     intent_payload: Any = None,
+    staged_current_context: Any = None,
+    retrieval_evidence_count: int = 0,
 ) -> CurrentContext:
-    if view_state is None:
-        return EmptyContext()
+    resolved_view_state = view_state if view_state is not None else ConversationViewState()
+    staged_context = load_current_context(staged_current_context) if staged_current_context is not None else EmptyContext()
+    staged_subject = staged_context if isinstance(staged_context, SubjectQueryContext) else None
 
     answer_meta = dict(selected_answer_meta or {})
     strategy_meta = _strategy_meta_payload(intent_payload)
     clarification_reason = _clarification_reason_from_payload(answer_meta, strategy_meta)
     publishability = str(answer_meta.get("answer_publishability") or "").strip().lower()
-    visible_snapshot = getattr(view_state, "visible_answer_manifest", None)
-    active_scope = getattr(view_state, "active_scope", None)
+    visible_snapshot = getattr(resolved_view_state, "visible_answer_manifest", None)
+    active_scope = getattr(resolved_view_state, "active_scope", None)
     active_snapshot = getattr(active_scope, "result_set", None)
     focus = getattr(active_scope, "focus", None) or getattr(active_scope, "child_anchor", None)
-    contract = dict(getattr(view_state, "last_query_contract", {}) or {})
+    contract = dict(getattr(resolved_view_state, "last_query_contract", {}) or {})
     followup_rights = str(contract.get("followup_rights") or "source_allowed").strip().lower()
     subject_kind, subject_name = _subject_seed_from_intent(intent_payload)
+    if staged_subject is not None:
+        subject_kind = subject_kind or staged_subject.subject_kind
+        subject_name = subject_name or staged_subject.subject_name
+    internal_error_answer = _is_internal_error_answer(answer_meta, strategy_meta)
 
-    subject_manifest = active_snapshot if isinstance(active_snapshot, DisplaySnapshot) else visible_snapshot
+    staged_manifest = staged_subject.result_manifest if staged_subject is not None else None
+    subject_manifest = (
+        active_snapshot
+        if isinstance(active_snapshot, DisplaySnapshot)
+        else visible_snapshot
+        if isinstance(visible_snapshot, DisplaySnapshot)
+        else staged_manifest
+    )
+    evidence_count = max(0, int(retrieval_evidence_count or 0))
+    has_subject_evidence = bool(
+        _snapshot_visible_count(subject_manifest)
+        or _snapshot_visible_count(staged_manifest)
+        or evidence_count > 0
+    )
     subject_can_be_retained = (
-        publishability == "publishable"
-        or (
-            publishability in {"withheld_partial", "blocked"}
-            and isinstance(subject_manifest, DisplaySnapshot)
+        not internal_error_answer
+        and bool(subject_kind and subject_name)
+        and has_subject_evidence
+        and (
+            publishability == "publishable"
+            or publishability in {"withheld_partial", "blocked"}
         )
     )
     if subject_can_be_retained and subject_kind and subject_name:
@@ -531,11 +633,34 @@ def build_current_context(
             if publishability == "publishable"
             else "answer_withheld_subject_retained"
         )
-        manifest = active_snapshot if isinstance(active_snapshot, DisplaySnapshot) else visible_snapshot
+        manifest = subject_manifest if isinstance(subject_manifest, DisplaySnapshot) else None
+        subject_ids_map: Dict[str, List[str]] = {}
+        if staged_subject is not None:
+            subject_ids_map.update(
+                {
+                    str(key): list(values)
+                    for key, values in dict(staged_subject.subject_ids_map or {}).items()
+                    if values
+                }
+            )
+        question_analysis_ids = _as_payload(_question_analysis_payload(intent_payload).get("ids_map"))
+        subject_ids_map.update(
+            {
+                str(key): _clean_list(value)
+                for key, value in question_analysis_ids.items()
+                if _clean_list(value)
+            }
+        )
         return SubjectQueryContext(
             subject_kind=subject_kind,
             subject_name=subject_name,
-            result_kind=str(getattr(manifest, "context_kind", None) or contract.get("context_kind") or "project"),
+            subject_ids_map=subject_ids_map,
+            result_kind=str(
+                getattr(manifest, "context_kind", None)
+                or getattr(staged_subject, "result_kind", None)
+                or contract.get("context_kind")
+                or "project"
+            ),
             result_manifest=manifest,
             publication_status=publication_status,
             followup_rights=FollowupRights(refinement_allowed=True),
@@ -551,7 +676,7 @@ def build_current_context(
     if publishability == "publishable" and isinstance(focus, FocusEntity):
         return DetailAnchorContext(anchor=focus)
 
-    if clarification_reason:
+    if clarification_reason and not internal_error_answer:
         unresolved_question, unresolved_constraints, requested_refinement = _build_unresolved_constraint_snapshot(
             intent_payload=intent_payload,
             answer_meta=answer_meta,
@@ -620,13 +745,8 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
         publication_status = str(context.publication_status or "").strip()
         # SubjectQueryContext.publication_status (ADR-0015 어휘) 를
         # last_query_contract.answer_publishability (기존 파이프라인 어휘) 로 매핑.
-        answer_publishability = (
-            "publishable"
-            if publication_status == "answer_published" or not publication_status
-            else "withheld_partial"
-            if publication_status == "answer_withheld_subject_retained"
-            else "blocked"
-        )
+        answer_publishability = _answer_publishability_from_subject_status(publication_status)
+        refinement_allowed = bool(context.followup_rights.refinement_allowed)
         focus = FocusEntity(
             kind=context.subject_kind,
             source="subject_query_context",
@@ -648,8 +768,12 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
                     "subject_name": context.subject_name,
                     "answer_publishability": answer_publishability,
                     "publication_status": publication_status or answer_publishability,
+                    "subject_publication_status": publication_status or "answer_published",
+                    "subject_continuity_retained": _subject_continuity_retained(context),
                     "followup_rights": "none",
-                    "refinement_allowed": bool(context.followup_rights.refinement_allowed),
+                    "refinement_allowed": refinement_allowed,
+                    "subject_refinement_allowed": refinement_allowed,
+                    "current_subject_confidence": _current_subject_confidence(publication_status),
                 },
             }
         )

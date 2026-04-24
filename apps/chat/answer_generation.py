@@ -32,7 +32,7 @@ from apps.evidence.canonical_context import (
     render_canonical_evidence_debug_text,
     render_canonical_evidence_text,
 )
-from apps.conversation.session_memory import build_current_context
+from apps.conversation.session_memory import SubjectQueryContext, build_current_context
 from apps.conversation.view_state import get_active_result_snapshot, set_visible_answer_manifest
 from apps.api.streaming.contracts import AnswerArtifact
 from apps.evidence.canonical_evidence import build_canonical_evidence
@@ -1363,11 +1363,66 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         if isinstance(selected_artifact, AnswerArtifact)
         else selected_meta
     )
+    retrieval_evidence_count = max(
+        len(canonical_evidence or []) if isinstance(canonical_evidence, list) else 0,
+        len(getattr(state, "context", None) or []) if isinstance(getattr(state, "context", None), list) else 0,
+        len(getattr(state, "prev_context", None) or []) if isinstance(getattr(state, "prev_context", None), list) else 0,
+        int(getattr(active_result_snapshot, "visible_count", 0) or 0) if active_result_snapshot is not None else 0,
+    )
     next_current_context = build_current_context(
         view_state=next_view_state,
         selected_answer_meta=selected_answer_meta,
         intent_payload=getattr(state, "intent_payload", None),
+        staged_current_context=getattr(state, "next_current_context", None),
+        retrieval_evidence_count=retrieval_evidence_count,
     )
+    intent_payload_for_context = getattr(state, "intent_payload", None)
+    normalized_for_context = getattr(intent_payload_for_context, "normalized_intent", None)
+    strategy_meta_for_context = dict(getattr(intent_payload_for_context, "strategy_meta", {}) or {})
+    subject_kind_for_context = None
+    subject_name_for_context = None
+    people_terms_for_context = list(getattr(normalized_for_context, "people_terms", []) or [])
+    org_terms_for_context = list(getattr(normalized_for_context, "org_terms", []) or [])
+    if people_terms_for_context:
+        subject_kind_for_context = "people"
+        subject_name_for_context = str(people_terms_for_context[0] or "").strip() or None
+    elif org_terms_for_context:
+        subject_kind_for_context = "org"
+        subject_name_for_context = str(org_terms_for_context[0] or "").strip() or None
+    if isinstance(next_current_context, SubjectQueryContext):
+        log_event(
+            "AGENT.SUBJECT_CONTEXT.RETAINED",
+            request_id=getattr(state, "request_id", None),
+            conversation_id=getattr(state, "conversation_id", None),
+            turn_id=getattr(state, "turn_id", None),
+            subject_kind=next_current_context.subject_kind,
+            subject_name=next_current_context.subject_name,
+            publication_status=next_current_context.publication_status,
+            answer_publishability=selected_answer_meta.get("answer_publishability") if isinstance(selected_answer_meta, dict) else None,
+            subject_continuity_retained=bool(next_current_context.followup_rights.refinement_allowed),
+            current_context_type=next_current_context.context_type,
+            tool_execution_source=strategy_meta_for_context.get("tool_execution_source"),
+            withheld_but_subject_retained=bool(
+                next_current_context.publication_status == "answer_withheld_subject_retained"
+            ),
+            planner_llm_skipped=strategy_meta_for_context.get("planner_llm_skipped"),
+        )
+    elif subject_kind_for_context and subject_name_for_context:
+        log_event(
+            "AGENT.SUBJECT_CONTEXT.SKIPPED",
+            request_id=getattr(state, "request_id", None),
+            conversation_id=getattr(state, "conversation_id", None),
+            turn_id=getattr(state, "turn_id", None),
+            subject_kind=subject_kind_for_context,
+            subject_name=subject_name_for_context,
+            publication_status=selected_answer_meta.get("answer_publishability") if isinstance(selected_answer_meta, dict) else None,
+            answer_publishability=selected_answer_meta.get("answer_publishability") if isinstance(selected_answer_meta, dict) else None,
+            subject_continuity_retained=False,
+            current_context_type=getattr(next_current_context, "context_type", None),
+            tool_execution_source=strategy_meta_for_context.get("tool_execution_source"),
+            withheld_but_subject_retained=False,
+            planner_llm_skipped=strategy_meta_for_context.get("planner_llm_skipped"),
+        )
 
     merge_debug = {
         "policy": _DUAL_MODEL_MERGE_POLICY,
