@@ -117,7 +117,7 @@ class QuestionAnalysisV3(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     hard_contract: HardContractV1 = Field(default_factory=HardContractV1)
     soft_strategy_hints: SoftStrategyHintsV1 = Field(default_factory=SoftStrategyHintsV1)
-    planner_source: Optional[Literal["legacy", "stagewise"]] = None
+    planner_source: Optional[Literal["legacy", "stagewise", "direct_compile"]] = None
 
     _ALLOWED_RELATIONS = {"project_perf", "perf_project"}
     _FORBIDDEN_PEOPLE_ORG_RELATIONS = {

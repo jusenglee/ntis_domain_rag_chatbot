@@ -1,4 +1,13 @@
-"""Conversation-memory helpers isolated from the server entrypoint."""
+"""
+대화의 맥락과 세션 정보를 영속성 저장소(KVStore)와 주고받는 기능을 담당하는 모듈입니다.
+
+[설계 의도: ADR-0015/ADR-0016 기반 대화 상태 관리]
+사용자와의 멀티턴 대화가 끊기지 않도록, 매 턴이 종료될 때마다 'SessionMemory'를 저장하고 
+새로운 요청이 들어올 때 복원합니다. 단순히 채팅 내역만 저장하는 것이 아니라, 
+사용자가 현재 무엇을 보고 있는지(ViewState), 어떤 주제에 집중하고 있는지(CurrentContext) 등의 
+풍부한 상태 정보를 구조화하여 관리합니다. 이를 통해 "그 과제에 대해 더 알려줘"와 같은 
+대화 맥락 추론이 가능해집니다.
+"""
 
 from __future__ import annotations
 

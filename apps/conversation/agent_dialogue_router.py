@@ -1,3 +1,20 @@
+"""
+대화의 제어권을 쥐고 사용자의 의도를 분석하여 다음 행동을 결정하는 'Dialogue Agent'의 실행 엔진입니다.
+
+[설계 의도: ADR-0001 LLM-First Dialogue Agent]
+이 모듈은 시스템의 'Front-Controller' 역할을 수행합니다. 사용자의 자연어 질문을 
+규칙 기반으로 처리하던 과거 방식에서 벗어나, LLM이 현재 대화 상태(ConversationStateCard)와 
+이전 기록(Recent Chat)을 종합적으로 판단하여 최적의 도구(Tool)를 선택하거나 
+사용자에게 되묻는(Clarification) 결정을 내립니다.
+
+주요 역할:
+1. Decision Making: AgentDecision 구조체를 통해 도구 호출, 직접 답변, 보정 요청 등을 결정합니다.
+2. Self-Repair: LLM이 구조화된 JSON 형식을 어겼을 경우, 오류 내용을 바탕으로 스스로 형식을 수정하여 
+   재시도하는 복원 로직을 포함합니다.
+3. Observability: 에이전트가 왜 그런 결정을 내렸는지에 대한 추론 근거(Reasoning Summary)를 
+   로그로 남겨 시스템의 가독성을 높입니다.
+"""
+
 from __future__ import annotations
 
 import asyncio

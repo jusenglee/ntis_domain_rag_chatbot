@@ -2012,8 +2012,14 @@ def _direct_compile_year_bounds(*, question: str, tool_args: Dict[str, Any]) -> 
     years = _normalize_text_list(explicit_only_hint.get("years"))
     raw_year_from = tool_args.get("year_from")
     raw_year_to = tool_args.get("year_to")
-    year_from = str(raw_year_from or "").strip() or (years[0] if years else None)
-    year_to = str(raw_year_to or "").strip() or (years[-1] if years else None)
+    year_from = str(raw_year_from or "").strip() or None
+    year_to = str(raw_year_to or "").strip() or None
+    # Only fall back to years-list when the agent supplied neither bound explicitly.
+    # Mixing an explicit year_from with years[-1] as year_to collapses open-range
+    # semantics like "2020년 이후" (gte=2020) into an exact-year filter (gte=2020, lte=2020).
+    if year_from is None and year_to is None:
+        year_from = years[0] if years else None
+        year_to = years[-1] if years else None
     return years, year_from, year_to
 
 
@@ -2165,7 +2171,7 @@ async def build_agent_subject_activity_intent_payload(
             semantic_kind="subject_activity",
             org_role_hint="participant_org" if kind == "org" else ("affiliation_org" if affiliation else None),
         ),
-        planner_source=None,
+        planner_source="direct_compile",
     )
     count_validation = _resolve_question_analysis_count(
         question_analysis,
@@ -2297,13 +2303,16 @@ async def build_agent_current_subject_refinement_intent_payload(
         tool_name="refine_current_subject",
         subject_kind=current_context.subject_kind,
         subject_name=current_context.subject_name,
+        identity_status=current_context.identity_status,
         publication_status=current_context.publication_status,
         current_context_type=current_context.context_type,
         tool_execution_source="agent_tool_refine_current_subject",
         withheld_but_subject_retained=bool(current_context.publication_status == "answer_withheld_subject_retained"),
+        identity_ambiguous=bool(current_context.identity_status == "ambiguous_name_only"),
         planner_llm_skipped=1,
         year_from=args.get("year_from"),
         year_to=args.get("year_to"),
+        affiliation_org_name=args.get("affiliation_org_name"),
         role=args.get("role"),
         target=args.get("target"),
     )

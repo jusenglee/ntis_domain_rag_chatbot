@@ -1,3 +1,9 @@
+"""NTIS RAG 요청 처리 워크플로우 빌더 모듈.
+
+LangGraph를 사용하여 질문 분석, 도구 실행, RAG 검색, 답변 생성 및 병합의 전체 과정을
+상태 머신(State Machine) 형태로 정의하고 조립합니다.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -27,8 +33,10 @@ from apps.retrieval.retrieval_workflow import node_knowledge_sufficiency, node_r
 
 
 def route_after_rule(state: Any) -> str:
-    """Route direct-answer prechecks or the normal agent front-controller path."""
-
+    """
+    사전 규칙 체크(rule_precheck) 이후의 경로를 결정합니다.
+    규칙에 의해 즉시 답변이 결정된 경우 'direct_answer'로, 그렇지 않으면 일반 에이전트 흐름으로 이동합니다.
+    """
     rule_decision = getattr(state, "rule_decision", None)
     if rule_decision and getattr(rule_decision, "action", None) == "direct_answer":
         return "direct_answer"
@@ -36,8 +44,12 @@ def route_after_rule(state: Any) -> str:
 
 
 def route_after_agent_decision(state: Any) -> str:
-    """Route the dialogue-agent decision as the front-controller decision."""
-
+    """
+    대화 에이전트(run_dialogue_agent)의 의사결정에 따라 경로를 결정합니다.
+    - direct_answer: 에이전트가 즉시 답변 가능
+    - call_tool: 검색 도구 실행 필요
+    - ask_clarification: 사용자에게 추가 질문 필요
+    """
     decision = getattr(state, "agent_decision", None)
     decision_type = str(getattr(decision, "decision_type", "") or "").strip()
     if decision_type == "direct_answer":
@@ -50,8 +62,11 @@ def route_after_agent_decision(state: Any) -> str:
 
 
 def route_after_agent_tool(state: Any) -> str:
-    """Continue to retrieval only when the tool produced a guarded intent."""
-
+    """
+    에이전트 도구 실행(execute_agent_tool) 이후의 경로를 결정합니다.
+    도구가 정상적으로 검색 의도를 생성한 경우 지식 충분성 판단 단계로 가고,
+    실패한 경우 1회 재시도하거나 에러 노드로 이동합니다.
+    """
     observation = getattr(state, "agent_observation", None)
     if (
         str(getattr(observation, "observation_type", "") or "") == "planned_intent"
@@ -59,6 +74,7 @@ def route_after_agent_tool(state: Any) -> str:
         and getattr(state, "agent_tool_question_analysis", None) is not None
     ):
         return "judge_knowledge_sufficiency"
+    
     retry_count = int(getattr(state, "agent_tool_retry_count", 0) or 0)
     if retry_count < 1:
         return "retry_agent_after_tool_error"
@@ -66,8 +82,11 @@ def route_after_agent_tool(state: Any) -> str:
 
 
 def route_after_knowledge_sufficiency(state: Any) -> str | list[str]:
-    """Run answer generation in parallel when previous context is already sufficient."""
-
+    """
+    지식 충분성 판단(judge_knowledge_sufficiency) 이후의 경로를 결정합니다.
+    이미 충분한 지식이 대화 맥락에 있다면 검색을 건너뛰고 답변 생성 단계(병렬)로 바로 진입합니다.
+    그렇지 않으면 실제 RAG 검색(rag_search)을 수행합니다.
+    """
     knowledge_sufficiency = getattr(state, "knowledge_sufficiency", None)
     prev_context = getattr(state, "prev_context", None)
     if (
@@ -75,13 +94,17 @@ def route_after_knowledge_sufficiency(state: Any) -> str | list[str]:
         and getattr(knowledge_sufficiency, "requires_new_knowledge", None) == "low"
         and prev_context
     ):
+        # 지식이 충분하면 검색 생략 후 두 모델 병렬 실행
         return ["generate_answer_solar", "generate_answer_gemma"]
     return "rag_search"
 
 
 def route_after_rag_search(state: Any) -> str | list[str]:
-    """Route empty retrieval results to bounded answer generation or configured retry."""
-
+    """
+    RAG 검색(rag_search) 결과에 따라 경로를 결정합니다.
+    검색 결과가 없거나 부족한 경우 검색 조건을 완화하여 재시도(relax_and_retry)하거나,
+    결과가 확보된 경우 답변 생성 단계로 이동합니다.
+    """
     qa = getattr(state, "question_analysis", None)
     return decide_post_retrieval_route(
         context=getattr(state, "context", None) or [],
@@ -93,11 +116,15 @@ def route_after_rag_search(state: Any) -> str | list[str]:
 
 
 def build_request_workflow() -> Any:
-    """Assemble the fixed request workflow using module-owned nodes."""
-
+    """
+    전체 워크플로우 그래프를 생성하고 노드 및 에지를 연결합니다.
+    이 함수는 서버 시작 시 1회 실행되어 컴파일된 그래프를 생성합니다.
+    """
     from langgraph.graph import END, StateGraph
 
     workflow = StateGraph(AgentState)
+    
+    # 1. 노드 추가
     workflow.add_node("load_memory", node_load_memory)
     workflow.add_node("rule_precheck", node_rule_precheck)
     workflow.add_node("build_conversation_state_card", node_build_conversation_state_card)
@@ -117,8 +144,11 @@ def build_request_workflow() -> Any:
     workflow.add_node("merge_answers", node_merge_answers)
     workflow.add_node("save_history", node_save_history)
 
+    # 2. 에지(흐름) 연결
     workflow.set_entry_point("load_memory")
     workflow.add_edge("load_memory", "rule_precheck")
+    
+    # 사전 규칙 기반 분기
     workflow.add_conditional_edges(
         "rule_precheck",
         route_after_rule,
@@ -128,6 +158,7 @@ def build_request_workflow() -> Any:
         },
     )
 
+    # 에이전트 의사결정 흐름
     workflow.add_edge("build_conversation_state_card", "run_dialogue_agent")
     workflow.add_conditional_edges(
         "run_dialogue_agent",
@@ -139,6 +170,8 @@ def build_request_workflow() -> Any:
             "agent_internal_error": "agent_internal_error",
         },
     )
+    
+    # 도구 실행 결과에 따른 분기
     workflow.add_conditional_edges(
         "execute_agent_tool",
         route_after_agent_tool,
@@ -148,6 +181,8 @@ def build_request_workflow() -> Any:
             "agent_internal_error": "agent_internal_error",
         },
     )
+    
+    # 도구 에러 후 재시도 흐름
     workflow.add_conditional_edges(
         "retry_agent_after_tool_error",
         route_after_agent_decision,
@@ -159,6 +194,7 @@ def build_request_workflow() -> Any:
         },
     )
 
+    # 검색 전 지식 판단 및 검색/답변 분기
     workflow.add_conditional_edges(
         "judge_knowledge_sufficiency",
         route_after_knowledge_sufficiency,
@@ -169,6 +205,7 @@ def build_request_workflow() -> Any:
         },
     )
 
+    # 검색 결과에 따른 완화(Retry) 또는 생성 분기
     workflow.add_conditional_edges(
         "rag_search",
         route_after_rag_search,
@@ -179,6 +216,7 @@ def build_request_workflow() -> Any:
         },
     )
 
+    # 후속 흐름 연결 (답변 생성 -> 병합 -> 저장 -> 종료)
     workflow.add_edge("relax_and_retry", "rag_search")
     workflow.add_edge("generate_answer_gemma", "join_answers")
     workflow.add_edge("generate_answer_solar", "join_answers")
@@ -189,4 +227,5 @@ def build_request_workflow() -> Any:
     workflow.add_edge("agent_internal_error", "save_history")
     workflow.add_edge("merge_answers", "save_history")
     workflow.add_edge("save_history", END)
+    
     return workflow

@@ -38,7 +38,7 @@ def build_rag_objects() -> RagResources:
     qdr = QdrantClient(
         host=QDRANT_HOST,
         port=QDRANT_PORT,
-        #prefer_grpc=True,
+        prefer_grpc=True,
         timeout=6000,
     )
 

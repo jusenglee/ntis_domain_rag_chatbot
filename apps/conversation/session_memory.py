@@ -1,3 +1,26 @@
+"""
+멀티턴 대화의 핵심 상태인 '세션 메모리'와 '대화 문맥(Context)'을 정의하고 관리하는 모듈입니다.
+
+[설계 의도: ADR-0015 주제 연속성(Subject Continuity) 보호]
+본 시스템은 사용자의 질문이 모호해지거나 생략되었을 때, 이전 대화에서 언급된 '주제'를 
+바탕으로 이를 복원합니다. 이를 위해 현재 대화의 성격에 따라 5가지 Context 타입을 운영합니다.
+
+[주요 Context 타입별 상태 관리 의미]
+1. PublishedManifestContext (목록 기반): 
+   - 왜 저장하는가: 사용자에게 검색 결과 리스트를 보여준 상태를 기억하기 위함입니다.
+   - 활성화 시점: 검색 결과 목록이 성공적으로 출력되었을 때. "3번 과제 상세 정보 보여줘"와 같은 순서 기반 요청 처리가 가능해집니다.
+2. DetailAnchorContext (상세 정보 기반):
+   - 왜 저장하는가: 특정 엔티티(과제, 논문 등)의 상세 페이지를 보고 있는 상태를 기억합니다.
+   - 활성화 시점: 특정 항목의 상세 조회가 수행되었을 때. "이 과제의 참여 연구원은?"과 같은 후속 질문에 대응합니다.
+3. SubjectQueryContext (주제 중심 기반):
+   - 왜 저장하는가: 특정 연구자나 기관 등 '대화의 주인공'을 기억합니다. 결과가 없더라도 "다른 연도로 다시 찾아봐"와 같은 재시도를 지원합니다.
+   - 활성화 시점: 연구자나 기관에 대한 조회가 발생했을 때. 답변 생성 실패 시에도 '주제'는 유지하여 대화의 맥락이 끊기지 않게 합니다.
+4. ClarificationContext (질문 보정 기반):
+   - 왜 저장하는가: 시스템이 사용자에게 추가 정보를 요청한 상태임을 기억합니다.
+   - 활성화 시점: 질문이 모호하여 시스템이 되물었을 때. 사용자가 추가 정보를 주면 이전의 미완성 질문과 결합하여 실행합니다.
+5. EmptyContext: 초기 상태 또는 문맥이 만료된 상태입니다.
+"""
+
 from __future__ import annotations
 
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -46,6 +69,11 @@ SubjectPublicationStatus = Literal[
     "answer_withheld_subject_retained",
     "clarification_pending",
 ]
+SubjectIdentityStatus = Literal[
+    "resolved",
+    "ambiguous_name_only",
+    "resolved_with_org",
+]
 
 
 _LEGACY_PUBLICATION_STATUS_MIGRATION: Dict[str, SubjectPublicationStatus] = {
@@ -59,6 +87,7 @@ class SubjectQueryContext(BaseModel):
     subject_kind: str
     subject_name: str
     subject_ids_map: Dict[str, List[str]] = Field(default_factory=dict)
+    identity_status: SubjectIdentityStatus = "resolved"
     result_kind: str = "project"
     result_manifest: Optional[DisplaySnapshot] = None
     # Dialogue continuity status is tracked separately from answer publication truth.
@@ -203,6 +232,202 @@ def _clean_list(values: Any) -> List[str]:
         seen.add(text)
         out.append(text)
     return out
+
+
+def _normalized_subject_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split()).lower()
+
+
+def _subject_name_matches(lhs: Any, rhs: Any) -> bool:
+    left = _normalized_subject_text(lhs)
+    right = _normalized_subject_text(rhs)
+    return bool(left and right and left == right)
+
+
+def _identity_keys_for_subject_kind(subject_kind: Any) -> tuple[str, ...]:
+    kind = str(subject_kind or "").strip().lower()
+    if kind == "people":
+        return ("person_no",)
+    if kind == "org":
+        return ("org_id", "org_code", "biz_no")
+    return ()
+
+
+def _identity_candidate_count(subject_kind: Any, ids_map: Optional[Dict[str, List[str]]]) -> int:
+    kind = str(subject_kind or "").strip().lower()
+    normalized_ids = dict(ids_map or {})
+    if kind == "people":
+        return len(_clean_list(normalized_ids.get("person_no")))
+    counts = [len(_clean_list(normalized_ids.get(key))) for key in _identity_keys_for_subject_kind(kind)]
+    counts = [count for count in counts if count > 0]
+    return max(counts) if counts else 0
+
+
+def _subject_identity_resolved(identity_status: Any) -> bool:
+    return str(identity_status or "").strip() in {"resolved", "resolved_with_org"}
+
+
+def _merge_subject_ids_maps(*maps: Any) -> Dict[str, List[str]]:
+    merged: Dict[str, List[str]] = {}
+    for raw_map in maps:
+        if not isinstance(raw_map, dict):
+            continue
+        for key, value in raw_map.items():
+            cleaned = _clean_list(value)
+            if not cleaned:
+                continue
+            existing = merged.get(str(key), [])
+            merged[str(key)] = _clean_list([*existing, *cleaned])
+    return merged
+
+
+def _append_subject_id_value(target: Dict[str, List[str]], key: str, value: Any) -> None:
+    cleaned = _clean_list(value)
+    if not cleaned:
+        return
+    target[key] = _clean_list([*(target.get(key) or []), *cleaned])
+
+
+def _append_display_item_ids(target: Dict[str, List[str]], item: Any, *, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        _append_subject_id_value(target, key, getattr(item, key, None))
+
+
+def _observed_subject_ids_from_manifest(
+    *,
+    subject_kind: Any,
+    subject_name: Any,
+    snapshot: Optional[DisplaySnapshot],
+) -> Dict[str, List[str]]:
+    if not isinstance(snapshot, DisplaySnapshot):
+        return {}
+
+    kind = str(subject_kind or "").strip().lower()
+    name = str(subject_name or "").strip()
+    if kind not in {"people", "org"} or not name:
+        return {}
+
+    observed: Dict[str, List[str]] = {}
+    for item in list(snapshot.items or []):
+        item_kind = str(getattr(item, "entity_kind", "") or "").strip().lower()
+        if kind == "people":
+            top_level_match = item_kind == "people" and (
+                _subject_name_matches(getattr(item, "title_text", None), name)
+                or any(_subject_name_matches(candidate, name) for candidate in list(getattr(item, "researchers", []) or []))
+            )
+            if top_level_match:
+                _append_display_item_ids(observed, item, keys=("person_no", "org_id", "org_code", "biz_no"))
+        elif kind == "org":
+            top_level_match = item_kind == "org" and (
+                _subject_name_matches(getattr(item, "title_text", None), name)
+                or _subject_name_matches(getattr(item, "lead_org", None), name)
+                or any(_subject_name_matches(candidate, name) for candidate in list(getattr(item, "participant_org", []) or []))
+            )
+            if top_level_match:
+                _append_display_item_ids(observed, item, keys=("org_id", "org_code", "biz_no"))
+
+        for ref in list(getattr(item, "child_refs", []) or []):
+            ref_kind = str(getattr(ref, "kind", "") or "").strip().lower()
+            if ref_kind != kind or not _subject_name_matches(getattr(ref, "display_name", None), name):
+                continue
+            observed = _merge_subject_ids_maps(observed, dict(getattr(ref, "ids_map", {}) or {}))
+    return observed
+
+
+def _question_analysis_ids_map(intent_payload: Any) -> Dict[str, List[str]]:
+    raw_ids = _as_payload(_question_analysis_payload(intent_payload).get("ids_map"))
+    return {
+        str(key): _clean_list(value)
+        for key, value in raw_ids.items()
+        if _clean_list(value)
+    }
+
+
+def _subject_has_org_disambiguation_cue(
+    *,
+    subject_kind: Any,
+    intent_payload: Any,
+    staged_subject: Optional[SubjectQueryContext],
+) -> bool:
+    if str(subject_kind or "").strip().lower() != "people":
+        return False
+    if isinstance(staged_subject, SubjectQueryContext) and staged_subject.identity_status == "resolved_with_org":
+        return True
+
+    normalized_intent = _normalized_intent_payload(intent_payload)
+    question_analysis = _question_analysis_payload(intent_payload)
+    filters = _as_payload(question_analysis.get("filters"))
+    return bool(
+        _clean_list(filters.get("people_affiliation_org_name"))
+        or _clean_list(filters.get("affiliation_org_name"))
+        or _clean_list(normalized_intent.get("people_affiliation_org_terms"))
+        or _clean_list(normalized_intent.get("people_affiliation_org_name"))
+    )
+
+
+def _has_explicit_identity_signal(
+    *,
+    subject_kind: Any,
+    question_analysis_ids: Dict[str, List[str]],
+) -> bool:
+    return _identity_candidate_count(subject_kind, question_analysis_ids) == 1
+
+
+def _resolved_subject_identity_status(
+    *,
+    subject_kind: Any,
+    subject_ids_map: Dict[str, List[str]],
+    question_analysis_ids: Dict[str, List[str]],
+    intent_payload: Any,
+    staged_subject: Optional[SubjectQueryContext],
+) -> SubjectIdentityStatus:
+    kind = str(subject_kind or "").strip().lower()
+    candidate_count = _identity_candidate_count(kind, subject_ids_map)
+    prior_status = (
+        str(getattr(staged_subject, "identity_status", "") or "").strip() if isinstance(staged_subject, SubjectQueryContext) else ""
+    )
+    has_org_cue = _subject_has_org_disambiguation_cue(
+        subject_kind=kind,
+        intent_payload=intent_payload,
+        staged_subject=staged_subject,
+    )
+    explicit_identity_signal = _has_explicit_identity_signal(
+        subject_kind=kind,
+        question_analysis_ids=question_analysis_ids,
+    )
+
+    if kind == "people":
+        if has_org_cue and candidate_count == 1:
+            return "resolved_with_org"
+        if prior_status == "resolved_with_org" and candidate_count == 1:
+            return "resolved_with_org"
+        if prior_status == "ambiguous_name_only" and not (has_org_cue or explicit_identity_signal):
+            return "ambiguous_name_only"
+        if candidate_count == 1:
+            return "resolved"
+        return "ambiguous_name_only"
+
+    if kind == "org":
+        return "resolved" if candidate_count == 1 else "ambiguous_name_only"
+
+    return "resolved"
+
+
+def _single_identity_value(
+    *,
+    subject_kind: Any,
+    identity_status: Any,
+    subject_ids_map: Dict[str, List[str]],
+    key: str,
+) -> Optional[str]:
+    if not _subject_identity_resolved(identity_status):
+        return None
+    if key not in _identity_keys_for_subject_kind(subject_kind):
+        return None
+    values = _clean_list(subject_ids_map.get(key))
+    if len(values) != 1:
+        return None
+    return values[0]
 
 
 def _infer_subject_kind_hint(question: str, normalized_intent: Dict[str, Any], strategy_meta: Dict[str, Any]) -> Optional[str]:
@@ -400,12 +625,20 @@ def _subject_continuity_retained(context: SubjectQueryContext) -> bool:
     return bool(context.followup_rights.refinement_allowed and status != "clarification_pending")
 
 
-def _current_subject_confidence(publication_status: Any) -> float:
+def _current_subject_confidence(publication_status: Any, identity_status: Any) -> float:
     status = str(publication_status or "").strip()
     if status == "answer_withheld_subject_retained":
+        if str(identity_status or "").strip() == "ambiguous_name_only":
+            return 0.25
+        if str(identity_status or "").strip() == "resolved_with_org":
+            return 0.9
         return 0.85
     if status == "clarification_pending":
         return 0.0
+    if str(identity_status or "").strip() == "ambiguous_name_only":
+        return 0.35
+    if str(identity_status or "").strip() == "resolved_with_org":
+        return 0.95
     return 1.0
 
 
@@ -437,6 +670,9 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
         "subject_kind": None,
         "subject_name": None,
         "subject_publication_status": None,
+        "subject_identity_status": None,
+        "subject_identity_candidate_count": 0,
+        "subject_identity_resolved": False,
         "subject_continuity_retained": False,
         "answer_publishability": None,
         "subject_refinement_allowed": False,
@@ -460,6 +696,7 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
         refinement_allowed = bool(context.followup_rights.refinement_allowed)
         answer_publishability = _answer_publishability_from_subject_status(context.publication_status)
         continuity_retained = _subject_continuity_retained(context)
+        identity_candidate_count = _identity_candidate_count(context.subject_kind, context.subject_ids_map)
         return {
             **base,
             "has_active_focus": True,
@@ -473,10 +710,16 @@ def current_context_summary(memory: Optional[SessionMemory]) -> Dict[str, Any]:
             "subject_name": context.subject_name,
             "result_kind": context.result_kind,
             "subject_publication_status": context.publication_status,
+            "subject_identity_status": context.identity_status,
+            "subject_identity_candidate_count": identity_candidate_count,
+            "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
             "subject_continuity_retained": continuity_retained,
             "answer_publishability": answer_publishability,
             "subject_refinement_allowed": refinement_allowed,
-            "current_subject_confidence": _current_subject_confidence(context.publication_status),
+            "current_subject_confidence": _current_subject_confidence(
+                context.publication_status,
+                context.identity_status,
+            ),
         }
 
     if isinstance(context, DetailAnchorContext):
@@ -521,6 +764,9 @@ def current_context_followup_contract(memory: Optional[SessionMemory]) -> Dict[s
         "anchor_reuse_allowed": False,
         "refinement_allowed": False,
         "subject_publication_status": None,
+        "subject_identity_status": None,
+        "subject_identity_candidate_count": 0,
+        "subject_identity_resolved": False,
         "subject_continuity_retained": False,
         "answer_publishability": "not_applicable",
         "subject_refinement_allowed": False,
@@ -547,10 +793,19 @@ def current_context_followup_contract(memory: Optional[SessionMemory]) -> Dict[s
                 "subject_kind": context.subject_kind,
                 "subject_name": context.subject_name,
                 "subject_publication_status": context.publication_status,
+                "subject_identity_status": context.identity_status,
+                "subject_identity_candidate_count": _identity_candidate_count(
+                    context.subject_kind,
+                    context.subject_ids_map,
+                ),
+                "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
                 "subject_continuity_retained": _subject_continuity_retained(context),
                 "answer_publishability": answer_publishability,
                 "subject_refinement_allowed": refinement_allowed,
-                "current_subject_confidence": _current_subject_confidence(context.publication_status),
+                "current_subject_confidence": _current_subject_confidence(
+                    context.publication_status,
+                    context.identity_status,
+                ),
             }
         )
     elif isinstance(context, DetailAnchorContext):
@@ -634,27 +889,33 @@ def build_current_context(
             else "answer_withheld_subject_retained"
         )
         manifest = subject_manifest if isinstance(subject_manifest, DisplaySnapshot) else None
-        subject_ids_map: Dict[str, List[str]] = {}
-        if staged_subject is not None:
-            subject_ids_map.update(
-                {
-                    str(key): list(values)
-                    for key, values in dict(staged_subject.subject_ids_map or {}).items()
-                    if values
-                }
-            )
-        question_analysis_ids = _as_payload(_question_analysis_payload(intent_payload).get("ids_map"))
-        subject_ids_map.update(
-            {
-                str(key): _clean_list(value)
-                for key, value in question_analysis_ids.items()
-                if _clean_list(value)
-            }
+        question_analysis_ids = _question_analysis_ids_map(intent_payload)
+        observed_manifest_ids = _observed_subject_ids_from_manifest(
+            subject_kind=subject_kind,
+            subject_name=subject_name,
+            snapshot=manifest,
+        )
+        subject_ids_map = _merge_subject_ids_maps(
+            dict(staged_subject.subject_ids_map or {}) if staged_subject is not None else {},
+            question_analysis_ids,
+            observed_manifest_ids,
+        )
+        for identity_key in _identity_keys_for_subject_kind(subject_kind):
+            observed_values = _clean_list(observed_manifest_ids.get(identity_key))
+            if observed_values:
+                subject_ids_map[identity_key] = observed_values
+        identity_status = _resolved_subject_identity_status(
+            subject_kind=subject_kind,
+            subject_ids_map=subject_ids_map,
+            question_analysis_ids=question_analysis_ids,
+            intent_payload=intent_payload,
+            staged_subject=staged_subject,
         )
         return SubjectQueryContext(
             subject_kind=subject_kind,
             subject_name=subject_name,
             subject_ids_map=subject_ids_map,
+            identity_status=identity_status,
             result_kind=str(
                 getattr(manifest, "context_kind", None)
                 or getattr(staged_subject, "result_kind", None)
@@ -751,10 +1012,30 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
             kind=context.subject_kind,
             source="subject_query_context",
             title_text=context.subject_name,
-            person_no=_first_text(context.subject_ids_map.get("person_no")),
-            org_id=_first_text(context.subject_ids_map.get("org_id")),
-            org_code=_first_text(context.subject_ids_map.get("org_code")),
-            biz_no=_first_text(context.subject_ids_map.get("biz_no")),
+            person_no=_single_identity_value(
+                subject_kind=context.subject_kind,
+                identity_status=context.identity_status,
+                subject_ids_map=context.subject_ids_map,
+                key="person_no",
+            ),
+            org_id=_single_identity_value(
+                subject_kind=context.subject_kind,
+                identity_status=context.identity_status,
+                subject_ids_map=context.subject_ids_map,
+                key="org_id",
+            ),
+            org_code=_single_identity_value(
+                subject_kind=context.subject_kind,
+                identity_status=context.identity_status,
+                subject_ids_map=context.subject_ids_map,
+                key="org_code",
+            ),
+            biz_no=_single_identity_value(
+                subject_kind=context.subject_kind,
+                identity_status=context.identity_status,
+                subject_ids_map=context.subject_ids_map,
+                key="biz_no",
+            ),
         )
         mentions = [recent_mention_from_focus_entity(focus, source="detail_focus")]
         return view_state.model_copy(
@@ -769,11 +1050,20 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
                     "answer_publishability": answer_publishability,
                     "publication_status": publication_status or answer_publishability,
                     "subject_publication_status": publication_status or "answer_published",
+                    "subject_identity_status": context.identity_status,
+                    "subject_identity_candidate_count": _identity_candidate_count(
+                        context.subject_kind,
+                        context.subject_ids_map,
+                    ),
+                    "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
                     "subject_continuity_retained": _subject_continuity_retained(context),
                     "followup_rights": "none",
                     "refinement_allowed": refinement_allowed,
                     "subject_refinement_allowed": refinement_allowed,
-                    "current_subject_confidence": _current_subject_confidence(publication_status),
+                    "current_subject_confidence": _current_subject_confidence(
+                        publication_status,
+                        context.identity_status,
+                    ),
                 },
             }
         )

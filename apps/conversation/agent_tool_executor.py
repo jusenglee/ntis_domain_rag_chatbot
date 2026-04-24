@@ -1,3 +1,23 @@
+"""
+대화 에이전트가 내린 결정을 실제 기술적 실행 계약(Intent Payload)으로 변환하고 실행하는 실행기입니다.
+
+[설계 의도: L1 의도와 L2 실행 간의 Shock Absorber (ADR-0016)]
+에이전트가 내린 전략적 의도(L1)를 시스템이 이해할 수 있는 구체적인 쿼리 파라미터(L2)로 
+번역하는 역할을 합니다. 이 과정에서 에이전트의 실수를 보정하거나, 이전의 모호했던 문맥을 
+현재의 답변과 결합하는 정교한 로직이 수행됩니다.
+
+[주요 로직 설명]
+1. Clarification Recovery (보정 복원): 
+   - 왜 필요한가: 사용자가 "2023년"이라고만 답했을 때, 이전 질문인 "홍길동 연구자의 과제 알려줘"와 
+     결합하여 "홍길동 연구자의 2023년 과제"라는 완전한 의도로 복원하기 위함입니다.
+   - 활성화 시점: 세션 메모리에 ClarificationContext가 존재할 때, 새로운 입력을 이전 제약 조건과 병합합니다.
+2. Direct Compile (직접 컴파일):
+   - 왜 필요한가: 연구자 활동 기록 조회와 같이 빈번하고 명확한 패턴은 복잡한 Planner 단계를 
+     거치지 않고 즉시 실행 계약을 만들어 성능을 최적화합니다.
+3. Guarded Tool Execution: 에이전트가 선택한 도구의 인자가 유효한지 검증하고, Smart Coercion 원칙에 
+   따라 파라미터를 정규화합니다.
+"""
+
 from __future__ import annotations
 
 import re
@@ -283,6 +303,24 @@ def _ids_map_from_question_analysis(question_analysis: Any) -> Dict[str, list[st
     return normalized
 
 
+def _staged_identity_status(
+    *,
+    subject_kind: str,
+    ids_map: Dict[str, list[str]],
+    source_context: Optional[SubjectQueryContext],
+) -> str:
+    if isinstance(source_context, SubjectQueryContext) and source_context.identity_status == "resolved_with_org":
+        return "resolved_with_org"
+    if subject_kind == "people":
+        return "resolved" if len(list(ids_map.get("person_no") or [])) == 1 else "ambiguous_name_only"
+    org_candidate_count = max(
+        len(list(ids_map.get("org_id") or [])),
+        len(list(ids_map.get("org_code") or [])),
+        len(list(ids_map.get("biz_no") or [])),
+    )
+    return "resolved" if org_candidate_count == 1 else "ambiguous_name_only"
+
+
 def _staged_subject_context(
     *,
     subject_kind: Any,
@@ -301,6 +339,11 @@ def _staged_subject_context(
         subject_kind=kind,
         subject_name=name,
         subject_ids_map=ids_map,
+        identity_status=_staged_identity_status(
+            subject_kind=kind,
+            ids_map=ids_map,
+            source_context=source_context,
+        ),
         result_kind=str(getattr(source_context, "result_kind", None) or "project"),
         publication_status="clarification_pending",
         followup_rights=FollowupRights(refinement_allowed=True),

@@ -65,6 +65,7 @@ def _agent_context_meta_from_card_model(card_model: Any) -> Dict[str, Any]:
         "current_context_type": getattr(card_model, "current_context_type", None),
         "subject_kind": getattr(card_model, "current_subject_kind", None),
         "subject_name": getattr(card_model, "current_subject_name", None),
+        "subject_identity_status": getattr(card_model, "current_subject_identity_status", None),
         "refinement_allowed": bool(getattr(card_model, "refinement_allowed", False)),
         "last_publication_status": getattr(card_model, "last_publication_status", None),
         "unresolved_constraint_keys": sorted(constraints.keys()),
@@ -79,6 +80,7 @@ def _agent_context_fields(state: Any) -> Dict[str, Any]:
             "current_context_type": meta.get("current_context_type"),
             "subject_kind": meta.get("subject_kind"),
             "subject_name": meta.get("subject_name"),
+            "subject_identity_status": meta.get("subject_identity_status"),
             "refinement_allowed": meta.get("refinement_allowed"),
             "last_publication_status": meta.get("last_publication_status"),
         }

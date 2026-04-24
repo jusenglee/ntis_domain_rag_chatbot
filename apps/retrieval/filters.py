@@ -604,19 +604,15 @@ def build_year_range_filter(
 
     should: List[Any] = []
 
-    # --- (A) year_keys: year-like numeric range fields ---
-    y_values: List[str] = []
+    # --- (A) year_keys: match_any for closed ranges only ---
+    # Open-range queries (year_from only = "이후", year_to only = "이전") rely solely on
+    # the integer range filter in Section B to avoid collapsing semantics to a single year.
     if y_from is not None and y_to is not None:
         span = max(0, min(60, y_to - y_from))
         y_values = [str(y_from + i) for i in range(span + 1)]
-    elif y_from is not None:
-        y_values = [str(y_from)]
-    elif y_to is not None:
-        y_values = [str(y_to)]
-
-    if y_values:
-        for key in year_keys:
-            should.append(qmodels.FieldCondition(key=key, match=make_match_any(y_values)))
+        if y_values:
+            for key in year_keys:
+                should.append(qmodels.FieldCondition(key=key, match=make_match_any(y_values)))
 
     # --- (B) year_keys: integer-like range fields ---
     year_range = _make_range_filter(y_from, y_to)

@@ -1,3 +1,9 @@
+"""NTIS RAG API의 런타임 유틸리티 및 헬퍼 모듈.
+
+로깅 구성, 텍스트 처리, 운영 이벤트 로깅(log_event), 상태 요약 데이터 추출 등
+API 서버 운영에 필요한 다양한 공통 기능을 제공합니다.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,9 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from apps.api.contracts.workflow_models import measure_latency as measure_latency_impl
-
 from apps.retrieval.rag_runtime_observability import get_code_fingerprint_fields
 
+# RAG 전략 위반 및 계약 실패 상세 파싱을 위한 정규식
 _CONTRACT_REASON_PATTERN = re.compile(
     r"reason=(?P<contract_fail_reason>[a-z_]+),\s*"
     r"reranked=(?P<reranked_count>\d+),\s*"
@@ -22,8 +28,9 @@ _CONTRACT_REASON_PATTERN = re.compile(
 
 
 def sha256_file(path: Path) -> str:
-    """파일 내용의 sha256 digest를 계산한다.
-    배포 산출물이나 prompt template의 변경 여부를 가볍게 비교할 때 쓴다.
+    """
+    파일 내용의 SHA-256 해시를 계산합니다.
+    코드 지문(Fingerprint) 생성 시 파일 변경 여부를 확인하기 위해 사용합니다.
     """
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -31,7 +38,11 @@ def sha256_file(path: Path) -> str:
 from loguru import logger
 
 def setup_file_logging(*, log_path: str = "logs/app.log"):
-    """loguru에 파일 sink를 추가하여 로그를 파일로 기록한다."""
+    """
+    Loguru 로거에 파일 출력을 추가하여 로그를 기록합니다.
+    - rotation: 50MB 단위로 새 파일 생성
+    - retention: 최대 10개의 로그 파일 유지
+    """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     logger.add(
         log_path,
@@ -42,11 +53,15 @@ def setup_file_logging(*, log_path: str = "logs/app.log"):
         level="INFO",
     )
 
+# 로깅 초기 설정 및 의존성 부분 적용
 setup_file_logging()
 measure_latency = partial(measure_latency_impl, logger_obj=logger)
+
 _SHORT_ANSWER_MAX_TOKENS_HINT = int(os.getenv("SHORT_ANSWER_MAX_TOKENS_HINT", "4096"))
 _FOLLOW_UP_MAX_TOKENS_HINT = int(os.getenv("FOLLOW_UP_MAX_TOKENS_HINT", "4096"))
 _APP_MAIN_FILE_PATH = Path(__file__).resolve().parent / "app_factory.py"
+
+# 시스템 상태 확인을 위한 코드 지문 필드 구성
 _CODE_FINGERPRINT_FIELDS: Dict[str, str] = {
     "app_main_sha256": sha256_file(_APP_MAIN_FILE_PATH),
     **get_code_fingerprint_fields(),
@@ -59,8 +74,10 @@ def select_max_tokens_hint(
     short_answer_max_tokens_hint: int,
     follow_up_max_tokens_hint: int,
 ) -> Optional[int]:
-    """question analysis 모드에 따라 LLM 생성 상한 hint를 고른다.
-    JOIN은 후속 설명이 상대적으로 길어질 수 있어 follow-up hint를 주고, SEARCH/LOOKUP은 짧은 답변 상한을 쓴다.
+    """
+    질문 분석(QA) 모드에 따라 적절한 LLM Max Token 힌트를 선택합니다.
+    - JOIN 모드: 상세한 설명이 필요하므로 follow-up 힌트 사용
+    - SEARCH/LOOKUP 모드: 간결한 답변을 위해 short-answer 힌트 사용
     """
     if not qa:
         return None
@@ -72,8 +89,9 @@ def select_max_tokens_hint(
 
 
 def truncate_text(value: Optional[str], limit: int) -> str:
-    """로그나 메타 표시에 쓸 문자열을 지정 길이로 잘라낸다.
-    원문 텍스트 의미를 바꾸지 않고 뒷부분만 생략표로 대체한다.
+    """
+    문자열이 지정된 길이를 초과하면 잘라내고 생략 부호(...)를 붙입니다.
+    주로 로그 출력 시 너무 긴 텍스트를 제한하기 위해 사용합니다.
     """
     if not value:
         return ""
@@ -84,14 +102,10 @@ def truncate_text(value: Optional[str], limit: int) -> str:
 
 
 def merge_log_fields(*field_sets: Any, **overrides: Any) -> Dict[str, Any]:
-    """Merge multiple log payload fragments before calling ``log_event``.
-
-    This prevents Python call-site errors such as
-    ``got multiple values for keyword argument 'subject_kind'`` when an explicit
-    field and a ``**meta`` payload carry the same key. Later values override
-    earlier ones.
     """
-
+    여러 개의 로그 필드 세트(dict 또는 객체)를 하나로 병합합니다.
+    동일한 키가 있을 경우 뒤에 오는 값이 우선하며, 명시적 오버라이드 값이 최종 우선순위를 갖습니다.
+    """
     merged: Dict[str, Any] = {}
     for field_set in field_sets:
         if field_set is None:
@@ -110,26 +124,23 @@ def merge_log_fields(*field_sets: Any, **overrides: Any) -> Dict[str, Any]:
 
 
 def is_debug_logging_enabled() -> bool:
-    """`RAG_DEBUG` 환경변수로 디버그 로깅 상태를 판정한다.
-    여러 truthy 표현을 허용해 운영 환경과 로컬 환경의 설정 차이를 흡수한다.
-    """
+    """`RAG_DEBUG` 환경변수가 설정되어 있는지 확인합니다."""
     return str(os.getenv("RAG_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def log_section(title: str, content: str) -> None:
-    """Emit colored section logs only when debug logging is enabled."""
-
+    """디버그 모드일 때만 콘솔에 강조된 섹션 로그를 출력합니다."""
     if not is_debug_logging_enabled():
         return
-
     header = f"\n\033[96m{'=' * 10} [{title}] {'=' * 10}\033[0m"
     footer = f"\033[96m{'=' * 30}\033[0m\n"
     logger.info("{}\n{}\n{}", header, content, footer)
 
 
 def mask_query_for_log(query: str, *, max_len: int = 80) -> str:
-    """사용자 질의를 로그용 짧은 표현으로 자른다.
-    전문을 그대로 남기지 않고 앞부분만 보여줘 개인정보와 긴 prompt가 로그를 오염시키지 않게 한다.
+    """
+    로그에 기록할 사용자 질문을 마스킹 및 요약 처리합니다.
+    개인정보 보호 및 로그 용량 최적화를 위해 앞부분만 남깁니다.
     """
     text = str(query or "").strip()
     if not text:
@@ -139,8 +150,9 @@ def mask_query_for_log(query: str, *, max_len: int = 80) -> str:
 
 
 def derive_stream_error_code(meta: Dict[str, Any]) -> Optional[str]:
-    """stream meta에서 상태를 대표하는 표준 에러 코드를 뽑아낸다.
-    deadline 위반, char limit, empty stream 같은 상태를 API 응답과 로그에서 같은 이름으로 다룰 수 있게 한다.
+    """
+    스트림 메타데이터를 분석하여 표준 에러 코드를 도출합니다.
+    타임아웃(TTFT), 생성 중단, 빈 결과 등의 상태를 식별합니다.
     """
     if not meta:
         return None
@@ -158,10 +170,9 @@ def derive_stream_error_code(meta: Dict[str, Any]) -> Optional[str]:
 
 
 def extract_contract_failure_details(reason: str) -> Dict[str, Any]:
-    """계약 위반 reason 문자열에서 관측용 메타를 추출한다.
-
-    route 레이어는 예외 객체 전체를 모를 수 있으므로, strict contract 오류 문자열에 실린 핵심 필드를
-    다시 파싱해 REQ.ERROR 같은 운영 로그에 남긴다.
+    """
+    에러 메시지(reason) 문자열에서 계약 실패 관련 상세 수치들을 파싱하여 추출합니다.
+    예: 리랭크 결과 개수 부족 등의 상황을 분석하기 위해 사용합니다.
     """
     text = str(reason or "").strip()
     if not text:
@@ -181,8 +192,8 @@ def extract_contract_failure_details(reason: str) -> Dict[str, Any]:
 
 
 def compute_total_ms_from_start(request_started_at: Optional[float]) -> Optional[float]:
-    """요청 시작 시점으로부터 지금까지의 경과 시간을 ms로 계산한다.
-    음수 경과시간은 clock anomaly로 간주하고 버려, 로그가 잘못된 latency를 남기지 않게 한다.
+    """
+    요청 시작 시점으로부터의 경과 시간(ms)을 계산합니다.
     """
     if request_started_at is None:
         return None
@@ -193,8 +204,8 @@ def compute_total_ms_from_start(request_started_at: Optional[float]) -> Optional
 
 
 def extract_stream_chunk_text_and_field(chunk: Any) -> Tuple[Optional[str], Optional[str]]:
-    """LangChain stream chunk에서 본문 텍스트와 stream field을 추출한다.
-    message wrapper 유무와 무관하게 같은 tuple을 돌려 SSE 계층이 chunk shape에 덤 민감하게 한다.
+    """
+    LangChain 스트림 청크에서 본문 텍스트와 스트림 필드(예: reasoning)를 분리하여 추출합니다.
     """
     msg = getattr(chunk, "message", None) or chunk
     text = getattr(msg, "content", None)
@@ -203,8 +214,9 @@ def extract_stream_chunk_text_and_field(chunk: Any) -> Tuple[Optional[str], Opti
 
 
 def normalize_none_string(value: Any) -> Any:
-    """반정형 payload 안에 섞인 문자열 `"None"`을 실제 `None`으로 복원한다.
-    list/dict를 재귀적으로 순회해 planner·memory·stream meta에 섞인 legacy 표현을 정리한다.
+    """
+    데이터 내에 문자열 "None"이 섞여 있을 경우 이를 실제 파이썬 `None`으로 정규화합니다.
+    중첩된 dict/list 내부까지 재귀적으로 처리합니다.
     """
     if isinstance(value, str) and value.strip() == "None":
         return None
@@ -216,8 +228,8 @@ def normalize_none_string(value: Any) -> Any:
 
 
 def has_payload_index(client: Any, collection_name: str, field_name: str) -> bool:
-    """Qdrant 컬렉션에 특정 payload field 인덱스가 있는지 확인한다.
-    인덱스가 없는 필드에 exact filter를 걸었다가 성능이 너무 나빠지는 경로를 사전에 피하게 한다.
+    """
+    Qdrant 컬렉션에 특정 페이로드 인덱스가 생성되어 있는지 확인합니다.
     """
     try:
         collection_info = client.get_collection(collection_name=collection_name)
@@ -231,9 +243,10 @@ def has_payload_index(client: Any, collection_name: str, field_name: str) -> boo
 
 
 def _render_pretty_log(name: str, fields: Dict[str, Any]) -> Optional[str]:
-    """운영 로그(JSON)와 별개로 콘솔에서 사람이 읽기 편한 시각적 요약을 생성합니다."""
-    
-    # 에이전트 의사결정 시각화
+    """
+    운영 이벤트를 사람이 읽기 편한 콘솔 요약 문자열로 렌더링합니다.
+    에이전트 의사결정, 도구 결과, 최종 결과 등을 이모지와 함께 시각화합니다.
+    """
     if name == "AGENT.DECISION":
         dtype = fields.get("decision_type", "unknown")
         icon = {"call_tool": "🛠️", "direct_answer": "💬", "ask_clarification": "❓"}.get(dtype, "🤖")
@@ -241,20 +254,17 @@ def _render_pretty_log(name: str, fields: Dict[str, Any]) -> Optional[str]:
         reason = fields.get("reasoning_summary", "")
         return f"\033[94m{icon} [Agent Decision] {dtype}{tool}\033[0m\n   \033[90mㄴ Reason: {reason}\033[0m"
 
-    # 도구 관측 결과 시각화
     if name == "AGENT.TOOL_OBSERVATION":
         otype = fields.get("observation_type", "unknown")
         icon = {"planned_intent": "✅", "error": "❌", "contract_violation": "🛡️", "no_results": "⚠️"}.get(otype, "👁️")
         summary = fields.get("summary", "")
         return f"\033[96m{icon} [Tool Result] {otype}\033[0m\n   \033[90mㄴ {summary}\033[0m"
 
-    # 플래너 단계 시각화
     if name.startswith("PLANNER.STAGE"):
         stage = name.replace("PLANNER.", "")
         conf = fields.get("confidence", 0.0)
         return f"\033[95m🧠 [{stage}] Conf: {conf:.2f}\033[0m"
 
-    # 최종 결과 요약
     if name == "REQ.SUMMARY":
         ms = fields.get("total_ms", 0)
         return f"\033[92m✨ [Request Done] {ms}ms | Model: {fields.get('selected_model')}\033[0m"
@@ -263,33 +273,40 @@ def _render_pretty_log(name: str, fields: Dict[str, Any]) -> Optional[str]:
 
 
 def log_event(name: str, **fields: Any) -> None:
-    """Operations 이벤트를 로깅합니다. 콘솔에는 시각적으로 가독성 높은 요약을 출력합니다."""
-
+    """
+    운영 시스템 이벤트를 로깅합니다.
+    1. 모든 필드를 JSON 형태로 파일에 기록 (데이터 분석용)
+    2. 주요 이벤트는 콘솔에 가독성 높은 형태로 요약 출력 (개발 확인용)
+    """
     payload = {"event": name, **_CODE_FINGERPRINT_FIELDS}
+    
+    # 전략 일관성 모드 기본값 설정
     if fields.get("policy_mode") is None:
         payload["policy_mode"] = (
             "strict"
             if str(os.getenv("RAG_STRICT_STRATEGY_CONSISTENCY", "1")).strip().lower() in {"1", "true", "yes", "y"}
             else "compat"
         )
+        
     for key, value in fields.items():
-        if value is None:
-            continue
+        if value is None: continue
         payload[key] = value
     
-    # 1. 원본 JSON 로그 (파일 기록용)
+    # 1. 원본 JSON 로그 기록
     logger.info("[OPS] {}", json.dumps(payload, ensure_ascii=False, default=str))
 
-    # 2. 콘솔 가독성을 위한 Pretty 요약 출력
+    # 2. 콘솔 가독성을 위한 Pretty 출력
     pretty = _render_pretty_log(name, payload)
     if pretty:
-        # 표준 로거 대신 직접 출력하여 포맷 겹침 방지 (또는 전용 채널 사용)
         print(f"\n{pretty}\n")
 
 
 def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dict[str, Any]:
-    """Extract summary log fields from workflow state without pulling in app boot imports."""
-
+    """
+    워크플로우 상태(State) 객체에서 운영 통계용 요약 필드들을 추출합니다.
+    질문 유형, 검색 전략, 사용된 키의 개수, 응답 모델 선택 사유 등을 방대하게 수집합니다.
+    """
+    # 상태에서 각종 객체 추출
     question_analysis = getattr(state, "question_analysis", None)
     agent_decision = getattr(state, "agent_decision", None)
     agent_observation = getattr(state, "agent_observation", None)
@@ -297,156 +314,60 @@ def _state_log_summary_fields(state: Any, total_ms: Optional[int] = None) -> Dic
     strategy = getattr(state, "strategy", None)
     intent_payload = getattr(state, "intent_payload", None)
     retrieval_runtime_meta = dict(getattr(state, "retrieval_runtime_meta", {}) or {})
-    normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload is not None else None
-    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {}) if intent_payload is not None else {}
     context = getattr(state, "context", None) or []
     merge_debug = getattr(state, "merge_debug", None) or {}
     timings = getattr(state, "timings", None) or {}
+    
+    normalized_intent = getattr(intent_payload, "normalized_intent", None) if intent_payload is not None else None
+    strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {}) if intent_payload is not None else {}
 
+    # 대상 컬렉션 확인
     target_cols = getattr(strategy, "target_collections", None)
     if target_cols is None:
-        target_cols = (
-            getattr(normalized_intent, "target_cols", None)
-            if normalized_intent is not None and not isinstance(normalized_intent, dict)
-            else None
-        )
-    if target_cols is None and isinstance(normalized_intent, dict):
-        target_cols = normalized_intent.get("target_cols")
+        target_cols = getattr(normalized_intent, "target_cols", None) if not isinstance(normalized_intent, dict) else normalized_intent.get("target_cols")
     if target_cols is None:
         target_cols = getattr(question_analysis, "target_cols", None)
 
-    base_route = getattr(normalized_intent, "base_route", None)
-    if base_route is None and isinstance(normalized_intent, dict):
-        base_route = normalized_intent.get("base_route")
-
-    planner_base_route = getattr(question_analysis, "head", None) or getattr(question_analysis, "base_route", None)
-    hard_contract = getattr(question_analysis, "hard_contract", None)
-    soft_strategy_hints = getattr(question_analysis, "soft_strategy_hints", None)
-
+    # 기본 필드 구성
     return {
         "request_id": getattr(state, "request_id", None),
         "conversation_id": getattr(state, "conversation_id", None),
         "stage": "summary",
-        "strategy_source": "execution_strategy" if strategy is not None else "assembled_question_analysis_only",
-        "base_route": base_route,
-        "planner_base_route": planner_base_route,
+        
+        # 1. 전략 및 모드 정보
         "mode": getattr(strategy, "mode", None) or getattr(question_analysis, "mode", None),
         "relation": getattr(strategy, "relation", None) or getattr(question_analysis, "relation", None),
         "target_cols": list(target_cols) if isinstance(target_cols, (list, tuple)) else target_cols,
-        "question_analysis_mode": getattr(question_analysis, "mode", None),
-        "question_analysis_relation": getattr(question_analysis, "relation", None),
-        "question_analysis_join_key_mode": getattr(question_analysis, "join_key_mode", None),
-        "execution_mode": getattr(strategy, "mode", None),
-        "execution_relation": getattr(strategy, "relation", None),
-        "execution_join_key_mode": getattr(strategy, "join_key_mode", None),
         "join_key_mode": getattr(strategy, "join_key_mode", None),
         "join_key_source": getattr(strategy, "join_key_source", None),
-        "join_compile_selection": getattr(strategy, "join_compile_selection", None),
-        "hop2_key_strategy": getattr(strategy, "hop2_key_strategy", None),
-        "resolved_runtime_key_kind": getattr(strategy, "resolved_runtime_key_kind", None),
-        "join_keys_used_count": getattr(strategy, "join_keys_used_count", None),
-        "query_graph_kind": getattr(strategy, "query_graph_kind", None),
-        "anchor_summary": getattr(strategy, "anchor_summary", None),
-        "anchor_resolution_status": getattr(strategy, "anchor_resolution_status", None),
-        "ambiguity_codes": list(getattr(strategy, "ambiguity_codes", tuple()) or []),
-        "resolved_researcher_count": getattr(strategy, "resolved_researcher_count", None),
-        "resolved_org_count": getattr(strategy, "resolved_org_count", None),
+        
+        # 2. 검색/분석 상세 (Aggregation, Series, Pattern 등)
         "aggregation_kind": getattr(strategy, "aggregation_kind", None),
-        "aggregation_metric": timings.get("info.aggregation_metric") or None,
-        "aggregation_group_by": timings.get("info.aggregation_group_by") or None,
-        "aggregation_threshold": timings.get("info.aggregation_threshold"),
         "aggregation_result_count": timings.get("info.aggregation_result_count"),
-        "failed_step": timings.get("info.failed_step") or None,
         "series_kind": getattr(strategy, "series_kind", None),
-        "series_result_count": timings.get("info.series_result_count"),
         "series_bucket_count": timings.get("info.series_bucket_count"),
-        "pattern_kind": getattr(strategy, "pattern_kind", None) or timings.get("info.pattern_kind") or None,
-        "bundle_kind": getattr(strategy, "bundle_kind", None) or timings.get("info.bundle_kind") or None,
-        "bundle_target_count": timings.get("info.bundle_target_count"),
-        "bundle_project_count": timings.get("info.bundle_project_count"),
-        "bundle_item_count": timings.get("info.bundle_item_count"),
-        "guidance_required": (
-            getattr(strategy, "guidance_required", None)
-            if strategy is not None
-            else timings.get("info.guidance_required")
-        ),
-        "pattern_result_count": timings.get("info.pattern_result_count"),
-        "pattern_subject_count": timings.get("info.pattern_subject_count"),
-        "pattern_support_doc_count": timings.get("info.pattern_support_doc_count"),
-        "reverse_trace_enabled": getattr(strategy, "reverse_trace_enabled", None),
-        "reverse_trace_hop_count": timings.get("info.reverse_trace_hop_count")
-        or getattr(strategy, "reverse_trace_hop_count", None),
-        "origin_project_count": timings.get("info.origin_project_count"),
-        "followup_perf_count": timings.get("info.followup_perf_count"),
+        "pattern_kind": getattr(strategy, "pattern_kind", None) or timings.get("info.pattern_kind"),
+        
+        # 3. 플래너 및 계약(Contract) 정보
         "planner_mode": getattr(question_analysis, "mode", None),
-        "planner_relation": getattr(question_analysis, "relation", None),
-        "planner_target_cols": getattr(question_analysis, "target_cols", None),
-        "intent_payload_version": getattr(intent_payload, "intent_payload_version", None),
-        "strategy_version": getattr(question_analysis, "strategy_version", None),
-        "resolved_project_key_axis": getattr(hard_contract, "resolved_project_key_axis", None),
-        "project_key_axis_locked": getattr(hard_contract, "project_key_axis_locked", None),
-        "unsupported_project_key_alias_count": len(getattr(hard_contract, "unsupported_project_key_aliases", []) or []),
-        "soft_strategy_semantic_kind": getattr(soft_strategy_hints, "semantic_kind", None),
-        "soft_strategy_has_prev_anchor": getattr(soft_strategy_hints, "has_prev_anchor", None),
         "project_key_policy": timings.get("info.project_key_policy") or getattr(strategy, "project_key_policy", None),
-        "join_resolution_policy": timings.get("info.join_resolution_policy")
-        or getattr(strategy, "join_resolution_policy", None),
-        "resolved_runtime_join_mode": timings.get("info.resolved_runtime_join_mode") or None,
-        "dual_branch_used": timings.get("info.dual_branch_used"),
-        "candidate_project_key_count": timings.get("info.candidate_project_key_count")
-        or strategy_meta.get("candidate_project_key_count"),
-        "candidate_perf_key_count": timings.get("info.candidate_perf_key_count")
-        or strategy_meta.get("candidate_perf_key_count"),
-        "followup_resolution_status": strategy_meta.get("followup_resolution_status"),
-        "followup_reference_kind": strategy_meta.get("followup_reference_kind"),
-        "selected_prev_index": strategy_meta.get("selected_prev_index"),
-        "selected_prev_context_kind": strategy_meta.get("selected_prev_context_kind"),
-        "seed_source": strategy_meta.get("seed_source"),
+        "contract_fail_reason": timings.get("info.contract_fail_reason"),
+        "reranked_count": timings.get("info.reranked_count"),
+        
+        # 4. 질의 및 검색 결과 통계
         "raw_query": getattr(state, "question", None),
-        "planner_query": timings.get("info.planner_query") or None,
-        "resolved_retrieval_query": getattr(state, "resolved_retrieval_query", None),
-        "actual_retrieval_query": getattr(state, "actual_retrieval_query", None),
-        "retrieval_query_mismatch": int(
-            bool(
-                getattr(state, "actual_retrieval_query", None)
-                and getattr(state, "resolved_retrieval_query", None)
-                and getattr(state, "actual_retrieval_query", None) != getattr(state, "resolved_retrieval_query", None)
-            )
-        ),
         "docs_found": len(context),
         "selected_model": merge_debug.get("selected_model"),
         "selection_reason": merge_debug.get("selection_reason"),
-        "state_consistency_status": (
-            (merge_debug.get("selected_state_consistency") or {}).get("status")
-            if isinstance(merge_debug.get("selected_state_consistency"), dict)
-            else None
-        ),
-        "state_consistency_reason_codes": (
-            list((merge_debug.get("selected_state_consistency") or {}).get("reason_codes") or [])
-            if isinstance(merge_debug.get("selected_state_consistency"), dict)
-            else None
-        ),
-        "visible_answer_manifest_status": merge_debug.get("visible_answer_manifest_status"),
-        "rendered_context_used": int(bool(getattr(state, "rendered_context_used", False))),
-        "contract_fail_reason": timings.get("info.contract_fail_reason") or None,
-        "empty_result_policy": timings.get("info.empty_result_policy") or None,
-        "reranked_count": timings.get("info.reranked_count"),
-        "degraded": int(bool(getattr(state, "degraded", False))),
         "total_ms": total_ms,
-        "agent_front_controller": 1,
+        
+        # 5. 에이전트(L1) 동작 정보
         "agent_decision_type": getattr(agent_decision, "decision_type", None),
         "agent_tool_name": getattr(agent_decision, "tool_name", None),
-        "agent_current_context_type": agent_context_meta.get("current_context_type"),
-        "agent_subject_name": agent_context_meta.get("subject_name"),
         "agent_observation_type": getattr(agent_observation, "observation_type", None),
-        "agent_contract_blocked": int(
-            str(getattr(agent_observation, "observation_type", "") or "") == "contract_violation"
-        ),
-        "agent_loop_guard_triggered": int(bool(getattr(state, "agent_loop_guard_triggered", False))),
-        # L2 layer fields
-        "l2_orchestrator_owned": retrieval_runtime_meta.get("orchestrator_owned"),
+        
+        # 6. 오케스트레이터(L2) 동작 정보
         "l2_policy_name": retrieval_runtime_meta.get("policy_name"),
         "l2_execution_kind": retrieval_runtime_meta.get("execution_kind"),
         "l2_recovery_applied": retrieval_runtime_meta.get("recovery_applied"),
-        "l2_legacy_retry_allowed": retrieval_runtime_meta.get("legacy_retry_allowed"),
     }

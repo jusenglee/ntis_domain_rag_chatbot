@@ -22,6 +22,7 @@ class ConversationStateCard(BaseModel):
     current_context_type: str = "empty"
     current_subject_kind: Optional[str] = None
     current_subject_name: Optional[str] = None
+    current_subject_identity_status: Optional[str] = None
     current_subject_ids_map: Dict[str, List[str]] = Field(default_factory=dict)
     refinement_allowed: bool = False
     result_kind: Optional[str] = None
@@ -88,6 +89,7 @@ def build_conversation_state_card_model(
             current_context_type=context.context_type,
             current_subject_kind=context.subject_kind,
             current_subject_name=context.subject_name,
+            current_subject_identity_status=context.identity_status,
             current_subject_ids_map=dict(context.subject_ids_map or {}),
             refinement_allowed=bool(context.followup_rights.refinement_allowed),
             result_kind=context.result_kind,
@@ -149,6 +151,8 @@ def render_conversation_state_card(card: ConversationStateCard) -> str:
         lines.append(f"current subject: {card.current_subject_name} ({card.current_subject_kind or 'unknown'})")
     else:
         lines.append("current subject: none confirmed")
+    if card.current_subject_identity_status:
+        lines.append(f"current subject identity: {card.current_subject_identity_status}")
 
     lines.append(f"refinement_allowed: {'yes' if card.refinement_allowed else 'no'}")
 

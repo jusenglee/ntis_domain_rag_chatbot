@@ -637,6 +637,13 @@
       renderBodies();
     }
 
+    function renderTerminalMessage(text) {
+      if (!text) return;
+      rawA = text;
+      rawB = text;
+      renderBodies();
+    }
+
     function appendRawTrace(rawLine) {
       if (!rawLine) return;
       logBox.textContent += `${rawLine}\n\n`;
@@ -730,7 +737,21 @@
           continue;
         }
 
+        const clarificationPayload =
+          eventMeta.clarification && typeof eventMeta.clarification === "object"
+            ? eventMeta.clarification
+            : null;
+        const terminalMessage = String(eventMeta.output_message || "");
+        const clarificationText = String(terminalMessage || clarificationPayload?.message || "");
+
         if (eventKind === "done") {
+          if (clarificationPayload && !clarificationRendered) {
+            renderClarification(clarificationText);
+          } else if (!rawA && !rawB && terminalMessage) {
+            renderTerminalMessage(terminalMessage);
+          } else {
+            renderBodies();
+          }
           done = true;
           if (streamToken === activeStreamToken) {
             setStreaming(false);
@@ -745,50 +766,22 @@
           continue;
         }
 
-        const clarificationPayload =
-          eventKind === "clarification" && eventMeta.clarification && typeof eventMeta.clarification === "object"
-            ? eventMeta.clarification
-            : null;
-        const clarificationText = String(eventContent || clarificationPayload?.message || "");
-
-        if (clarificationPayload) {
-          if (!clarificationRendered) {
-            renderClarification(clarificationText);
-          }
-          scrollToBottom();
-          continue;
-        }
-
         const modelKey = String(eventPayload?.model_key || "").toLowerCase();
         const isSolarFrame = modelKey === "solar";
         const isGemmaFrame = modelKey === "gemma";
 
-        if (eventKind === "answer.final") {
-          if (clarificationRendered) {
-            scrollToBottom();
-            continue;
-          }
-          // answer.final은 사용자에게 미노출 (상태/메타만 처리)
-          // renderFinalAnswer(eventContent, eventMeta); 
-          renderBodies();
+        if (eventKind !== "answer.chunk") {
           scrollToBottom();
           continue;
         }
 
         // MODEL_A / MODEL_B 처리 (model_key 기반 계약)
-        if (eventKind === "answer.chunk") {
-          if (isSolarFrame) {
-            rawA += eventContent;
-          } else if (isGemmaFrame) {
-            rawB += eventContent;
-          }
+        if (isSolarFrame) {
+          rawA += eventContent;
+        } else if (isGemmaFrame) {
+          rawB += eventContent;
         }
 
-
-
-        if (eventKind === "error"){
-          stopStream("❗ SSE fetch 오류");
-        }
 
 
         renderBodies();

@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""
+RAG 결과 조립(Assembly) 모듈입니다.
+이 모듈은 검색 엔진(Qdrant 등)에서 찾아온 원본 데이터(Evidence)를 
+정렬(Sorting), 필터링(Filtering), 그리고 최종적으로 프롬프트에 들어갈 텍스트(Context)로 
+변환하는 전 과정을 담당하는 핵심 관문입니다.
+
+주요 흐름:
+1. 중복 제거: 여러 소스에서 들어온 검색 결과 중 겹치는 문서를 정리합니다.
+2. 재정렬(Rerank): 사용자 질문과의 유사도, 중요도(Tag Boost) 등을 고려해 순위를 다시 매깁니다.
+3. 필터링: 특정 인물, 기관 등 구조적 제약 조건(Structured Constraint)에 맞춰 결과를 걸러냅니다.
+4. 요약 및 변환: 최종 선정된 문서들을 프롬프트용 텍스트(Context)로 렌더링하고 참조 정보(Refs)를 만듭니다.
+"""
+
 import os
 import time
 from dataclasses import dataclass
@@ -28,6 +41,7 @@ TimingPut = Callable[[str, Any], None]
 
 
 def _coerce_int(value: Any, default: int) -> int:
+    """값을 정수형으로 안전하게 변환합니다. 변환 실패 시 기본값을 반환합니다."""
     try:
         return int(value)
     except Exception:
@@ -35,6 +49,7 @@ def _coerce_int(value: Any, default: int) -> int:
 
 
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    """객체의 속성이나 딕셔너리의 키 값을 안전하게 가져옵니다."""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -43,6 +58,7 @@ def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
 
 
 def _hydrate_points(points: Sequence[Any], *, qdr: Any, chunk_size: int = 128) -> None:
+    """검색 결과(points)의 메타데이터를 실제 상세 정보로 채웁니다(Hydration)."""
     hydrate_points_payload(
         qdr,
         list(points or []),
@@ -60,6 +76,7 @@ def _hydrate_points(points: Sequence[Any], *, qdr: Any, chunk_size: int = 128) -
 
 
 def _log_top_points(title: str, points: Sequence[Any], *, topn: int = None, level: str = "info", tier: str = "debug") -> None:
+    """상위 N개의 검색 결과를 로그에 기록하여 품질을 모니터링합니다."""
     log_top_points_runtime(
         title,
         list(points or []),
@@ -73,6 +90,9 @@ def _log_top_points(title: str, points: Sequence[Any], *, topn: int = None, leve
 
 
 def _has_explicit_identifiers(intent: Any) -> bool:
+    """사용자 의도(intent)에 명시적인 ID(과제 ID 등)가 포함되어 있는지 확인합니다.
+    ID 기반 조회는 일반 검색보다 엄격한 품질 기준이 적용될 수 있습니다.
+    """
     ids_map = getattr(intent, "ids_map", None)
     if isinstance(ids_map, dict) and any(values for values in ids_map.values() if values):
         return True
@@ -86,7 +106,7 @@ def _has_explicit_identifiers(intent: Any) -> bool:
 
 
 def _render_series_context(series: Optional[Dict[str, Any]]) -> str:
-    """Render a compact text view for series payloads."""
+    """연속적인 과제(Series) 정보를 텍스트 형태로 변환하여 프롬프트에 사용할 수 있게 합니다."""
     if not isinstance(series, dict):
         return ""
     projects = list(series.get("instance_projects") or [])
@@ -110,8 +130,10 @@ def _render_series_context(series: Optional[Dict[str, Any]]) -> str:
             f"- bucket {bucket.get('year')}: projects={bucket.get('project_count', 0)}, papers={bucket.get('paper_count', 0)}, patents={bucket.get('patent_count', 0)}, reports={bucket.get('report_count', 0)}"
         )
     return "\n".join(lines)
+
+
 def _render_pattern_analysis_context(pattern_analysis: Optional[Dict[str, Any]]) -> str:
-    """Render a compact text view for pattern-analysis payloads."""
+    """패턴 분석 결과(예: 공동 연구 반복 횟수 등)를 텍스트 형태로 렌더링합니다."""
     if not isinstance(pattern_analysis, dict):
         return ""
     items = list(pattern_analysis.get("items") or [])
@@ -137,7 +159,7 @@ def _render_pattern_analysis_context(pattern_analysis: Optional[Dict[str, Any]])
 
 
 def _render_multi_hop_bundle_context(bundle: Optional[Dict[str, Any]]) -> str:
-    """Render a compact text view for multi-hop bundle payloads."""
+    """여러 단계를 거쳐 수집된 데이터(Multi-hop Bundle)를 요약된 텍스트로 변환합니다."""
     if not isinstance(bundle, dict):
         return ""
     projects = list(bundle.get("projects") or [])
@@ -165,7 +187,7 @@ def _render_multi_hop_bundle_context(bundle: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 def _render_reverse_trace_context(reverse_trace: Optional[Dict[str, Any]]) -> str:
-    """Render a compact text view for perf -> project -> perf reverse traces."""
+    """성과에서 과제로, 다시 성과로 이어지는 역추적 관계를 텍스트로 렌더링합니다."""
     if not isinstance(reverse_trace, dict):
         return ""
     origin_perf = list(reverse_trace.get("origin_perf") or [])
@@ -191,9 +213,7 @@ def _render_reverse_trace_context(reverse_trace: Optional[Dict[str, Any]]) -> st
 
 @dataclass(frozen=True)
 class ResultAssemblyRequest:
-    """RAG 결과 조립에 필요한 요청 컨텍스트를 묶어 두는 구조체다.
-    base route, mode, relation, query terms, source hits가 한 곳에 있어 context builder와 join assembler가 같은 입력을 공유한다.
-    """
+    """RAG 결과 조립에 필요한 모든 입력 정보를 담고 있는 데이터 클래스입니다."""
     base_route: str
     mode: str
     action: str
@@ -213,9 +233,7 @@ class ResultAssemblyRequest:
 
 @dataclass(frozen=True)
 class ResultAssemblyPolicy:
-    """result assembly에서 쓸 rerank/title/context 정책 설정을 묶어 둔다.
-    preset과 title match 정책을 함께 들고 다니며 조립 단계에서 타이틀 강화가 어떻게 적용되는지 고정한다.
-    """
+    """결과 조립 과정에서 적용할 정책(Rerank 사양, 토큰 제한 등)을 정의합니다."""
     rerank_spec: Optional[Dict[str, Any]]
     preset: Any
     ctx_hard_limit: int
@@ -228,8 +246,7 @@ class ResultAssemblyPolicy:
 
 @dataclass(frozen=True)
 class ResultAssemblyState:
-    """Result assembly가 공유하는 실제 runtime state만 보관한다."""
-
+    """결과 조립 실행 중의 상태(소요 시간, DB 클라이언트 등)를 관리합니다."""
     timings: Dict[str, Any]
     t_all0: float
     qdr: Any
@@ -237,9 +254,7 @@ class ResultAssemblyState:
 
 
 def collect_filter_probe_terms(*, people_terms: Optional[List[str]], people_ids: Optional[List[str]], mode: str) -> List[str]:
-    """필터 효과를 사후 점검할 때 사용할 probe 키워드를 골라낸다.
-    lookup/join에서만 최소 한 개 term을 유지해 raw nested payload에 실제 매칭 흔적이 있는지 확인한다.
-    """
+    """필터링 효과를 사후 검증하기 위해 사용할 키워드를 추출합니다."""
     probe_terms = [str(term).strip() for term in (people_terms or []) if str(term).strip()]
     if not probe_terms and mode in ("lookup", "join"):
         if bool(people_terms) and not bool(people_ids):
@@ -254,9 +269,7 @@ def collect_filter_probe_docs(
     probe_terms: List[str],
     mode: str,
 ) -> Optional[Dict[str, Any]]:
-    """reranked top-N 문서에서 참여인력 nested payload 매칭 증거를 수집한다.
-    filter 결과가 실제 raw payload 기준으로 확인되는지 사후 진단할 수 있게 preview 문서와 match count를 만든다.
-    """
+    """재정렬된 문서들 중 필터 조건에 부합하는 문서가 실제로 있는지 샘플링하여 조사합니다."""
     if not probe_terms or mode not in ("lookup", "join") or not reranked:
         return None
 
@@ -330,6 +343,7 @@ def collect_filter_probe_docs(
 
 
 def _payload_list_texts(payload: Dict[str, Any], key: str) -> List[str]:
+    """페이로드에서 특정 키에 해당하는 텍스트 리스트를 추출합니다."""
     values: List[str] = []
     current = payload.get(key)
     if isinstance(current, list):
@@ -347,6 +361,7 @@ def _payload_list_texts(payload: Dict[str, Any], key: str) -> List[str]:
 
 
 def _match_any_term(value: str, terms: Sequence[str]) -> bool:
+    """주어진 값에 검색어 리스트 중 하나라도 포함되어 있는지 확인합니다."""
     target = str(value or "").strip().lower()
     if not target:
         return False
@@ -360,6 +375,7 @@ def _match_same_member_constraints(
     people_ids: Sequence[str],
     affiliation_org_terms: Sequence[str],
 ) -> bool:
+    """특정 인물이나 소속 기관에 대한 제약 조건이 데이터와 일치하는지 검사합니다."""
     if not isinstance(members_raw, list):
         return False
     normalized_people = [str(term).strip() for term in people_terms if str(term).strip()]
@@ -393,6 +409,7 @@ def _point_satisfies_structured_constraint(
     people_org_terms: Sequence[str],
     org_role: Optional[str],
 ) -> bool:
+    """검색 결과(point)가 인물, 기관 등 구조적 제약 조건을 만족하는지 판단합니다."""
     payload = getattr(point, "payload", None) or {}
     role = str(org_role or "").strip().lower()
     normalized_people = [str(term).strip() for term in people_terms if str(term).strip()]
@@ -449,6 +466,7 @@ def apply_structured_result_constraint(
     people_org_terms: Sequence[str],
     org_role: Optional[str],
 ) -> tuple[List[Any], Dict[str, Any]]:
+    """재정렬된 결과들에 대해 인물/기관 등의 추가적인 필터링 제약을 적용합니다."""
     constrained = list(reranked or [])
     constraints_present = bool(people_terms or people_ids or org_terms or people_org_terms)
     if not constraints_present:
@@ -475,9 +493,7 @@ def apply_structured_result_constraint(
 
 
 def collect_merged_hits(sources: Sequence[Any], *, hit_key: HitKey) -> List[Any]:
-    """여러 source에서 들어온 hit를 key 기준으로 중복 제거해 합친다.
-    source별 히트를 다른 순서로 받더라도 같은 문서를 두 번 집계하지 않게 한다.
-    """
+    """여러 소스에서 검색된 문서들을 하나로 합치고 중복을 제거합니다."""
     merged_hits: List[Any] = []
     seen: set[Tuple[str, str]] = set()
     for source in sources:
@@ -498,9 +514,7 @@ def resolve_effective_min_reranked(
     preset_min_reranked: int,
     hinted_limit: int = 0,
 ) -> tuple[int, str]:
-    """현재 요청에 적용할 실효 `min_reranked` 값과 clamp 사유를 계산한다.
-    hinted limit·lookup id query 같은 예외 경로에서 rerank 하한선을 낮춰 가시 결과가 사라지지 않게 한다.
-    """
+    """현재 검색 상황에 맞춰 최소 유지해야 할 문서 개수(min_reranked)를 결정합니다."""
     effective_min_reranked = max(0, int(preset_min_reranked or 0))
     clamp_reasons: list[str] = []
 
@@ -552,11 +566,10 @@ def assemble_rag_result(
     contract_fail_reason: Any,
     intent_payload: Any = None,
 ) -> RagResult:
-    """base retrieval/rerank 결과를 context bundle·docs·aggregations·meta가 들어있는 RagResult로 조립한다.
-    title post-rerank, contract enforcement, filter probe, aggregation, context rendering을 연결하는 핵심 결과 조립 관문이다.
-    """
+    """최종적인 RAG 응답 객체(RagResult)를 조립합니다. 컨텍스트 렌더링과 메타데이터 작성이 여기서 일어납니다."""
     strategy_meta = dict(getattr(intent_payload, "strategy_meta", None) or {})
     t0 = time.time()
+    # 텍스트 컨텍스트 및 참조 정보(Refs) 생성
     context_bundle = build_context_bundle(
         list(reranked or []),
         min_ctx_items=min_ctx_items,
@@ -575,6 +588,7 @@ def assemble_rag_result(
         turn_id=str(strategy_meta.get("turn_id") or "").strip() or None,
     )
     context = context_bundle["context"]
+    # 특정 출력 타입에 따른 컨텍스트 오버라이드 (Series, Pattern Analysis 등)
     if str(output_type or "").strip().lower() == "series" and isinstance(series, dict) and str(series.get("status") or "").strip().lower() == "ok":
         context = _render_series_context(series) or context
     elif isinstance(pattern_analysis, dict) and str(pattern_analysis.get("status") or "").strip().lower() == "ok":
@@ -599,6 +613,7 @@ def assemble_rag_result(
     kept_ctx = int(context_bundle["kept_ctx"])
     discarded_ctx = int(context_bundle["discarded_ctx"])
 
+    # 로깅: 컨텍스트 조립 결과 요약 (재현성 및 품질 진단용)
     log_kv(
         "RAG.CONTEXT",
         reranked_total=len(reranked or []),
@@ -669,10 +684,7 @@ def assemble_rag_result(
 
 
 class SearchLookupResultOrchestrator:
-    """`SearchLookupResultOrchestrator`는 현재 모듈의 책임을 표현하는 타입 또는 헬퍼 클래스입니다.
-
-책임:
-- 현재 레이어는 planner/contract/runtime 경계를 넘어 의미를 임의 보정하지 않고, 필요한 검증과 조립만 수행해야 합니다.\n    """
+    """검색 및 조회 결과의 후처리와 조립을 총괄하는 오케스트레이터 클래스입니다."""
     def __init__(
         self,
         *,
@@ -684,9 +696,7 @@ class SearchLookupResultOrchestrator:
         policy: ResultAssemblyPolicy,
         state: ResultAssemblyState,
     ) -> None:
-        """join result assembly에 필요한 runtime callback과 공유 설정을 인스턴스에 붙인다.
-        join hop context 조립과 base result assembly가 같은 자원을 공유할 수 있게 초기 상태를 정리한다.
-        """
+        """필요한 상태값들을 초기화합니다."""
         self.merged_rrf = merged_rrf
         self.query_intent = query_intent
         self.keywords = keywords
@@ -696,9 +706,7 @@ class SearchLookupResultOrchestrator:
         self.state = state
 
     def run(self) -> RagResult:
-        """join hop 결과를 받아 relation 전용 RagResult로 조립한다.
-        hop1/hop2 context, join keys used, strategy summary를 합친 다음 base assembler가 내놓는 shape와 맞춰 반환한다.
-        """
+        """전체 조립 프로세스를 실행합니다."""
         record_timing = lambda key, value: timing_put(self.state.timings, key, value)
         final_rerank = build_final_rerank(
             payload_get=_payload_get,
@@ -708,6 +716,7 @@ class SearchLookupResultOrchestrator:
             log_kv=log_kv,
             log_section=log_section,
         )
+        # 제목 매칭 등을 활용한 가중치 설정 준비
         title_post_filter = prepare_title_post_rerank(
             self.merged_rrf,
             plan_mode=self.request.plan_mode,
@@ -724,6 +733,7 @@ class SearchLookupResultOrchestrator:
 
         t0 = time.time()
         final_keep = int((self.policy.rerank_spec or {}).get("final_keep", 80))
+        # 1. 최종 재정렬 (Rerank) 실행
         reranked = final_rerank(
             self.merged_rrf,
             it=self.query_intent,
@@ -742,6 +752,7 @@ class SearchLookupResultOrchestrator:
             reranked = reranked[: self.policy.ctx_hard_limit]
         record_timing("phase.final_rerank", time.time() - t0)
 
+        # 2. 부가 정보 생성 (인물 통계, 과제 시리즈 등)
         aggregation = build_people_superlative_aggregation(
             reranked=reranked,
             intent=self.query_intent,
@@ -801,6 +812,7 @@ class SearchLookupResultOrchestrator:
         _log_top_points("RAG.RESULT.TOP", reranked, topn=result_topn_normal, tier="normal")
         _log_top_points("RAG.RESULT.TOP.DEBUG", reranked, topn=result_topn_debug, tier="debug")
 
+        # 3. 품질 계약(Contract) 확인 및 데이터 상세화 (Hydrate)
         min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
         min_reranked = max(0, int(getattr(self.policy.preset, "min_reranked", 0) or 0))
         effective_min_reranked, min_reranked_clamp_reason = resolve_effective_min_reranked(
@@ -853,6 +865,7 @@ class SearchLookupResultOrchestrator:
             output_type=self.request.output_type,
             base_route=self.request.base_route,
         )
+        # 4. 구조적 필터링 적용
         reranked, structured_constraint = apply_structured_result_constraint(
             reranked,
             people_terms=list(self.request.people_terms or []),
@@ -922,6 +935,7 @@ class SearchLookupResultOrchestrator:
                 tier="debug",
             )
 
+        # 5. 최종 결과 조립 및 반환
         return assemble_rag_result(
             reranked=reranked,
             sources=self.request.sources,
@@ -986,9 +1000,7 @@ def finalize_rag_result(
     title_terms: List[str],
     lookup_title_filter_policy: str,
 ) -> RagResult:
-    """request/policy/runtime을 받아 base RAG 결과 조립 전체를 실행한다.
-    ResultAssemblyRequest·Policy·Runtime를 입력으로 받는 파사드로, 실제 조립 함수의 긴 인자 목록을 증발시키지 않게 한다.
-    """
+    """결과 조립 과정을 간편하게 호출할 수 있는 진입점 함수입니다."""
     request = ResultAssemblyRequest(
         base_route=base_route,
         mode=mode,
@@ -1068,10 +1080,9 @@ def assemble_join_rag_result(
     multi_hop_bundle: Optional[Dict[str, Any]] = None,
     debug_meta: Optional[Dict[str, Any]] = None,
 ) -> RagResult:
-    """JOIN 경로의 hop 결과를 relation 특화 RagResult로 조립한다.
-    join context 번들, canonical relation summary, strategy meta를 포함해 base result와는 다른 relation view를 만든다.
-    """
+    """조인(Join) 경로를 거친 복합 검색 결과를 조립합니다. 1차 결과와 2차 결과를 연결합니다."""
     min_ctx_items = max(1, min(2, int(os.getenv("RAG_MIN_CTX_ITEMS", "2"))))
+    # 1차 홉(Hop) 컨텍스트 생성
     hop1_ctx, hop1_refs = build_join_hop_context(
         context_builder=build_context_with_output_type,
         points=list(hop1_points or []),
@@ -1087,6 +1098,7 @@ def assemble_join_rag_result(
     )
 
     t0 = time.time()
+    # 2차 홉(Hop) 컨텍스트 생성
     context_bundle = build_context_bundle(
         list(hop2_reranked or []),
         min_ctx_items=min_ctx_items,
@@ -1120,6 +1132,7 @@ def assemble_join_rag_result(
     compressed_count = int(context_bundle.get("compressed_count") or 0)
     lineages = list(context_bundle.get("lineages") or [])
 
+    # 두 홉의 결과를 하나로 결합
     context = compose_join_context(
         hop1_ctx=hop1_ctx,
         hop2_ctx=hop2_ctx,

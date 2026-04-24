@@ -1,3 +1,22 @@
+"""
+사용자에게 보여지는 화면의 상태(UI State)와 대화 중 언급된 엔티티들을 관리하는 모듈입니다.
+
+[설계 의도: ADR-0016 가시적 진실(Visible Truth) 관리]
+이 모듈은 대화의 '눈' 역할을 합니다. 현재 사용자가 어떤 리스트를 보고 있는지(DisplaySnapshot), 
+그 중 특정 항목을 선택했는지(ActiveScope)를 추적하여 "그것의 참여 인력은?"과 같은 
+지시 대명사 기반의 요청을 정확한 데이터와 매핑합니다.
+
+[주요 상태 관리 로직]
+1. ActiveScope (활성 범위):
+   - 왜 저장하는가: 사용자의 현재 시점(View)을 List, Detail, Child 단위로 관리하여 대화의 깊이를 유지합니다.
+   - 활성화 시점: 검색 결과가 나오거나(List), 특정 항목을 클릭/요청했을 때(Detail) 전환됩니다.
+2. SubjectIndex (엔티티 색인):
+   - 왜 저장하는가: 대화 중 언급된 모든 연구자, 기관, 성과물들을 인덱싱하여 나중에 다시 언급될 때 빠르게 식별하기 위함입니다.
+   - 동작 방식: 이름, 소속, ID 등을 결합하여 고유 식별자(Subject Identity)를 생성하고 관리합니다.
+3. RecentMentions (최근 언급 항목):
+   - 왜 저장하는가: 가장 최근에 언급된 엔티티들을 별도로 관리하여 LLM이 대화 맥락을 파악할 때 힌트로 제공합니다.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional

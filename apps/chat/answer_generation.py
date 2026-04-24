@@ -1,8 +1,15 @@
 """
 검색된 근거(Evidence)를 바탕으로 최종 사용자 답변을 생성하고 품질을 검증하는 모듈입니다.
 
-단순한 텍스트 생성을 넘어, 답변 내용이 실제 검색 결과와 일치하는지(Consistency), 
-허구의 정보가 포함되지 않았는지(Groundedness)를 2중으로 체크하여 신뢰성을 확보합니다.
+[설계 의도: ADR-0016 및 2층 계약(2-Layer Contract) 아키텍처]
+이 모듈은 시스템의 최종 관문인 'Answer Publication Guard' 역할을 수행합니다.
+단순히 LLM이 생성한 텍스트를 전달하는 것이 아니라, 검색된 실제 데이터(L2 계층의 진실)와 
+사용자의 의도(L1 계층의 진실)가 최종 답변에서 정합성을 이루는지 엄격하게 검증합니다.
+
+주요 특징:
+1. Groundedness (근거성): 답변의 모든 내용이 검색된 Evidence 내에 존재하는지 확인하여 환각(Hallucination)을 방지합니다.
+2. State Consistency (상태 정합성): 특히 '목록형' 응답에서, 화면에 표시된 항목의 순서나 개수가 답변 내용과 일치하는지 체크합니다.
+3. Subject Continuity (주제 연속성): 답변 생성 후, 다음 대화에서도 현재 대화의 주제(연구자, 기관 등)를 유지할 수 있도록 SubjectQueryContext를 관리합니다.
 """
 
 from __future__ import annotations
@@ -842,10 +849,17 @@ async def generate_answer(
     final_field: str,
 ) -> Dict[str, Any]:
 
-    """모델별 system prompt, reference context, user question을 묶어 최종 답변을 생성한다.
+    """모델별 system prompt, reference context, user question을 묶어 최종 답변을 생성합니다.
 
-    스트리밍 메트릭과 context 사용 여부를 함께 기록해 이후 병합 단계가 모델 상태를 근거 있게
-    판단할 수 있도록 만든다.
+    [상태 관리 로직 설명]
+    1. Short-circuit (단축 경로): 이미 유효한 답변 아티팩트가 있거나 결과 없음 메시지가 설정된 경우, 
+       LLM을 호출하지 않고 즉시 반환하여 비용과 지연 시간을 줄입니다.
+    2. Context Building: 검색된 raw payload를 'Canonical Evidence' 형태로 변환하여 LLM이 이해하기 
+       쉬운 표준화된 텍스트로 제공합니다. 이는 모델 간(Solar, Gemma)의 일관된 성능을 보장합니다.
+    3. Agent Observation Note: 대화 에이전트가 탐색 과정에서 남긴 특이 사항([결과 주석])이 있다면 
+       이를 프롬프트에 주입하여, LLM이 단순 검색 결과 이상의 맥락을 답변에 반영하도록 합니다.
+    4. Streaming Metrics: 스트리밍 응답의 품질(TTFT, 지연 등)을 실시간으로 측정하여 성능 저하 시 
+       로그를 남기고 후속 병합 단계에서 참고할 수 있게 합니다.
     """
     execution_trace_summary = summarize_execution_trace(getattr(state, "execution_trace", None) or [])
 
@@ -1135,9 +1149,22 @@ async def node_merge_answers(state: Any) -> Dict[str, Any]:
 
 async def merge_answers(state: Any) -> Dict[str, Any]:
 
-    """Solar과 Gemma 결과 중 최종 답변을 선택하고 병합 메타를 기록한다.
+    """Solar과 Gemma 결과 중 최종 답변을 선택하고 병합 메타를 기록합니다.
 
-    선택 정책은 별도 함수에 위임하고, 여기서는 선택 사유와 실패 징후를 workflow state에 보존한다.
+    [상태 관리 및 검증 로직 상세 설명]
+    1. Dual Model Validation: 두 모델의 답변에 대해 Groundedness와 State Consistency를 동시에 검증합니다.
+       하나의 모델이 실패하더라도 다른 모델의 성공적인 답변을 선택할 수 있는 복원력을 제공합니다.
+    2. Answer Publication Guard: 만약 모든 모델이 '목록 불일치'나 '환각' 등의 이유로 검증을 통과하지 
+       못할 경우, 사용자에게 잘못된 정보를 전달하는 대신 미리 정의된 안전한 'Fallback 메시지'를 
+       출력하여 시스템의 신뢰성을 유지합니다.
+    3. Deterministic Visible List: 목록형 응답에서 모델의 답변이 불안정할 경우, 검색된 데이터를 기반으로 
+       시스템이 직접 확정적인 리스트를 생성하여 제공합니다(Answer Augmentation).
+    4. Next Current Context (중요): 답변이 나간 후, 사용자가 "그 사람의 다른 과제는?"과 같이 
+       대명사나 생략된 표현을 썼을 때 이를 이해할 수 있도록 현재 대화의 주제(Subject)를 
+       추출하여 세션 메모리에 저장합니다. 
+       - 답변이 정상적으로 나갔다면 'answer_published' 상태로 저장.
+       - 데이터는 찾았으나 답변 생성에 실패해 질문 보정 유도가 필요한 경우 'answer_withheld_subject_retained' 
+         상태로 저장하여 주제 맥락은 유지하되 답변만 보류합니다.
     """
 
     has_docs_context = bool(getattr(state, "context", None) or getattr(state, "prev_context", None) or getattr(state, "canonical_evidence", None))
@@ -1398,6 +1425,13 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             subject_kind=next_current_context.subject_kind,
             subject_name=next_current_context.subject_name,
             publication_status=next_current_context.publication_status,
+            identity_status=next_current_context.identity_status,
+            subject_identity_candidate_count=max(
+                len(list(next_current_context.subject_ids_map.get("person_no") or [])),
+                len(list(next_current_context.subject_ids_map.get("org_id") or [])),
+                len(list(next_current_context.subject_ids_map.get("org_code") or [])),
+                len(list(next_current_context.subject_ids_map.get("biz_no") or [])),
+            ),
             answer_publishability=selected_answer_meta.get("answer_publishability") if isinstance(selected_answer_meta, dict) else None,
             subject_continuity_retained=bool(next_current_context.followup_rights.refinement_allowed),
             current_context_type=next_current_context.context_type,

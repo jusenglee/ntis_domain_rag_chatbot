@@ -93,7 +93,26 @@
 {"action":"list","head":"perf","relation_candidate":null,"referential_followup":false,"confidence":0.94}
 {"action":"list","head":"support","relation_candidate":null,"referential_followup":false,"confidence":0.98}
 {"action":"detail","head":"perf","relation_candidate":null,"referential_followup":false,"confidence":0.99}
+{"action":"stats","head":"project","relation_candidate":null,"referential_followup":false,"confidence":0.97}
+{"action":"list","head":"project","relation_candidate":"project_perf","referential_followup":true,"confidence":0.92}
 </examples>
+
+<detailed_few_shots>
+1. 질문: "최근 3년간 인공지능 관련 과제들의 연도별 건수 알려줘"
+   -> {"action":"stats","head":"project","relation_candidate":null,"referential_followup":false,"confidence":0.98}
+
+2. 질문: "신동구 연구자가 2022년에 발표한 논문 목록 보여줘"
+   -> {"action":"list","head":"perf","relation_candidate":null,"referential_followup":false,"confidence":0.99}
+
+3. 질문: "이 과제에서 나온 특허 정보가 궁금해" (이전 과제 답변 맥락이 있는 경우)
+   -> {"action":"list","head":"perf","relation_candidate":"project_perf","referential_followup":true,"confidence":0.95}
+
+4. 질문: "한국과학기술정보연구원의 작년도 총 연구비 통계"
+   -> {"action":"stats","head":"project","relation_candidate":null,"referential_followup":false,"confidence":0.97}
+
+5. 질문: "바이오 분야 중기부 지원사업 리스트"
+   -> {"action":"list","head":"support","relation_candidate":null,"referential_followup":false,"confidence":0.98}
+</detailed_few_shots>
 
 <final_check>
 반드시 아래를 모두 만족해야 한다.

@@ -20,10 +20,7 @@ class StreamEvent:
         "conversation",
         "status",
         "answer.chunk",
-        "answer.final",
         "reference.set",
-        "clarification",
-        "error",
         "done",
     ]
     request_id: str

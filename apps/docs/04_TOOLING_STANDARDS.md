@@ -42,7 +42,7 @@ ADR-0001 전환을 위해 `apps.conversation`에 agent-facing tool 계약을 추
 - `agent_tools.py`: `search_subject_activity`, `search_ntis_domain`, `refine_current_subject`, `ask_user_for_clarification`의 tool spec과 아직 미구현인 `lookup_specific_entity`, `join_project_perf` 선언
 - `agent_contracts.py`: workflow state와 router가 공유하는 `AgentDecision` 계약. 허용 decision은 `direct_answer`, `call_tool`, `ask_clarification`, `agent_internal_error`로 고정한다.
 - `agent_observation.py`: `AgentObservation` 표준 관측 결과와 guarded planner 산출물을 함께 싣는 `AgentToolExecutionResult`. subject activity/refinement 결과는 answer publication 전 staging 후보인 `next_current_context`를 함께 실을 수 있다.
-- `agent_tool_executor.py`: `search_subject_activity`와 `refine_current_subject`는 direct compile로, generic `search_ntis_domain`은 `build_agent_intent_payload()`로 연결해 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 생성한다. direct subject tool은 `SubjectQueryContext(publication_status="clarification_pending")`를 stage하고 answer publication 이후 `answer_published` 또는 `answer_withheld_subject_retained`로 커밋한다.
+- `agent_tool_executor.py`: `search_subject_activity`와 `refine_current_subject`는 direct compile로, generic `search_ntis_domain`은 `build_agent_intent_payload()`로 연결해 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 생성한다. direct subject tool은 `SubjectQueryContext(publication_status="clarification_pending")`를 stage하고 answer publication 이후 `answer_published` 또는 `answer_withheld_subject_retained`로 커밋한다. stage/commit payload는 `identity_status`와 복수 `person_no` 후보를 함께 유지할 수 있으며, ambiguity는 commit 이후에도 explicit disambiguation signal 전까지 보존한다.
 - `conversation_state_card.py`: `SessionMemory.current_context`를 LLM이 읽을 수 있는 state card로 투영
 
 신규 agent 계약에는 이전 front-controller fallback decision이 없다.

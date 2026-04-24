@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+"""
+정규화된 문맥(Canonical Context) 관리 모듈입니다.
+이 모듈은 RAG 시스템에서 LLM에게 전달할 지식 데이터를 사람이 읽기 좋은 형태(자연어)로 변환하거나,
+이전 대화의 문맥을 다시 복원하는 역할을 수행합니다.
+
+주요 역할:
+1. 텍스트 렌더링: 구조화된 증거(Evidence) 데이터를 '# 출처 N. 제목' 형태의 깔끔한 텍스트로 바꿉니다.
+2. 필드 라벨링: 데이터베이스의 키 값(pjt_id, rst_id 등)을 '과제 ID', '성과 ID'와 같은 사용자 친화적인 한글 이름으로 매핑합니다.
+3. 문맥 복원(Rehydration): 이전 턴에서 사용했던 정규화된 증거를 다시 딕셔너리 형태로 되돌려 대화의 연속성을 유지합니다.
+"""
+
 from typing import Any
 
 from apps.evidence.canonical_evidence import build_canonical_evidence, build_canonical_evidence_bundle
 
-
+# 프롬프트에 표시될 필드들의 한글 라벨 설정입니다.
+# 사용자가 답변의 근거를 쉽게 이해할 수 있도록 친숙한 용어를 사용합니다.
 _PROMPT_FIELD_LABELS = {
     "pjt_id": "과제 ID",
     "pjt_no": "과제 번호",
@@ -30,6 +42,9 @@ _PROMPT_FIELD_LABELS = {
 
 
 def _clean_prompt_value(value: Any) -> str:
+    """텍스트 내의 불필요한 공백이나 특수 줄바꿈 문자를 제거하여 깔끔하게 정리합니다.
+    데이터 전처리 과정에서 발생할 수 있는 노이즈를 제거하여 LLM이 더 잘 이해하도록 돕습니다.
+    """
     text = str(value or "")
     text = text.replace("_x000D_\n", "\n").replace("_x000D_", "\n")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -37,6 +52,9 @@ def _clean_prompt_value(value: Any) -> str:
 
 
 def _join_unique(values: list[Any]) -> str:
+    """리스트 형태의 값들을 중복 없이 하나로 합쳐진 문자열로 변환합니다.
+    여러 필드에 흩어져 있는 중복된 정보를 하나로 묶어 프롬프트 길이를 줄입니다.
+    """
     items: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -49,6 +67,9 @@ def _join_unique(values: list[Any]) -> str:
 
 
 def _append_prompt_field(lines: list[str], *, key: str, value: Any) -> None:
+    """단일 값을 가진 필드를 프롬프트 줄 리스트에 추가합니다.
+    값이 비어 있는 경우에는 불필요한 줄을 생성하지 않습니다.
+    """
     rendered = _clean_prompt_value(value)
     if not rendered:
         return
@@ -56,6 +77,9 @@ def _append_prompt_field(lines: list[str], *, key: str, value: Any) -> None:
 
 
 def _append_prompt_list_field(lines: list[str], *, key: str, values: list[Any]) -> None:
+    """리스트 형태의 값을 가진 필드를 프롬프트 줄 리스트에 추가합니다.
+    여러 개의 기관이나 연구자 이름을 쉼표로 구분하여 한 줄로 표시합니다.
+    """
     rendered = _join_unique(list(values or []))
     if not rendered:
         return
@@ -63,6 +87,9 @@ def _append_prompt_list_field(lines: list[str], *, key: str, values: list[Any]) 
 
 
 def _first_child_id(entity: dict[str, Any], key: str) -> str:
+    """엔티티의 ID 맵(ids_map)에서 첫 번째 유효한 ID 값을 추출합니다.
+    복합적인 ID 구조에서 대표 값을 안전하게 가져오기 위해 사용합니다.
+    """
     ids_map = entity.get("ids_map") or {}
     values = ids_map.get(key) or []
     if isinstance(values, str):
@@ -76,7 +103,9 @@ def _first_child_id(entity: dict[str, Any], key: str) -> str:
 
 
 def _rehydrate_participant_members(roles: dict[str, Any], child_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rebuild participant members while preserving affiliation-org semantics."""
+    """참여 연구자 정보를 이전의 구조화된 데이터 형태로 복원합니다.
+    대화 이력에 저장된 텍스트나 엔티티 정보를 바탕으로 원래의 연구자 정보를 재구성합니다.
+    """
     child_members: list[dict[str, Any]] = []
     for entity in child_entities or []:
         if not isinstance(entity, dict):
@@ -101,6 +130,7 @@ def _rehydrate_participant_members(roles: dict[str, Any], child_entities: list[d
     if child_members:
         return child_members
 
+    # 엔티티 정보가 없는 경우, 역할 맵(roles)에 저장된 정보로 대체합니다.
     researcher_names = [
         str(value).strip()
         for value in (roles.get("participant_researcher_name") or [])
@@ -122,6 +152,9 @@ def _rehydrate_participant_members(roles: dict[str, Any], child_entities: list[d
 
 
 def _rehydrate_participant_orgs(roles: dict[str, Any], child_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """참여 기관 정보를 이전의 구조화된 데이터 형태로 복원합니다.
+    참여 기관명뿐만 아니라 기관 ID나 사업자 번호 등 메타데이터도 함께 복원합니다.
+    """
     child_orgs: list[dict[str, Any]] = []
     for entity in child_entities or []:
         if not isinstance(entity, dict):
@@ -153,6 +186,9 @@ def _rehydrate_participant_orgs(roles: dict[str, Any], child_entities: list[dict
 
 
 def _rehydrate_related_perf(child_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """관련 성과 정보를 이전의 구조화된 데이터 형태로 복원합니다.
+    논문, 특허 등 과제와 연결된 성과물들의 상세 정보를 재구성합니다.
+    """
     related: list[dict[str, Any]] = []
     for entity in child_entities or []:
         if not isinstance(entity, dict):
@@ -180,17 +216,22 @@ def _rehydrate_related_perf(child_entities: list[dict[str, Any]]) -> list[dict[s
             item["org_nm"] = affiliation
         related.append(item)
     return related
-
-
+
+
 def render_canonical_evidence_text(
     canonical_evidence: list[dict[str, Any]],
     render_profile: dict[str, Any],
-    *,
-    max_chars: int = 0,
+    *,
+    max_chars: int = 0,
 ) -> str:
-    """canonical_evidence와 render_profile을 사람이 읽는 context text로 렌더링한다.
-
-    모델이 그대로 따라 말할 수 있으므로 내부 schema 키 대신 `# 출처 N.`와 사용자 친화 라벨만 쓴다.
+    """
+    정규화된 증거(Evidence) 데이터를 사람이 읽기 좋은 텍스트(Context)로 변환합니다.
+    이 텍스트는 프롬프트에 직접 포함되어 LLM이 답변을 생성하는 핵심 근거가 됩니다.
+    
+    매개변수:
+        canonical_evidence: 정규화된 증거 객체 리스트
+        render_profile: 렌더링 방식(이름, 종류 등)을 정의한 프로필
+        max_chars: 결과 텍스트의 최대 글자 수 (0이면 제한 없음)
     """
     if not canonical_evidence:
         return "NONE"
@@ -203,6 +244,7 @@ def render_canonical_evidence_text(
         title = _clean_prompt_value(facts.get("title") or item.get("identity") or "항목")
         lines.append(f"# 출처 {index}. {title}")
 
+        # 설정된 필드들을 하나씩 줄로 추가합니다.
         _append_prompt_field(lines, key="pjt_id", value=ids.get("pjt_id"))
         _append_prompt_field(lines, key="pjt_no", value=ids.get("pjt_no"))
         _append_prompt_field(lines, key="rst_id", value=ids.get("rst_id"))
@@ -229,6 +271,7 @@ def render_canonical_evidence_text(
             _append_prompt_field(lines, key="outputs", value=outputs)
         lines.append("")
 
+        # 최대 글자 수를 초과하면 즉시 반환합니다.
         joined = "\n".join(lines)
         if max_chars > 0 and len(joined) >= max_chars:
             return joined[:max_chars].rstrip()
@@ -242,7 +285,9 @@ def render_canonical_evidence_debug_text(
     *,
     max_chars: int = 0,
 ) -> str:
-    """운영 로그용 canonical context를 구조적으로 렌더링한다."""
+    """운영 모니터링 및 디버깅을 위해 정규화된 증거의 상세 정보를 요약된 한 줄 텍스트로 만듭니다.
+    주요 ID값과 참여자 정보를 한눈에 파악할 수 있는 형식을 제공합니다.
+    """
     if not canonical_evidence:
         return "NONE"
 
@@ -291,48 +336,49 @@ def render_canonical_evidence_debug_text(
             return joined[:max_chars]
 
     return "\n".join(lines)
-
-
+
+
 def build_prev_context_canonical_text(
     prev_context: list[dict[str, Any]],
     *,
-    base_route: str = "project",
-    output_type: str = "summary",
-    render_profile_name: str = "summary",
-    render_profile_kind: str = "project",
-    max_chars: int = 0,
-) -> str:
-    """이전 prev_context 문서를 canonical_evidence로 재구성한 뒤 같은 renderer로 텍스트를 만든다."""
-    canonical_evidence: list[dict[str, Any]] = []
-    for index, item in enumerate(prev_context or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        canonical_evidence.append(
-            build_canonical_evidence(
-                item,
-                rank=index,
-                base_route=base_route,
-                output_type=output_type,
-            ).to_dict()
-        )
+    base_route: str = "project",
+    output_type: str = "summary",
+    render_profile_name: str = "summary",
+    render_profile_kind: str = "project",
+    max_chars: int = 0,
+) -> str:
+    """이전 대화에서 사용된 문맥(prev_context)을 다시 사람이 읽기 좋은 텍스트로 변환합니다.
+    대화 흐름 유지를 위해 이전 턴의 정보를 프롬프트에 다시 포함시킬 때 사용합니다.
+    """
+    canonical_evidence: list[dict[str, Any]] = []
+    for index, item in enumerate(prev_context or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        canonical_evidence.append(
+            build_canonical_evidence(
+                item,
+                rank=index,
+                base_route=base_route,
+                output_type=output_type,
+            ).to_dict()
+        )
     return render_canonical_evidence_text(
         canonical_evidence,
         {"name": render_profile_name, "context_kind": render_profile_kind},
         max_chars=max_chars,
     )
-
-
-def rehydrate_prev_context_from_canonical_evidence(
-    canonical_evidence: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """canonical_evidence를 이전 prev_context와 비슷한 얕은 dict 목록으로 복원한다.
-
-    필요한 title, 요약, 역할 정보만 되살려 다음 요청이 메모리 snapshot을 이용해 문맥을 이어가게 한다.
-    """
-    prev_context: list[dict[str, Any]] = []
-    for item in canonical_evidence or []:
-        if not isinstance(item, dict):
-            continue
+
+
+def rehydrate_prev_context_from_canonical_evidence(
+    canonical_evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """정규화된 증거 목록을 다시 구조화된 딕셔너리 리스트로 복원(Rehydrate)합니다.
+    이렇게 복원된 데이터는 대화 상태(State)의 일부로 저장되어 다음 턴에서 참조됩니다.
+    """
+    prev_context: list[dict[str, Any]] = []
+    for item in canonical_evidence or []:
+        if not isinstance(item, dict):
+            continue
         ids = item.get("ids") or {}
         facts = item.get("facts") or {}
         roles = item.get("roles") or {}

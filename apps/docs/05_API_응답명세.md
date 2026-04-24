@@ -76,10 +76,11 @@
 - media type: `text/event-stream`
 - canonical envelope: 모든 frame은 `data: {"tag":"event","event":...}` 형태다.
 - route-level reasoning chunk는 내보내지 않는다. 사용자 가시 텍스트만 `answer.chunk`로 보낸다.
-- `answer.chunk`는 요청 진행 중의 provisional stream이다. 클라이언트는 같은 UI row에 대해 최초 수신한 `request_id`와 다른 `answer.chunk`/`answer.final`/`reference.set`/`done`을 반영하면 안 된다.
-- `answer.final`은 LLM 스트림 본문을 임의로 덮어쓰기 위한 이벤트가 아니다. 정합성 보완이 필요하면 `meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
+- `answer.chunk`는 요청 진행 중의 provisional stream이다. 클라이언트는 같은 UI row에 대해 최초 수신한 `request_id`와 다른 `answer.chunk`/`reference.set`/`done`을 반영하면 안 된다.
+- 최종 사용자 가시 본문은 `answer.chunk`로만 전달한다. 정합성 보완이 필요하면 `done.meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
 - `reference.set`과 `done`은 정상/오류/강등(degraded) 종료 모두에서 내려보내는 것이 원칙이다.
-- `contract-invalid` 상태에서는 LLM `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 `answer.final` 또는 `clarification`으로 내보내야 한다.
+- `done`은 단순 종료 신호가 아니라 terminal metadata carrier다. clarification, no-result, degraded/error, publication guard 결과는 `done.meta`에 실린다.
+- `contract-invalid` 상태에서는 LLM `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 `done.meta.output_message`와 `done.meta.clarification`로 내보낸다.
 - 모델 provider가 reasoning만 내보내고 content를 만들지 못하면 provider failure로 간주한다. 이 상태는 사용자 모호성 clarification이 아니다.
 
 ### 공통 SSE envelope
@@ -88,13 +89,15 @@
 {
   "tag": "event",
   "event": {
-    "kind": "answer.final",
+    "kind": "done",
     "request_id": "cid-1234-abcd1234",
     "seq": 4,
-    "model_key": "solar",
-    "content": "최종 답변",
+    "model_key": null,
+    "content": null,
     "references": null,
-    "meta": {}
+    "meta": {
+      "answer_kind": "llm_collected"
+    }
   }
 }
 ```
@@ -105,7 +108,7 @@
 | `event.kind` | string | 아래 event kind 표 참고 |
 | `event.request_id` | string | route가 생성한 request id |
 | `event.seq` | integer | route 기준 순번 |
-| `event.model_key` | string \| null | `answer.chunk`, `answer.final` 등 모델 종속 event에서만 사용 |
+| `event.model_key` | string \| null | `answer.chunk` 등 모델 종속 event에서만 사용 |
 | `event.content` | string \| null | 사용자 가시 텍스트 |
 | `event.references` | array \| null | `reference.set`에서 사용하며, 다른 event에서는 `null` |
 | `event.meta` | object | event별 추가 payload |
@@ -117,33 +120,29 @@
 | `conversation` | `conversation_id` | `null` | `{ "conversation_id": "..." }` |
 | `status` | 없음 | `null` | 현재 구현은 `{ "status": "retrieve" }` |
 | `answer.chunk` | 부분 답변 텍스트 | `null` | `{}` |
-| `clarification` | clarification 메시지 | `null` | `{ "clarification": ClarificationPayload }` |
-| `answer.final` | 최종 사용자 답변 | `null` | `AnswerFinalMeta` |
 | `reference.set` | `"null"` | `ReferenceItem[]` | `{ "references": ReferenceItem[] }` |
-| `error` | 없음 | `null` | `{ "error": "...", "error_code": "...", "reason": "..." }` |
-| `done` | 없음 | `null` | `{}` 또는 `{ "error": true }` 또는 `{ "degraded": true }` |
+| `done` | 없음 | `null` | `TerminalDoneMeta` |
 
 ### 정상 종료 순서
 
 1. `conversation`
 2. `status`
 3. `answer.chunk` 0회 이상
-4. `clarification` 또는 `answer.final`
-5. `reference.set`
-6. `done`
+4. `reference.set`
+5. `done`
 
 ### 예외 종료 규칙
 
 - graph 미준비:
-  - `error` -> `reference.set` -> `done`
+  - `reference.set` -> `done`
 - 전략 위반을 사용자 메시지로 강등한 경우:
-  - `answer.final` -> `reference.set` -> `done`
-  - 이 경로는 `error` event 대신 사용자 가시 fallback 문장을 반환한다.
+  - `reference.set` -> `done`
+  - 이 경로는 `done.meta.output_message`에 사용자 가시 fallback 문장을 싣는다.
 - 내부 예외:
-  - `error` -> `reference.set` -> `done`
+  - `reference.set` -> `done`
 - 최종 답변이 비어 있는 비정상 종료:
-  - route guard가 `answer.final`을 강제로 생성한다.
-  - `meta.error_code="MISSING_FINAL_ANSWER"`가 포함된다.
+  - route guard가 `done.meta.output_message`를 강제로 생성한다.
+  - `done.meta.error_code="MISSING_FINAL_ANSWER"`가 포함된다.
 
 ### Contract-invalid 종료 규칙
 
@@ -156,9 +155,9 @@
 
 이 경우 API는 다음 중 하나로 닫는다.
 
-- 실제 사용자 대상이 모호하면 `clarification`
-- 시스템/tool/planner 오류면 `answer.final.meta.answer_kind="error"` 또는 degraded terminal message
-- 데이터 없음이면 `answer.final.meta.answer_kind="no_result"`
+- 실제 사용자 대상이 모호하면 `done.meta.clarification`
+- 시스템/tool/planner 오류면 `done.meta.answer_kind="error"` 또는 degraded terminal message
+- 데이터 없음이면 `done.meta.answer_kind="no_result"`
 
 ### `ClarificationPayload`
 
@@ -178,37 +177,28 @@
 | `candidates` | array | 재선택 후보 목록 |
 | `resume_token` | object | 후속 재개용 토큰 |
 
-### `AnswerFinalMeta`
+### `TerminalDoneMeta`
 
-`answer.final.meta`는 `AnswerArtifact.to_meta_dict()` 결과를 기준으로 한다.
-route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같다.
+`done.meta`는 `AnswerArtifact.to_meta_dict()` 결과를 기준으로 하며, `stream_metrics`(지연 시간 등)와 `meta`(실행 전략 등) 필드가 최상위 객체로 병합된 형태입니다.
 
 | 필드 | 타입 | 조건 | 설명 |
 |---|---|---|---|
 | `answer_kind` | string | 항상 | `llm_streamed`, `llm_collected`, `detail_cache`, `detail_profile`, `clarification`, `no_result`, `direct_answer`, `error` |
-| `user_visible_final_required` | boolean | 항상 | 최종 사용자 노출용 terminal message 여부 |
-| `answer_source` | string | 대부분 | 선택된 답변 소스 |
-| `model_key` | string | 모델 기반 최종답변 | 보통 `solar` 또는 `gemma` |
-| `selection_reason` | string | dual-model 병합 경로 | 최종 답변 선택 사유 |
-| `groundedness_status` | string | 병합 경로 | groundedness verdict |
-| `groundedness_reason_codes` | array | 병합 경로 | groundedness 보조 코드 |
-| `answer_state_consistency` | object | list-family 검증 경로 | state consistency verdict 전체 |
-| `answer_state_consistency_status` | string | list-family 검증 경로 | state consistency 상태 |
-| `answer_state_consistency_reason_codes` | array | list-family 검증 경로 | state consistency 보조 코드 |
-| `verified_projection_summary` | object | list-family 보완 경로 | LLM 본문을 교체하지 않고 보완 UI에 표시할 검증된 projection 요약. `text`, `groundedness`, `state_consistency`를 포함한다. |
-| `answer_augmentation_mode` | string | list-family 보완 경로 | 현재는 `verified_projection_summary`. LLM 본문 유지 후 검증 데이터 레이어를 보강했음을 나타낸다. |
-| `visible_answer_manifest_status` | string | 병합 경로 | `approved`, `withheld_partial`, `blocked_*`, `not_applicable` |
-| `visible_answer_manifest` | object | publishable list-family | 다음 turn의 ordinal/source follow-up truth |
-| `visible_answer_manifest_publication` | object | list-family publication | answer-owned publication artifact; `approved` contains `published_manifest`, blocked/withheld statuses must not fall back to stale `view_state.visible_answer_manifest` |
-| `state_consistency_status` | string | summary/debug/merge 경로 | state consistency 축약 상태. `unsupported_count`, `blocked_*`이면 manifest publication을 신뢰하지 않는다. |
-| `agent_current_context_type` | string | Agent 경로 | Agent state card 기준 current context type. `clarification`이면 후속 detail이 stale clarification에 묶였는지 확인해야 한다. |
-| `followup_resolution_status` | string | strategy meta | follow-up 해소 상태. `agent_tool`은 관측용이며 clarification trigger가 아니다. |
-| `error_code` | string | guard/degraded error 경로 | route 또는 strategy 위반 코드 |
-| `reason` | string | guard/degraded error 경로 | 오류 설명 |
-| `degraded` | boolean | degraded 경로 | 사용자 메시지로 강등된 종료 여부 |
+| `user_visible_final_required` | boolean | 항상 | 최종 사용자 노출용 terminal message 필수 여부. `true`이면 클라이언트는 반드시 답변의 마지막에 이 정보를 반영해야 함. |
+| `elapsed_ms` | number | 대부분 | 전체 요청 처리 시간(ms) |
+| `ttft_any_ms` | number | 모델 경로 | 첫 번째 청크 수신까지의 시간(ms) |
+| `ttft_content_ms` | number | 모델 경로 | 유효 텍스트 첫 청크 수신까지의 시간(ms) |
+| `content_chars` | integer | 모델 경로 | 최종 생성 답변 글자 수 |
+| `answer_source` | string | 대부분 | 선택된 답변 소스 (예: `solar`, `gemma`, `cache`) |
+| `model_key` | string | 모델 기반 | 사용된 LLM 모델 키 |
+| `groundedness_status` | string | 검증 경로 | 답변의 근거 정합성 상태 (`success`, `fail`, `not_applicable`) |
+| `visible_answer_manifest` | object | 목록 응답 | 다음 턴 참조용 엔티티 맵 (ordinal, id, title 포함) |
+| `visible_answer_manifest_publication` | object | 목록 발행 | 발행된 매니페스트 상세 정보 및 상태 |
+| `agent_current_context_type` | string | Agent 경로 | 현재 에이전트의 문맥 상태 (`search`, `refine`, `clarification`) |
+| `output_message` | string | terminal 경로 | deterministic terminal 문장 (clarification, no-result 등) |
+| `clarification` | object | clarification 경로 | `ClarificationPayload` 본문 정보 |
+| `error_code` | string | 오류 경로 | 구체적인 시스템 또는 전략 위반 코드 |
 
-- 추가 stream metric 필드(`elapsed_ms`, `ttft_any_ms`, `ttft_content_ms`, `content_chars` 등)는 모델 실행 경로에 따라 더 붙을 수 있다.
-- 문서상 안정 계약은 위 표의 공통 필드까지로 본다.
 
 ### `ReferenceItem`
 
@@ -272,7 +262,7 @@ route 문서에서 안정적으로 기대해도 되는 필드는 아래와 같�
 | `answer_gemma` | string \| null | Gemma 모델 원본 답변 |
 | `answer_solar` | string \| null | Solar 모델 원본 답변 |
 | `output_message` | string | 최종 사용자 답변 |
-| `final_answer_meta` | object \| null | `answer.final.meta`와 같은 계열의 최종 메타 |
+| `final_answer_meta` | object \| null | `done.meta`와 같은 계열의 최종 메타 |
 | `question_analysis` | object \| null | assembled planner contract |
 | `strategy_summary` | object | `StrategySpec` 직렬화 결과 |
 | `knowledge_sufficiency` | object \| null | retrieval 필요성 판단 결과 |

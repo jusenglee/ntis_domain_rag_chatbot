@@ -1,4 +1,18 @@
 # rag_pipeline/settings.py
+from __future__ import annotations
+
+"""
+시스템 전역 설정 및 하이퍼파라미터 관리 모듈입니다.
+이 모듈은 환경 변수를 읽어 시스템의 동작 방식을 결정하며, 특히 RAG(Retrieval-Augmented Generation)의 
+성능과 품질에 직결되는 각종 임계값(Threshold)과 파라미터를 중앙 집중식으로 관리합니다.
+
+핵심 설정 영역:
+1. 인프라 접속: Qdrant, Triton, Redis 등 외부 서비스 연결 정보
+2. 모델 경로: 로컬에 저장된 임베딩 및 LLM 토크나이저 경로
+3. RAG 성능 파라미터: 검색 후보군 개수, 유사도 점수, 토큰 예산 등
+4. 타임아웃 및 재시도: 모델 호출 시의 안정성 확보를 위한 시간 제한 설정
+"""
+
 import os
 import logging
 from pathlib import Path
@@ -7,16 +21,14 @@ from dataclasses import dataclass
 import sys
 from loguru import logger
 
-# 로깅 설정
+# 로깅 설정: 표준 logging 라이브러리의 출력을 Loguru로 통합하여 일관된 로그 형식을 유지합니다.
 class InterceptHandler(logging.Handler):
     def emit(self, record):
-        # Get corresponding Loguru level if it exists
         try:
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
 
-        # Find caller from where originated the logged message
         frame, depth = logging.currentframe(), 2
         while frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
@@ -25,15 +37,12 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 def setup_logging():
-    # Remove default handler
     logger.remove()
-    # Add new handler with custom format
     logger.add(
         sys.stderr,
         format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         level="INFO",
     )
-    # Intercept standard logging
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
 setup_logging()
@@ -78,7 +87,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _resolve_local_models_root() -> Path:
-    """Resolve the repository-local model asset root."""
+    """로컬 모델 자산이 저장된 루트 디렉토리를 결정합니다."""
     raw = _get_env_str("NTIS_LOCAL_MODELS_ROOT", str(_REPO_ROOT / "Models"))
     return Path(raw).expanduser().resolve()
 
@@ -87,12 +96,12 @@ LOCAL_MODELS_ROOT = str(_resolve_local_models_root())
 
 
 def _local_models_path(*parts: str) -> str:
-    """Build an absolute path under the local model asset root."""
+    """로컬 모델 루트 하위의 절대 경로를 생성합니다."""
     return str((Path(LOCAL_MODELS_ROOT).joinpath(*parts)).resolve())
 
 
 def _resolve_local_hf_model_snapshot(model_dir_name: str) -> str:
-    """Resolve a Hugging Face cache-style local model directory to a loadable snapshot."""
+    """Hugging Face 캐시 스타일의 로컬 모델 디렉토리에서 실제 로드 가능한 스냅샷 경로를 찾습니다."""
     model_root = Path(LOCAL_MODELS_ROOT).joinpath(model_dir_name).resolve()
     if not model_root.exists():
         raise ValueError(f"Local model directory not found: {model_root}")
@@ -116,27 +125,25 @@ def _resolve_local_hf_model_snapshot(model_dir_name: str) -> str:
 
 
 def _get_env_or_local_model(env_name: str, default_model_dir_name: str) -> str:
-    """Return the explicit env override or resolve the repository-local snapshot default."""
+    """환경 변수 설정이 있으면 사용하고, 없으면 로컬 기본 경로를 반환합니다."""
     raw = os.getenv(env_name)
     if raw is not None and str(raw).strip():
         return str(raw).strip()
     return _resolve_local_hf_model_snapshot(default_model_dir_name)
 
-# Qdrant / Embedding (A)
+# Qdrant / Embedding 설정
 QDRANT_HOST  = _get_env_str("QDRANT_HOST", "203.250.234.159")
 QDRANT_PORT  = _get_env_int("QDRANT_PORT", 8005, min_value=1)
 EMBED_MODEL  = _get_env_or_local_model("EMBEDDING_MODEL", "multilingual-e5-large-instruct")
 
-# Qdrant / Embedding (B)
+# 백업용 Qdrant / Embedding 설정
 QDRANT_HOST_B  = _get_env_str("QDRANT_HOST_B", QDRANT_HOST)
 QDRANT_PORT_B  = _get_env_int("QDRANT_PORT_B", QDRANT_PORT, min_value=1)
 EMBED_MODEL_B  = _get_env_or_local_model("EMBEDDING_MODEL_B", "multilingual-e5-large")
 
 
 def _split_csv(value: str | None, default: list[str]) -> list[str]:
-    """CSV 문자열 설정을 공백·빈 항목이 제거된 리스트로 바꾼다.
-    allowlist 같은 env가 비어 있을 때 default를 쓰고, 명시적 빈 문자열은 빈 리스트로 해석한다.
-    """
+    """CSV 형식의 환경 변수를 리스트로 변환합니다."""
     if value is None:
         return list(default)
     value = value.strip()
@@ -150,7 +157,7 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
     ["ntis_project_v1", "ntis_perf_v1", "ntis_supports_v1"],
 )
 
-# Triton
+# Triton 추론 서버 설정
 TRITON_URL         = _get_env_str("TRITON_URL", "203.250.234.159:8001")
 DEFAULT_MODEL_NAME = _get_env_str("TRITON_MODEL", "gpt_triton_0")
 TOKENIZER_MAP = {
@@ -159,21 +166,58 @@ TOKENIZER_MAP = {
 }
 SOLAR_TOKENIZER_NAME_OR_PATH = _get_env_str("SOLAR_TOKENIZER_NAME_OR_PATH", _get_env_str("SOLAR_VLLM_MODEL", "/model"))
 
-# 하이퍼파라미터
+# =============================================================================
+# 하이퍼파라미터 설정 (RAG 성능과 품질에 직접적인 영향을 미칩니다)
+# =============================================================================
+
+# [1] TOP_K_BASE: 초기 검색 단계(Retrieval)에서 벡터 DB로부터 가져올 후보 문서의 개수입니다.
+# - 영향: 값이 클수록 정답이 포함될 확률(Recall)이 높아지지만, 검색 속도가 느려지고 Rerank 단계의 부담이 커집니다.
 TOP_K_BASE       = 300
+
+# [2] TOP_K_RETURN: 재정렬(Rerank) 과정을 거친 후 최종적으로 LLM 프롬프트에 전달할 문서의 개수입니다.
+# - 영향: 너무 많으면 LLM의 문맥 파악 능력이 떨어지는 'Lost in the middle' 현상이 발생할 수 있고,
+#   너무 적으면 답변에 필요한 정보가 부족해질 수 있습니다.
 TOP_K_RETURN     = 20
-DEFAULT_MAX_TOKENS = _get_env_int("MAX_TOKENS", 16000, min_value=1)
-TEMPERATURE      = 0.2
-TOP_P            = 0.8
+
+# [3] SCORE_THRESHOLD: 검색된 결과 중 유효하다고 판단할 최소 유사도 점수입니다.
+# - 영향: 임계값이 높으면 관련성이 아주 높은 문서만 선택되어 정확도가 올라가지만,
+#   답변에 필요한 문서가 제외될 위험이 있습니다. 낮으면 노이즈가 섞일 확률이 높아집니다.
 SCORE_THRESHOLD  = 0.20
-FUZZ_MIN         = 55
-SNIPPET_MAX_CHARS = 8000
+
+# [4] TEMPERATURE: LLM 답변의 창의성/무작위성을 조절합니다 (0.0 ~ 1.0).
+# - 영향: RAG 시스템에서는 지식에 기반한 정확한 답변이 중요하므로 낮은 값(0.2)을 유지하여 
+#   모델의 환각(Hallucination) 현상을 억제합니다.
+TEMPERATURE      = 0.2
+
+# [5] TOP_P: 답변 생성 시 누적 확률이 P 이내인 단어들 중에서 선택합니다.
+# - 영향: 1.0에 가까울수록 다양한 단어를 선택하며, 0.8 정도의 설정은 답변의 일관성과 품질 사이의 균형을 잡습니다.
+TOP_P            = 0.8
+
+# [6] RAG_EVIDENCE_TOKEN_BUDGET: 프롬프트 구성 시 증거(Context)로 할당할 최대 토큰 예산입니다.
+# - 영향: 이 예산을 초과하는 문서는 아무리 유사도가 높아도 잘려나갑니다. 
+#   전체 프롬프트 길이 제한 내에서 최대한 많은 정보를 담을 수 있도록 최적화된 값이 필요합니다.
+RAG_EVIDENCE_TOKEN_BUDGET = _get_env_int("RAG_EVIDENCE_TOKEN_BUDGET", 20000, min_value=1)
+
+# [7] MAX_CONTEXT_CHARS: 프롬프트에 포함될 전체 컨텍스트의 최대 글자 수입니다.
+# - 영향: 토큰 예산과 별개로 글자 수 단위의 하드 리밋을 설정하여 예상치 못한 긴 입력으로 인한 오류를 방지합니다.
 MAX_CONTEXT_CHARS = _get_env_int("MAX_CONTEXT_CHARS", 24000, min_value=1)
+
+# [8] SNIPPET_MAX_CHARS: 개별 문서(Snippet) 하나가 가질 수 있는 최대 글자 수입니다.
+# - 영향: 너무 긴 문서는 핵심 내용이 희석되거나 예산을 독점할 수 있으므로 적절한 수준(8000자)에서 제한합니다.
+SNIPPET_MAX_CHARS = 8000
+
+# [9] MAX_DOC_SENTENCES / MAX_DOC_TOKENS: 개별 문서의 상세 제약 조건입니다.
+# - 영향: 문서 하나가 너무 많은 분량을 차지하지 않도록 하여, 컨텍스트 내에 더 다양한 문서가 포함되도록 유도합니다.
 MAX_DOC_SENTENCES = _get_env_int("MAX_DOC_SENTENCES", 12, min_value=1)
 MAX_DOC_TOKENS = _get_env_int("MAX_DOC_TOKENS", 800, min_value=1)
+
+# =============================================================================
+
+DEFAULT_MAX_TOKENS = _get_env_int("MAX_TOKENS", 16000, min_value=1)
+FUZZ_MIN         = 55
 SUMMARY_DOC_SENTENCES = _get_env_int("SUMMARY_DOC_SENTENCES", 6, min_value=1)
 SUMMARY_DOC_TOKENS = _get_env_int("SUMMARY_DOC_TOKENS", 240, min_value=1)
-RAG_EVIDENCE_TOKEN_BUDGET = _get_env_int("RAG_EVIDENCE_TOKEN_BUDGET", 20000, min_value=1)
+
 RAG_OVERFLOW_QUEUE_SIZE = _get_env_int("RAG_OVERFLOW_QUEUE_SIZE", 4, min_value=0)
 RAG_CONTEXT_COMPRESS_MIN_SCORE = _get_env_float("RAG_CONTEXT_COMPRESS_MIN_SCORE", 0.0)
 RAG_CONTEXT_COMPRESS_MAX_DOCS = _get_env_int("RAG_CONTEXT_COMPRESS_MAX_DOCS", 4, min_value=0)
@@ -184,10 +228,7 @@ RAW_PAYLOAD_RECENT_ANCHOR_LIMIT = _get_env_int("RAW_PAYLOAD_RECENT_ANCHOR_LIMIT"
 RAW_PAYLOAD_SCHEMA_VERSION = _get_env_str("RAW_PAYLOAD_SCHEMA_VERSION", "v1")
 RAW_PAYLOAD_COMPRESSION_CODEC = _get_env_str("RAW_PAYLOAD_COMPRESSION_CODEC", "gzip")
 
-# Redis / 검색 제한 설정
-# REDIS_URL: Redis 연결 문자열 (예: redis://localhost:6379)
-# REDIS_TTL: Redis 캐시 TTL(초)
-# MAX_TOP_K_SIZE: 검색/응답에 사용할 최대 문서 수
+# Redis 캐시 설정
 REDIS_URL = _get_env_str("REDIS_URL", "redis://redis8:6379")
 REDIS_TTL = _get_env_int("REDIS_TTL", 3600, min_value=1)
 MAX_TOP_K_SIZE = _get_env_int("MAX_TOP_K_SIZE", 20, min_value=1)
@@ -198,9 +239,7 @@ CTX_MIN_BUDGET = _get_env_int("RAG_CTX_MIN_BUDGET", 512, min_value=1)
 DEFAULT_MAX_MODEL_LEN = _get_env_int("DEFAULT_MAX_MODEL_LEN", 32768, min_value=1)
 
 def get_ctx_token_budget(model_name: str, *, max_output_tokens: int | None = None) -> int:
-    """모델 context 상한에서 prompt overhead와 output budget를 제하고 실제 context 예산을 계산한다.
-    LLM에 넘길 문서 분량이 max context를 초과하지 않게 하는 중앙 예산 계산기다.
-    """
+    """모델의 최대 컨텍스트 길이에서 오버헤드와 출력 토큰을 제외한 순수 증거(Evidence) 예산을 계산합니다."""
     model_ctx = MODEL_MAX_CONTEXT.get(model_name, DEFAULT_MAX_MODEL_LEN)
 
     if max_output_tokens is None:
@@ -225,16 +264,12 @@ MAX_TOKENS = {
 
 
 def get_model_max_output_tokens(model_name: str) -> int:
-    """모델별 최대 생성 토큰 설정을 돌려준다.
-    개별 모델 오버라이드가 없으면 전역 default로 돌아가 max token policy가 일관되게 유지된다.
-    """
+    """모델별 최대 생성 토큰 설정을 반환합니다."""
     return int(MAX_TOKENS.get(model_name, DEFAULT_MAX_TOKENS))
 
 
 def _get_timeout_env(name: str, default: int) -> int:
-    """timeout 환경변수를 양의 정수로 읽는 짧은 헬퍼다.
-    stream/sync timeout 계산에서 같은 검증 규칙을 재사용하기 위해 분리됐다.
-    """
+    """타임아웃 설정을 안전하게 읽어옵니다."""
     return _get_env_int(name, default, min_value=1)
 
 
@@ -246,9 +281,7 @@ def _get_model_timeout_pair(
         default_idle: int,
         deprecated_env_prefix: str | None = None,
 ) -> tuple[int, int]:
-    """모델별 request type에 대한 first/idle timeout 쌍을 계산한다.
-    신 환경변수 이름을 우선하되 deprecated prefix가 남아 있으면 경고를 남기고 호환해 준다.
-    """
+    """모델별 첫 토큰 응답 및 유휴 타임아웃 쌍을 계산합니다."""
     request_env_prefix = f"TRITON_{model_env_prefix}_{request_type}"
 
     first = _get_timeout_env(f"{request_env_prefix}_TIMEOUT_FIRST", default_first)
@@ -317,7 +350,7 @@ TRITON_TIMEOUTS = {
     },
 }
 
-# 벤치 로그
+# 벤치마킹 및 운영 로그 디렉토리 설정
 LOG_DIR = Path(_get_env_str("RAG_BENCH_LOG_DIR", "./rag_bench_logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -335,9 +368,7 @@ os.environ.setdefault("SNIPPET_MAX_CHARS", str(SNIPPET_MAX_CHARS))
 
 @dataclass(frozen=True)
 class SolarVLLMConfig:
-    """Solar OpenAI-compat provider에 접속하는 데 필요한 설정 묶음이다.
-    model name, base URL, API key, timeout을 하나로 묶어 app/runtime이 해당 provider를 일관된 계약으로 주입하게 한다.
-    """
+    """Solar OpenAI-compat 제공자 접속에 필요한 설정을 그룹화합니다."""
     model_name: str
     base_url: str
     api_key: str
@@ -345,9 +376,7 @@ class SolarVLLMConfig:
 
     @classmethod
     def from_env(cls) -> "SolarVLLMConfig":
-        """Solar VLLM 접속 설정을 환경변수에서 읽어 `SolarVLLMConfig`로 만든다.
-        필수 필드가 비어 있으면 즉시 예외를 내 부트 오류를 명확히 드러내고, timeout은 실수 형식으로 정규화한다.
-        """
+        """환경 변수로부터 Solar VLLM 설정을 읽어옵니다."""
         model_name = _get_env_str("SOLAR_VLLM_MODEL", "/model")
         base_url = _get_env_str("SOLAR_VLLM_BASE_URL", "http://203.250.234.159:8010/v1")
         api_key = _get_env_str("SOLAR_VLLM_API_KEY", "EMPTY")

@@ -6,7 +6,6 @@
 """
 
 import asyncio
-import json
 import os
 import time
 import uuid
@@ -21,7 +20,7 @@ from apps.api.rag_mapper.schema_types import DataTag
 from apps.api.request_overrides import merge_request_overrides
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
-from apps.api.streaming.sse_encoder import encode_sse_payload, encode_stream_event
+from apps.api.streaming.sse_encoder import encode_stream_event
 from apps.platform.metrics import MetricSnapshot
 from apps.platform.schemas import strategy_spec_to_response
 
@@ -258,6 +257,36 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             normalized["message"] = message
         return normalized
 
+    def _terminal_done_meta(
+            *,
+            artifact: Optional[AnswerArtifact] = None,
+            clarification_payload: Optional[dict[str, Any]] = None,
+            output_message: Optional[str] = None,
+            error: Optional[bool] = None,
+            error_code: Optional[str] = None,
+            reason: Optional[str] = None,
+            degraded: Optional[bool] = None,
+            extra_meta: Optional[Dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        meta = artifact.to_meta_dict() if isinstance(artifact, AnswerArtifact) else {}
+        if isinstance(clarification_payload, dict):
+            meta["clarification"] = dict(clarification_payload)
+            meta.setdefault("answer_kind", "clarification")
+            meta.setdefault("user_visible_final_required", True)
+        if output_message:
+            meta["output_message"] = output_message
+        if error is not None:
+            meta["error"] = bool(error)
+        if error_code:
+            meta["error_code"] = error_code
+        if reason:
+            meta["reason"] = reason
+        if degraded is not None:
+            meta["degraded"] = bool(degraded)
+        if isinstance(extra_meta, dict):
+            meta.update(extra_meta)
+        return meta
+
     def _normalize_stream_model_key(model_key: str) -> str:
         """모델 키 값을 표준 소문자 식별자로 변환합니다."""
         normalized = str(model_key or "").strip().lower()
@@ -266,14 +295,6 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         if normalized == "gemma":
             return "gemma"
         return normalized
-
-    def _stream_data(tag: str, **payload: Any) -> str:
-        """SSE 한 프레임을 인코딩합니다."""
-        return encode_sse_payload(tag, **payload)
-
-    def _stream_legacy_payload(**payload: Any) -> str:
-        """하위 호환성을 위한 레거시 SSE 페이로드 인코딩입니다."""
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     def _resolve_stream_model_label(model_key: str) -> str:
         """스트림 표시용 모델 라벨(대문자 등)을 결정합니다."""
@@ -284,16 +305,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             return "GEMMA"
         return normalized.upper() or "UNKNOWN"
 
-    def _stream_chunk(model_key: str, content: str) -> str:
-        """텍스트 조각(Chunk)에 대한 SSE 프레임을 생성합니다."""
-        normalized = _normalize_stream_model_key(model_key)
-        return _stream_data(
-            "chunk",
-            model=_resolve_stream_model_label(normalized),
-            content=content,
-        )
-
-    def _emit_legacy_stream_event(event: StreamEvent) -> list[str]:
+    def _emit_stream_event_lines(event: StreamEvent) -> list[str]:
         """표준 StreamEvent 객체를 SSE 라인 리스트로 변환합니다."""
         return [encode_stream_event(event)]
 
@@ -592,24 +604,40 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
             # 엔진 준비 미비 시 즉시 에러 반환
             if graph is None:
-                for payload_line in _emit_legacy_stream_event(
-                    _next_route_event(
-                        kind="answer.final",
-                        content="시스템이 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.",
-                        meta={"error": "runtime_not_ready", "error_code": "RUNTIME_NOT_READY", "reason": "compiled graph unavailable"},
-                    )
-                ):
-                    yield payload_line
-                for payload_line in _emit_legacy_stream_event(
+                runtime_not_ready_message = "시스템이 준비되지 않았습니다. 잠시 후 다시 시도해 주세요."
+                runtime_not_ready_artifact = AnswerArtifact(
+                    text=runtime_not_ready_message,
+                    answer_kind="error",
+                    stream_metrics={},
+                    user_visible_final_required=True,
+                    error=ErrorArtifact(
+                        error_code="RUNTIME_NOT_READY",
+                        reason="compiled graph unavailable",
+                        retryable=True,
+                    ),
+                    meta={"answer_source": "route_runtime_not_ready"},
+                )
+                for payload_line in _emit_stream_event_lines(
                     _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
-                for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
+                for payload_line in _emit_stream_event_lines(
+                    _next_route_event(
+                        kind="done",
+                        meta=_terminal_done_meta(
+                            artifact=runtime_not_ready_artifact,
+                            output_message=runtime_not_ready_message,
+                            error=True,
+                            error_code="RUNTIME_NOT_READY",
+                            reason="compiled graph unavailable",
+                        ),
+                    )
+                ):
                     yield payload_line
                 return
 
             # 대화 ID 전송
-            for payload_line in _emit_legacy_stream_event(
+            for payload_line in _emit_stream_event_lines(
                 _next_route_event(
                     kind="conversation",
                     content=conversation_id,
@@ -691,7 +719,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                             if stream_field == "reasoning" or not chunk_text:
                                 continue
                             model_key = "solar" if node == "generate_answer_solar" else "gemma"
-                            for payload_line in _emit_legacy_stream_event(
+                            for payload_line in _emit_stream_event_lines(
                                 _next_route_event(kind="answer.chunk", model_key=model_key, content=chunk_text, meta={})
                             ):
                                 yield payload_line
@@ -699,7 +727,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 else:
                     # 일괄 실행 방식 + emitter를 통한 내부 스트리밍
                     graph_task = asyncio.create_task(graph.ainvoke(inputs))
-                    for payload_line in _emit_legacy_stream_event(_next_route_event(kind="status", meta={"status": "retrieve"})):
+                    for payload_line in _emit_stream_event_lines(_next_route_event(kind="status", meta={"status": "retrieve"})):
                         yield payload_line
 
                     while True:
@@ -714,7 +742,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                                 break
                             continue
                         route_seq = max(route_seq, int(getattr(emitted_event, "seq", 0) or 0))
-                        for payload_line in _emit_legacy_stream_event(emitted_event):
+                        for payload_line in _emit_stream_event_lines(emitted_event):
                             yield payload_line
 
                     final_state = await graph_task
@@ -730,56 +758,40 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                 )
 
                 user_visible_terminal_emitted = False
+                terminal_done_meta: dict[str, Any] = {}
 
                 # 명확화 요청이 있는 경우 처리
                 if clarification_payload:
                     clarification_message = str(clarification_payload.get("message") or "").strip()
-                    if clarification_message:
-                        for mk in ["solar", "gemma"]:
-                            for payload_line in _emit_legacy_stream_event(
-                                _next_route_event(kind="answer.chunk", model_key=mk, content=clarification_message)
-                            ):
-                                yield payload_line
-
-                    clarification_event = _next_route_event(
-                        kind="answer.final",
-                        content=None,
-                        meta={"clarification": clarification_payload},
+                    terminal_done_meta = _terminal_done_meta(
+                        artifact=selected_artifact if isinstance(selected_artifact, AnswerArtifact) else None,
+                        clarification_payload=clarification_payload,
+                        output_message=clarification_message or None,
                     )
-                    for payload_line in _emit_legacy_stream_event(clarification_event):
-                        yield payload_line
                     user_visible_terminal_emitted = True
 
                 # 최종 답변 텍스트 전송
                 if not clarification_payload and isinstance(selected_artifact, AnswerArtifact) and selected_artifact.text and selected_artifact.user_visible_final_required:
-                    if _normalize_answer_kind(selected_artifact.answer_kind) != "llm_streamed":
-                        model_key = _normalize_stream_model_key(str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "solar"))
-                        for payload_line in _emit_legacy_stream_event(
+                    selected_answer_kind = _normalize_answer_kind(selected_artifact.answer_kind)
+                    if selected_answer_kind not in {"llm_streamed", "error", "no_result"}:
+                        model_key = _normalize_stream_model_key(
+                            str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "solar")
+                        )
+                        for payload_line in _emit_stream_event_lines(
                             _next_route_event(kind="answer.chunk", model_key=model_key, content=selected_artifact.text)
                         ):
                             yield payload_line
 
-                    final_event = _next_route_event(
-                        kind="answer.final",
-                        model_key=_normalize_stream_model_key(str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "")),
-                        content=None,
-                        meta=selected_artifact.to_meta_dict(),
+                    terminal_done_meta = _terminal_done_meta(
+                        artifact=selected_artifact,
+                        output_message=selected_artifact.text if selected_answer_kind in {"error", "no_result"} else None,
                     )
-                    for payload_line in _emit_legacy_stream_event(final_event):
-                        yield payload_line
                     user_visible_terminal_emitted = True
 
                 # 답변 누락 방지 가드 (Guard)
                 if not user_visible_terminal_emitted:
                     guard_reason = "route completed without final_answer_artifact/final_answer_text/clarification"
                     guard_message = "응답 생성은 완료되었지만 표시할 최종 답변이 비어 있습니다. 다시 시도해 주세요."
-                    
-                    for mk in ["solar", "gemma"]:
-                        for payload_line in _emit_legacy_stream_event(
-                            _next_route_event(kind="answer.chunk", model_key=mk, content=guard_message)
-                        ):
-                            yield payload_line
-
                     guard_artifact = AnswerArtifact(
                         text=guard_message,
                         answer_kind="error",
@@ -788,18 +800,32 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         error=ErrorArtifact(error_code="MISSING_FINAL_ANSWER", reason=guard_reason, retryable=True),
                         meta={"answer_source": "route_contract_guard", "degraded": True},
                     )
-                    guard_event = _next_route_event(
-                        kind="answer.final",
-                        content=None,
-                        meta=guard_artifact.to_meta_dict() | {"error_code": "MISSING_FINAL_ANSWER", "reason": guard_reason, "degraded": True},
+                    terminal_done_meta = _terminal_done_meta(
+                        artifact=guard_artifact,
+                        output_message=guard_message,
+                        error_code="MISSING_FINAL_ANSWER",
+                        reason=guard_reason,
+                        degraded=True,
                     )
-                    for payload_line in _emit_legacy_stream_event(guard_event):
-                        yield payload_line
 
                 # 4. 참조 리스트 조립 및 전송
                 ref_docs = []
                 seen_reference_keys = set()
                 invalid_candidate_count = 0
+                fallback_used = "none"
+                artifact_references = list(getattr(selected_artifact, "references", []) or [])
+                artifact_reference_docs = [ref for ref in artifact_references if isinstance(ref, dict)]
+                artifact_candidate_count = len(artifact_reference_docs)
+                canonical_evidence = _state_get_list(final_state, "canonical_evidence")
+                canonical_reference_docs = [
+                    _canonical_evidence_to_reference_doc(item)
+                    for item in canonical_evidence
+                    if isinstance(item, dict)
+                ]
+                canonical_reference_docs = [doc for doc in canonical_reference_docs if doc]
+                canonical_candidate_count = len(canonical_reference_docs)
+                fallback_docs = [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
+                documents_used_candidate_count = len(fallback_docs)
 
                 def _append_reference_docs(candidates: list[dict[str, Any]], *, candidate_source: str) -> int:
                     """유효한 참조 문서를 목록에 추가합니다."""
@@ -820,6 +846,11 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                                 invalid_reason=invalid_reason,
                                 raw_tag=candidate.get("tag"),
                                 source_type=candidate.get("source_type"),
+                                top_level_pjt_id=candidate.get("pjt_id"),
+                                top_level_rst_id=candidate.get("rst_id"),
+                                top_level_title1=candidate.get("title1"),
+                                top_level_title2=candidate.get("title2"),
+                                top_level_title_text=candidate.get("title_text"),
                                 keys=sorted(candidate.keys()),
                             )
                             continue
@@ -832,17 +863,14 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     return added_count
 
                 # 참조 목록을 가져오는 계층적 전략 (Artifact -> Evidence -> Context)
-                artifact_references = list(getattr(selected_artifact, "references", []) or [])
-                artifact_reference_docs = [ref for ref in artifact_references if isinstance(ref, dict)]
                 _append_reference_docs(artifact_reference_docs, candidate_source="artifact_references")
-                
+
                 if not ref_docs:
-                    canonical_evidence = _state_get_list(final_state, "canonical_evidence")
-                    canonical_reference_docs = [_canonical_evidence_to_reference_doc(item) for item in canonical_evidence if isinstance(item, dict)]
-                    _append_reference_docs([doc for doc in canonical_reference_docs if doc], candidate_source="canonical_evidence")
-                
+                    fallback_used = "canonical_evidence"
+                    _append_reference_docs(canonical_reference_docs, candidate_source="canonical_evidence")
+
                 if not ref_docs:
-                    fallback_docs = [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
+                    fallback_used = "documents_used"
                     _append_reference_docs(fallback_docs, candidate_source="documents_used")
 
                 # 운영 로그: 참조 목록 구성 결과 기록
@@ -851,8 +879,12 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     request_id=request_id,
                     conversation_id=conversation_id,
                     stage="stream_finalization",
+                    artifact_candidate_count=artifact_candidate_count,
+                    canonical_candidate_count=canonical_candidate_count,
+                    documents_used_candidate_count=documents_used_candidate_count,
                     invalid_candidate_count=invalid_candidate_count,
                     emitted_reference_count=len(ref_docs),
+                    fallback_used=fallback_used if ref_docs else "none",
                 )
 
                 # 최종 참조 리스트 전송
@@ -862,7 +894,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     references=ref_docs,
                     meta={"references": ref_docs},
                 )
-                for payload_line in _emit_legacy_stream_event(ref_event):
+                for payload_line in _emit_stream_event_lines(ref_event):
                     yield payload_line
 
                 # 5. 스트림 완료 및 종료 로그
@@ -878,8 +910,8 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     gemma_error_code=derive_stream_error_code(gemma_done),
                     gemma_elapsed_ms=gemma_done.get("elapsed_ms"),
                 )
-                done_event = _next_route_event(kind="done", meta={})
-                for payload_line in _emit_legacy_stream_event(done_event):
+                done_event = _next_route_event(kind="done", meta=terminal_done_meta)
+                for payload_line in _emit_stream_event_lines(done_event):
                     yield payload_line
 
             except Exception as exc:
@@ -918,38 +950,54 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         error=ErrorArtifact(error_code=error_code, reason=reason),
                         meta={"degraded": True, "answer_source": "strategy_violation"},
                     )
-                    for payload_line in _emit_legacy_stream_event(
-                        _next_route_event(
-                            kind="answer.final",
-                            content=user_message,
-                            meta=error_artifact.to_meta_dict() | {"error_code": error_code, "reason": reason, "degraded": True},
-                        )
-                    ):
-                        yield payload_line
-                    for payload_line in _emit_legacy_stream_event(
+                    for payload_line in _emit_stream_event_lines(
                         _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                     ):
                         yield payload_line
-                    for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"degraded": True})):
+                    for payload_line in _emit_stream_event_lines(
+                        _next_route_event(
+                            kind="done",
+                            meta=_terminal_done_meta(
+                                artifact=error_artifact,
+                                output_message=user_message,
+                                error_code=error_code,
+                                reason=reason,
+                                degraded=True,
+                            ),
+                        )
+                    ):
                         yield payload_line
                     return
                 
                 # 일반 시스템 오류 전송
                 error_message = "시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-                for payload_line in _emit_legacy_stream_event(
-                    _next_route_event(
-                        kind="answer.final",
-                        content=error_message,
-                        meta={"error": str(exc), "error_code": error_code, "reason": reason},
-                    )
-                ):
-                    yield payload_line
-                for payload_line in _emit_legacy_stream_event(
+                error_artifact = AnswerArtifact(
+                    text=error_message,
+                    answer_kind="error",
+                    stream_metrics={},
+                    user_visible_final_required=True,
+                    error=ErrorArtifact(error_code=error_code, reason=reason),
+                    meta={"answer_source": "route_exception"},
+                )
+                for payload_line in _emit_stream_event_lines(
                     _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
-                for payload_line in _emit_legacy_stream_event(_next_route_event(kind="done", meta={"error": True})):
+                for payload_line in _emit_stream_event_lines(
+                    _next_route_event(
+                        kind="done",
+                        meta=_terminal_done_meta(
+                            artifact=error_artifact,
+                            output_message=error_message,
+                            error=True,
+                            error_code=error_code,
+                            reason=reason,
+                            extra_meta={"error_detail": str(exc)},
+                        ),
+                    )
+                ):
                     yield payload_line
+                return
             finally:
                 await emitter.close()
                 set_log_context(request_id=None, conversation_id=None)
