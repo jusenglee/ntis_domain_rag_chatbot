@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>NTIS QnA · Model Compare</title>
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --panel:#ffffff;
+      --text:#0f172a;
+      --muted:#64748b;
+      --border:#e2e8f0;
+      --shadow:0 10px 30px rgba(2,6,23,.06);
+      --accent:#10a37f;
+      --accent2:#0e8f70;
+
+      --user:#111827;
+      --userText:#ffffff;
+
+      --card:#ffffff;
+      --codebg:#0b1020;
+      --codefg:#e5e7eb;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      height:100vh;
+      display:flex;
+      flex-direction:column;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Pretendard, Roboto, "Noto Sans KR", Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, rgba(16,163,127,.12), transparent 60%),
+      radial-gradient(1000px 600px at 110% 10%, rgba(99,102,241,.10), transparent 60%),
+      var(--bg);
+      color:var(--text);
+    }
+
+    /* Topbar */
+    .topbar{
+      position:sticky; top:0; z-index:10;
+      background: rgba(246,247,251,.78);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--border);
+    }
+    .topbar-inner{
+      max-width:1100px;
+      margin:0 auto;
+      padding:12px 16px;
+      display:flex;
+      align-items:center;
+      gap:12px;
+    }
+    .brand{
+      display:flex; align-items:center; gap:10px;
+      min-width: 240px;
+    }
+    .logo{
+      width:34px; height:34px; border-radius:12px;
+      background: linear-gradient(135deg, var(--accent), #34d399);
+      box-shadow: 0 14px 40px rgba(16,163,127,.18);
+      flex:0 0 auto;
+    }
+    .brand h1{
+      font-size:14px; margin:0; font-weight:900; letter-spacing:-.2px;
+      line-height:1.1;
+    }
+    .brand .sub{
+      margin-top:2px;
+      font-size:12px; color:var(--muted); font-weight:700;
+    }
+    .controls{
+      margin-left:auto;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+    select, .btn{
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.86);
+      border-radius:12px;
+      padding:8px 10px;
+      font-size:13px;
+      color:var(--text);
+      box-shadow: 0 1px 0 rgba(2,6,23,.02);
+    }
+    select:focus, .btn:focus, textarea:focus{
+      outline:none;
+      border-color: rgba(16,163,127,.55);
+      box-shadow: 0 0 0 4px rgba(16,163,127,.12);
+    }
+    .btn{
+      cursor:pointer;
+      font-weight:800;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      transition:.15s;
+      user-select:none;
+    }
+    .btn:hover{ transform: translateY(-1px); }
+    .btn.primary{
+      background:var(--accent);
+      color:#fff;
+      border-color: transparent;
+    }
+    .btn.primary:hover{ background:var(--accent2); }
+    .btn.ghost{
+      background:rgba(255,255,255,.60);
+    }
+    .chip{
+      font-size:12px;
+      color:var(--muted);
+      padding:6px 10px;
+      border:1px solid var(--border);
+      border-radius:999px;
+      background:rgba(255,255,255,.70);
+      font-weight:800;
+    }
+
+    /* Layout */
+    .wrap{ flex:1; min-height:0; display:flex; flex-direction:column; }
+    .chat{
+      flex:1; min-height:0; overflow:auto;
+      padding:18px 0 110px;
+    }
+    .chat-inner{
+      max-width:1100px;
+      margin:0 auto;
+      padding:0 16px;
+      display:flex;
+      flex-direction:column;
+      gap:14px;
+    }
+
+    /* Rows */
+    .row{ display:flex; gap:12px; align-items:flex-start; }
+    .row.user{ justify-content:flex-end; }
+    .row.assistant{ justify-content:flex-start; }
+
+    .avatar{
+      width:34px; height:34px; border-radius:12px;
+      background:rgba(255,255,255,.86);
+      border:1px solid var(--border);
+      display:flex; align-items:center; justify-content:center;
+      box-shadow: var(--shadow);
+      flex:0 0 auto;
+      font-weight:1000;
+      color:var(--accent);
+    }
+
+    .bubble{
+      border:1px solid var(--border);
+      box-shadow: var(--shadow);
+      border-radius:16px;
+      padding:12px 14px;
+      line-height:1.65;
+      word-break:break-word;
+      white-space:pre-wrap; /* ✅ 항상 raw 텍스트 그대로 */
+    }
+    .bubble.user{
+      background:var(--user);
+      color:var(--userText);
+      border-color: transparent;
+      max-width:min(720px, 92vw);
+    }
+
+    .meta{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      display:flex;
+      gap:10px;
+      align-items:center;
+      font-weight:700;
+    }
+    .dot{ width:4px; height:4px; border-radius:999px; background: var(--border); }
+
+    /* Compare grid */
+    .compare-grid{
+      width:100%;
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:12px;
+    }
+    @media (max-width: 860px){
+      .compare-grid{ grid-template-columns: 1fr; }
+    }
+    .compare-card{
+      background:rgba(255,255,255,.86);
+      border:1px solid var(--border);
+      box-shadow: var(--shadow);
+      border-radius:18px;
+      overflow:hidden;
+    }
+    .compare-head{
+      padding:10px 12px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      border-bottom:1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.72));
+    }
+    .compare-title{
+      font-size:12px;
+      color:var(--muted);
+      font-weight:900;
+      letter-spacing:.2px;
+    }
+    .pill{
+      font-size:11px;
+      font-weight:900;
+      padding:4px 8px;
+      border-radius:999px;
+      border:1px solid var(--border);
+      background: rgba(16,163,127,.10);
+      color: var(--accent2);
+    }
+    .compare-body{
+      padding:12px 14px;
+      min-height:72px;
+      white-space:pre-wrap;   /* ✅ raw */
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .final-card{
+      margin-top:12px;
+      display:none;
+    }
+    .final-card .compare-body{
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      font-size:14px;
+      line-height:1.65;
+    }
+
+    /* Input bar */
+    .inputbar{
+      position:fixed;
+      bottom:0; left:0; right:0;
+      background: rgba(246,247,251,.78);
+      backdrop-filter: blur(10px);
+      border-top:1px solid var(--border);
+      padding:12px 0;
+    }
+    .inputbar-inner{
+      max-width:1100px;
+      margin:0 auto;
+      padding:0 16px;
+      display:flex;
+      gap:10px;
+      align-items:flex-end;
+    }
+    textarea{
+      flex:1;
+      resize:none;
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.90);
+      border-radius:16px;
+      padding:12px 12px;
+      font-size:14px;
+      line-height:1.45;
+      min-height:46px;
+      max-height:160px;
+      overflow:auto;
+      box-shadow: var(--shadow);
+    }
+
+    /* Debug */
+    .debug-wrap{
+      max-width:1100px;
+      margin: 12px auto 0;
+      padding: 0 16px;
+    }
+    details.debug{
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.70);
+      border-radius:16px;
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    details.debug summary{
+      cursor:pointer;
+      list-style:none;
+      padding:10px 12px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      font-weight:900;
+      color:#334155;
+      user-select:none;
+    }
+    details.debug summary::-webkit-details-marker{ display:none; }
+    .debug-content{
+      border-top:1px solid var(--border);
+      padding:10px 12px;
+    }
+    #stream-log{
+      background: var(--codebg);
+      color: var(--codefg);
+      border-radius: 12px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size:12px;
+      line-height:1.5;
+      max-height:220px;
+      overflow:auto;
+      white-space:pre-wrap;
+      border:1px solid rgba(255,255,255,.08);
+    }
+  </style>
+</head>
+
+<body>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>NTIS QnA · Compare</h1>
+        <div class="sub">A/B 모델 비교 · 응답 raw 출력</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <select id="modelA" title="모델 A">
+        <option value="solar">Solar-102B vLLM (solar_vllm_0)</option>
+        <option value="gemma">Gemma Triton (gemma_triton_0)</option>
+      </select>
+      <select id="modelB" title="모델 B">
+        <option value="gemma">Gemma Triton (gemma_triton_0)</option>
+        <option value="solar">Solar-102B vLLM (solar_vllm_0)</option>
+      </select>
+
+      <span id="convChip" class="chip" title="conversation_id">conv: (none)</span>
+      <button class="btn ghost" id="btnNew">새 대화</button>
+      <button class="btn ghost" id="btnStop" disabled>중단</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="debug-wrap">
+    <details class="debug">
+      <summary>
+        <span>📜 로그/컨텍스트 (디버그)</span>
+        <span style="font-size:12px;color:var(--muted);font-weight:800;">열기/닫기</span>
+      </summary>
+      <div class="debug-content">
+        <div id="stream-log"></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="chat" id="chat">
+    <div class="chat-inner" id="chatInner">
+      <div class="row assistant">
+        <div class="avatar">AI</div>
+        <div style="width:100%;">
+          <div class="bubble" style="background:rgba(255,255,255,.86);">
+            모델 A/B 비교 전용 화면입니다. 답변은 후처리 없이 raw 텍스트 그대로 출력됩니다.
+          </div>
+          <div class="meta">
+            <span>system</span><span class="dot"></span><span>ready</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="inputbar">
+    <div class="inputbar-inner">
+      <textarea id="question" placeholder="질문 입력 (Enter 전송 / Shift+Enter 줄바꿈)" rows="1"></textarea>
+      <button class="btn primary" id="btnSend">전송</button>
+      <button class="btn" id="debug">디벅</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const chat = document.getElementById("chat");
+  const chatInner = document.getElementById("chatInner");
+  const logBox = document.getElementById("stream-log");
+
+  const modelA = document.getElementById("modelA");
+  const modelB = document.getElementById("modelB");
+
+  const textarea = document.getElementById("question");
+  const btnSend = document.getElementById("btnSend");
+  const btnDebug = document.getElementById("debug");
+  const btnStop = document.getElementById("btnStop");
+  const btnNew  = document.getElementById("btnNew");
+  const convChip = document.getElementById("convChip");
+
+  let eventSource = null;
+  let activeFetchController = null;
+  let activeStreamToken = 0;
+  let streaming = false;
+  let lastCompareTarget = "A";
+
+  const CONV_KEY = "ntis_conversation_id";
+  let conversationId = localStorage.getItem(CONV_KEY) || null;
+
+  function scrollToBottom(){ chat.scrollTop = chat.scrollHeight; }
+  function setConvChip(){
+    convChip.textContent = "conv: " + (conversationId ? conversationId : "(none)");
+  }
+
+  function setStreaming(on){
+    streaming = on;
+    btnSend.disabled = on;
+    btnStop.disabled = !on;
+  }
+
+  function stopStream(reason){
+    activeStreamToken += 1;
+    if (eventSource){
+      try { eventSource.close(); } catch(e){}
+      eventSource = null;
+    }
+    if (activeFetchController){
+      try { activeFetchController.abort(); } catch(e){}
+      activeFetchController = null;
+    }
+    setStreaming(false);
+    if (reason){
+      logBox.textContent += reason + "\n";
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  }
+
+  function autoGrow(){
+    textarea.style.height = "0px";
+    textarea.style.height = Math.min(textarea.scrollHeight, 160) + "px";
+  }
+  textarea.addEventListener("input", autoGrow);
+
+  function ensureDistinctModels(){
+    if (modelA.value === modelB.value){
+      modelB.value = (modelA.value === "solar") ? "gemma" : "solar";
+    }
+  }
+  modelA.addEventListener("change", ensureDistinctModels);
+  modelB.addEventListener("change", ensureDistinctModels);
+
+  function addUserMessage(text){
+    const row = document.createElement("div");
+    row.className = "row user";
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble user";
+    bubble.textContent = text;
+
+    row.appendChild(bubble);
+    chatInner.appendChild(row);
+    scrollToBottom();
+  }
+
+  function addCompareRow(leftTitle, rightTitle){
+    const row = document.createElement("div");
+    row.className = "row assistant";
+
+    const av = document.createElement("div");
+    av.className = "avatar";
+    av.textContent = "AI";
+    row.appendChild(av);
+
+    const wrap = document.createElement("div");
+    wrap.style.width = "100%";
+
+    const grid = document.createElement("div");
+    grid.className = "compare-grid";
+
+    // A card
+    const cardA = document.createElement("div");
+    cardA.className = "compare-card";
+    const headA = document.createElement("div");
+    headA.className = "compare-head";
+    headA.innerHTML = `<div class="compare-title">${leftTitle}</div><div class="pill">A</div>`;
+    const bodyA = document.createElement("div");
+    bodyA.className = "compare-body";
+    bodyA.textContent = "⏳ 답변 생성 중...";
+    cardA.appendChild(headA);
+    cardA.appendChild(bodyA);
+
+    // B card
+    const cardB = document.createElement("div");
+    cardB.className = "compare-card";
+    const headB = document.createElement("div");
+    headB.className = "compare-head";
+    headB.innerHTML = `<div class="compare-title">${rightTitle}</div><div class="pill">B</div>`;
+    const bodyB = document.createElement("div");
+    bodyB.className = "compare-body";
+    bodyB.textContent = "⏳ 답변 생성 중...";
+    cardB.appendChild(headB);
+    cardB.appendChild(bodyB);
+
+    grid.appendChild(cardA);
+    grid.appendChild(cardB);
+
+    wrap.appendChild(grid);
+
+    const finalCard = document.createElement("div");
+    finalCard.className = "compare-card final-card";
+    const finalHead = document.createElement("div");
+    finalHead.className = "compare-head";
+    finalHead.innerHTML = `<div class="compare-title"></div><div class="pill">FINAL</div>`;
+    const finalBody = document.createElement("div");
+    finalBody.className = "compare-body";
+    finalCard.appendChild(finalHead);
+    finalCard.appendChild(finalBody);
+    wrap.appendChild(finalCard);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span>assistant</span><span class="dot"></span><span>${new Date().toLocaleTimeString()}</span>`;
+    wrap.appendChild(meta);
+
+    row.appendChild(wrap);
+    chatInner.appendChild(row);
+    scrollToBottom();
+
+    return { bodyA, bodyB, finalCard, finalBody };
+  }
+
+  // Enter send / Shift+Enter newline
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey){
+      e.preventDefault();
+      onSend();
+    }
+  });
+
+  btnSend.addEventListener("click", (e) => { e.preventDefault(); onSend(); });
+  btnStop.addEventListener("click", (e) => { e.preventDefault(); stopStream("⛔ 사용자 중단"); });
+
+  btnDebug.addEventListener("click", (e) => { e.preventDefault(); onDebug(); });
+
+  btnNew.addEventListener("click", (e) => {
+    e.preventDefault();
+    stopStream();
+
+    conversationId = null;
+    localStorage.removeItem(CONV_KEY);
+    setConvChip();
+
+    logBox.textContent = "";
+    chatInner.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "row assistant";
+    row.innerHTML = `
+      <div class="avatar">AI</div>
+      <div style="width:100%;">
+        <div class="bubble" style="background:rgba(255,255,255,.86);">새 대화를 시작합니다. 질문을 입력하세요.</div>
+        <div class="meta"><span>system</span><span class="dot"></span><span>reset</span></div>
+      </div>`;
+    chatInner.appendChild(row);
+    scrollToBottom();
+  });
+
+  async function onDebug(){
+    const q = (textarea.value || "").trim();
+    if (!q || streaming) return;
+
+
+    const payload = {
+      question: q,
+      conversation_id: conversationId || null
+    };
+
+    const res = await fetch("/query/debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    alert(data.toString());
+  }
+
+  async function onSend() {
+    const q = (textarea.value || "").trim();
+    if (!q || streaming) return;
+
+    ensureDistinctModels();
+
+    const aKey = modelA.value;
+    const bKey = modelB.value;
+
+    textarea.value = "";
+    autoGrow();
+
+    addUserMessage(q);
+
+    const aTitle = modelA.options[modelA.selectedIndex]?.text || "A";
+    const bTitle = modelB.options[modelB.selectedIndex]?.text || "B";
+    const bubbles = addCompareRow(aTitle, bTitle);
+
+    stopStream();
+    const streamToken = ++activeStreamToken;
+    const controller = new AbortController();
+    activeFetchController = controller;
+    setStreaming(true);
+
+    logBox.textContent += `\n=== USER: ${q}\n`;
+
+    let rawA = "";
+    let rawB = "";
+    let activeRequestId = "";
+    let clarificationRendered = false;
+    lastCompareTarget = "A";
+
+    function renderBodies() {
+      bubbles.bodyA.textContent = rawA || "⏳ 답변 생성 중...";
+      bubbles.bodyB.textContent = rawB || "⏳ 답변 생성 중...";
+    }
+
+    function renderFinalAnswer(text, meta) {
+      if (!text) return;
+      const summary = meta && meta.verified_projection_summary && typeof meta.verified_projection_summary === "object"
+        ? String(meta.verified_projection_summary.text || "")
+        : "";
+      bubbles.finalBody.textContent = summary
+        ? `${text}\n\n[데이터 정합성 확인]\n${summary}`
+        : text;
+      bubbles.finalCard.style.display = "block";
+    }
+
+    function renderClarification(text) {
+      if (!text) return;
+      rawA = text;
+      rawB = text;
+      clarificationRendered = true;
+      renderBodies();
+    }
+
+    function renderTerminalMessage(text) {
+      if (!text) return;
+      rawA = text;
+      rawB = text;
+      renderBodies();
+    }
+
+    function appendRawTrace(rawLine) {
+      if (!rawLine) return;
+      logBox.textContent += `${rawLine}\n\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+      console.log(rawLine);
+    }
+
+    const payload = {
+      model: aKey,
+      question: q,
+      compare: true,
+      other_model: bKey,
+      conversation_id: conversationId || null
+    };
+
+    let reader = null;
+    let buffer = "";
+    let done = false;
+    try {
+      const res = await fetch("/query/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+
+    reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    while (!done) {
+      if (streamToken !== activeStreamToken) return;
+      const { value, done: streamDone } = await reader.read();
+      done = streamDone;
+      if (!value) continue;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 이벤트는 빈 줄로 끝남
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        if (streamToken !== activeStreamToken) return;
+        const event = buffer.slice(0, idx).trim();
+
+        buffer = buffer.slice(idx + 2);
+
+        if (!event.startsWith("data:")) continue;
+
+        const jsonStr = event.replace(/^data:\s*/, "");
+        let json;
+        try {
+          json = JSON.parse(jsonStr);
+        } catch (e) {
+          console.error("JSON parse error:", jsonStr);
+          done = true;
+          continue;
+        }
+
+        const tag = String(json.tag || "");
+        if (tag !== "event" || !json.event || typeof json.event !== "object") {
+          continue;
+        }
+
+        const eventPayload = json.event;
+        const eventKind = String(eventPayload?.kind || "");
+        const eventRequestId = String(eventPayload?.request_id || "");
+        const eventContent = (typeof eventPayload?.content === "string") ? eventPayload.content : "";
+        const eventMeta = (eventPayload?.meta && typeof eventPayload.meta === "object") ? eventPayload.meta : {};
+        const shouldTraceRawEvent = eventKind !== "conversation" && eventKind !== "status";
+        const rawTraceLine = `data: ${jsonStr}`;
+
+        if (shouldTraceRawEvent) {
+          appendRawTrace(rawTraceLine);
+        }
+
+        if (!activeRequestId && eventRequestId) {
+          activeRequestId = eventRequestId;
+        }
+        if (activeRequestId && eventRequestId && eventRequestId !== activeRequestId) {
+          logBox.textContent += `[ignored stale event request_id=${eventRequestId} active_request_id=${activeRequestId}]\n`;
+          logBox.scrollTop = logBox.scrollHeight;
+          continue;
+        }
+
+        if (eventKind === "conversation") {
+          const nextConversationId = String(eventMeta.conversation_id || "");
+          if (nextConversationId) {
+            localStorage.setItem(CONV_KEY, nextConversationId);
+            conversationId = nextConversationId;
+            setConvChip();
+          }
+          continue;
+        }
+
+        const clarificationPayload =
+          eventMeta.clarification && typeof eventMeta.clarification === "object"
+            ? eventMeta.clarification
+            : null;
+        const terminalMessage = String(eventMeta.output_message || "");
+        const clarificationText = String(terminalMessage || clarificationPayload?.message || "");
+
+        if (eventKind === "done") {
+          if (clarificationPayload && !clarificationRendered) {
+            renderClarification(clarificationText);
+          } else if (!rawA && !rawB && terminalMessage) {
+            renderTerminalMessage(terminalMessage);
+          } else {
+            renderBodies();
+          }
+          done = true;
+          if (streamToken === activeStreamToken) {
+            setStreaming(false);
+            activeFetchController = null;
+            logBox.textContent += "[END]\n";
+          }
+          scrollToBottom();
+          return;
+        }
+
+        if (eventKind === "status" || eventKind === "reference.set") {
+          continue;
+        }
+
+        const modelKey = String(eventPayload?.model_key || "").toLowerCase();
+        const isSolarFrame = modelKey === "solar";
+        const isGemmaFrame = modelKey === "gemma";
+
+        if (eventKind !== "answer.chunk") {
+          scrollToBottom();
+          continue;
+        }
+
+        // MODEL_A / MODEL_B 처리 (model_key 기반 계약)
+        if (isSolarFrame) {
+          rawA += eventContent;
+        } else if (isGemmaFrame) {
+          rawB += eventContent;
+        }
+
+
+
+        renderBodies();
+        scrollToBottom();
+      }
+    }
+
+    } catch (err) {
+      if (streamToken !== activeStreamToken || err?.name === "AbortError") {
+        return;
+      }
+      console.error("Streaming fetch error:", err);
+      stopStream("❗ SSE fetch 오류");
+      bubbles.bodyA.textContent = rawA || "(fetch 오류)";
+      bubbles.bodyB.textContent = rawB || "(fetch 오류)";
+      done = true;
+      scrollToBottom();
+    } finally {
+      if (streamToken === activeStreamToken && activeFetchController === controller) {
+        activeFetchController = null;
+      }
+    }
+  }
+
+  // init
+  setConvChip();
+  autoGrow();
+  ensureDistinctModels();
+</script>
+</body>
+</html>
