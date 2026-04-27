@@ -106,11 +106,15 @@ def default_agent_tool_specs(*, implemented_only: bool = False) -> List[AgentToo
         ),
         AgentToolSpec(
             name="lookup_specific_entity",
-            description="이전 답변 결과나 메모리에 있는 특정 엔티티(특정 과제 번호나 성과 ID)를 직접 조회합니다.",
-            implemented=False,
+            description=(
+                "최근 발행된 목록(published manifest)에서 특정 항목을 직접 조회합니다. "
+                "'해당 과제', '그 항목', 명시적 제목([[제목]] 등) 참조에 사용하십시오. "
+                "entity_ref는 'rank:N'(목록 순위, 예: 'rank:1') 또는 'title:[제목]' 형식을 사용합니다."
+            ),
+            implemented=True,
             input_schema=_schema(
                 {
-                    "entity_ref": {"type": "string", "description": "참조할 엔티티 ID 또는 식별자"},
+                    "entity_ref": {"type": "string", "description": "'rank:N' 또는 'title:[제목]' 또는 내부 ID"},
                     "entity_kind": {"type": "string", "enum": ["project", "perf", "people", "org", "auto"]},
                     "detail_level": {"type": "string", "enum": ["summary", "detail"], "description": "조회 상세 수준"},
                 },

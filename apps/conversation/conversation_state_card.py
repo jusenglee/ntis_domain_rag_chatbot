@@ -32,6 +32,7 @@ class ConversationStateCard(BaseModel):
     unresolved_question: Optional[str] = None
     unresolved_constraints: Dict[str, Any] = Field(default_factory=dict)
     manifest_summary: Optional[str] = None
+    manifest_item_previews: List[Dict[str, Any]] = Field(default_factory=list)
     anchor_summary: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
 
@@ -47,6 +48,28 @@ def _manifest_summary(snapshot: Optional[DisplaySnapshot]) -> Optional[str]:
     if not titles:
         return f"{snapshot.visible_count} visible {snapshot.context_kind} items"
     return f"{snapshot.visible_count} visible {snapshot.context_kind} items: " + "; ".join(titles)
+
+
+def _manifest_item_previews(snapshot: Optional[DisplaySnapshot]) -> List[Dict[str, Any]]:
+    if not isinstance(snapshot, DisplaySnapshot):
+        return []
+    previews: List[Dict[str, Any]] = []
+    for item in list(snapshot.items or [])[:5]:
+        title = str(getattr(item, "title_text", "") or "").strip()
+        if not title:
+            continue
+        ids_map: Dict[str, List[str]] = {}
+        for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+            val = getattr(item, key, None)
+            if val:
+                ids_map[key] = [str(val)]
+        previews.append({
+            "rank": item.display_rank,
+            "title_text": title,
+            "entity_kind": item.entity_kind,
+            "ids_map": ids_map,
+        })
+    return previews
 
 
 def _anchor_summary(anchor: Any) -> Optional[str]:
@@ -114,6 +137,7 @@ def build_conversation_state_card_model(
             result_kind=context.result_kind,
             last_publication_status=publication_status,
             manifest_summary=_manifest_summary(context.result_manifest),
+            manifest_item_previews=_manifest_item_previews(context.result_manifest),
         )
 
     if isinstance(context, DetailAnchorContext):
@@ -171,6 +195,10 @@ def render_conversation_state_card(card: ConversationStateCard) -> str:
         lines.append(f"last_publication_status: {card.last_publication_status}")
     if card.manifest_summary:
         lines.append(f"manifest_summary: {card.manifest_summary}")
+    if card.manifest_item_previews:
+        lines.append("최근 발행된 목록:")
+        for preview in card.manifest_item_previews:
+            lines.append(f"  {preview['rank']}. {preview['title_text']}")
     if card.anchor_summary:
         lines.append(f"anchor_summary: {card.anchor_summary}")
     if card.unresolved_question:

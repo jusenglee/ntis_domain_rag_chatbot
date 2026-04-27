@@ -1,4 +1,4 @@
-"""실행 계층의 질의 분기와 결과 shaping을 돕는 RAG retrieval 헬퍼 모음."""
+﻿"""실행 계층의 질의 분기와 결과 shaping을 돕는 RAG retrieval 헬퍼 모음."""
 
 from __future__ import annotations
 
@@ -944,7 +944,11 @@ def resolve_rag_queries(*, state: Any, qa: Any, ks: Any, min_confidence: float) 
     """
     raw_query = state.question
     normalized_intent = _get_normalized_intent(state)
-    hint_query = _pick_attr(ks, normalized_intent, qa, key="retrieval_query", default=raw_query)
+    strategy_meta = _get_strategy_meta(state)
+    if strategy_meta.get("planner_llm_skipped"):
+        hint_query = _pick_attr(normalized_intent, qa, key="retrieval_query", default=raw_query)
+    else:
+        hint_query = _pick_attr(ks, normalized_intent, qa, key="retrieval_query", default=raw_query)
     action = str(_pick_attr(normalized_intent, qa, key="action", default="") or "").strip().lower()
     output_type = str(_pick_attr(normalized_intent, qa, key="output_type", default="") or "").strip().lower()
     anchor_context = get_followup_anchor_context(state, active_only=True)

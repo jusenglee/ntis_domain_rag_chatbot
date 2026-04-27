@@ -1,4 +1,4 @@
-"""
+﻿"""
 멀티턴 대화의 핵심 상태인 '세션 메모리'와 '대화 문맥(Context)'을 정의하고 관리하는 모듈입니다.
 
 [설계 의도: ADR-0015 주제 연속성(Subject Continuity) 보호]
@@ -911,6 +911,8 @@ def build_current_context(
             intent_payload=intent_payload,
             staged_subject=staged_subject,
         )
+        if publication_status == "answer_published" and identity_status == "ambiguous_name_only":
+            publication_status = "answer_withheld_subject_retained"
         return SubjectQueryContext(
             subject_kind=subject_kind,
             subject_name=subject_name,
@@ -924,7 +926,11 @@ def build_current_context(
             ),
             result_manifest=manifest,
             publication_status=publication_status,
-            followup_rights=FollowupRights(refinement_allowed=True),
+            followup_rights=FollowupRights(
+                refinement_allowed=True,
+                ordinal_allowed=isinstance(manifest, DisplaySnapshot) and _snapshot_visible_count(manifest) > 0,
+                source_allowed=isinstance(manifest, DisplaySnapshot) and _snapshot_visible_count(manifest) > 0,
+            ),
         )
 
     if publishability == "publishable" and isinstance(visible_snapshot, DisplaySnapshot):

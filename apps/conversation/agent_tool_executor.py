@@ -29,6 +29,7 @@ from apps.conversation.agent_tools import tool_spec_by_name
 from apps.conversation.request_facade import (
     build_agent_current_subject_refinement_intent_payload,
     build_agent_intent_payload,
+    build_agent_manifest_item_lookup_intent_payload,
     build_agent_people_activity_intent_payload,
     build_agent_subject_activity_intent_payload,
 )
@@ -40,6 +41,60 @@ from apps.conversation.session_memory import (
     view_state_from_current_context,
 )
 from apps.conversation.view_state import ConversationViewState
+
+
+_DEICTIC_TOKENS = (
+    "해당 과제",
+    "그 과제",
+    "이 과제",
+    "해당 항목",
+    "그 항목",
+    "이 항목",
+    "해당 것",
+    "그것",
+    "이것",
+    "그거",
+    "이거",
+)
+
+
+def _substitute_deictic_with_title(question: str, title: str) -> str:
+    """Replace the first deictic reference in question with the resolved title."""
+    for token in _DEICTIC_TOKENS:
+        if token in question:
+            return question.replace(token, title, 1)
+    return f"{title} {question}".strip()
+
+
+def _resolve_entity_ref_from_manifest(entity_ref: str, session_memory: Any) -> Optional[Any]:
+    """Resolve 'rank:N' or 'title:[text]' entity_ref against the current PublishedManifestContext."""
+    from apps.conversation.session_memory import PublishedManifestContext
+    from apps.conversation.followup_anchor import normalize_explicit_title_reference, _resolve_title_in_manifest
+
+    ctx = getattr(session_memory, "current_context", None) if session_memory is not None else None
+    if not isinstance(ctx, PublishedManifestContext):
+        return None
+    items = list(getattr(ctx.result_manifest, "items", None) or [])
+    if not items:
+        return None
+
+    ref = str(entity_ref or "").strip()
+
+    if ref.lower().startswith("rank:"):
+        try:
+            rank = int(ref.split(":", 1)[1].strip())
+        except ValueError:
+            return None
+        for item in items:
+            if item.display_rank == rank:
+                return item
+        if 1 <= rank <= len(items):
+            return items[rank - 1]
+        return None
+
+    title_text = ref[len("title:"):].strip() if ref.lower().startswith("title:") else ref
+    normalized = normalize_explicit_title_reference(title_text) or title_text
+    return _resolve_title_in_manifest(normalized, items)
 
 
 _PEOPLE_ACTIVITY_CUES = (
@@ -515,6 +570,63 @@ async def execute_agent_tool(
                     structured_refs={"tool_name": name},
                 )
             )
+    elif name == "lookup_specific_entity":
+        session_memory_for_lookup = _get_state_attr(state, "session_memory")
+        manifest_item = _resolve_entity_ref_from_manifest(
+            entity_ref=str(args.get("entity_ref") or ""),
+            session_memory=session_memory_for_lookup,
+        )
+        if manifest_item is None:
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="contract_violation",
+                    summary="lookup_specific_entity: 현재 발행된 목록에서 해당 항목을 찾을 수 없습니다.",
+                    warnings=["manifest_item_not_found"],
+                    structured_refs={"tool_name": name, "entity_ref": args.get("entity_ref")},
+                )
+            )
+        original_question = _first_text(_get_state_attr(state, "question")) or ""
+        request_clause = (
+            _substitute_deictic_with_title(original_question, manifest_item.title_text)
+            if original_question
+            else f"{manifest_item.title_text} 상세 정보"
+        )
+        detail_level = str(args.get("detail_level") or "detail").strip().lower()
+        try:
+            intent_payload, question_analysis = await build_agent_manifest_item_lookup_intent_payload(
+                item=manifest_item,
+                retrieval_query=request_clause,
+                conversation_id=str(_get_state_attr(state, "conversation_id", "")),
+                request_id=_first_text(_get_state_attr(state, "request_id")),
+                turn_id=_first_text(_get_state_attr(state, "turn_id")),
+                detail_level=detail_level,
+            )
+        except Exception as exc:
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="error",
+                    summary=f"lookup_specific_entity direct compile failed: {type(exc).__name__}: {exc}",
+                    warnings=["planner_error"],
+                    structured_refs={"tool_name": name, "entity_ref": args.get("entity_ref")},
+                )
+            )
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="planned_intent",
+                summary=f"Agent tool '{name}' directly compiled a manifest item lookup.",
+                structured_refs={
+                    "tool_name": name,
+                    "entity_ref": args.get("entity_ref"),
+                    "entity_title": manifest_item.title_text,
+                    "generated_question": request_clause,
+                    "question_analysis": _model_dump(question_analysis),
+                    "tool_execution_source": "agent_tool_manifest_item_lookup",
+                },
+            ),
+            intent_payload=intent_payload,
+            question_analysis=question_analysis,
+            next_current_context=None,
+        )
     elif name == "ask_user_for_clarification":
         return AgentToolExecutionResult(
             observation=AgentObservation(

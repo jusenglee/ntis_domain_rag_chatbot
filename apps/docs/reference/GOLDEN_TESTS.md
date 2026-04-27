@@ -222,6 +222,13 @@
 - expected keep: publication status is `approved` only when the verified projection summary is snapshot-owned and supported.
 - expected ban: model-generated reordered activity rows becoming `visible_answer_manifest` truth.
 
+### 11N-3. Grouped project list count failure augments with snapshot-owned rendering
+- setup: project list active snapshot has `visible_count == len(items)` and multiple visible rows share the same `pjt_no`, while each row still has its own `pjt_id`.
+- answer: both model answers collapse grouped `pjt_no` rows with rank citations such as `[1, 5]`, causing row-level state consistency to report `unsupported_count`.
+- expected keep: answer-stage keeps the selected LLM text but attaches the snapshot-owned row list as `verified_projection_summary`.
+- expected keep: `visible_answer_manifest_publication_source=verified_projection_summary` and published manifest remain row-level `pjt_id` truth.
+- expected ban: treating grouped `pjt_no` summaries as the next-turn ordinal/source truth.
+
 ### 11L. Invalid planner count contract fails closed instead of runtime overwrite
 - query: explicit-count list where planner assembled `display_limit` does not match the requested count
 - expected keep: `PLANNER.COUNT_CONTRACT source=planner_invalid`, `invalid_reason=explicit_count_mismatch`

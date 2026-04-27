@@ -558,11 +558,42 @@ def _is_activity_like_visible_snapshot(snapshot: Any) -> bool:
     return activity_rows > 0 and activity_rows * 2 >= len(items)
 
 
+def _snapshot_visible_count_matches_items(snapshot: Any) -> bool:
+    items = _snapshot_items(snapshot)
+    if not items:
+        return False
+    try:
+        visible_count = int(getattr(snapshot, "visible_count", 0) or 0)
+    except Exception:
+        return False
+    return visible_count > 0 and visible_count == len(items)
+
+
+def _is_grouped_project_visible_snapshot(snapshot: Any) -> bool:
+    if not _snapshot_visible_count_matches_items(snapshot):
+        return False
+    items = _snapshot_items(snapshot)
+    project_rows = 0
+    pjt_no_bucket_sizes: dict[str, int] = {}
+    for item in items:
+        kind = str(item.get("entity_kind") or "").strip().lower() or "project"
+        has_project_identity = _has_text_value(item, "pjt_id", "pjt_no")
+        if kind != "project" or not has_project_identity:
+            continue
+        project_rows += 1
+        pjt_no = str(item.get("pjt_no") or "").strip()
+        if pjt_no:
+            pjt_no_bucket_sizes[pjt_no] = pjt_no_bucket_sizes.get(pjt_no, 0) + 1
+    return project_rows == len(items) and any(size > 1 for size in pjt_no_bucket_sizes.values())
+
+
 def _can_render_deterministic_visible_list(snapshot: Any, *, state_inconsistent: bool) -> bool:
     if not state_inconsistent:
         return False
     context_kind = str(getattr(snapshot, "context_kind", None) or "").strip().lower()
     if context_kind in {"people", "org"}:
+        return True
+    if context_kind == "project" and _is_grouped_project_visible_snapshot(snapshot):
         return True
     return _is_activity_like_visible_snapshot(snapshot)
 

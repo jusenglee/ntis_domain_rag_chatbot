@@ -87,9 +87,53 @@ _COUNT_PATTERNS = (
 _KOREAN_COUNT = {"\ud55c": 1, "\ub450": 2, "\uc138": 3}
 _EXPLICIT_ID_KEYS = ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no", "doi", "issn")
 
+_TITLE_DECORATION_PRESENT_RE = re.compile(r"\[\[.+?\]\]|\[[^\[\]]+?\]|\*\*.+?\*\*")
+
 
 def _decode_token(token: str) -> str:
     return token.encode("utf-8").decode("unicode_escape")
+
+
+def normalize_explicit_title_reference(text: str) -> Optional[str]:
+    """Return inner title if text is a fully-decorated title reference ([[...]], [...], **...**), else None."""
+    s = str(text or "").strip()
+    if not s:
+        return None
+    if s.startswith("[[") and s.endswith("]]") and len(s) > 4:
+        return s[2:-2].strip() or None
+    if s.startswith("[") and s.endswith("]") and len(s) > 2:
+        return s[1:-1].strip() or None
+    if s.startswith("**") and s.endswith("**") and len(s) > 4:
+        return s[2:-2].strip() or None
+    return None
+
+
+def _normalize_for_title_compare(text: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFC", str(text or "").lower())
+    return re.sub(r"[\s ]+", " ", s).strip()
+
+
+def _resolve_title_in_manifest(normalized_title: str, items: list) -> Optional[Any]:
+    """Exact then substring match against DisplayItem list.
+
+    Returns a single DisplayItem on unique match, None on 0 or ≥2 matches.
+    """
+    norm_q = _normalize_for_title_compare(normalized_title)
+    if not norm_q:
+        return None
+    exact = [i for i in items if _normalize_for_title_compare(i.title_text) == norm_q]
+    if len(exact) == 1:
+        return exact[0]
+    if not exact:
+        sub = [
+            i for i in items
+            if norm_q in _normalize_for_title_compare(i.title_text)
+            or _normalize_for_title_compare(i.title_text) in norm_q
+        ]
+        if len(sub) == 1:
+            return sub[0]
+    return None
 
 
 def _is_hangul_syllable(ch: str) -> bool:
@@ -607,6 +651,19 @@ def resolve_followup_anchor(
             doi=values[0] if key == "doi" else None,
             issn=values[0] if key == "issn" else None,
         )
+
+    # Step 1.5: Explicit decorated-title match against current manifest (pre-LLM strong path)
+    if display_snapshot and display_snapshot.items and _TITLE_DECORATION_PRESENT_RE.search(question):
+        normalized_title = normalize_explicit_title_reference(question)
+        if normalized_title:
+            title_item = _resolve_title_in_manifest(normalized_title, display_snapshot.items)
+            if title_item is not None:
+                return focus_entity_from_item(
+                    item=title_item,
+                    kind=display_snapshot.context_kind,
+                    source="explicit_title_match",
+                    view_id=display_snapshot.view_id,
+                )
 
     active_focus = scope_focus_entity or focus_entity
     child_anchor = _resolve_named_child_anchor_from_focus(question=question, focus_entity=active_focus)

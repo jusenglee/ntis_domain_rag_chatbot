@@ -742,9 +742,12 @@ def _apply_unresolved_constraints_to_intent(
             updates[field] = _merge_unique_terms([], *(values if isinstance(values, (list, tuple, set)) else [values]))
 
     if updates.get("years"):
-        if not _has_field_value(normalized_intent, "year_from"):
+        year_from_preexisting = _has_field_value(normalized_intent, "year_from")
+        if not year_from_preexisting:
             updates["year_from"] = updates["years"][0]
-        if not _has_field_value(normalized_intent, "year_to"):
+        # year_from이 이미 설정된 경우(open-range "이후" 등) year_to를 years[-1]로 설정하면
+        # gte=2020 의미가 exact-year(gte=2020, lte=2020)로 collapse된다.
+        if not _has_field_value(normalized_intent, "year_to") and not year_from_preexisting:
             updates["year_to"] = updates["years"][-1]
     else:
         for field in ("year_from", "year_to"):
@@ -2332,6 +2335,158 @@ async def build_agent_current_subject_refinement_intent_payload(
         publication_status=current_context.publication_status,
         clarification_recovery=clarification_recovery,
     )
+
+
+async def build_agent_manifest_item_lookup_intent_payload(
+    *,
+    item: Any,
+    retrieval_query: str,
+    conversation_id: str,
+    request_id: Optional[str],
+    turn_id: Optional[str],
+    detail_level: str = "detail",
+    tool_execution_source: str = "agent_tool_manifest_item_lookup",
+) -> tuple[Any, Any]:
+    """Direct-compile an anchor lookup for a specific manifest item.
+
+    Bypasses stagewise planner entirely. Injects manifest item IDs directly
+    into the NormalizedIntent so anchor_present=True in the retrieval layer,
+    blocking raw-query fallback.
+    """
+    entity_kind = str(getattr(item, "entity_kind", None) or "project").strip().lower()
+    if entity_kind not in {"project", "perf", "people", "org"}:
+        entity_kind = "project"
+
+    ids_map: Dict[str, List[str]] = {}
+    for key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id", "org_code", "biz_no"):
+        val = getattr(item, key, None)
+        if val:
+            ids_map[key] = [str(val)]
+
+    action = "detail" if detail_level != "list" else "list"
+    query = str(retrieval_query or getattr(item, "title_text", "") or "").strip()
+    explicit_only_hint = _build_explicit_only_hint(query)
+    kws: List[str] = []
+    raw_intent = classify_query_intent(query, kws, hint=explicit_only_hint)
+    normalized_intent_base = normalize_intent(
+        raw_intent,
+        query=query,
+        keywords=kws,
+        hint_years=list(explicit_only_hint.get("years", [])),
+        hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
+        hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
+    )
+    normalized_intent_base = replace(
+        normalized_intent_base,
+        action=action,
+        base_route=entity_kind,
+        relation=None,
+        mode="lookup",
+        output_type="detail",
+        retrieval_query=query,
+        planner_limit=1,
+        ids_map=ids_map,
+        ids_flat=[v for values in ids_map.values() for v in values],
+        lookup_filter_policy="ids_must",
+        people_terms=[],
+        org_terms=[],
+        lead_org_terms=[],
+        participant_org_terms=[],
+        people_affiliation_org_terms=[],
+    )
+    question_analysis = QuestionAnalysis(
+        mode="LOOKUP",
+        head=entity_kind,
+        action=action,
+        relation=None,
+        join_key_mode=None,
+        output_type="detail",
+        ids_map=ids_map,
+        candidate_keys={},
+        filters={},
+        target_cols=[],
+        limit=1,
+        display_limit=1,
+        retrieval_query=query,
+        confidence=0.97,
+        hard_contract=HardContractV1(),
+        soft_strategy_hints=SoftStrategyHintsV1(
+            must_keep_terms=[str(getattr(item, "title_text", "") or "").strip()],
+            semantic_kind="manifest_item_lookup",
+        ),
+        planner_source="direct_compile",
+    )
+    count_validation = _resolve_question_analysis_count(
+        question_analysis,
+        question=query,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    normalized_intent, planner_applied = apply_question_analysis_v3(
+        normalized_intent_base,
+        question_analysis,
+        request_id=request_id,
+        conversation_id=conversation_id,
+    )
+    turn_contract = _build_turn_contract(
+        normalized_intent=normalized_intent,
+        question_analysis=question_analysis,
+    )
+    log_event(
+        "AGENT.TOOL_DIRECT_COMPILE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        tool_name="lookup_specific_entity",
+        entity_kind=entity_kind,
+        entity_title=str(getattr(item, "title_text", "") or "").strip(),
+        ids_map_keys=sorted(ids_map.keys()),
+        tool_execution_source=tool_execution_source,
+        planner_llm_skipped=1,
+        mode="LOOKUP",
+        action=action,
+    )
+    log_event(
+        "PLANNER.PIPELINE",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        step="agent_manifest_item_lookup_direct_compile",
+        status="success",
+        front_controller="agent",
+        planner_applied=int(planner_applied),
+        planner_failed=0,
+        planner_stagewise_enabled=0,
+        planner_llm_skipped=1,
+        schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
+    )
+    payload = _build_intent_payload_object(
+        normalized_intent,
+        question_analysis,
+        followup_resolution={
+            "followup_resolution_status": "none",
+            "explicit_followup": False,
+            "followup_reference_kind": None,
+        },
+        turn_id=turn_id,
+        turn_contract=turn_contract,
+        count_validation=count_validation,
+        context_router={
+            "invoked": False,
+            "status": "not_applicable",
+            "source": tool_execution_source,
+            "confidence": 0.0,
+        },
+    )
+    if hasattr(payload, "strategy_meta") and isinstance(payload.strategy_meta, dict):
+        payload.strategy_meta.update(
+            {
+                "tool_execution_source": tool_execution_source,
+                "planner_llm_skipped": True,
+                "direct_compile_entity_kind": entity_kind,
+                "direct_compile_entity_title": str(getattr(item, "title_text", "") or "").strip(),
+                "direct_compile_ids_map": ids_map,
+            }
+        )
+    return payload, question_analysis
 
 
 async def build_agent_intent_payload(
