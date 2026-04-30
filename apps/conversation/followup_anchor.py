@@ -846,3 +846,21 @@ def anchor_to_seed_map(anchor: Optional[FocusEntity]) -> Dict[str, list[str]]:
         "issn": [anchor.issn] if anchor.issn else [],
     }
     return {key: values for key, values in seed_map.items() if values}
+
+
+def group_anchor_context_to_seed_map(context: Any) -> Dict[str, list[str]]:
+    """GroupAnchorContext → seed_map (pjt_no + 개별 pjt_ids 포함).
+
+    DetailAnchorContext(FocusEntity 앵커) → anchor_to_seed_map() 사용.
+    """
+    anchor = getattr(context, "anchor", None)
+    if anchor is None:
+        return {}
+    pjt_no = str(getattr(anchor, "pjt_no", "") or "").strip()
+    pjt_ids = [str(x).strip() for x in (getattr(anchor, "pjt_ids", None) or []) if str(x).strip()]
+    seed_map: Dict[str, list[str]] = {}
+    if pjt_no:
+        seed_map["pjt_no"] = [pjt_no]
+    if pjt_ids:
+        seed_map["pjt_id"] = pjt_ids
+    return {key: values for key, values in seed_map.items() if values}

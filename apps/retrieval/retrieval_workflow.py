@@ -457,6 +457,81 @@ def _build_project_tool_collaborators(
     }
 
 
+def direct_retrieve_for_title_resolution(
+    *,
+    state: Any,
+    title: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """resolve_project_title 전용 직접 벡터 검색. 플래너 없이 호출 가능."""
+    from apps.platform.pipeline_steps import NormalizedIntent
+    from apps.platform.schemas import IntentPayloadV3
+
+    request_overrides = dict(getattr(state, "request_overrides", None) or {})
+    title_text = str(title or "").strip()
+    if not title_text:
+        return []
+    top_k = max(1, int(limit))
+    ni = NormalizedIntent(
+        action="list",
+        base_route="project",
+        relation=None,
+        is_id_query=False,
+        mode="SEARCH",
+        target_cols=["ntis_project_v1"],
+        retrieval_query=title_text,
+        ids_map={},
+        top_k=top_k,
+    )
+    ip = IntentPayloadV3(normalized_intent=ni, strategy_meta={})
+    retriever = CustomRAGRetriever(
+        top_k=top_k,
+        model_name="gemma_triton_0",
+        intent_payload=ip,
+        request_overrides=request_overrides,
+    )
+    raw = retriever.retrieve(title_text)
+    return list(raw.get("documents") or [])
+
+
+def direct_retrieve_for_participant_extraction(
+    *,
+    state: Any,
+    pjt_no: str,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """extract_project_participants 전용 직접 pjt_no 조회. 플래너 없이 호출 가능."""
+    from apps.platform.pipeline_steps import NormalizedIntent
+    from apps.platform.schemas import IntentPayloadV3
+
+    request_overrides = dict(getattr(state, "request_overrides", None) or {})
+    pjt_no_text = str(pjt_no or "").strip()
+    if not pjt_no_text:
+        return []
+    top_k = max(1, int(limit))
+    ni = NormalizedIntent(
+        action="list",
+        base_route="project",
+        relation=None,
+        is_id_query=True,
+        is_exact_key_query=True,
+        mode="LOOKUP",
+        target_cols=["ntis_project_v1"],
+        retrieval_query=pjt_no_text,
+        ids_map={"pjt_no": [pjt_no_text]},
+        top_k=top_k,
+    )
+    ip = IntentPayloadV3(normalized_intent=ni, strategy_meta={})
+    retriever = CustomRAGRetriever(
+        top_k=top_k,
+        model_name="gemma_triton_0",
+        intent_payload=ip,
+        request_overrides=request_overrides,
+    )
+    raw = retriever.retrieve(pjt_no_text)
+    return list(raw.get("documents") or [])
+
+
 def _build_route_search_collaborators(
     *,
     state: Any,

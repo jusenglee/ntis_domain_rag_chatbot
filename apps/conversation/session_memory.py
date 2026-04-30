@@ -23,9 +23,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
+
+_logger = logging.getLogger(__name__)
 
 from apps.conversation.view_state import (
     ActiveScope,
@@ -116,6 +119,30 @@ class ClarificationContext(BaseModel):
     followup_rights: FollowupRights = Field(default_factory=FollowupRights)
 
 
+class ProjectGroupAnchor(BaseModel):
+    """pjt_no 기준 동일 과제 그룹 앵커. 확정된 pjt_no 없이는 생성 불가."""
+    pjt_no: str
+    title: str
+    pjt_ids: List[str] = Field(default_factory=list)
+    years: List[int] = Field(default_factory=list)
+    lead_researcher: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_pjt_no(self) -> "ProjectGroupAnchor":
+        if not self.pjt_no:
+            raise ValueError("ProjectGroupAnchor requires non-empty pjt_no")
+        return self
+
+
+class GroupAnchorContext(BaseModel):
+    """resolve_project_title 성공 후 발행되는 pjt_no 그룹 앵커 컨텍스트."""
+    context_type: Literal["group_anchor"] = "group_anchor"
+    anchor: ProjectGroupAnchor
+    followup_rights: FollowupRights = Field(
+        default_factory=lambda: FollowupRights(refinement_allowed=True)
+    )
+
+
 CurrentContext = Annotated[
     Union[
         EmptyContext,
@@ -123,6 +150,7 @@ CurrentContext = Annotated[
         DetailAnchorContext,
         SubjectQueryContext,
         ClarificationContext,
+        GroupAnchorContext,
     ],
     Field(discriminator="context_type"),
 ]
@@ -151,7 +179,8 @@ def load_session_memory(payload: Any) -> SessionMemory:
     if isinstance(payload, dict):
         try:
             return SessionMemory.model_validate(payload)
-        except Exception:
+        except Exception as exc:
+            _logger.warning("SESSION_MEMORY.PARSE_FAILED: invalid session payload, resetting to empty. error=%s", exc)
             return empty_session_memory()
     return empty_session_memory()
 
@@ -1084,6 +1113,28 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
                     "context_kind": context.anchor.kind,
                     "answer_publishability": "publishable",
                     "followup_rights": "none",
+                },
+            }
+        )
+
+    if isinstance(context, GroupAnchorContext):
+        focus = FocusEntity(
+            kind="project",
+            source="group_anchor_context",
+            title_text=context.anchor.title,
+            pjt_no=context.anchor.pjt_no,
+        )
+        refinement_allowed = bool(context.followup_rights.refinement_allowed)
+        return view_state.model_copy(
+            update={
+                "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
+                "recent_mentions": [recent_mention_from_focus_entity(focus, source="detail_focus")],
+                "last_query_contract": {
+                    "turn_kind": "group_anchor",
+                    "context_kind": "project",
+                    "answer_publishability": "publishable",
+                    "followup_rights": "refinement_allowed" if refinement_allowed else "none",
+                    "refinement_allowed": refinement_allowed,
                 },
             }
         )

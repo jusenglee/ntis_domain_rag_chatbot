@@ -19,6 +19,8 @@ from apps.api.workflow_nodes import (
     node_execute_agent_tool,
     node_join_answers,
     node_load_memory,
+    node_render_anchor_answer,
+    node_render_participant_answer,
     node_rule_precheck,
     node_run_dialogue_agent,
     node_save_history,
@@ -65,16 +67,25 @@ def route_after_agent_tool(state: Any) -> str:
     """
     에이전트 도구 실행(execute_agent_tool) 이후의 경로를 결정합니다.
     도구가 정상적으로 검색 의도를 생성한 경우 지식 충분성 판단 단계로 가고,
+    결정적 앵커/참여인력 결과는 템플릿 렌더링 노드로,
     실패한 경우 1회 재시도하거나 에러 노드로 이동합니다.
     """
     observation = getattr(state, "agent_observation", None)
+    observation_type = str(getattr(observation, "observation_type", "") or "")
+
     if (
-        str(getattr(observation, "observation_type", "") or "") == "planned_intent"
+        observation_type == "planned_intent"
         and getattr(state, "agent_tool_intent_payload", None) is not None
         and getattr(state, "agent_tool_question_analysis", None) is not None
     ):
         return "judge_knowledge_sufficiency"
-    
+
+    if observation_type == "resolved_anchor":
+        return "render_anchor_answer"
+
+    if observation_type == "participant_extraction":
+        return "render_participant_answer"
+
     retry_count = int(getattr(state, "agent_tool_retry_count", 0) or 0)
     if retry_count < 1:
         return "retry_agent_after_tool_error"
@@ -142,6 +153,8 @@ def build_request_workflow() -> Any:
     workflow.add_node("join_answers", node_join_answers)
     workflow.add_node("direct_answer", node_direct_answer)
     workflow.add_node("merge_answers", node_merge_answers)
+    workflow.add_node("render_anchor_answer", node_render_anchor_answer)
+    workflow.add_node("render_participant_answer", node_render_participant_answer)
     workflow.add_node("save_history", node_save_history)
 
     # 2. 에지(흐름) 연결
@@ -177,6 +190,8 @@ def build_request_workflow() -> Any:
         route_after_agent_tool,
         {
             "judge_knowledge_sufficiency": "judge_knowledge_sufficiency",
+            "render_anchor_answer": "render_anchor_answer",
+            "render_participant_answer": "render_participant_answer",
             "retry_agent_after_tool_error": "retry_agent_after_tool_error",
             "agent_internal_error": "agent_internal_error",
         },
@@ -226,6 +241,8 @@ def build_request_workflow() -> Any:
     workflow.add_edge("agent_clarification", "save_history")
     workflow.add_edge("agent_internal_error", "save_history")
     workflow.add_edge("merge_answers", "save_history")
+    workflow.add_edge("render_anchor_answer", "save_history")
+    workflow.add_edge("render_participant_answer", "save_history")
     workflow.add_edge("save_history", END)
     
     return workflow

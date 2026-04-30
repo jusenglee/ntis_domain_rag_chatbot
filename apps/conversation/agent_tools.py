@@ -135,6 +135,38 @@ def default_agent_tool_specs(*, implemented_only: bool = False) -> List[AgentToo
             ),
         ),
         AgentToolSpec(
+            name="resolve_project_title",
+            description=(
+                "과제 제목(대괄호 포함 또는 명시 제목)으로 pjt_no 그룹을 확정하고 GroupAnchorContext를 발행합니다. "
+                "manifest가 없어도 사용자가 과제명을 명시했으면 이 툴을 우선 사용하십시오. "
+                "search_ntis_domain 대신 사용해야 합니다."
+            ),
+            input_schema=_schema(
+                {"title": {"type": "string", "description": "확정하려는 과제 제목 (전체 또는 근접)"}},
+                required=["title"],
+            ),
+        ),
+        AgentToolSpec(
+            name="extract_project_participants",
+            description=(
+                "GroupAnchorContext의 pjt_no 기준으로 모든 연도 인스턴스에서 "
+                "prtcp_mp[]를 결정적으로 추출·합산합니다. "
+                "resolve_project_title 또는 LOOKUP으로 앵커가 설정된 후에만 사용하십시오. "
+                "절대 search_subject_activity로 대체하지 마십시오."
+            ),
+            input_schema=_schema(
+                {
+                    "pjt_no": {"type": "string", "description": "과제 그룹 번호 (GroupAnchorContext에서 확인)"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["group", "single"],
+                        "description": "group=전체 연도 합산(기본값), single=현재 인스턴스만",
+                    },
+                },
+                required=["pjt_no"],
+            ),
+        ),
+        AgentToolSpec(
             name="ask_user_for_clarification",
             description="사용자의 질문이 모호하여 실행이 불가능할 때, 부족한 정보나 선택지를 사용자에게 요청합니다.",
             input_schema=_schema(

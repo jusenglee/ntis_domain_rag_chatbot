@@ -1283,6 +1283,18 @@ def assemble_question_analysis(
     # 런타임에서 시드 유실 여부 등에 따른 JOIN 전략 자동 보정 로직 (조용히 모드 강등 등)
     # ... (생략된 세부 보정 로직은 원본과 동일하게 유지)
 
+    # detail 액션은 limit을 1로 강제 — LLM이 stage2에서 더 큰 값을 반환해도 허용하지 않음
+    if str(payload.get("action") or "").strip().lower() == "detail" or \
+            str(payload.get("output_type") or "").strip().lower() == "detail":
+        payload["limit"] = 1
+        payload["display_limit"] = 1
+        log_event(
+            "PLANNER.DETAIL_GUARD",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            reason="detail_limit_normalized_to_1",
+        )
+
     payload["planner_source"] = "stagewise"
     # 최종 계약서 첨부
     payload["hard_contract"] = _build_hard_contract(

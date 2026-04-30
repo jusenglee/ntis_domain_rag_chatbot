@@ -35,7 +35,10 @@ from apps.conversation.request_facade import (
 )
 from apps.conversation.session_memory import (
     ClarificationContext,
+    DetailAnchorContext,
     FollowupRights,
+    GroupAnchorContext,
+    ProjectGroupAnchor,
     SessionMemory,
     SubjectQueryContext,
     view_state_from_current_context,
@@ -56,6 +59,119 @@ _DEICTIC_TOKENS = (
     "그거",
     "이거",
 )
+
+# search_subject_activity의 subject_name으로 허용할 수 없는 지시어/대명사 패턴
+_INVALID_SUBJECT_NAME_PHRASES = (
+    "해당 과제의",
+    "해당 과제",
+    "그 과제의",
+    "이 과제의",
+    "해당 연구자",
+    "해당 기관",
+    "해당 항목",
+    "앞의 과제",
+    "위 과제",
+    "이전 과제",
+    "참여 연구자",
+    "참여연구자",
+    "연구자들",
+    "연구원들",
+    "목록",
+    "상세",
+    "방금",
+    "저 과제",
+    "아까",
+)
+
+_SUBJECT_ACTION_WORDS = frozenset({"연구자", "과제", "목록", "상세", "기관", "참여"})
+
+# bracket/quote 제목 추출용 패턴 — resolve_project_title pre-router에서 사용
+_BRACKET_TITLE_PATTERNS = (
+    r'\[([^\]]{5,})\]',    # [ ... ]
+    r'「([^」]{5,})」',     # 「 ... 」
+    r'"([^"]{10,})"',      # " ... "
+    r"'([^']{10,})'",      # ' ... '
+)
+
+_PROJECT_CUES = ("과제", "연구", "프로젝트", "사업", "찾아", "알려", "보여")
+
+
+def _extract_bracket_title(question: str) -> str | None:
+    """[ ] 또는 「 」 또는 10자 이상 따옴표 내 문자열에서 제목 후보를 추출합니다."""
+    text = str(question or "")
+    for pattern in _BRACKET_TITLE_PATTERNS:
+        m = re.search(pattern, text)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate:
+                return candidate
+    return None
+
+
+def _has_project_cue(question: str) -> bool:
+    return any(cue in question for cue in _PROJECT_CUES)
+
+
+def _normalize_title_for_match(title: str) -> str:
+    """비교용 제목 정규화: 공백 제거, 소문자, 특수문자 제거."""
+    import unicodedata
+    text = str(title or "").strip()
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"[\s ]+", " ", text).strip()
+    text = re.sub(r"[^\w\s가-힣]", "", text, flags=re.UNICODE)
+    return text.lower()
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """두 정규화된 제목 문자열의 유사도를 반환합니다."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _extract_lead_researcher_from_doc(doc: dict) -> str | None:
+    for person in (doc.get("prtcp_mp") or []):
+        if "연구책임자" in str(person.get("role_slct_nm") or ""):
+            return str(person.get("hm_nm") or "").strip() or None
+    return None
+
+
+def _normalize_person_key(hm_nm: str | None, blng_org_nm: str | None, role: str | None) -> str:
+    """hm_id 없을 때 인물 dedup 키 생성."""
+    parts = [str(x or "").strip() for x in (hm_nm, blng_org_nm, role)]
+    return "|".join(p for p in parts if p) or "unknown"
+
+
+def _read_pjt_no_from_context(session_memory: Any) -> str | None:
+    """현재 세션 컨텍스트에서 pjt_no를 읽습니다."""
+    if session_memory is None:
+        return None
+    ctx = getattr(session_memory, "current_context", None)
+    if ctx is None:
+        return None
+    ctx_type = getattr(ctx, "context_type", "")
+    if ctx_type == "group_anchor":
+        return str(getattr(ctx.anchor, "pjt_no", "") or "").strip() or None
+    if ctx_type == "detail_anchor":
+        return str(getattr(ctx.anchor, "pjt_no", "") or "").strip() or None
+    return None
+
+
+def _looks_like_valid_subject_name(name: str) -> bool:
+    """subject_name이 실제 인명/기관명이 아닌 지시어/대명사인지 검사합니다."""
+    text = str(name or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    for phrase in _INVALID_SUBJECT_NAME_PHRASES:
+        if phrase in lower:
+            return False
+    for token in _DEICTIC_TOKENS:
+        if token in text:
+            return False
+    # 8자 초과 + 동작어 포함 → 이름이 아닐 가능성 높음
+    if len(text) > 8 and any(w in text for w in _SUBJECT_ACTION_WORDS):
+        return False
+    return True
 
 
 def _substitute_deictic_with_title(question: str, title: str) -> str:
@@ -496,6 +612,279 @@ def _state_log_fields(state: Any) -> Dict[str, Any]:
     }
 
 
+_TITLE_SIMILARITY_THRESHOLD = 0.80
+
+
+async def _handle_resolve_project_title(title: str, state: Any) -> "AgentToolExecutionResult":
+    """결정적 과제 제목 해결. 플래너/LLM 없이 벡터 검색 → pjt_no 그룹 확정 → GroupAnchorContext 발행."""
+    from time import perf_counter
+
+    from apps.retrieval.retrieval_workflow import direct_retrieve_for_title_resolution
+
+    started_at = perf_counter()
+    try:
+        docs = direct_retrieve_for_title_resolution(state=state, title=title, limit=50)
+    except Exception as exc:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="error",
+                summary=f"resolve_project_title search failed: {type(exc).__name__}: {exc}",
+                warnings=["retrieval_error"],
+                structured_refs={"tool_name": "resolve_project_title"},
+            )
+        )
+    latency_ms = (perf_counter() - started_at) * 1000.0
+
+    if not docs:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="no_results",
+                summary=f"과제 제목 '{title}'에 해당하는 결과가 없습니다.",
+                warnings=["title_no_match"],
+                structured_refs={"tool_name": "resolve_project_title", "title": title},
+            )
+        )
+
+    # 1. 정확 일치 우선
+    normalized = _normalize_title_for_match(title)
+    exact = [
+        d for d in docs
+        if _normalize_title_for_match(d.get("title_text") or d.get("title1") or "") == normalized
+        or _normalize_title_for_match(d.get("title2") or "") == normalized
+    ]
+
+    # 2. 유사도 기반 폴백
+    if not exact:
+        scored = sorted(
+            [
+                {
+                    "doc": d,
+                    "score": _title_similarity(
+                        normalized,
+                        _normalize_title_for_match(d.get("title_text") or d.get("title1") or ""),
+                    ),
+                }
+                for d in docs
+            ],
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+        top_score = scored[0]["score"] if scored else 0.0
+        if top_score < _TITLE_SIMILARITY_THRESHOLD:
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="clarification_required",
+                    summary=f"제목 '{title}'에 신뢰도 높은 과제를 찾을 수 없습니다.",
+                    warnings=["title_no_confident_match"],
+                    structured_refs={
+                        "tool_name": "resolve_project_title",
+                        "title": title,
+                        "candidates": [s["doc"].get("title_text") for s in scored[:5]],
+                    },
+                )
+            )
+        threshold = max(_TITLE_SIMILARITY_THRESHOLD, top_score * 0.90)
+        exact = [s["doc"] for s in scored if s["score"] >= threshold]
+
+    # 3. pjt_no 기준 그룹화
+    groups: dict[str, list[dict]] = {}
+    ungrouped = []
+    for doc in exact:
+        pno = str(doc.get("pjt_no") or "").strip()
+        if pno:
+            groups.setdefault(pno, []).append(doc)
+        else:
+            ungrouped.append(doc)
+
+    # pjt_no 없는 경우 pjt_id fallback
+    if not groups and ungrouped:
+        fallback_id = str(ungrouped[0].get("pjt_id") or "").strip()
+        if fallback_id:
+            groups[fallback_id] = ungrouped
+
+    if not groups:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="no_results",
+                summary=f"과제 제목 '{title}'로 pjt_no를 확정할 수 없습니다.",
+                warnings=["pjt_no_not_found"],
+                structured_refs={"tool_name": "resolve_project_title", "title": title},
+            )
+        )
+
+    if len(groups) > 1:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="clarification_required",
+                summary=f"'{title}' 과제 그룹이 {len(groups)}개입니다. 어느 과제를 원하시나요?",
+                warnings=["multiple_pjt_no_groups"],
+                structured_refs={
+                    "tool_name": "resolve_project_title",
+                    "title": title,
+                    "group_count": len(groups),
+                    "group_titles": [list(v)[0].get("title_text") for v in groups.values()],
+                },
+            )
+        )
+
+    # 단일 그룹 확정
+    pjt_no, instances = list(groups.items())[0]
+    try:
+        anchor = ProjectGroupAnchor(
+            pjt_no=pjt_no,
+            title=instances[0].get("title_text") or title,
+            pjt_ids=[str(i.get("pjt_id") or "") for i in instances if i.get("pjt_id")],
+            years=sorted(
+                {int(i["stan_yr"]) for i in instances if i.get("stan_yr") and str(i["stan_yr"]).isdigit()}
+            ),
+            lead_researcher=_extract_lead_researcher_from_doc(instances[0]),
+        )
+    except ValueError as exc:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="error",
+                summary=f"GroupAnchor 생성 실패: {exc}",
+                warnings=["anchor_validation_error"],
+                structured_refs={"tool_name": "resolve_project_title", "pjt_no": pjt_no},
+            )
+        )
+
+    next_ctx = GroupAnchorContext(anchor=anchor)
+    log_event(
+        "AGENT.RESOLVE_PROJECT_TITLE.SUCCESS",
+        pjt_no=pjt_no,
+        title=anchor.title,
+        instance_count=len(instances),
+        latency_ms=round(latency_ms, 1),
+        **_state_log_fields(state),
+    )
+    return AgentToolExecutionResult(
+        observation=AgentObservation(
+            observation_type="resolved_anchor",
+            summary=f"과제 그룹 확정: {anchor.title} (pjt_no={pjt_no})",
+            structured_refs={
+                "tool_name": "resolve_project_title",
+                "pjt_no": pjt_no,
+                "title": anchor.title,
+                "years": anchor.years,
+                "lead_researcher": anchor.lead_researcher,
+                "instance_count": len(anchor.pjt_ids),
+            },
+        ),
+        intent_payload=None,
+        question_analysis=None,
+        next_current_context=next_ctx,
+    )
+
+
+async def _handle_extract_project_participants(pjt_no: str, state: Any) -> "AgentToolExecutionResult":
+    """결정적 참여인력 추출. pjt_no 전체 인스턴스에서 prtcp_mp[] 합산."""
+    from time import perf_counter
+
+    from apps.retrieval.retrieval_workflow import direct_retrieve_for_participant_extraction
+
+    started_at = perf_counter()
+    try:
+        docs = direct_retrieve_for_participant_extraction(state=state, pjt_no=pjt_no, limit=30)
+    except Exception as exc:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="error",
+                summary=f"extract_project_participants failed: {type(exc).__name__}: {exc}",
+                warnings=["retrieval_error"],
+                structured_refs={"tool_name": "extract_project_participants", "pjt_no": pjt_no},
+            )
+        )
+    latency_ms = (perf_counter() - started_at) * 1000.0
+
+    if not docs:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="no_results",
+                summary=f"pjt_no={pjt_no}에 해당하는 과제 인스턴스를 찾을 수 없습니다.",
+                warnings=["pjt_no_not_found"],
+                structured_refs={"tool_name": "extract_project_participants", "pjt_no": pjt_no},
+            )
+        )
+
+    # prtcp_mp[] union — hm_id 기반 dedup
+    participants_by_key: dict[str, dict] = {}
+    for doc in docs:
+        year = str(doc.get("stan_yr") or "").strip()
+        pjt_id_val = str(doc.get("pjt_id") or "").strip()
+        for person in (doc.get("prtcp_mp") or []):
+            hm_id = str(person.get("hm_id") or "").strip()
+            hm_nm = str(person.get("hm_nm") or "").strip()
+            blng_org_nm = str(person.get("blng_org_nm") or "").strip()
+            role = str(person.get("role_slct_nm") or "").strip()
+            key = hm_id or _normalize_person_key(hm_nm, blng_org_nm, role)
+            row = participants_by_key.setdefault(
+                key,
+                {
+                    "hm_nm": hm_nm,
+                    "hm_id": hm_id,
+                    "role_set": set(),
+                    "affiliation_set": set(),
+                    "years": set(),
+                    "pjt_ids": set(),
+                },
+            )
+            if not row["hm_nm"] and hm_nm:
+                row["hm_nm"] = hm_nm
+            if not row["hm_id"] and hm_id:
+                row["hm_id"] = hm_id
+            if role:
+                row["role_set"].add(role)
+            if blng_org_nm:
+                row["affiliation_set"].add(blng_org_nm)
+            if year:
+                row["years"].add(year)
+            if pjt_id_val:
+                row["pjt_ids"].add(pjt_id_val)
+
+    participants = [
+        {
+            "hm_nm": v["hm_nm"],
+            "hm_id": v["hm_id"],
+            "roles": sorted(v["role_set"] - {""}),
+            "affiliations": sorted(v["affiliation_set"] - {""}),
+            "years": sorted(v["years"]),
+            "pjt_ids": sorted(v["pjt_ids"]),
+        }
+        for v in participants_by_key.values()
+        if v["hm_nm"]
+    ]
+
+    project_title = (docs[0].get("title_text") or "") if docs else ""
+    participant_count = len(participants)
+    log_event(
+        "AGENT.EXTRACT_PROJECT_PARTICIPANTS.SUCCESS",
+        pjt_no=pjt_no,
+        project_title=project_title,
+        instances_checked=len(docs),
+        participant_count=participant_count,
+        latency_ms=round(latency_ms, 1),
+        **_state_log_fields(state),
+    )
+    return AgentToolExecutionResult(
+        observation=AgentObservation(
+            observation_type="participant_extraction",
+            summary=f"pjt_no={pjt_no} 참여인력 {participant_count}명 추출",
+            structured_refs={
+                "tool_name": "extract_project_participants",
+                "pjt_no": pjt_no,
+                "project_title": project_title,
+                "instances_checked": len(docs),
+                "participant_count": participant_count,
+                "participants": participants,
+            },
+        ),
+        intent_payload=None,
+        question_analysis=None,
+        next_current_context=None,
+    )
+
+
 async def execute_agent_tool(
     *,
     tool_name: str,
@@ -506,6 +895,20 @@ async def execute_agent_tool(
 
     name = str(tool_name or "").strip()
     args = dict(tool_args or {})
+
+    # Pre-router: 대괄호/따옴표 제목 + 과제 단서 감지 → resolve_project_title 오버라이드
+    _original_question = _first_text(_get_state_attr(state, "question")) or ""
+    _bracket_title = _extract_bracket_title(_original_question)
+    if _bracket_title and _has_project_cue(_original_question) and name != "resolve_project_title":
+        log_event(
+            "AGENT.PRE_ROUTER.EXPLICIT_TITLE",
+            original_tool=name,
+            title_chars=len(_bracket_title),
+            **_state_log_fields(state),
+        )
+        name = "resolve_project_title"
+        args = {"title": _bracket_title}
+
     spec = tool_spec_by_name().get(name)
 
     if spec is None or not spec.implemented:
@@ -549,6 +952,20 @@ async def execute_agent_tool(
                 )
             )
     elif name == "search_subject_activity":
+        _subject_name_raw = str(args.get("subject_name") or args.get("people_name") or "").strip()
+        if _subject_name_raw and not _looks_like_valid_subject_name(_subject_name_raw):
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="contract_violation",
+                    summary=(
+                        f"search_subject_activity: subject_name '{_subject_name_raw}'은(는) "
+                        "실제 인명/기관명이 아닌 지시어입니다. "
+                        "ask_clarification으로 실제 이름을 확인하세요."
+                    ),
+                    warnings=["invalid_subject_name_deictic"],
+                    structured_refs={"tool_name": name, "rejected_subject_name": _subject_name_raw},
+                )
+            )
         generated_question = _question_from_subject_activity_args(args)
         if not generated_question:
             return AgentToolExecutionResult(
@@ -577,6 +994,17 @@ async def execute_agent_tool(
             session_memory=session_memory_for_lookup,
         )
         if manifest_item is None:
+            # Recovery router: 원본 질문에 명시 제목이 있으면 resolve_project_title으로 직접 전환
+            _recovery_title = _extract_bracket_title(_first_text(_get_state_attr(state, "question")) or "")
+            if _recovery_title:
+                log_event(
+                    "AGENT.RECOVERY.TITLE_FALLBACK",
+                    original_tool=name,
+                    entity_ref=args.get("entity_ref"),
+                    title_chars=len(_recovery_title),
+                    **_state_log_fields(state),
+                )
+                return await _handle_resolve_project_title(_recovery_title, state)
             return AgentToolExecutionResult(
                 observation=AgentObservation(
                     observation_type="contract_violation",
@@ -627,6 +1055,37 @@ async def execute_agent_tool(
             question_analysis=question_analysis,
             next_current_context=None,
         )
+    elif name == "resolve_project_title":
+        _title_arg = str(args.get("title") or "").strip()
+        if not _title_arg:
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="contract_violation",
+                    summary="resolve_project_title: 'title' 인자가 필요합니다.",
+                    warnings=["missing_title"],
+                    structured_refs={"tool_name": name},
+                )
+            )
+        return await _handle_resolve_project_title(_title_arg, state)
+    elif name == "extract_project_participants":
+        _pjt_no_arg = str(args.get("pjt_no") or "").strip()
+        if not _pjt_no_arg:
+            # 세션 컨텍스트에서 pjt_no 보충
+            _session_mem_for_pjt = _get_state_attr(state, "session_memory")
+            _pjt_no_arg = _read_pjt_no_from_context(_session_mem_for_pjt) or ""
+        if not _pjt_no_arg:
+            return AgentToolExecutionResult(
+                observation=AgentObservation(
+                    observation_type="contract_violation",
+                    summary=(
+                        "extract_project_participants: pjt_no 없음. "
+                        "먼저 resolve_project_title로 GroupAnchor를 확정하십시오."
+                    ),
+                    warnings=["anchor_not_established"],
+                    structured_refs={"tool_name": name},
+                )
+            )
+        return await _handle_extract_project_participants(_pjt_no_arg, state)
     elif name == "ask_user_for_clarification":
         return AgentToolExecutionResult(
             observation=AgentObservation(
@@ -753,8 +1212,8 @@ async def execute_agent_tool(
                         "generated_question": materialized_question,
                         "question_analysis": _model_dump(question_analysis),
                         "tool_execution_source": "agent_tool_subject_activity",
-                    },
-                ),
+                        },
+                    ),
                 intent_payload=intent_payload,
                 question_analysis=question_analysis,
                 next_current_context=_staged_subject_context(

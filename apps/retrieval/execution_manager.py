@@ -69,6 +69,20 @@ class ExecutionManager:
                 diagnostics={"reason": "no_runtime_strategy_policy"},
             )
 
+        # DETAIL_COUNT_NORMALIZATION_GUARD: detail 액션은 limit=1 강제
+        _qa_action = str(getattr(execution_input.question_analysis, "action", "") or "").strip().lower()
+        _qa_output_type = str(getattr(execution_input.question_analysis, "output_type", "") or "").strip().lower()
+        if _qa_action == "detail" or _qa_output_type == "detail":
+            _req_limit = int(execution_input.request_meta.get("limit") or 1)
+            if _req_limit > 1:
+                execution_input = ExecutionInput(
+                    question_analysis=execution_input.question_analysis,
+                    retrieval_query=execution_input.retrieval_query,
+                    target_cols=execution_input.target_cols,
+                    request_meta={**execution_input.request_meta, "limit": 1},
+                    collaborator_bundle=execution_input.collaborator_bundle,
+                )
+
         if policy.name == "LOOKUP_MISSING_RECOVERY":
             return self._execute_lookup_missing_recovery(execution_input, policy)
         if policy.name == "SEARCH_RECOVERY":
@@ -162,6 +176,26 @@ class ExecutionManager:
                 execution_trace=trace,
                 no_result_message=message,
                 diagnostics={"recovery_blocked": True, "reason": "exact_id_no_relax"},
+            )
+
+        # detail 액션은 text search 복구 금지 — 없는 항목을 유사 결과로 치환해서는 안 됨
+        _output_type = str(getattr(qa, "output_type", "") or "").strip().lower()
+        _action = str(getattr(qa, "action", "") or "").strip().lower()
+        if _action == "detail" or _output_type == "detail":
+            trace.append(
+                {
+                    "step": 2,
+                    "phase": "policy_gate",
+                    "policy": policy.name,
+                    "tool_name": policy.secondary,
+                    "status": "blocked",
+                    "reason": "detail_no_search_recovery",
+                }
+            )
+            return ExecutionOutcome(
+                execution_trace=trace,
+                no_result_message="요청하신 항목을 찾지 못했습니다.",
+                diagnostics={"recovery_blocked": True, "reason": "detail_no_search_recovery"},
             )
 
         secondary_result = _TOOL_REGISTRY[policy.secondary](

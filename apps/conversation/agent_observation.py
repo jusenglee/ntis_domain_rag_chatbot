@@ -16,6 +16,8 @@ class AgentObservation(BaseModel):
         "no_results",
         "contract_violation",
         "error",
+        "resolved_anchor",
+        "participant_extraction",
     ]
     summary: str
     structured_refs: Dict[str, Any] = Field(default_factory=dict)

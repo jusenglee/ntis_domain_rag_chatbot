@@ -204,6 +204,27 @@ def _render_tool_retry_feedback(state: Any) -> str:
     if summary:
         lines.append(f"summary: {truncate_text(summary, 300)}")
     
+    # manifest_item_not_found: 3-way recovery decision tree
+    if "manifest_item_not_found" in warnings:
+        from apps.conversation.agent_tool_executor import _extract_bracket_title
+        _question_text = str(getattr(state, "question", "") or "").strip()
+        _bracket_title = _extract_bracket_title(_question_text)
+        if _bracket_title:
+            lines.append(
+                f"IMPORTANT: manifest_item_not_found — explicit title detected in question: '{_bracket_title}'. "
+                f"Call resolve_project_title(title='{_bracket_title}'). "
+                "Do NOT use search_subject_activity or search_ntis_domain."
+            )
+        else:
+            lines.append(
+                "IMPORTANT: manifest_item_not_found — the referenced item is not in the current published context.\n"
+                "Recovery decision tree:\n"
+                "  1. User question has explicit title in [...] or quotes → call resolve_project_title(title=<title>)\n"
+                "  2. User question has explicit ID (PJT_ID/PJT_NO pattern) → call lookup_specific_entity with that ID\n"
+                "  3. Only deictic references (해당/그/이) with no title or ID → call ask_user_for_clarification\n"
+                "Do NOT use search_subject_activity or search_ntis_domain."
+            )
+
     # 에이전트의 다음 행동 지침 추가
     lines.append(
         "instruction: This is an internal tool-backend observation, not user ambiguity. "
@@ -891,6 +912,145 @@ async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
         "merge_debug": {
             "selected_model": "agent",
             "selected_answer_source": "agent_internal_error",
+            "selected_answer_kind": artifact.answer_kind,
+        },
+        "messages": [AIMessage(content=response_text)],
+    }
+
+
+async def node_render_anchor_answer(state: Any) -> Dict[str, Any]:
+    """[노드] resolve_project_title 결과(GroupAnchorContext)를 사람이 읽을 수 있는 텍스트로 렌더링합니다."""
+    observation = getattr(state, "agent_observation", None)
+    refs = dict(getattr(observation, "structured_refs", {}) or {})
+
+    title = refs.get("title") or "제목 미상"
+    pjt_no = refs.get("pjt_no") or "-"
+    years = list(refs.get("years") or [])
+    lead_researcher = refs.get("lead_researcher") or "미확인"
+    instance_count = refs.get("instance_count") or 0
+
+    year_range = f"{min(years)}–{max(years)}" if years else "미확인"
+    lines = [
+        f"**{title}**",
+        f"- 과제 그룹 번호: {pjt_no}",
+        f"- 연도 범위: {year_range}",
+        f"- 연구책임자: {lead_researcher}",
+        f"- 확인 인스턴스: {instance_count}건",
+    ]
+    response_text = "\n".join(lines)
+
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="direct_answer",
+        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        meta={
+            "answer_source": "render_anchor_answer",
+            "model_key": "agent",
+            "pjt_no": pjt_no,
+        },
+    )
+
+    log_event(
+        "AGENT.RENDER_ANCHOR_ANSWER",
+        **_agent_base_fields(state),
+        pjt_no=pjt_no,
+        title=title,
+        instance_count=instance_count,
+        answer_chars=len(response_text),
+    )
+
+    next_ctx = getattr(state, "next_current_context", None)
+    return {
+        "answer_gemma": response_text,
+        "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": next_ctx,
+        "merge_debug": {
+            "selected_model": "agent",
+            "selected_answer_source": "render_anchor_answer",
+            "selected_answer_kind": artifact.answer_kind,
+        },
+        "messages": [AIMessage(content=response_text)],
+    }
+
+
+async def node_render_participant_answer(state: Any) -> Dict[str, Any]:
+    """[노드] extract_project_participants 결과를 사람이 읽을 수 있는 텍스트로 렌더링합니다."""
+    observation = getattr(state, "agent_observation", None)
+    refs = dict(getattr(observation, "structured_refs", {}) or {})
+
+    pjt_no = refs.get("pjt_no") or "-"
+    project_title = refs.get("project_title") or ""
+    instances_checked = refs.get("instances_checked") or 0
+    participant_count = refs.get("participant_count") or 0
+    participants = list(refs.get("participants") or [])
+
+    header_parts = [
+        f"확인 범위: pjt_no={pjt_no} 동일 과제 그룹, {instances_checked}개 연도 인스턴스",
+    ]
+    if project_title:
+        header_parts.append(f"과제명: {project_title}")
+    header_parts.append(f"참여 연구자 ({participant_count}명):")
+    header = "\n".join(header_parts)
+
+    rows = []
+    for i, p in enumerate(participants, 1):
+        name = p.get("hm_nm") or "이름 미상"
+        roles = ", ".join(p.get("roles") or []) or "미확인"
+        affiliations = ", ".join(p.get("affiliations") or []) or "미확인"
+        yrs = ", ".join(sorted(p.get("years") or []))
+        rows.append(
+            f"{i}. {name}\n"
+            f"   - 역할: {roles}\n"
+            f"   - 소속: {affiliations}\n"
+            f"   - 확인 연도: {yrs}"
+        )
+
+    footer = f"\n현재 DB의 prtcp_mp[] 기준으로 총 {participant_count}명입니다."
+    response_text = header + "\n" + "\n".join(rows) + footer
+
+    artifact = AnswerArtifact(
+        text=response_text,
+        answer_kind="direct_answer",
+        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
+        user_visible_final_required=True,
+        meta={
+            "answer_source": "render_participant_answer",
+            "model_key": "agent",
+            "pjt_no": pjt_no,
+            "participant_count": participant_count,
+        },
+    )
+
+    log_event(
+        "AGENT.RENDER_PARTICIPANT_ANSWER",
+        **_agent_base_fields(state),
+        pjt_no=pjt_no,
+        instances_checked=instances_checked,
+        participant_count=participant_count,
+        answer_chars=len(response_text),
+    )
+
+    next_ctx = getattr(state, "next_current_context", None)
+    return {
+        "answer_gemma": response_text,
+        "answer_solar": response_text,
+        "answer_artifact_gemma": artifact,
+        "answer_artifact_solar": artifact,
+        "answer_artifact": artifact,
+        "final_answer_text": response_text,
+        "final_answer_artifact": artifact,
+        "selected_answer_meta": artifact.to_meta_dict(),
+        "next_current_context": next_ctx,
+        "merge_debug": {
+            "selected_model": "agent",
+            "selected_answer_source": "render_participant_answer",
             "selected_answer_kind": artifact.answer_kind,
         },
         "messages": [AIMessage(content=response_text)],

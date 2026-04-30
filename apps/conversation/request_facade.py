@@ -2592,6 +2592,12 @@ async def build_agent_intent_payload(
                 "planner_llm_skipped": False,
             }
         )
+    # DETAIL_COUNT_NORMALIZATION_GUARD: detail 액션은 limit=1 강제
+    if str(getattr(question_analysis, "action", "") or "").strip().lower() == "detail":
+        try:
+            question_analysis = question_analysis.model_copy(update={"limit": 1, "display_limit": 1})
+        except Exception:
+            pass
     return payload, question_analysis
 
 

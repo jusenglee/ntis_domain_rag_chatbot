@@ -53,8 +53,8 @@ def _resolve_fastembed_cache_dir() -> Optional[str]:
     """fastembed 캐시 경로를 확보하고 생성 실패 시 None을 돌려준다."""
     from apps.platform.settings import LOCAL_MODELS_ROOT
     raw = str(os.getenv("RAG_FASTEMBED_CACHE_DIR", "")).strip()
-    cache_dir = raw or str((Path(LOCAL_MODELS_ROOT) / "hub").resolve())
-    #cache_dir = "../../Models/hub/"
+    #cache_dir = raw or str((Path(LOCAL_MODELS_ROOT) / "hub").resolve())
+    cache_dir = "../../Models/hub/"
     try:
         os.makedirs(cache_dir, exist_ok=True)
         return cache_dir
