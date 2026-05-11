@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
 from apps.conversation.view_state import (
     ConversationViewState,
@@ -16,8 +16,9 @@ from apps.conversation.view_state import (
     get_recent_mentions,
 )
 
-if TYPE_CHECKING:
-    from apps.conversation.turn_interpreter import TurnCandidate
+# Removed per ADR-0015 Stage 4: the legacy `turn_interpreter.TurnCandidate`
+# type was only referenced by the deleted helpers `_candidate_matches_ids`
+# and `resolve_candidate_to_focus_entity` below.
 
 
 _ORDINAL_PATTERNS = (
@@ -704,131 +705,11 @@ def resolve_followup_anchor(
     return None
 
 
-def _candidate_matches_ids(
-    candidate: "TurnCandidate",
-    *,
-    ids_map: Dict[str, list[str]],
-    display_name: Optional[str] = None,
-    subject_id: Optional[str] = None,
-) -> bool:
-    candidate_subject_id = str(getattr(candidate, "subject_id", "") or "").strip()
-    if candidate_subject_id and subject_id and candidate_subject_id == str(subject_id).strip():
-        return True
-    candidate_ids = _normalize_ids_map(getattr(candidate, "ids_map", {}) or {})
-    for key in _EXPLICIT_ID_KEYS:
-        candidate_values = candidate_ids.get(key) or []
-        current_values = ids_map.get(key) or []
-        if candidate_values and current_values and candidate_values[0] == current_values[0]:
-            return True
-    candidate_name = str(getattr(candidate, "display_name", "") or "").strip()
-    current_name = str(display_name or "").strip()
-    return bool(candidate_name and current_name and candidate_name == current_name)
-
-
-def resolve_candidate_to_focus_entity(
-    *,
-    candidate: "TurnCandidate",
-    view_state: Optional[ConversationViewState],
-) -> Optional[FocusEntity]:
-    if candidate is None or view_state is None:
-        return None
-
-    source = str(getattr(candidate, "source", "") or "").strip().lower()
-    active_focus = get_active_focus_entity(view_state)
-    child_anchor = get_active_child_anchor(view_state)
-    snapshot = getattr(view_state, "visible_answer_manifest", None)
-
-    if source == "focus_entity" and active_focus is not None:
-        ids_map = _normalize_ids_map(
-            {
-                "pjt_id": active_focus.pjt_id,
-                "pjt_no": active_focus.pjt_no,
-                "rst_id": active_focus.rst_id,
-                "person_no": active_focus.person_no,
-                "org_id": active_focus.org_id,
-                "org_code": active_focus.org_code,
-                "biz_no": active_focus.biz_no,
-                "doi": active_focus.doi,
-                "issn": active_focus.issn,
-            }
-        )
-        if _candidate_matches_ids(candidate, ids_map=ids_map, display_name=active_focus.title_text):
-            return active_focus
-        return active_focus
-
-    if source == "child_anchor" and child_anchor is not None:
-        ids_map = _normalize_ids_map(
-            {
-                "pjt_id": child_anchor.pjt_id,
-                "pjt_no": child_anchor.pjt_no,
-                "rst_id": child_anchor.rst_id,
-                "person_no": child_anchor.person_no,
-                "org_id": child_anchor.org_id,
-                "org_code": child_anchor.org_code,
-                "biz_no": child_anchor.biz_no,
-                "doi": child_anchor.doi,
-                "issn": child_anchor.issn,
-            }
-        )
-        if _candidate_matches_ids(candidate, ids_map=ids_map, display_name=child_anchor.title_text):
-            return child_anchor
-        return child_anchor
-
-    if source == "manifest_item" and snapshot is not None:
-        candidate_rank = getattr(candidate, "display_rank", None)
-        for item in list(snapshot.items or []):
-            ids_map = _normalize_ids_map(
-                {
-                    "pjt_id": item.pjt_id,
-                    "pjt_no": item.pjt_no,
-                    "rst_id": item.rst_id,
-                    "person_no": item.person_no,
-                    "org_id": item.org_id,
-                    "org_code": item.org_code,
-                    "biz_no": item.biz_no,
-                    "doi": item.doi,
-                    "issn": item.issn,
-                }
-            )
-            if candidate_rank is not None and int(item.display_rank or 0) == int(candidate_rank or 0):
-                return focus_entity_from_item(
-                    item=item,
-                    kind=getattr(snapshot, "context_kind", None) or item.entity_kind or "project",
-                    source="display_snapshot",
-                    view_id=getattr(snapshot, "view_id", None),
-                )
-            if _candidate_matches_ids(candidate, ids_map=ids_map, display_name=item.title_text):
-                return focus_entity_from_item(
-                    item=item,
-                    kind=getattr(snapshot, "context_kind", None) or item.entity_kind or "project",
-                    source="display_snapshot",
-                    view_id=getattr(snapshot, "view_id", None),
-                )
-        return None
-
-    if source == "subject_index":
-        for entry in _iter_subject_index_entries(getattr(view_state, "subject_index", {}) or {}):
-            ids_map = _normalize_ids_map(entry.ids_map)
-            if _candidate_matches_ids(candidate, ids_map=ids_map, display_name=entry.display_name, subject_id=entry.subject_id):
-                return _build_subject_index_anchor(entry=entry, focus_entity=active_focus)
-        return None
-
-    if source == "recent_mention":
-        for mention in get_recent_mentions(view_state):
-            ids_map = _normalize_ids_map(
-                {
-                    "pjt_id": getattr(mention, "pjt_id", None),
-                    "pjt_no": getattr(mention, "pjt_no", None),
-                    "rst_id": getattr(mention, "rst_id", None),
-                    "doi": getattr(mention, "doi", None),
-                    "issn": getattr(mention, "issn", None),
-                }
-            )
-            if _candidate_matches_ids(candidate, ids_map=ids_map, display_name=getattr(mention, "title_text", None)):
-                return focus_entity_from_mention(mention)
-        return None
-
-    return None
+# Removed per ADR-0015 Stage 4: `_candidate_matches_ids` and
+# `resolve_candidate_to_focus_entity` materialized a `turn_interpreter.TurnCandidate`
+# back into a `FocusEntity` for the legacy clarification path. The agentic
+# tool executor builds anchors via `build_agent_manifest_item_lookup_intent_payload`
+# and the deterministic helpers below; neither helper has any remaining caller.
 
 
 def anchor_to_seed_map(anchor: Optional[FocusEntity]) -> Dict[str, list[str]]:

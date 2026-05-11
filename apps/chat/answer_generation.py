@@ -1044,6 +1044,39 @@ async def generate_answer(
     llm_request_overrides = _resolve_llm_request_overrides(state)
     max_tokens_hint = int(llm_request_overrides.get("max_tokens_hint", max_tokens_hint))
 
+    # Phase 13 진단 관측 (docs/08): contract-invalid 신호가 있는데도 스트리밍이 시작되는 경로를
+    # 찾기 위한 정찰 로그. 행동은 바꾸지 않으며, 추후 publishability gate 도입 근거 데이터로 사용한다.
+    try:
+        _intent_payload_for_diag = getattr(state, "intent_payload", None)
+        _strategy_meta_for_diag = dict(getattr(_intent_payload_for_diag, "strategy_meta", {}) or {})
+        _qa_for_diag = getattr(state, "question_analysis", None)
+        _pre_stream_signals = {
+            "early_exit_reason": getattr(state, "early_exit_reason", None)
+            or _strategy_meta_for_diag.get("early_exit_reason"),
+            "count_contract_invalid_reason": _strategy_meta_for_diag.get("count_contract_invalid_reason"),
+            "answer_publishability_policy": _strategy_meta_for_diag.get("answer_publishability_policy"),
+            "detail_guard_blocked": bool(_strategy_meta_for_diag.get("detail_guard_blocked")),
+            "no_result_message_present": bool(getattr(state, "no_result_message", None)),
+            "intent_validation_status": _strategy_meta_for_diag.get("validation_status"),
+        }
+        if any(
+            value
+            for key, value in _pre_stream_signals.items()
+            if key not in {"answer_publishability_policy", "intent_validation_status"}
+        ) or str(_pre_stream_signals.get("answer_publishability_policy") or "").strip().lower() == "never_publish":
+            log_event(
+                "LLM.STREAM.PRE_GUARD_DIAG",
+                request_id=getattr(state, "request_id", None),
+                conversation_id=getattr(state, "conversation_id", None),
+                turn_id=getattr(state, "turn_id", None),
+                model=model_name,
+                phase13_followup=True,
+                **{k: v for k, v in _pre_stream_signals.items() if v is not None},
+            )
+    except Exception:
+        # 진단 로그 실패는 스트리밍을 막지 않는다.
+        pass
+
     final_artifact = await run_llm_streaming(
         llm,
         messages,

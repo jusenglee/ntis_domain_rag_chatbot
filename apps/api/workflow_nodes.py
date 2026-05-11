@@ -691,26 +691,10 @@ async def node_execute_agent_tool(state: Any) -> Dict[str, Any]:
 
 
 async def node_agent_direct_answer(state: Any) -> Dict[str, Any]:
-    """[노드] 에이전트가 도구 호출 대신 사용자에게 직접 대답하기로 결정한 경우 처리합니다."""
+    """[노드] 에이전트가 직접 답변하기로 결정한 경우, 라우팅 마커만 세팅하고
+    실제 답변 본문 생성은 후속 generate_answer_gemma/solar(Triton/vLLM)에 위임한다."""
     decision = getattr(state, "agent_decision", None)
-    response_text = str(getattr(decision, "response_text", None) or "").strip()
-    
-    # 응답 내용이 비어있는 경우 기본 방어 로직
-    if not response_text:
-        response_text = "요청을 처리하려면 질문을 조금 더 구체적으로 작성해 주세요."
-    
-    artifact = AnswerArtifact(
-        text=response_text,
-        answer_kind="direct_answer",
-        stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
-        user_visible_final_required=True,
-        meta={
-            "answer_source": "agent_direct_answer",
-            "model_key": "agent",
-            "agent_decision": _agent_decision_meta(decision),
-        },
-    )
-    
+
     log_event(
         "AGENT.DIRECT_ANSWER",
         **merge_log_fields(
@@ -718,25 +702,11 @@ async def node_agent_direct_answer(state: Any) -> Dict[str, Any]:
             _agent_context_fields(state),
             _agent_decision_fields(decision),
         ),
-        answer_chars=len(response_text),
     )
-    
+
     return {
-        "answer_gemma": response_text,
-        "answer_solar": response_text,
-        "answer_artifact_gemma": artifact,
-        "answer_artifact_solar": artifact,
-        "answer_artifact": artifact,
-        "final_answer_text": response_text,
-        "final_answer_artifact": artifact,
-        "selected_answer_meta": artifact.to_meta_dict(),
+        "direct_answer_mode": True,
         "next_current_context": EmptyContext(),
-        "merge_debug": {
-            "selected_model": "agent",
-            "selected_answer_source": "agent_direct_answer",
-            "selected_answer_kind": artifact.answer_kind,
-        },
-        "messages": [AIMessage(content=response_text)],
     }
 
 

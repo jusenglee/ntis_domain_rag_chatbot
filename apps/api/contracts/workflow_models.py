@@ -480,6 +480,7 @@ class AgentState(BaseModel):
     # node_execute_agent_tool 및 retry 노드에서 복사되며 generate_answer_*가 참조.
     agent_answer_context: Optional[AgentAnswerContext] = None
     search_retry_count: int = 0
+    direct_answer_mode: bool = False
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
         """Merge latency fields into the aggregated execution metadata."""

@@ -131,7 +131,7 @@ class OracleRequestDefaultsLoader:
     def from_env(cls, *, logger: Any) -> Optional["OracleRequestDefaultsLoader"]:
         user = str(os.getenv("ORACLE_PARAM_USER", "ird")).strip()
         password = str(os.getenv("ORACLE_PARAM_PASSWORD", "ird_12#$")).strip()
-        dsn = str(os.getenv("ORACLE_PARAM_DSN", "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=172.31.234.203)(PORT=1253)))(CONNECT_DATA=(SERVICE_NAME=KNTIS)))")).strip()
+        dsn = str(os.getenv("ORACLE_PARAM_DSN", "(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=203.250.234.203)(PORT=1253)))(CONNECT_DATA=(SERVICE_NAME=KNTIS)))")).strip()
         if not user or not password or not dsn:
             return None
         loader = cls(user=user, password=password, dsn=dsn, logger=logger)

@@ -237,7 +237,9 @@ def build_request_workflow() -> Any:
     workflow.add_edge("generate_answer_solar", "join_answers")
     workflow.add_edge("join_answers", "merge_answers")
     workflow.add_edge("direct_answer", "save_history")
-    workflow.add_edge("agent_direct_answer", "save_history")
+    # agent direct_answer 결정 시 본문은 Triton(gemma)/vLLM(solar) 두 LLM에 위임.
+    workflow.add_edge("agent_direct_answer", "generate_answer_gemma")
+    workflow.add_edge("agent_direct_answer", "generate_answer_solar")
     workflow.add_edge("agent_clarification", "save_history")
     workflow.add_edge("agent_internal_error", "save_history")
     workflow.add_edge("merge_answers", "save_history")

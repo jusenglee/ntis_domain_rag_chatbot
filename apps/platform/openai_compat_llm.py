@@ -1,4 +1,5 @@
 import inspect
+import json
 import time
 from typing import Any, AsyncIterator, List, Optional
 
@@ -269,7 +270,14 @@ class OpenAICompatChatModel(BaseChatModel):
             len(content),
             len(reasoning),
         )
-        
+        # LLM 응답 본문 기록 (multiline은 JSON escape하여 단일 라인으로)
+        logger.info(
+            "non-stream content: request_id={} model={} content={}",
+            request_id,
+            self.model_name,
+            json.dumps(content, ensure_ascii=False),
+        )
+
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
     async def ainvoke_non_stream(self, messages: List[BaseMessage], **kwargs: Any) -> AIMessage:
@@ -316,6 +324,7 @@ class OpenAICompatChatModel(BaseChatModel):
         last_finish_reason = None
         closed = False
         primary_exc: Optional[BaseException] = None
+        content_buffer: List[str] = []
 
         try:
             async for chunk in stream:
@@ -356,6 +365,7 @@ class OpenAICompatChatModel(BaseChatModel):
                         ttft_content_ms = (time.monotonic() - t0) * 1000
                     emitted_content_chunk_n += 1
                     content_char_n += len(content)
+                    content_buffer.append(content)
 
                     yield ChatGenerationChunk(
                         message=AIMessageChunk(
@@ -391,4 +401,11 @@ class OpenAICompatChatModel(BaseChatModel):
                 chunk_n,
                 content_char_n,
                 self.model_name,
+            )
+            # LLM 응답 본문 기록 (multiline은 JSON escape하여 단일 라인으로)
+            logger.info(
+                "stream content: request_id={} model={} content={}",
+                request_id,
+                self.model_name,
+                json.dumps("".join(content_buffer), ensure_ascii=False),
             )
