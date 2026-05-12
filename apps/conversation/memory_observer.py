@@ -89,6 +89,7 @@ def log_memory_snapshot(
     history_turns: Optional[int] = None,
     view_state: Any = None,
     note: Optional[str] = None,
+    kv_store: Any = None,
 ) -> None:
     """MEMORY.SNAPSHOT 이벤트를 방출한다 (load/save 시점 호출용)."""
     try:
@@ -109,6 +110,7 @@ def log_memory_snapshot(
                 subject_index_size = len(subject_index)
             elif isinstance(subject_index, (list, tuple)):
                 subject_index_size = len(subject_index)
+        kv_backend = str(getattr(kv_store, "backend_name", "") or "").strip() or None
         log_event(
             "MEMORY.SNAPSHOT",
             request_id=request_id,
@@ -126,6 +128,7 @@ def log_memory_snapshot(
             view_recent_mentions=recent_mentions_count,
             view_manifest_items=manifest_items,
             view_subject_index_size=subject_index_size,
+            kv_backend=kv_backend,
             note=note,
         )
     except Exception:

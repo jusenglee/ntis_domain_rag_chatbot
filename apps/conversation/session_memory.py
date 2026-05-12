@@ -1073,35 +1073,55 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
             ),
         )
         mentions = [recent_mention_from_focus_entity(focus, source="detail_focus")]
-        return view_state.model_copy(
-            update={
-                "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
-                "recent_mentions": mentions,
-                "last_query_contract": {
-                    "turn_kind": "subject_query",
-                    "context_kind": context.result_kind,
-                    "subject_kind": context.subject_kind,
-                    "subject_name": context.subject_name,
-                    "answer_publishability": answer_publishability,
-                    "publication_status": publication_status or answer_publishability,
-                    "subject_publication_status": publication_status or "answer_published",
-                    "subject_identity_status": context.identity_status,
-                    "subject_identity_candidate_count": _identity_candidate_count(
-                        context.subject_kind,
-                        context.subject_ids_map,
-                    ),
-                    "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
-                    "subject_continuity_retained": _subject_continuity_retained(context),
-                    "followup_rights": "none",
-                    "refinement_allowed": refinement_allowed,
-                    "subject_refinement_allowed": refinement_allowed,
-                    "current_subject_confidence": _current_subject_confidence(
-                        publication_status,
-                        context.identity_status,
-                    ),
-                },
-            }
-        )
+        # 차단 또는 보류 상태에서도 manifest 자체는 살려서 후속 turn에 ordinal 참조 가능하도록 view_state에 펼친다.
+        # ordinal_allowed 자체는 followup_rights 에서 별도 결정되며, manifest 항목 ID 가시성은 별 신호다.
+        manifest_snapshot = context.result_manifest if isinstance(context.result_manifest, DisplaySnapshot) else None
+        manifest_visible = _snapshot_visible_count(manifest_snapshot) if manifest_snapshot is not None else 0
+        ordinal_allowed_in_subject = bool(context.followup_rights.ordinal_allowed)
+        update_fields: Dict[str, Any] = {
+            "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
+            "recent_mentions": mentions,
+            "last_query_contract": {
+                "turn_kind": "subject_query",
+                "context_kind": context.result_kind,
+                "subject_kind": context.subject_kind,
+                "subject_name": context.subject_name,
+                "answer_publishability": answer_publishability,
+                "publication_status": publication_status or answer_publishability,
+                "subject_publication_status": publication_status or "answer_published",
+                "subject_identity_status": context.identity_status,
+                "subject_identity_candidate_count": _identity_candidate_count(
+                    context.subject_kind,
+                    context.subject_ids_map,
+                ),
+                "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
+                "subject_continuity_retained": _subject_continuity_retained(context),
+                "followup_rights": "ordinal_allowed" if ordinal_allowed_in_subject else "none",
+                "refinement_allowed": refinement_allowed,
+                "subject_refinement_allowed": refinement_allowed,
+                "current_subject_confidence": _current_subject_confidence(
+                    publication_status,
+                    context.identity_status,
+                ),
+                "subject_manifest_visible_count": int(manifest_visible),
+                "subject_manifest_ordinal_allowed": ordinal_allowed_in_subject,
+            },
+        }
+        if manifest_snapshot is not None and manifest_visible > 0:
+            list_mentions = [
+                recent_mention_from_display_item(item, source="list_snapshot", turn_index=idx)
+                for idx, item in enumerate(manifest_snapshot.items[:12])
+            ]
+            update_fields["visible_answer_manifest"] = manifest_snapshot
+            update_fields["active_scope"] = ActiveScope(
+                result_set=manifest_snapshot,
+                focus=focus,
+                scope_kind="list",
+            )
+            update_fields["active_result_set_kind"] = context.result_kind
+            update_fields["active_result_view_id"] = manifest_snapshot.view_id
+            update_fields["recent_mentions"] = [*mentions, *list_mentions]
+        return view_state.model_copy(update=update_fields)
 
     if isinstance(context, DetailAnchorContext):
         return view_state.model_copy(

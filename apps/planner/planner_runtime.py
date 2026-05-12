@@ -1262,6 +1262,14 @@ def assemble_question_analysis(
     # 시드 데이터 정제 (무효한 값 제거)
     ids_map, candidate_keys, invalids = sanitize_ids_map_semantics(stage2.ids_map, question_text=question, candidate_keys=getattr(stage2, "candidate_keys", None))
     
+    # stage1.5의 org_role_hint(주관기관 역할 힌트)를 stage2 filters에 주입한다.
+    # 다운스트림 머지(merge_planner_hints)는 filters.get("org_role")에서 역할을 찾으므로
+    # 이 키가 없으면 앵커-스트릭트 server filter 게이트가 영구히 닫혀 있다.
+    _merged_filters = dict(stage2.filters or {})
+    _org_role_from_stage15 = str(getattr(entity_role_plan, "org_role_hint", "") or "").strip().lower() or None
+    if _org_role_from_stage15 and not _merged_filters.get("org_role"):
+        _merged_filters["org_role"] = _org_role_from_stage15
+
     # 최종 결과물 조합
     payload = merge_locked_strategy_slots(
         schema_version=PLANNER_RUNTIME_SCHEMA_VERSION,
@@ -1271,7 +1279,7 @@ def assemble_question_analysis(
             "candidate_keys": candidate_keys,
             "project_key_policy": getattr(stage2, "project_key_policy", None),
             "join_resolution_policy": getattr(stage2, "join_resolution_policy", None),
-            "filters": stage2.filters,
+            "filters": _merged_filters,
             "limit": min(stage2.limit, PLANNER_RUNTIME_MAX_TOP_K_SIZE),
             "display_limit": min(getattr(stage2, "display_limit", stage2.limit), min(stage2.limit, PLANNER_RUNTIME_MAX_TOP_K_SIZE)),
             "retrieval_query": stage2.retrieval_query or question,

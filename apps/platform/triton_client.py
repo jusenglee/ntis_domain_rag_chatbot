@@ -75,7 +75,7 @@ def _is_gpt_oss_model(model_name: str) -> bool:
 def get_tokenizer_for_model(model_name: str) -> AutoTokenizer:
     """Load and cache the Hugging Face tokenizer for the model."""
     if model_name not in _tokenizers:
-        tok_id = "../../Models/gemma-3-27b-it"
+        tok_id = "Models/gemma-3-27b-it"
         tokenizer_cls = _require_transformers()
         _tokenizers[model_name] = tokenizer_cls.from_pretrained(
             tok_id,

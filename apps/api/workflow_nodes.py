@@ -318,6 +318,7 @@ async def node_load_memory(state: Any) -> Dict[str, Any]:
         raw_payload_memory=raw_payload_memory,
         history_turns=len(loaded_history),
         view_state=view_state,
+        kv_store=getattr(state, "kv_store", None),
     )
     
     return {
@@ -831,8 +832,23 @@ async def node_agent_internal_error(state: Any) -> Dict[str, Any]:
     )
     if not internal_reason:
         internal_reason = _observation_reason(observation) or "agent_internal_error"
-        
-    response_text = "요청을 처리하는 중 문제가 발생했습니다. 다시 시도해 주세요."
+
+    # 마지막 관측 경고를 사용자 가시 메시지에 반영하여 단순 "문제 발생" 대신 원인별 안내로 분기
+    last_warnings = {str(w) for w in (getattr(observation, "warnings", None) or [])}
+    retry_reason = str(getattr(state, "agent_tool_retry_reason", "") or "").strip()
+    if "manifest_item_not_found" in last_warnings or retry_reason == "manifest_item_not_found":
+        response_text = (
+            "참조하신 항목을 현재 발행된 목록에서 찾지 못했습니다. "
+            "항목 번호 대신 과제명이나 ID를 직접 알려 주시거나, "
+            "새로운 검색 조건으로 다시 시도해 주세요."
+        )
+    elif "agent_loop_guard_triggered" in last_warnings:
+        response_text = (
+            "동일한 조회가 반복되어 안전을 위해 작업을 중단했습니다. "
+            "질문을 다시 작성하거나 조건을 더 구체적으로 알려 주세요."
+        )
+    else:
+        response_text = "요청을 처리하는 중 문제가 발생했습니다. 다시 시도해 주세요."
     
     # 다음 문맥은 현재 문맥을 유지하여 사용자가 다시 시도할 수 있게 함
     session_memory = getattr(state, "session_memory", None)
@@ -1079,6 +1095,7 @@ async def node_save_history(state: Any) -> Dict[str, Any]:
         history_turns=len(save_payload.get("history") or []),
         view_state=save_payload.get("view_state"),
         note=None if (saved and raw_saved) else "kv_store_unavailable",
+        kv_store=getattr(state, "kv_store", None),
     )
 
     # 전체 요청 실행 요약 로그 (REQ.SUMMARY)

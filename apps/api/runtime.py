@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from dataclasses import dataclass
 import inspect
 from pathlib import Path
@@ -125,6 +127,98 @@ async def _initialize_kv_store_with_fallback(
     except Exception as fallback_exc:
         logger_obj.error("File KV fallback failed: {}", fallback_exc, exc_info=True)
         return None
+
+
+async def _file_kv_sweeper_loop(
+    *,
+    get_kv_store: Callable[[], Any],
+    interval_seconds: float,
+    logger_obj: Any,
+) -> None:
+    """FileKVStore(파일 기반 키-값 저장소)의 만료 파일을 주기적으로 일괄 삭제한다.
+
+    lazy delete(읽을 때만 정리)만으로는 디스크가 무한 증가하므로 active eviction(능동 만료 제거)을 한다.
+    백엔드가 redis로 절체된 후에는 sweep 호출이 의미가 없으므로 즉시 종료한다.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            return
+        current = get_kv_store()
+        sweep_fn = getattr(current, "sweep_expired", None)
+        if not callable(sweep_fn):
+            # 백엔드가 file에서 다른 종류로 절체된 경우 sweeper도 종료
+            return
+        try:
+            removed = await sweep_fn()
+        except Exception as exc:
+            try:
+                logger_obj.warning("[file_kv] sweeper error: {}", exc)
+            except Exception:
+                pass
+            continue
+        if removed:
+            try:
+                logger_obj.info("[file_kv] swept {} expired entries", int(removed))
+            except Exception:
+                pass
+
+
+async def _redis_reconnect_loop(
+    app: FastAPI,
+    *,
+    redis_url: str,
+    redis_from_url: Callable[..., Any],
+    logger_obj: Any,
+    interval_seconds: float,
+) -> None:
+    """파일 KV(파일 기반 키-값 저장소)로 절체된 상태에서 주기적으로 Redis ping(연결 확인) 재시도.
+
+    Redis가 복구되면 app.state.kv_store를 Redis 어댑터로 교체한다.
+    이미 Redis 모드이거나 KV가 없는 경우 즉시 종료.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            return
+        current = getattr(app.state, "kv_store", None)
+        if current is None or isinstance(current, RedisKVStore):
+            return
+        client: Any = None
+        try:
+            client = redis_from_url(redis_url, encoding="utf-8", decode_responses=True)
+            await client.ping()
+        except Exception:
+            try:
+                await _close_async_resource(client)
+            except Exception:
+                pass
+            continue
+        new_store = RedisKVStore(client)
+        old_store = current
+        app.state.kv_store = new_store
+        # file KV sweeper가 돌고 있으면 절체 후 의미가 없으므로 정리
+        sweeper_task = getattr(app.state, "file_kv_sweeper_task", None)
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+            try:
+                await sweeper_task
+            except Exception:
+                pass
+            app.state.file_kv_sweeper_task = None
+        try:
+            logger_obj.info(
+                "Redis reconnected; KV backend switched from file to redis: {}", redis_url
+            )
+        except Exception:
+            pass
+        try:
+            await _close_async_resource(old_store)
+        except Exception:
+            pass
+        return
 
 
 async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> None:
@@ -265,6 +359,41 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         redis_from_url=redis.from_url,
     )
 
+    # Redis 재연결 백그라운드: file KV로 절체된 경우만 시작. interval=0 이면 비활성.
+    reconnect_interval = float(os.getenv("REDIS_RECONNECT_INTERVAL_SECONDS", "30") or 0)
+    if (
+        reconnect_interval > 0
+        and app.state.kv_store is not None
+        and not isinstance(app.state.kv_store, RedisKVStore)
+    ):
+        app.state.redis_reconnect_task = asyncio.create_task(
+            _redis_reconnect_loop(
+                app,
+                redis_url=config.redis_url,
+                redis_from_url=redis.from_url,
+                logger_obj=logger,
+                interval_seconds=reconnect_interval,
+            )
+        )
+    else:
+        app.state.redis_reconnect_task = None
+
+    # FileKVStore sweeper: file 백엔드에서만 의미 있음. FILE_KV_SWEEP_INTERVAL_SECONDS=0 이면 비활성.
+    sweep_interval = float(os.getenv("FILE_KV_SWEEP_INTERVAL_SECONDS", "300") or 0)
+    if (
+        sweep_interval > 0
+        and isinstance(app.state.kv_store, FileKVStore)
+    ):
+        app.state.file_kv_sweeper_task = asyncio.create_task(
+            _file_kv_sweeper_loop(
+                get_kv_store=lambda: getattr(app.state, "kv_store", None),
+                interval_seconds=sweep_interval,
+                logger_obj=logger,
+            )
+        )
+    else:
+        app.state.file_kv_sweeper_task = None
+
     # 메트릭용 HTTP 클라이언트 및 워크플로우 그래프 빌드
     metrics_timeout = httpx.Timeout(config.metrics_timeout_seconds)
     app.state.metrics_http = httpx.AsyncClient(timeout=metrics_timeout)
@@ -279,6 +408,24 @@ async def shutdown_app_runtime(app: FastAPI) -> None:
     """
     from apps.api.runtime_helpers import logger
     from apps.chat.llm_runtime import get_llm_cache
+
+    # Redis 재연결 백그라운드 task 정리
+    reconnect_task = getattr(app.state, "redis_reconnect_task", None)
+    if reconnect_task is not None:
+        reconnect_task.cancel()
+        try:
+            await reconnect_task
+        except Exception:
+            pass
+
+    # FileKVStore sweeper task 정리
+    sweeper_task = getattr(app.state, "file_kv_sweeper_task", None)
+    if sweeper_task is not None:
+        sweeper_task.cancel()
+        try:
+            await sweeper_task
+        except Exception:
+            pass
 
     # 메트릭 HTTP 클라이언트 종료
     metrics_http = getattr(app.state, "metrics_http", None)

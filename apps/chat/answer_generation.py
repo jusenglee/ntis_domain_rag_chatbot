@@ -699,14 +699,24 @@ def _promote_llm_for_augmented_state_inconsistency(
     solar_failed: bool,
     gemma_failed: bool,
 ) -> bool:
-    if str(selection.get("selection_reason") or "").strip().lower() != "both_models_state_inconsistent":
+    # `both_models_state_inconsistent`(둘 다 fallback) 또는 severity 완화 분기(`*_lesser_severity_*`)에서
+    # deterministic visible list가 만들어진 경우 LLM 답변을 augmented 라벨로 승격하여 publication 회복 흐름을 잇는다.
+    selection_reason = str(selection.get("selection_reason") or "").strip().lower()
+    is_augmentable = (
+        selection_reason == "both_models_state_inconsistent"
+        or "lesser_severity" in selection_reason
+    )
+    if not is_augmentable:
         return False
-    if answer_solar and not solar_failed:
+    current_selected = str(selection.get("selected_model") or "").strip().lower()
+    prefer_solar = current_selected == "solar" or current_selected == "fallback"
+    prefer_gemma = current_selected == "gemma" or current_selected == "fallback"
+    if prefer_solar and answer_solar and not solar_failed:
         selection["selected_model"] = "solar"
         selection["selected_answer"] = answer_solar
         selection["selection_reason"] = "solar_augmented_state_inconsistent"
         return True
-    if answer_gemma and not gemma_failed:
+    if prefer_gemma and answer_gemma and not gemma_failed:
         selection["selected_model"] = "gemma"
         selection["selected_answer"] = answer_gemma
         selection["selection_reason"] = "gemma_augmented_state_inconsistent"
@@ -1020,10 +1030,22 @@ async def generate_answer(
         note_value = getattr(agent_answer_context, "note", None)
         if isinstance(note_value, str) and note_value.strip():
             agent_observation_note = f"[결과 주석]\n{note_value.strip()}\n\n"
+    # 가시 목록 항목 수(visible_count)를 list-like 출력일 때만 프롬프트에 주입하여
+    # 두 모델이 동일한 개수 제약을 따르도록 강제한다. detail/narrative 같은 list 아닌 출력은 미주입.
+    prompt_visible_count = _resolve_groundedness_visible_count(state)
+    visible_order_hint = ""
+    if isinstance(prompt_visible_count, int) and prompt_visible_count > 0:
+        visible_order_hint = (
+            f"[목록 항목 수 강제]\n"
+            f"반드시 정확히 {prompt_visible_count}개 항목으로 답변하십시오. "
+            f"가시 목록의 항목 수는 {prompt_visible_count}개입니다. "
+            f"항목을 추가하거나 누락하지 마십시오.\n\n"
+        )
     human_prompt = (
         f"[질문 요약]\n{question_summary or '없음'}\n\n"
         f"[원본 질문]\n{getattr(last_message, 'content', '')}\n\n"
         f"{agent_observation_note}"
+        f"{visible_order_hint}"
         f"[제공된 정보]\n{context_text}"
     )
     log_section("Reference Context", debug_context_text)
@@ -1298,13 +1320,20 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     solar_state_diag = _state_consistency_diag(solar_state_consistency)
     gemma_state_diag = _state_consistency_diag(gemma_state_consistency)
     state_snapshot_diag = _state_snapshot_diag(state_consistency_snapshot)
+    # state_consistency가 통과하지 못한 모든 경우(both_models_state_inconsistent 또는
+    # severity 완화 분기 *_lesser_severity_*)에 결정론적 가시 목록(verified_projection_summary)을 메타로 attach한다.
+    _selection_reason_lc = str(selection.get("selection_reason") or "").strip().lower()
+    state_inconsistent_flag = (
+        _selection_reason_lc == "both_models_state_inconsistent"
+        or "lesser_severity" in _selection_reason_lc
+    )
     deterministic_visible_list = _build_deterministic_visible_list_candidate(
         state=state,
         active_result_snapshot=active_result_snapshot,
         groundedness_snapshot=groundedness_snapshot,
         state_consistency_snapshot=state_consistency_snapshot,
         state_consistency_policy=state_consistency_policy,
-        state_inconsistent=str(selection.get("selection_reason") or "").strip().lower() == "both_models_state_inconsistent",
+        state_inconsistent=state_inconsistent_flag,
     )
     verified_projection_summary = _build_verified_projection_summary(deterministic_visible_list)
     augmented_state_inconsistent = False
@@ -1320,6 +1349,21 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     selected_answer = str(selection["selected_answer"])
     if selected_model == "fallback":
         selected_answer = _build_user_visible_fallback_message(selection)
+    else:
+        # state_consistency 통과 실패 상태에서 severity 비교로 살린 답변은 부분 신뢰이므로
+        # 사용자 가시 답변 앞에 한국어 주의문을 prepend 한다. 환경변수로 끌 수 있다.
+        selection_reason_value = str(selection.get("selection_reason") or "").strip().lower()
+        if (
+            "lesser_severity" in selection_reason_value
+            and os.getenv("RAG_ANSWER_PARTIAL_NOTICE_ENABLED", "1").strip() not in {"", "0", "false", "no"}
+            and isinstance(selected_answer, str)
+            and selected_answer.strip()
+            and not selected_answer.lstrip().startswith("※")
+        ):
+            selected_answer = (
+                "※ 이 응답은 가시 목록과 일부 일치하지 않을 수 있어 검수가 필요합니다.\n\n"
+                + selected_answer
+            )
     degraded = bool(getattr(state, "degraded", False)) or (selected_model == "fallback")
     selected_meta = {}
     if selected_model == "solar":

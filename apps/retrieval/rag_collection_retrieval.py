@@ -111,8 +111,15 @@ def retrieve_collections(
         use_dense_k = topk_dense if emb_map_col else 0
 
         qfilter = server_filter_for_col(col)
+        # search 모드에서 server-side qfilter를 자동으로 끄지 않는다.
+        # filter 적용 여부 결정은 rag_filter_policy.resolve_collection_server_filter에 위임한다
+        # (lookup 기본 + anchor-strict search 예외). policy가 None을 반환하면 그대로 unfiltered.
         if mode == "search":
-            qfilter = None
+            qfilter_source = "policy_anchor_strict" if qfilter is not None else "search_unfiltered"
+        elif qfilter is not None:
+            qfilter_source = "policy_lookup"
+        else:
+            qfilter_source = "policy_none"
 
         log_kv(
             "RAG.COL.RETRIEVE",
@@ -127,6 +134,7 @@ def retrieve_collections(
             search_filter_signal=search_filter_signal,
             search_filter_conf_ok=search_filter_conf_ok,
             title_filter_server_applied=int(title_filter_server_applied),
+            qfilter_source=qfilter_source,
             use_dense_k=use_dense_k,
             topk_lex_cand=topk_lex_cand,
             topk_lex=topk_lex,

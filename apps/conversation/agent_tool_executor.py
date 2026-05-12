@@ -183,14 +183,25 @@ def _substitute_deictic_with_title(question: str, title: str) -> str:
 
 
 def _resolve_entity_ref_from_manifest(entity_ref: str, session_memory: Any) -> Optional[Any]:
-    """Resolve 'rank:N' or 'title:[text]' entity_ref against the current PublishedManifestContext."""
-    from apps.conversation.session_memory import PublishedManifestContext
+    """Resolve 'rank:N' or 'title:[text]' entity_ref against the current published or subject-retained manifest.
+
+    `PublishedManifestContext`(정상 발행 목록)와 `SubjectQueryContext`(답변 보류·주제 유지) 두 가지 모두에서
+    manifest items을 찾아 항목을 해소한다. 후자의 경우 followup_rights.ordinal_allowed가 켜져 있을 때만 허용.
+    """
+    from apps.conversation.session_memory import PublishedManifestContext, SubjectQueryContext
     from apps.conversation.followup_anchor import normalize_explicit_title_reference, _resolve_title_in_manifest
 
     ctx = getattr(session_memory, "current_context", None) if session_memory is not None else None
-    if not isinstance(ctx, PublishedManifestContext):
+    manifest_obj: Any = None
+    if isinstance(ctx, PublishedManifestContext):
+        manifest_obj = ctx.result_manifest
+    elif isinstance(ctx, SubjectQueryContext):
+        if not bool(getattr(getattr(ctx, "followup_rights", None), "ordinal_allowed", False)):
+            return None
+        manifest_obj = ctx.result_manifest
+    else:
         return None
-    items = list(getattr(ctx.result_manifest, "items", None) or [])
+    items = list(getattr(manifest_obj, "items", None) or [])
     if not items:
         return None
 

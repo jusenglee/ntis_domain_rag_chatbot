@@ -150,6 +150,19 @@ def _state_support_rank(verdict: dict[str, Any] | None) -> int:
     return 2 if bool((verdict or {}).get("manifest_publish_allowed")) else 1
 
 
+def _state_severity_rank(verdict: dict[str, Any] | None) -> int:
+    """검증 결과의 status를 _STATE_CONSISTENCY_SEVERITY로 변환해 정렬 가능한 정수로 돌려준다.
+
+    값이 클수록 더 심각하다. 두 모델이 모두 supported 미만(=support rank 0)일 때,
+    severity가 더 낮은 쪽을 살리는 정책 분기에 사용된다.
+    """
+    status = str((verdict or {}).get("status") or "").strip().lower()
+    return _STATE_CONSISTENCY_SEVERITY.get(status, 0)
+
+
+_STATE_CONSISTENCY_MAX_SEVERITY = max(_STATE_CONSISTENCY_SEVERITY.values())
+
+
 def _state_selection_reason(model_name: str, verdict: dict[str, Any] | None) -> str:
     return (
         f"{model_name}_state_publishable"
@@ -371,9 +384,44 @@ def select_final_answer(
             selected_answer = gemma_answer
             selection_reason = _state_selection_reason("gemma", gemma_state_consistency)
     elif state_guard_applies and solar_state_rank == 0 and gemma_state_rank == 0:
-        selected_model = "fallback"
-        selected_answer = fallback_message
-        selection_reason = "both_models_state_inconsistent"
+        # 두 모델 모두 state_consistency가 통과하지 못했어도 severity(심각도) 차이로 덜 위험한 쪽을 살린다.
+        # 둘 다 최대 severity(예: unsupported_item_identity)에 도달했거나 둘 다 유효하지 않은 경우에만 진짜 fallback.
+        solar_severity = _state_severity_rank(solar_state_consistency)
+        gemma_severity = _state_severity_rank(gemma_state_consistency)
+        both_at_max = (
+            solar_severity >= _STATE_CONSISTENCY_MAX_SEVERITY
+            and gemma_severity >= _STATE_CONSISTENCY_MAX_SEVERITY
+        )
+        if both_at_max or not (solar_valid or gemma_valid):
+            selected_model = "fallback"
+            selected_answer = fallback_message
+            selection_reason = "both_models_state_inconsistent"
+        elif solar_severity < gemma_severity and solar_valid:
+            selected_model = "solar"
+            selected_answer = solar_answer
+            selection_reason = "solar_lesser_severity_over_gemma"
+        elif gemma_severity < solar_severity and gemma_valid:
+            selected_model = "gemma"
+            selected_answer = gemma_answer
+            selection_reason = "gemma_lesser_severity_over_solar"
+        elif solar_valid and gemma_valid:
+            # severity 동률 + 둘 다 최대 미만 → policy 기본으로 살림.
+            if normalized_policy == "gemma_first":
+                selected_model = "gemma"
+                selected_answer = gemma_answer
+                selection_reason = "gemma_lesser_severity_policy_tie"
+            else:
+                selected_model = "solar"
+                selected_answer = solar_answer
+                selection_reason = "solar_lesser_severity_policy_tie"
+        elif solar_valid:
+            selected_model = "solar"
+            selected_answer = solar_answer
+            selection_reason = "solar_lesser_severity_only_valid"
+        else:
+            selected_model = "gemma"
+            selected_answer = gemma_answer
+            selection_reason = "gemma_lesser_severity_only_valid"
     elif protect_visible_order and not state_guard_applies and solar_visible_order_safe != gemma_visible_order_safe:
         if solar_visible_order_safe:
             selected_model = "solar"

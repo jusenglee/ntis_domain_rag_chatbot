@@ -890,6 +890,7 @@ def _run_rag_with_vectors(
             lookup_filter_enabled=lookup_filter_enabled,
             title_filter_server_applied=title_filter_server_applied,
             planner_org_filter_present=planner_org_filter_present,
+            anchor_strict_conf_ok=bool(getattr(prelude, "anchor_strict_conf_ok", False)),
             org_role=org_role,
             org_terms=list(org_terms or []),
             people_terms=list(people_terms or []),

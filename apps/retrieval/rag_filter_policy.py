@@ -14,6 +14,7 @@ class CollectionFilterPolicyContext:
     lookup_filter_enabled: bool
     title_filter_server_applied: bool
     planner_org_filter_present: bool
+    anchor_strict_conf_ok: bool
     org_role: Optional[str]
     org_terms: List[str]
     people_terms: List[str]
@@ -115,6 +116,42 @@ def resolve_collection_server_filter(
         return combined
 
     if context.mode != "lookup":
+        # Anchor-strict search exception: planner가 명시적으로 lead-org anchor를 주고
+        # 신뢰도 신호가 정렬된 경우 한정으로, project 컬렉션에서 server-side org filter를
+        # 살려 BM25 노이즈(예: '시행한' 같은 도메인 외 동조어) 진입을 막는다.
+        if (
+            context.mode == "search"
+            and context.base_route == "project"
+            and context.anchor_strict_conf_ok
+            and context.planner_org_filter_present
+            and context.org_role in ("lead", "lead_org", "performer", "performing")
+            and context.org_filter is not None
+        ):
+            if col == context.col_project:
+                tag_filter_local = build_tag_only_filter(["IRD_NAI_PJT_INFO"])
+                anchor_filter = and_filter(tag_filter_local, context.org_filter)
+                return _apply_extra_filters(with_org_must_gate(anchor_filter))
+            if col == context.col_perf and context.perf_tag_filter:
+                anchor_filter = and_filter(context.perf_tag_filter, context.org_filter)
+                return _apply_extra_filters(with_org_must_gate(anchor_filter))
+            if col == context.col_perf:
+                return _apply_extra_filters(with_org_must_gate(context.org_filter))
+        if (
+            context.mode == "search"
+            and context.base_route in ("project", "people")
+            and context.anchor_strict_conf_ok
+            and context.people_filter is not None
+            and (context.people_terms or context.people_ids)
+        ):
+            if col == context.col_project:
+                tag_filter_local = build_tag_only_filter(["IRD_NAI_PJT_INFO"])
+                anchor_filter = and_filter(tag_filter_local, context.people_filter)
+                return _apply_extra_filters(with_org_must_gate(anchor_filter))
+            if col == context.col_perf and context.perf_tag_filter:
+                anchor_filter = and_filter(context.perf_tag_filter, context.people_filter)
+                return _apply_extra_filters(with_org_must_gate(anchor_filter))
+            if col == context.col_perf:
+                return _apply_extra_filters(with_org_must_gate(context.people_filter))
         return None
 
     base_filter_lookup = _build_soft_filter_for_col() if context.lookup_filter_enabled else None
