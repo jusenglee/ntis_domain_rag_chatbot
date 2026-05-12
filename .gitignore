@@ -2,3 +2,8 @@
 *.iml
 __pycache__/
 *.py[cod]
+Models/
+logs/
+local_kvstore/
+rag_bench_logs/
+tests/
