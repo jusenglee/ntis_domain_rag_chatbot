@@ -37,6 +37,7 @@ class EvidenceProjectionBundle:
     display_source: str
     display_documents: list[dict[str, Any]] = field(default_factory=list)
     canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
     projected_items: list[ProjectedItem] = field(default_factory=list)
     answer_context_text: str = ""
     debug_answer_context_text: str = ""
@@ -58,3 +59,4 @@ class RetrievalBundle:
     answer_context_text: str = ""
     debug_answer_context_text: str = ""
     context_source: str = "pipeline_context"
+    references: list[dict[str, Any]] = field(default_factory=list)

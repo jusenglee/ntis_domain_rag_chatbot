@@ -3088,3 +3088,29 @@
   - `requestCount` still preserves `null` on collection failure; this patch only normalizes GPU metrics.
 - next_best_task:
   - validate the patched `/metrics` response against the live Prometheus target and confirm `gpuUtilPercent` is now numeric for the current deployment.
+
+## 2026-05-12T14:30:00+09:00 Codex
+- branch/head: pending local workspace
+- inspected_files:
+  - `apps/api/contracts/answer_groundedness.py`
+  - `apps/chat/answer_merge.py`
+  - `apps/chat/answer_generation.py`
+  - `tests/test_answer_groundedness_verdict.py`
+  - `tests/test_answer_merge_state_diagnostics.py`
+  - `apps/docs/02_CONTRACTS_AND_RULES.md`
+  - `apps/docs/07_회귀기준과_점검.md`
+- findings:
+  - detail lookup could retrieve the correct single project and still have both model answers rejected as `unsupported_groundedness`.
+  - the failure came from treating free-text detail summary numbers as list/count claims while state consistency was correctly `not_applicable` for detail output.
+- changes:
+  - added `detail_structured` groundedness policy for `output_type=detail`.
+  - detail groundedness now validates structured metadata axes (`pjt_id`, `pjt_no`, `year`, `lead_org_name`, `budget`, `period`) and ignores count-like values embedded in summary/body text.
+  - kept `pjt_id` and `pjt_no` as separate supported axes instead of mixing `pjt_no` into project IDs.
+  - wired the policy through dual-model selection and added regressions for the detail fallback scenario.
+- validations:
+  - `python -m py_compile apps/api/contracts/answer_groundedness.py apps/chat/answer_merge.py apps/chat/answer_generation.py tests/test_answer_groundedness_verdict.py tests/test_answer_merge_state_diagnostics.py`
+  - `python -m pytest tests/test_answer_groundedness_verdict.py tests/test_answer_merge_state_diagnostics.py -q -p no:cacheprovider`
+- remains_risky:
+  - this policy intentionally does not fact-check arbitrary free-text summary/body sentences beyond the structured metadata axes.
+- next_best_task:
+  - add live-log replay for the exact `rank:7` follow-up once runtime dependencies and services are available.

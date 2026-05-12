@@ -117,11 +117,13 @@ def _evaluate_groundedness(
     answer_text: str,
     answer_kind: str,
     evidence_snapshot: dict[str, Any] | None,
+    groundedness_policy: str | None = None,
 ) -> dict[str, Any]:
     return evaluate_answer_groundedness(
         answer_text=answer_text,
         answer_kind=answer_kind,
         evidence_snapshot=evidence_snapshot,
+        groundedness_policy=groundedness_policy,
     ).model_dump()
 
 
@@ -240,6 +242,7 @@ def _evaluate_model_answer(
     fallback_message: str,
     min_answer_chars: int,
     evidence_snapshot: dict[str, Any] | None = None,
+    groundedness_policy: str | None = None,
 ) -> dict[str, Any]:
     answer = (answer_text or "").strip()
     meta = answer_meta or {}
@@ -281,6 +284,7 @@ def _evaluate_model_answer(
         answer_text=answer,
         answer_kind=answer_kind,
         evidence_snapshot=evidence_snapshot,
+        groundedness_policy=groundedness_policy,
     )
     if not bypass_like_answer and str((groundedness or {}).get("status") or "").strip().lower() == "unsupported":
         fail_reasons.append("unsupported_groundedness")
@@ -317,6 +321,7 @@ def select_final_answer(
     fallback_message: str,
     min_answer_chars: int,
     evidence_snapshot: dict[str, Any] | None = None,
+    groundedness_policy: str | None = None,
     protect_visible_order: bool = False,
     state_consistency_snapshot: dict[str, Any] | None = None,
     state_consistency_policy: dict[str, Any] | None = None,
@@ -328,6 +333,7 @@ def select_final_answer(
         fallback_message=fallback_message,
         min_answer_chars=min_answer_chars,
         evidence_snapshot=evidence_snapshot,
+        groundedness_policy=groundedness_policy,
     )
     gemma_eval = _evaluate_model_answer(
         answer_text=answer_gemma,
@@ -335,6 +341,7 @@ def select_final_answer(
         fallback_message=fallback_message,
         min_answer_chars=min_answer_chars,
         evidence_snapshot=evidence_snapshot,
+        groundedness_policy=groundedness_policy,
     )
 
     solar_answer = solar_eval["answer"]
@@ -483,6 +490,7 @@ def select_final_answer(
         "gemma_meta": gemma_eval["meta"],
         "solar_groundedness": dict(solar_eval["groundedness"]),
         "gemma_groundedness": dict(gemma_eval["groundedness"]),
+        "groundedness_policy": str(groundedness_policy or "default"),
         "groundedness_snapshot": dict(evidence_snapshot or {}),
         "solar_state_consistency": dict(solar_state_consistency),
         "gemma_state_consistency": dict(gemma_state_consistency),

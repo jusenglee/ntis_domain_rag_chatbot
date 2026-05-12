@@ -188,7 +188,7 @@ def _normalize_reference_tag(tag_value: Any, *, source_type: Any = None) -> Opti
 
 
 def _normalize_reference_id(reference: dict[str, Any]) -> Optional[str]:
-    tag = str(reference.get("tag") or "").strip()
+    tag = str(reference.get("tag") or reference.get("source_table") or "").strip()
     source_type = str(reference.get("source_type") or "").strip().lower()
     project_like = (
         tag == DataTag.PROJECT.value
@@ -196,15 +196,24 @@ def _normalize_reference_id(reference: dict[str, Any]) -> Optional[str]:
         or (reference.get("pjt_id") and not any(reference.get(key) for key in ("rst_id", "perf_id", "paper_id")))
     )
     if project_like:
-        value = reference.get("pjt_id") or reference.get("id")
+        value = reference.get("pjt_id") or reference.get("id") or reference.get("doc_id")
     else:
-        value = reference.get("rst_id") or reference.get("perf_id") or reference.get("paper_id") or reference.get("id")
+        value = (
+            reference.get("rst_id")
+            or reference.get("perf_id")
+            or reference.get("paper_id")
+            or reference.get("id")
+            or reference.get("doc_id")
+        )
     text = str(value or "").strip()
     return text or None
 
 
 def _normalize_reference_payload(reference: dict[str, Any]) -> Optional[dict[str, Any]]:
-    tag = _normalize_reference_tag(reference.get("tag"), source_type=reference.get("source_type"))
+    tag = _normalize_reference_tag(
+        reference.get("tag") or reference.get("source_table"),
+        source_type=reference.get("source_type"),
+    )
     title = str(reference.get("title") or reference.get("title_text") or "").strip() or None
     normalized = {
         "tag": tag,
@@ -306,7 +315,27 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
         seen_keys.add(dedupe_key)
         references.append(normalized)
 
+    def _append_sequence(values: Any) -> None:
+        if not isinstance(values, list):
+            return
+        for value in values:
+            if isinstance(value, dict):
+                _append(value)
+
+    retrieval_bundle = getattr(state, "retrieval_bundle", None)
+    if isinstance(retrieval_bundle, dict):
+        bundle_references = retrieval_bundle.get("references")
+    else:
+        bundle_references = getattr(retrieval_bundle, "references", None)
+    _append_sequence(bundle_references)
+    if references:
+        return references
+
     projection_payload = _projection_bundle_payload(state)
+    _append_sequence(projection_payload.get("references") if projection_payload else None)
+    if references:
+        return references
+
     projection_canonical = _projection_sequence(projection_payload, "canonical_evidence")
     projection_display = _projection_sequence(projection_payload, "display_documents")
     if projection_payload:
@@ -317,7 +346,6 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
             _append(_reference_seed_from_canonical_item(canonical, fallback_doc=display))
         return references
 
-    retrieval_bundle = getattr(state, "retrieval_bundle", None)
     if isinstance(retrieval_bundle, dict):
         items = retrieval_bundle.get("items")
     else:
@@ -1272,6 +1300,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     active_result_snapshot = active_result_snapshot_raw if projection_lineage_ok else None
     output_family = _resolve_output_family(state)
     publication_applicable = output_family in _LIST_LIKE_OUTPUT_TYPES
+    groundedness_policy = "detail_structured" if output_family == "detail" else "default"
     visible_order_count = (
         int(getattr(active_result_snapshot, "visible_count", 0) or 0)
         if publication_applicable and active_result_snapshot is not None
@@ -1303,6 +1332,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         fallback_message=_DUAL_MODEL_FALLBACK_MESSAGE,
         min_answer_chars=_SOLAR_MIN_ANSWER_CHARS,
         evidence_snapshot=groundedness_snapshot,
+        groundedness_policy=groundedness_policy,
         protect_visible_order=protect_visible_order,
         state_consistency_snapshot=state_consistency_snapshot,
         state_consistency_policy=state_consistency_policy,
@@ -1432,6 +1462,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
                 enriched_meta["answer_augmentation_mode"] = "verified_projection_summary"
         if execution_trace_summary:
             enriched_meta.update(execution_trace_summary)
+        enriched_meta["groundedness_policy"] = groundedness_policy
         enriched_meta["groundedness_status"] = selected_groundedness.get("status")
         enriched_meta["groundedness_reason_codes"] = list(selected_groundedness.get("reason_codes") or [])
         enriched_meta["groundedness_summary"] = selected_groundedness
@@ -1583,6 +1614,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         "gemma_answer_chars": selection["gemma_answer_chars"],
         "min_chars_threshold": _SOLAR_MIN_ANSWER_CHARS,
         "selected_answer_kind": (selected_artifact.answer_kind if isinstance(selected_artifact, AnswerArtifact) else None),
+        "groundedness_policy": groundedness_policy,
         "groundedness_snapshot": groundedness_snapshot,
         "solar_groundedness": solar_groundedness,
         "gemma_groundedness": gemma_groundedness,
@@ -1625,6 +1657,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         gemma_answer_chars=len(answer_gemma),
         solar_answer_chars=len(answer_solar),
         groundedness_status=selected_groundedness.get("status"),
+        groundedness_policy=groundedness_policy,
         groundedness_reason_codes=list(selected_groundedness.get("reason_codes") or []),
         state_consistency_status=selected_state_consistency.get("status"),
         state_consistency_reason_codes=list(selected_state_consistency.get("reason_codes") or []),

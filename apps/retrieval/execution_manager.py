@@ -23,6 +23,7 @@ class ExecutionInput:
 class ExecutionOutcome:
     docs: list[dict[str, Any]] = field(default_factory=list)
     canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
     render_profile: dict[str, Any] = field(default_factory=dict)
     execution_trace: list[dict[str, Any]] = field(default_factory=list)
     no_result_message: str | None = None
@@ -232,6 +233,7 @@ class ExecutionManager:
             return ExecutionOutcome(
                 docs=list(secondary_result.rows),
                 canonical_evidence=list(secondary_result.canonical_evidence),
+                references=list(secondary_result.references),
                 render_profile=dict(secondary_result.render_profile or {}),
                 execution_trace=trace,
                 no_result_message=None,
@@ -688,6 +690,7 @@ def _tool_result_to_outcome(
     return ExecutionOutcome(
         docs=list(result.rows),
         canonical_evidence=list(result.canonical_evidence),
+        references=list(result.references),
         render_profile=dict(result.render_profile or {}),
         execution_trace=list(trace),
         no_result_message=message,

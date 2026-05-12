@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -340,9 +341,14 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
     def _reference_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
         """검색 결과 문서로부터 프론트엔드 참조 목록에 표시할 최소 페이로드를 추출합니다."""
+        tag = _top_level_text_value(doc, "tag", "source_table")
+        if tag == DataTag.PROJECT.value:
+            reference_id = _top_level_text_value(doc, "pjt_id", "id", "doc_id", "rst_id")
+        else:
+            reference_id = _top_level_text_value(doc, "rst_id", "pjt_id", "id", "doc_id")
         return {
-            "tag": _top_level_text_value(doc, "tag"),
-            "id": _top_level_text_value(doc, "pjt_id", "rst_id", "id"),
+            "tag": tag,
+            "id": reference_id,
             "title": _top_level_text_value(doc, "title1", "title2", "title_text", "title"),
         }
 
@@ -355,6 +361,30 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         if not payload.get("title"):
             return "missing_title"
         return None
+
+    def _json_safe_reference_value(value: Any) -> Any:
+        """Return a JSON-serializable copy of a reference candidate value."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(key): _json_safe_reference_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_safe_reference_value(item) for item in value]
+        return str(value)
+
+    def _invalid_reference_payload(
+        candidate: Dict[str, Any],
+        *,
+        candidate_source: str,
+        invalid_reason: str,
+    ) -> Dict[str, Any]:
+        payload = _json_safe_reference_value(candidate)
+        if not isinstance(payload, dict):
+            payload = {"raw_reference": payload}
+        payload["invalid"] = True
+        payload["invalid_reason"] = invalid_reason
+        payload["candidate_source"] = candidate_source
+        return payload
 
     def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
         """내부 증거 객체를 라우트 참조 계약에 맞는 최상위 문서 형식으로 변환합니다."""
@@ -845,16 +875,34 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                                 candidate_source=candidate_source,
                                 invalid_reason=invalid_reason,
                                 raw_tag=candidate.get("tag"),
+                                raw_source_table=candidate.get("source_table"),
                                 source_type=candidate.get("source_type"),
                                 top_level_pjt_id=candidate.get("pjt_id"),
                                 top_level_rst_id=candidate.get("rst_id"),
+                                top_level_doc_id=candidate.get("doc_id"),
                                 top_level_title1=candidate.get("title1"),
                                 top_level_title2=candidate.get("title2"),
                                 top_level_title_text=candidate.get("title_text"),
                                 keys=sorted(candidate.keys()),
                             )
+                            invalid_payload = _invalid_reference_payload(
+                                candidate,
+                                candidate_source=candidate_source,
+                                invalid_reason=invalid_reason,
+                            )
+                            dedupe_key = (
+                                "invalid",
+                                candidate_source,
+                                invalid_reason,
+                                json.dumps(invalid_payload, ensure_ascii=False, sort_keys=True),
+                            )
+                            if dedupe_key in seen_reference_keys:
+                                continue
+                            seen_reference_keys.add(dedupe_key)
+                            ref_docs.append(invalid_payload)
+                            added_count += 1
                             continue
-                        dedupe_key = (normalized.get("tag"), normalized.get("id"), normalized.get("title"))
+                        dedupe_key = ("valid", normalized.get("tag"), normalized.get("id"), normalized.get("title"))
                         if dedupe_key in seen_reference_keys:
                             continue
                         seen_reference_keys.add(dedupe_key)

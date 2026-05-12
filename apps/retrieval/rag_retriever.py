@@ -742,9 +742,10 @@ class CustomRAGRetriever(BaseModel):
         res_m = res_map.get("M") or res_map.get("A") or next(iter(res_map.values()))
 
         hits = getattr(res_m, "reranked_hits", []) or []
-        aggregation = getattr(res_m, "aggregation", None) or {}
+        aggregation = getattr(res_m, "aggregation", None) or {}
         series = getattr(res_m, "series", None) or {}
         canonical_evidence = getattr(res_m, "canonical_evidence", None) or []
+        references = [dict(ref) for ref in list(getattr(res_m, "refs", None) or []) if isinstance(ref, dict)]
         render_profile = getattr(res_m, "render_profile", None) or {}
         answer_context_text = str(getattr(res_m, "context", "") or "")
         timings = getattr(res_m, "timings", None) or {}
@@ -755,6 +756,7 @@ class CustomRAGRetriever(BaseModel):
             return {
                 "documents": documents,
                 "canonical_evidence": canonical_evidence,
+                "references": references,
                 "render_profile": render_profile,
                 "answer_context_text": answer_context_text,
                 "actual_retrieval_query": str(query or "").strip(),

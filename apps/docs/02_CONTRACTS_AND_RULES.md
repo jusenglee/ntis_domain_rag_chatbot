@@ -128,3 +128,12 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   **Fuzzy Fallback:** 검색 결과가 부족할 경우, L1 계약을 훼손하지 않는 범위 내에서 검색 가중치를 조절하거나 보조 도구를 호출하는 L2 정책을 실행할 수 있다.
 *   **Internal Error Loop:** schema/tool/planner/backend 오류는 사용자 모호성으로 위장하지 않는다. Compact observation으로 Agent에게 최대 1회 self-correction 기회를 주고, 재시도 실패 시 `agent_internal_error`로 닫는다.
 *   **Clarification 경계:** clarification은 사용자 대상이 실제로 모호할 때만 사용한다. 내부 오류나 parser/schema 실패를 `ClarificationContext`로 저장하면 안 된다.
+
+---
+
+## 2026-05-12 Detail Groundedness Contract
+
+* `output_type=detail` answers are validated with the `detail_structured` groundedness policy.
+* The policy validates only structured metadata axes that are expected to map 1:1 to canonical evidence: `pjt_id`, `pjt_no`, `year`, `lead_org_name`, `budget`, and `period`.
+* Free-text `summary` / `goal` body content in a detail answer is evidence text, but its embedded numbers are not list-count claims. Values such as `ISO 20000`, `13만 건`, `17개 부처`, or `90% 이상` must not trigger `unsupported_count` by themselves.
+* `pjt_id` and `pjt_no` remain separate axes. `pjt_no` must not be added to the supported `pjt_id` set to make a detail answer pass validation.

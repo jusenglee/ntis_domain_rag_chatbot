@@ -30,6 +30,7 @@ class ToolResult:
     status: str
     rows: list[dict[str, Any]] = field(default_factory=list)
     canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
     render_profile: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
     latency_ms: float = 0.0
@@ -44,6 +45,7 @@ def build_tool_result(
 ) -> ToolResult:
     rows: list[dict[str, Any]] = []
     canonical_evidence: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
     render_profile: dict[str, Any] = dict(default_render_profile or {})
     diagnostics: dict[str, Any] = {}
 
@@ -52,6 +54,7 @@ def build_tool_result(
         canonical_evidence = _normalize_records(
             raw_result.get("canonical_evidence") or raw_result.get("canonical") or []
         )
+        references = _normalize_records(raw_result.get("references") or raw_result.get("refs") or [])
         if not canonical_evidence and rows:
             canonical_evidence = list(rows)
         render_profile = dict(raw_result.get("render_profile") or default_render_profile or {})
@@ -83,6 +86,7 @@ def build_tool_result(
         status=status,
         rows=rows,
         canonical_evidence=canonical_evidence,
+        references=references,
         render_profile=render_profile,
         diagnostics=diagnostics,
         latency_ms=float(latency_ms),
