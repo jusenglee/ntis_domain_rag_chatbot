@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from apps.api.runtime_helpers import log_event
 from apps.evidence.canonical_evidence import build_canonical_evidence
+from apps.evidence.citation_registry import build_citation_registry
 from apps.evidence.context_packer import BudgetedContextPacker, PromptUnitCandidate
 from apps.evidence.context_score_gate import normalize_reranked_hits
 from apps.evidence.prompt_evidence_envelope import build_prompt_evidence_envelope, build_prompt_reference
 from apps.evidence.render_profile import resolve_render_profile
+from apps.evidence.source_reference import SourceReference, build_source_reference
 from apps.platform.settings import RAG_EVIDENCE_TOKEN_BUDGET
 
 
@@ -134,12 +137,13 @@ def build_context_bundle(
         payload = getattr(item.point, "payload", None) or {}
         if not isinstance(payload, dict):
             continue
-        canonical_item = build_canonical_evidence(
+        canonical_obj = build_canonical_evidence(
             payload,
             rank=item.rank,
             base_route=base_route,
             output_type=output_type,
-        ).to_dict()
+        )
+        canonical_item = canonical_obj.to_dict()
         canonical_evidence.append(canonical_item)
         envelope = build_prompt_evidence_envelope(
             point=item.point,
@@ -159,6 +163,24 @@ def build_context_bundle(
             canonical_item=canonical_item,
             final_score=item.final_score,
         )
+        try:
+            source_ref: Optional[SourceReference] = build_source_reference(
+                payload=payload,
+                canonical=canonical_obj,
+                rank=item.rank,
+                final_score=item.final_score,
+            )
+        except ValueError as exc:
+            log_event(
+                "REFERENCE.INVARIANT_VIOLATION",
+                stage="build_source_reference",
+                reason="build_source_reference_failed",
+                rank=int(item.rank),
+                base_route=base_route,
+                output_type=output_type,
+                error=str(exc),
+            )
+            source_ref = None
         identity = envelope.get("identity") if isinstance(envelope.get("identity"), dict) else {}
         identity_ids = identity.get("ids") if isinstance(identity.get("ids"), dict) else {}
         parent_anchor_key = ""
@@ -178,6 +200,7 @@ def build_context_bundle(
                 ref=ref,
                 parent_anchor_key=parent_anchor_key,
                 turn_id=str(turn_id or "").strip(),
+                source_ref=source_ref,
             )
         )
 
@@ -187,11 +210,14 @@ def build_context_bundle(
     ).pack(candidates, dropped_by_floor=dropped_by_floor)
     kept_ctx = int(packed.kept_count)
     discarded_ctx = int(packed.discarded_count)
+    citation_registry = build_citation_registry(packed)
 
     return {
         "context": packed.context,
         "prompt_units": packed.prompt_units,
         "refs": packed.refs,
+        "source_refs": list(packed.source_refs or []),
+        "citation_registry": citation_registry,
         "fieldset": fieldset,
         "render_profile": render_profile,
         "canonical_evidence": canonical_evidence,

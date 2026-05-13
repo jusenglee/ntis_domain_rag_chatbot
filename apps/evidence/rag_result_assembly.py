@@ -596,6 +596,8 @@ def assemble_rag_result(
     elif isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"}:
         context = _render_multi_hop_bundle_context(multi_hop_bundle) or context
     refs = context_bundle["refs"]
+    source_refs_bundle = list(context_bundle.get("source_refs") or [])
+    citation_registry_bundle = context_bundle.get("citation_registry")
     ctx_fieldset = context_bundle["fieldset"]
     render_profile = context_bundle.get("render_profile")
     canonical_evidence = context_bundle.get("canonical_evidence")
@@ -637,6 +639,7 @@ def assemble_rag_result(
         tier="debug",
         ctx_len=len(context or ""),
         refs=len(refs or []),
+        ref_ids=[str((ref or {}).get("id") or (ref or {}).get("doc_id") or "") for ref in (refs or [])],
         max_items=int(ctx_max_items),
         used_tokens=used_tokens,
         contract_fail_reason=contract_fail_reason,
@@ -680,6 +683,8 @@ def assemble_rag_result(
         lineages=lineages,
         anchor_hit=bool(context_bundle.get("anchor_hit")),
         followup_resolved_by_facts=bool(context_bundle.get("followup_resolved_by_facts")),
+        source_refs=list(source_refs_bundle or []),
+        citation_registry=citation_registry_bundle,
     )
 
 
@@ -1123,6 +1128,13 @@ def assemble_join_rag_result(
     elif isinstance(multi_hop_bundle, dict) and str(multi_hop_bundle.get("status") or "").strip().lower() in {"ok", "partial"}:
         hop2_ctx = _render_multi_hop_bundle_context(multi_hop_bundle) or hop2_ctx
     hop2_refs = context_bundle["refs"]
+    hop2_source_refs = list(context_bundle.get("source_refs") or [])
+    hop2_citation_registry = context_bundle.get("citation_registry")
+    # hop1은 build_context_with_output_type (3-tuple)을 거쳐 source_refs를 잃는다.
+    # Stage 2에서는 join 경로의 SourceReference passthrough를 빈 리스트로 두고,
+    # 정상 단일홉 RAG 경로의 lockstep을 먼저 안정화한다. (사용자 명시 non-goal과는 별개로,
+    # join 경로는 후속 stage에서 build_join_hop_context 시그니처 확장 필요.)
+    hop1_source_refs: list = []
     render_profile = context_bundle.get("render_profile")
     canonical_evidence = context_bundle.get("canonical_evidence")
     prompt_units = context_bundle.get("prompt_units") or []
@@ -1142,6 +1154,7 @@ def assemble_join_rag_result(
         join_pjt_nos=join_pjt_nos,
     )
     refs = list(hop1_refs or []) + list(hop2_refs or [])
+    source_refs_combined = list(hop1_source_refs or []) + list(hop2_source_refs or [])
 
     timing_put(timings, "phase.build_context", time.time() - t0)
     timing_put(timings, "phase.total", time.time() - t_all0)
@@ -1203,4 +1216,6 @@ def assemble_join_rag_result(
         dropped_by_budget=dropped_by_budget,
         compressed_count=compressed_count,
         lineages=lineages,
+        source_refs=list(source_refs_combined or []),
+        citation_registry=hop2_citation_registry,
     )

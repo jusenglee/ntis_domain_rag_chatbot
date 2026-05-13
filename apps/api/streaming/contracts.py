@@ -47,6 +47,8 @@ class AnswerArtifact:
     stream_metrics: dict[str, Any] = field(default_factory=dict)
     user_visible_final_required: bool = True
     references: list[dict[str, Any]] = field(default_factory=list)
+    # SSOT 출처. Stage 4 도입. references는 deprecate, source_refs로 교체 예정.
+    source_refs: list = field(default_factory=list)
     visible_answer_manifest: Optional[dict[str, Any]] = None
     visible_answer_manifest_publication: Optional[dict[str, Any]] = None
     clarification: Optional[ClarificationRequest] = None

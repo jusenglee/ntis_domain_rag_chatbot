@@ -39,6 +39,7 @@ from apps.evidence.canonical_context import (
     render_canonical_evidence_debug_text,
     render_canonical_evidence_text,
 )
+from apps.evidence.citation_registry import CitationRegistry, derive_cited_source_refs
 from apps.conversation.session_memory import SubjectQueryContext, build_current_context
 from apps.conversation.view_state import get_active_result_snapshot, set_visible_answer_manifest
 from apps.api.streaming.contracts import AnswerArtifact
@@ -81,6 +82,12 @@ _GEMMA_SYSTEM_PROMPT_PATH_RAW = os.getenv("GEMMA_SYSTEM_PROMPT_PATH", "").strip(
 _GEMMA_SYSTEM_PROMPT_PATH = Path(_GEMMA_SYSTEM_PROMPT_PATH_RAW) if _GEMMA_SYSTEM_PROMPT_PATH_RAW else None
 _SOLAR_SYSTEM_PROMPT_PATH_RAW = os.getenv("SOLAR_SYSTEM_PROMPT_PATH", "").strip()
 _SOLAR_SYSTEM_PROMPT_PATH = Path(_SOLAR_SYSTEM_PROMPT_PATH_RAW) if _SOLAR_SYSTEM_PROMPT_PATH_RAW else None
+_DIRECT_SYSTEM_PROMPT_PATH_RAW = os.getenv("DIRECT_ANSWER_SYSTEM_PROMPT_PATH", "").strip()
+_DIRECT_SYSTEM_PROMPT_PATH = (
+    Path(_DIRECT_SYSTEM_PROMPT_PATH_RAW)
+    if _DIRECT_SYSTEM_PROMPT_PATH_RAW
+    else Path(planner_prompt_path("ntis_chatbot_direct.md"))
+)
 _SOLAR_MAX_DOC_SENTENCES = int(os.getenv("SOLAR_MAX_DOC_SENTENCES", str(MAX_DOC_SENTENCES)))
 _SOLAR_MAX_DOC_TOKENS = int(os.getenv("SOLAR_MAX_DOC_TOKENS", str(MAX_DOC_TOKENS)))
 _LIST_LIKE_OUTPUT_TYPES = {"list", "relation", "comparison", "series", "stats"}
@@ -303,6 +310,15 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
     references: list[dict[str, Any]] = []
     seen_keys: set[tuple[Any, Any, Any]] = set()
 
+    # 5/16 미스매치 진단용 trace. 각 후보 source 가용 수와 어떤 source가 hit했는지 기록.
+    candidate_counts = {
+        "bundle_refs": 0,
+        "projection_refs": 0,
+        "projection_canonical": 0,
+        "bundle_items": 0,
+        "state_canonical": 0,
+    }
+
     def _append(reference: Optional[dict[str, Any]]) -> None:
         if not isinstance(reference, dict):
             return
@@ -322,34 +338,54 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
             if isinstance(value, dict):
                 _append(value)
 
+    def _log_collect(source_used: str) -> None:
+        log_event(
+            "REFERENCE.COLLECT",
+            request_id=getattr(state, "request_id", None),
+            conversation_id=getattr(state, "conversation_id", None),
+            stage="collect_state_references",
+            source_used=source_used,
+            collected_count=len(references),
+            collected_ref_ids=[str((ref or {}).get("id") or "") for ref in references],
+            **candidate_counts,
+        )
+
     retrieval_bundle = getattr(state, "retrieval_bundle", None)
     if isinstance(retrieval_bundle, dict):
         bundle_references = retrieval_bundle.get("references")
     else:
         bundle_references = getattr(retrieval_bundle, "references", None)
+    candidate_counts["bundle_refs"] = len(bundle_references) if isinstance(bundle_references, list) else 0
     _append_sequence(bundle_references)
     if references:
+        _log_collect("retrieval_bundle.references")
         return references
 
     projection_payload = _projection_bundle_payload(state)
-    _append_sequence(projection_payload.get("references") if projection_payload else None)
+    proj_refs = projection_payload.get("references") if projection_payload else None
+    candidate_counts["projection_refs"] = len(proj_refs) if isinstance(proj_refs, list) else 0
+    _append_sequence(proj_refs)
     if references:
+        _log_collect("projection.references")
         return references
 
     projection_canonical = _projection_sequence(projection_payload, "canonical_evidence")
     projection_display = _projection_sequence(projection_payload, "display_documents")
+    candidate_counts["projection_canonical"] = len(projection_canonical) if isinstance(projection_canonical, list) else 0
     if projection_payload:
         for index, canonical in enumerate(projection_canonical):
             if not isinstance(canonical, dict):
                 continue
             display = projection_display[index] if index < len(projection_display) and isinstance(projection_display[index], dict) else {}
             _append(_reference_seed_from_canonical_item(canonical, fallback_doc=display))
+        _log_collect("projection.canonical_evidence")
         return references
 
     if isinstance(retrieval_bundle, dict):
         items = retrieval_bundle.get("items")
     else:
         items = getattr(retrieval_bundle, "items", None)
+    candidate_counts["bundle_items"] = len(items) if isinstance(items, list) else 0
     if isinstance(items, list):
         for item in items:
             if isinstance(item, dict):
@@ -363,13 +399,16 @@ def _collect_state_references(state: Any) -> list[dict[str, Any]]:
             _append(_reference_seed_from_canonical_item(canonical_doc, fallback_doc=display_doc))
 
     if references:
+        _log_collect("retrieval_bundle.items")
         return references
 
     canonical_evidence = getattr(state, "canonical_evidence", None) or []
+    candidate_counts["state_canonical"] = len(canonical_evidence) if isinstance(canonical_evidence, list) else 0
     for item in canonical_evidence:
         if not isinstance(item, dict):
             continue
         _append(_reference_seed_from_canonical_item(item))
+    _log_collect("state.canonical_evidence" if references else "none")
     return references
 
 
@@ -380,6 +419,23 @@ def _with_references(artifact: AnswerArtifact, references: list[dict[str, Any]])
         stream_metrics=dict(artifact.stream_metrics or {}),
         user_visible_final_required=bool(artifact.user_visible_final_required),
         references=list(references or []),
+        source_refs=list(getattr(artifact, "source_refs", []) or []),
+        visible_answer_manifest=artifact.visible_answer_manifest,
+        visible_answer_manifest_publication=artifact.visible_answer_manifest_publication,
+        clarification=artifact.clarification,
+        error=artifact.error,
+        meta=dict(artifact.meta or {}),
+    )
+
+
+def _with_source_refs(artifact: AnswerArtifact, source_refs: list) -> AnswerArtifact:
+    return AnswerArtifact(
+        text=artifact.text,
+        answer_kind=artifact.answer_kind,
+        stream_metrics=dict(artifact.stream_metrics or {}),
+        user_visible_final_required=bool(artifact.user_visible_final_required),
+        references=list(artifact.references or []),
+        source_refs=list(source_refs or []),
         visible_answer_manifest=artifact.visible_answer_manifest,
         visible_answer_manifest_publication=artifact.visible_answer_manifest_publication,
         clarification=artifact.clarification,
@@ -1034,12 +1090,16 @@ async def generate_answer(
     context_tokens_est = context_info["context_tokens_est"]
     context_source = context_info.get("context_source", "canonical_evidence")
 
-    system_prompt_path = resolve_system_prompt_path(
-        model_name=model_name,
-        default_path=_DEFAULT_SYSTEM_PROMPT_PATH,
-        gemma_path=_GEMMA_SYSTEM_PROMPT_PATH,
-        solar_path=_SOLAR_SYSTEM_PROMPT_PATH,
-    )
+    direct_answer_mode = bool(getattr(state, "direct_answer_mode", False))
+    if direct_answer_mode:
+        system_prompt_path = _DIRECT_SYSTEM_PROMPT_PATH
+    else:
+        system_prompt_path = resolve_system_prompt_path(
+            model_name=model_name,
+            default_path=_DEFAULT_SYSTEM_PROMPT_PATH,
+            gemma_path=_GEMMA_SYSTEM_PROMPT_PATH,
+            solar_path=_SOLAR_SYSTEM_PROMPT_PATH,
+        )
     system_prompt = await load_system_prompt(system_prompt_path)
 
     messages_state = getattr(state, "messages", None) or []
@@ -1089,10 +1149,12 @@ async def generate_answer(
         token_hint_source,
         short_answer_max_tokens_hint=_SHORT_ANSWER_MAX_TOKENS_HINT,
         follow_up_max_tokens_hint=_FOLLOW_UP_MAX_TOKENS_HINT,
-    )
+    ) or _SHORT_ANSWER_MAX_TOKENS_HINT
 
     llm_request_overrides = _resolve_llm_request_overrides(state)
-    max_tokens_hint = int(llm_request_overrides.get("max_tokens_hint", max_tokens_hint))
+    override_hint = llm_request_overrides.get("max_tokens_hint")
+    if override_hint is not None:
+        max_tokens_hint = int(override_hint)
 
     # Phase 13 진단 관측 (docs/08): contract-invalid 신호가 있는데도 스트리밍이 시작되는 경로를
     # 찾기 위한 정찰 로그. 행동은 바꾸지 않으며, 추후 publishability gate 도입 근거 데이터로 사용한다.
@@ -1153,6 +1215,21 @@ async def generate_answer(
         inferred_references = _collect_state_references(state)
         if inferred_references:
             final_artifact = _with_references(final_artifact, inferred_references)
+    # SSOT: state.citation_registry가 있으면 source_refs를 LLM 본문의 `[N]`으로 필터.
+    state_registry = getattr(state, "citation_registry", None)
+    if (
+        isinstance(final_artifact, AnswerArtifact)
+        and isinstance(state_registry, CitationRegistry)
+        and not list(getattr(final_artifact, "source_refs", []) or [])
+    ):
+        cited = derive_cited_source_refs(
+            state_registry,
+            answer_text=final_artifact.text,
+            request_id=str(getattr(state, "request_id", "") or ""),
+            conversation_id=str(getattr(state, "conversation_id", "") or ""),
+        )
+        if cited:
+            final_artifact = _with_source_refs(final_artifact, cited)
     final_answer = final_artifact.text
     stream_metrics = dict(final_artifact.stream_metrics or {})
 
@@ -1234,6 +1311,8 @@ async def generate_answer(
         ctx_tokens_est=context_tokens_est,
         context_source=context_source,
         emitted_chars=len(final_answer or ""),
+        system_prompt_path=str(system_prompt_path),
+        direct_answer_mode=int(direct_answer_mode),
     )
 
     rendered_context_key = f"rendered_context_used_{final_field.replace('answer_', '')}"
@@ -1409,12 +1488,22 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
     elif selected_model == "gemma" and isinstance(answer_artifact_gemma, AnswerArtifact):
         selected_artifact = answer_artifact_gemma
     elif selected_answer:
+        _state_registry_fallback = getattr(state, "citation_registry", None)
+        _fallback_source_refs: list = []
+        if isinstance(_state_registry_fallback, CitationRegistry):
+            _fallback_source_refs = derive_cited_source_refs(
+                _state_registry_fallback,
+                answer_text=selected_answer,
+                request_id=str(getattr(state, "request_id", "") or ""),
+                conversation_id=str(getattr(state, "conversation_id", "") or ""),
+            )
         selected_artifact = AnswerArtifact(
             text=selected_answer,
             answer_kind=("direct_answer" if selected_model == "fallback" else "llm_collected"),
             stream_metrics=dict(selected_meta or {}),
             user_visible_final_required=True,
             references=_collect_state_references(state),
+            source_refs=list(_fallback_source_refs or []),
             meta={
                 "answer_source": selected_answer_source,
                 "model_key": selected_model,
@@ -1474,6 +1563,17 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_references = list(selected_artifact.references or [])
         if not selected_references:
             selected_references = _collect_state_references(state)
+        # SSOT source_refs: artifact가 비어 있으면 state.citation_registry로부터 LLM 본문 [N] 기준 도출.
+        selected_source_refs = list(getattr(selected_artifact, "source_refs", []) or [])
+        if not selected_source_refs:
+            _state_registry_repack = getattr(state, "citation_registry", None)
+            if isinstance(_state_registry_repack, CitationRegistry):
+                selected_source_refs = derive_cited_source_refs(
+                    _state_registry_repack,
+                    answer_text=selected_artifact.text,
+                    request_id=str(getattr(state, "request_id", "") or ""),
+                    conversation_id=str(getattr(state, "conversation_id", "") or ""),
+                )
         snapshot_payload = _snapshot_to_payload(active_result_snapshot) if active_result_snapshot is not None else None
         publication_groundedness = selected_groundedness
         publication_state_consistency = selected_state_consistency
@@ -1512,6 +1612,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             stream_metrics=dict(selected_artifact.stream_metrics or {}),
             user_visible_final_required=bool(selected_artifact.user_visible_final_required),
             references=selected_references,
+            source_refs=list(selected_source_refs or []),
             visible_answer_manifest=visible_answer_manifest,
             visible_answer_manifest_publication=dict(visible_answer_manifest_publication or {}),
             clarification=selected_artifact.clarification,

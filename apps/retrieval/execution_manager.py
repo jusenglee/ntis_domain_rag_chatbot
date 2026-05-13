@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apps.platform.runtime_strategy_policy import RECOVERY_POLICIES, RuntimeStrategyPolicy, resolve_runtime_strategy_policy
 from apps.retrieval.tools.project_tools import fetch_project_detail, search_projects_by_text
 from apps.retrieval.tools.route_search_tools import search_route_by_text
 from apps.retrieval.tools.relation_tools import fetch_project_performance
 from apps.retrieval.tools.types import ToolResult
+
+if TYPE_CHECKING:
+    from apps.evidence.citation_registry import CitationRegistry
+    from apps.evidence.source_reference import SourceReference
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,8 @@ class ExecutionOutcome:
     execution_trace: list[dict[str, Any]] = field(default_factory=list)
     no_result_message: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    source_refs: list["SourceReference"] = field(default_factory=list)
+    citation_registry: "CitationRegistry | None" = None
 
 
 _TOOL_REGISTRY = {
@@ -238,6 +244,8 @@ class ExecutionManager:
                 execution_trace=trace,
                 no_result_message=None,
                 diagnostics=diagnostics,
+                source_refs=list(secondary_result.source_refs or []),
+                citation_registry=getattr(secondary_result, "citation_registry", None),
             )
 
         no_result_message = _resolve_no_result_message(
@@ -695,6 +703,8 @@ def _tool_result_to_outcome(
         execution_trace=list(trace),
         no_result_message=message,
         diagnostics=diagnostics,
+        source_refs=list(result.source_refs or []),
+        citation_registry=getattr(result, "citation_registry", None),
     )
 
 

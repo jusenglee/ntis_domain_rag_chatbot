@@ -1,5 +1,11 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from apps.evidence.citation_registry import CitationRegistry
+    from apps.evidence.source_reference import SourceReference
 
 
 @dataclass
@@ -34,3 +40,6 @@ class RagResult:
     lineages: Optional[List[Dict[str, Any]]] = None
     anchor_hit: bool = False
     followup_resolved_by_facts: bool = False
+    # SSOT: SourceReference 리스트 + CitationRegistry. Stage 3에서 채워짐.
+    source_refs: Optional[List["SourceReference"]] = None
+    citation_registry: Optional["CitationRegistry"] = None

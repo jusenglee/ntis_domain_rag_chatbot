@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from apps.evidence.citation_registry import CitationRegistry
+    from apps.evidence.source_reference import SourceReference
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,7 @@ class EvidenceProjectionBundle:
     selected_count: int = 0
     manifest_count: int = 0
     rendered_count: int = 0
+    source_refs: list["SourceReference"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -60,3 +65,5 @@ class RetrievalBundle:
     debug_answer_context_text: str = ""
     context_source: str = "pipeline_context"
     references: list[dict[str, Any]] = field(default_factory=list)
+    source_refs: list["SourceReference"] = field(default_factory=list)
+    citation_registry: "CitationRegistry | None" = None

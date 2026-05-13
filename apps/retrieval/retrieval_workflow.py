@@ -742,6 +742,8 @@ def _build_retrieval_bundle(
     debug_answer_context_text: str = "",
     context_source: str = "pipeline_context",
     references: list[dict[str, Any]] | None = None,
+    source_refs: list | None = None,
+    citation_registry: Any = None,
 ) -> RetrievalBundle:
     items: list[ResultItem] = []
 
@@ -766,6 +768,8 @@ def _build_retrieval_bundle(
         debug_answer_context_text=str(debug_answer_context_text or ""),
         context_source=str(context_source or "pipeline_context"),
         references=[dict(ref) for ref in list(references or []) if isinstance(ref, dict)],
+        source_refs=list(source_refs or []),
+        citation_registry=citation_registry,
     )
 
 
@@ -1806,6 +1810,7 @@ def _finalize_projection_bundle(
     debug_answer_context_text: str,
     render_profile: dict[str, Any],
     references: list[dict[str, Any]] | None = None,
+    source_refs: list | None = None,
 ) -> EvidenceProjectionBundle | None:
     if bundle is None:
         return None
@@ -1816,6 +1821,7 @@ def _finalize_projection_bundle(
         display_documents=list(docs or []),
         canonical_evidence=list(canonical_evidence or []),
         references=[dict(ref) for ref in list(references or []) if isinstance(ref, dict)],
+        source_refs=list(source_refs or []),
         projected_items=projected_items,
         answer_context_text=str(answer_context_text or ""),
         debug_answer_context_text=str(debug_answer_context_text or ""),
@@ -2601,6 +2607,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
         )
 
         references: list[dict[str, Any]] = []
+        source_refs: list = []
+        citation_registry_obj: Any = None
 
         if dispatch_plan.execution_kind == "detail_guard_blocked":
             guard_reason = str(dispatch_plan.request_meta.get("detail_guard_reason") or "missing_single_project_candidate")
@@ -2729,6 +2737,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             docs = list(execution_outcome.docs or [])
             canonical_evidence = list(execution_outcome.canonical_evidence or [])
             references = list(execution_outcome.references or [])
+            source_refs = list(getattr(execution_outcome, "source_refs", None) or [])
+            citation_registry_obj = getattr(execution_outcome, "citation_registry", None)
             render_profile = dict(execution_outcome.render_profile or {})
             no_result_message = execution_outcome.no_result_message
             execution_trace = list(execution_outcome.execution_trace or [])
@@ -2792,6 +2802,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
 
             canonical_evidence = retrieve_result.get("canonical_evidence", []) if isinstance(retrieve_result, dict) else []
             references = retrieve_result.get("references", []) if isinstance(retrieve_result, dict) else []
+            source_refs = retrieve_result.get("source_refs", []) if isinstance(retrieve_result, dict) else []
+            citation_registry_obj = retrieve_result.get("citation_registry") if isinstance(retrieve_result, dict) else None
 
             render_profile = retrieve_result.get("render_profile", {}) if isinstance(retrieve_result, dict) else {}
             no_result_message = retrieve_result.get("no_result_message") if isinstance(retrieve_result, dict) else None
@@ -2830,6 +2842,8 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             debug_answer_context_text=debug_answer_context_text,
             context_source=("pipeline_context" if answer_context_text else "derived_canonical_evidence"),
             references=references,
+            source_refs=source_refs,
+            citation_registry=citation_registry_obj,
         )
 
 
@@ -3179,6 +3193,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
                     debug_answer_context_text=detail_debug_context,
                     context_source="detail_contract_context",
                     references=references,
+                    source_refs=source_refs,
                 )
                 log_event(
                     "DETAIL.COVERAGE",
@@ -3200,6 +3215,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             debug_answer_context_text=debug_answer_context_text,
             render_profile=render_profile,
             references=references,
+            source_refs=source_refs,
         )
 
         if docs:
@@ -3231,6 +3247,7 @@ async def node_rag_search(state: Any) -> Dict[str, Any]:
             "retrieval_bundle": retrieval_bundle,
             "evidence_projection_bundle": evidence_projection_bundle,
             "references": references,
+            "citation_registry": citation_registry_obj,
             "answer_context_text": answer_context_text,
             "debug_answer_context_text": debug_answer_context_text,
             "resolved_retrieval_query": resolved_retrieval_query,

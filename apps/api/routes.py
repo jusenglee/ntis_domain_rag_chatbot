@@ -339,106 +339,9 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
         }
         return mapping.get(normalized)
 
-    def _reference_payload_from_doc(doc: Dict[str, Any]) -> Dict[str, Optional[str]]:
-        """검색 결과 문서로부터 프론트엔드 참조 목록에 표시할 최소 페이로드를 추출합니다."""
-        tag = _top_level_text_value(doc, "tag", "source_table")
-        if tag == DataTag.PROJECT.value:
-            reference_id = _top_level_text_value(doc, "pjt_id", "id", "doc_id", "rst_id")
-        else:
-            reference_id = _top_level_text_value(doc, "rst_id", "pjt_id", "id", "doc_id")
-        return {
-            "tag": tag,
-            "id": reference_id,
-            "title": _top_level_text_value(doc, "title1", "title2", "title_text", "title"),
-        }
-
-    def _reference_payload_invalid_reason(payload: Dict[str, Optional[str]]) -> Optional[str]:
-        """참조 페이로드가 필수 필드를 모두 갖추었는지 검증합니다."""
-        if not payload.get("tag"):
-            return "missing_tag"
-        if not payload.get("id"):
-            return "missing_project_or_result_id"
-        if not payload.get("title"):
-            return "missing_title"
-        return None
-
-    def _json_safe_reference_value(value: Any) -> Any:
-        """Return a JSON-serializable copy of a reference candidate value."""
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, dict):
-            return {str(key): _json_safe_reference_value(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [_json_safe_reference_value(item) for item in value]
-        return str(value)
-
-    def _invalid_reference_payload(
-        candidate: Dict[str, Any],
-        *,
-        candidate_source: str,
-        invalid_reason: str,
-    ) -> Dict[str, Any]:
-        payload = _json_safe_reference_value(candidate)
-        if not isinstance(payload, dict):
-            payload = {"raw_reference": payload}
-        payload["invalid"] = True
-        payload["invalid_reason"] = invalid_reason
-        payload["candidate_source"] = candidate_source
-        return payload
-
-    def _canonical_evidence_to_reference_doc(item: Dict[str, Any]) -> Dict[str, Any]:
-        """내부 증거 객체를 라우트 참조 계약에 맞는 최상위 문서 형식으로 변환합니다."""
-        if not isinstance(item, dict):
-            return {}
-        ids = item.get("ids")
-        facts = item.get("facts")
-        evidence = item.get("evidence")
-        source_type = _top_level_text_value(item, "source_type")
-
-        doc: Dict[str, Any] = {}
-        if source_type:
-            doc["source_type"] = source_type
-
-        if isinstance(ids, dict):
-            pjt_id = _top_level_text_value(ids, "pjt_id")
-            rst_id = _top_level_text_value(ids, "rst_id")
-            if pjt_id:
-                doc["pjt_id"] = pjt_id
-            if rst_id:
-                doc["rst_id"] = rst_id
-        if "pjt_id" not in doc:
-            pjt_id = _top_level_text_value(item, "pjt_id")
-            if pjt_id:
-                doc["pjt_id"] = pjt_id
-        if "rst_id" not in doc:
-            rst_id = _top_level_text_value(item, "rst_id")
-            if rst_id:
-                doc["rst_id"] = rst_id
-
-        tag = _top_level_text_value(item, "tag") or _reference_tag_from_source_type(source_type)
-        if not tag and _top_level_text_value(doc, "pjt_id"):
-            tag = DataTag.PROJECT.value
-        if tag:
-            doc["tag"] = tag
-
-        if isinstance(evidence, dict):
-            for key in ("title1", "title2", "title_text"):
-                value = _top_level_text_value(evidence, key)
-                if value:
-                    doc[key] = value
-        for key in ("title1", "title2", "title_text"):
-            if key not in doc:
-                value = _top_level_text_value(item, key)
-                if value:
-                    doc[key] = value
-        if not any(_top_level_text_value(doc, key) for key in ("title1", "title2", "title_text")):
-            title = None
-            if isinstance(facts, dict):
-                title = _top_level_text_value(facts, "title")
-            title = title or _top_level_text_value(item, "title")
-            if title:
-                doc["title_text"] = title
-        return doc
+    # NOTE: 과거의 reference 정규화 헬퍼들(_reference_payload_from_doc 등)은
+    # SourceReference SSOT 도입(2026-05-12) 이후 더 이상 사용되지 않아 삭제됨.
+    # reference.set 발행은 selected_artifact.source_refs[*].to_frontend_payload()로 단일화.
 
     def _validate_request_override_ranges(overrides: dict[str, Any]) -> None:
         """LLM/RAG 파라미터 값이 유효 범위를 벗어나는지 검증합니다."""
@@ -838,101 +741,50 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         degraded=True,
                     )
 
-                # 4. 참조 리스트 조립 및 전송
-                ref_docs = []
-                seen_reference_keys = set()
-                invalid_candidate_count = 0
-                fallback_used = "none"
-                artifact_references = list(getattr(selected_artifact, "references", []) or [])
-                artifact_reference_docs = [ref for ref in artifact_references if isinstance(ref, dict)]
-                artifact_candidate_count = len(artifact_reference_docs)
-                canonical_evidence = _state_get_list(final_state, "canonical_evidence")
-                canonical_reference_docs = [
-                    _canonical_evidence_to_reference_doc(item)
-                    for item in canonical_evidence
-                    if isinstance(item, dict)
-                ]
-                canonical_reference_docs = [doc for doc in canonical_reference_docs if doc]
-                canonical_candidate_count = len(canonical_reference_docs)
-                fallback_docs = [doc for doc in documents_used if is_hit_source(doc) and isinstance(doc, dict)]
-                documents_used_candidate_count = len(fallback_docs)
+                # 4. 참조 리스트 조립 및 전송 — SSOT (source_refs) 단일 source.
+                # 정상 RAG 경로면 selected_artifact.source_refs 가 있다. 비어 있는데 evidence 경로면
+                # invariant violation 으로 내부 로그하고, 프론트엔 빈 reference.set 송신.
+                ref_docs: list[dict[str, str]] = []
+                emitted_source_refs = list(getattr(selected_artifact, "source_refs", []) or [])
+                if emitted_source_refs:
+                    for sref in emitted_source_refs:
+                        try:
+                            ref_docs.append(sref.to_frontend_payload())
+                        except AttributeError:
+                            # 호환: source_refs에 dict가 섞여 들어오면 그대로 정리
+                            if isinstance(sref, dict):
+                                ref_docs.append(
+                                    {
+                                        "id": str(sref.get("id") or ""),
+                                        "tag": str(sref.get("tag") or ""),
+                                        "title": str(sref.get("title") or ""),
+                                    }
+                                )
+                else:
+                    has_citation_registry = bool(getattr(final_state, "citation_registry", None)) or bool(
+                        getattr(getattr(final_state, "retrieval_bundle", None), "citation_registry", None)
+                    )
+                    if has_citation_registry:
+                        log_event(
+                            "REFERENCE.INVARIANT_VIOLATION",
+                            request_id=request_id,
+                            conversation_id=conversation_id,
+                            stage="stream_finalization",
+                            reason="empty_source_refs_on_evidence_path",
+                            answer_kind=getattr(selected_artifact, "answer_kind", None),
+                            has_retrieval_bundle=bool(getattr(final_state, "retrieval_bundle", None)),
+                            has_citation_registry=True,
+                        )
+                    # direct_answer_mode / no_result / clarification / error 등은 citation_registry 없음 → 정상.
 
-                def _append_reference_docs(candidates: list[dict[str, Any]], *, candidate_source: str) -> int:
-                    """유효한 참조 문서를 목록에 추가합니다."""
-                    nonlocal invalid_candidate_count
-                    added_count = 0
-                    for candidate in candidates:
-                        normalized = _reference_payload_from_doc(candidate)
-                        invalid_reason = _reference_payload_invalid_reason(normalized)
-                        if invalid_reason is not None:
-                            invalid_candidate_count += 1
-                            # 유효하지 않은 참조 데이터 로깅
-                            log_event(
-                                "REFERENCE.INVALID_PAYLOAD",
-                                request_id=request_id,
-                                conversation_id=conversation_id,
-                                stage="stream_finalization",
-                                candidate_source=candidate_source,
-                                invalid_reason=invalid_reason,
-                                raw_tag=candidate.get("tag"),
-                                raw_source_table=candidate.get("source_table"),
-                                source_type=candidate.get("source_type"),
-                                top_level_pjt_id=candidate.get("pjt_id"),
-                                top_level_rst_id=candidate.get("rst_id"),
-                                top_level_doc_id=candidate.get("doc_id"),
-                                top_level_title1=candidate.get("title1"),
-                                top_level_title2=candidate.get("title2"),
-                                top_level_title_text=candidate.get("title_text"),
-                                keys=sorted(candidate.keys()),
-                            )
-                            invalid_payload = _invalid_reference_payload(
-                                candidate,
-                                candidate_source=candidate_source,
-                                invalid_reason=invalid_reason,
-                            )
-                            dedupe_key = (
-                                "invalid",
-                                candidate_source,
-                                invalid_reason,
-                                json.dumps(invalid_payload, ensure_ascii=False, sort_keys=True),
-                            )
-                            if dedupe_key in seen_reference_keys:
-                                continue
-                            seen_reference_keys.add(dedupe_key)
-                            ref_docs.append(invalid_payload)
-                            added_count += 1
-                            continue
-                        dedupe_key = ("valid", normalized.get("tag"), normalized.get("id"), normalized.get("title"))
-                        if dedupe_key in seen_reference_keys:
-                            continue
-                        seen_reference_keys.add(dedupe_key)
-                        ref_docs.append(normalized)
-                        added_count += 1
-                    return added_count
-
-                # 참조 목록을 가져오는 계층적 전략 (Artifact -> Evidence -> Context)
-                _append_reference_docs(artifact_reference_docs, candidate_source="artifact_references")
-
-                if not ref_docs:
-                    fallback_used = "canonical_evidence"
-                    _append_reference_docs(canonical_reference_docs, candidate_source="canonical_evidence")
-
-                if not ref_docs:
-                    fallback_used = "documents_used"
-                    _append_reference_docs(fallback_docs, candidate_source="documents_used")
-
-                # 운영 로그: 참조 목록 구성 결과 기록
                 log_event(
                     "REFERENCE.FINALIZATION",
                     request_id=request_id,
                     conversation_id=conversation_id,
                     stage="stream_finalization",
-                    artifact_candidate_count=artifact_candidate_count,
-                    canonical_candidate_count=canonical_candidate_count,
-                    documents_used_candidate_count=documents_used_candidate_count,
-                    invalid_candidate_count=invalid_candidate_count,
                     emitted_reference_count=len(ref_docs),
-                    fallback_used=fallback_used if ref_docs else "none",
+                    emitted_ref_ids=[ref.get("id", "") for ref in ref_docs],
+                    source="citation_registry",
                 )
 
                 # 최종 참조 리스트 전송

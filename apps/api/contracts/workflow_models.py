@@ -481,6 +481,9 @@ class AgentState(BaseModel):
     agent_answer_context: Optional[AgentAnswerContext] = None
     search_retry_count: int = 0
     direct_answer_mode: bool = False
+    # SSOT 출처 진실. retrieval_bundle.citation_registry를 노드 진행 중 캐시.
+    # Stage 3 도입. direct_answer 등 검색 미수행 경로에서는 None.
+    citation_registry: Optional[Any] = None
 
     def merge_latencies(existing: Dict[str, float], new: Dict[str, float]) -> Dict[str, float]:
         """Merge latency fields into the aggregated execution metadata."""
