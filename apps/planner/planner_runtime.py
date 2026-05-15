@@ -335,6 +335,7 @@ def _signals_payload(signals: SurfaceSignals) -> dict[str, Any]:
         "perf_types": list(signals.perf_types),
         "followup_cues": list(signals.followup_cues),
         "high_salience_terms": list(signals.high_salience_terms),
+        "raw_person_hint_terms": list(getattr(signals, "raw_person_hint_terms", []) or []),
     }
 
 
@@ -637,12 +638,29 @@ def _sanitize_stage2_structured_filters(
     org_role_hint = str(getattr(entity_role_plan, "org_role_hint", "") or "").strip().lower()
     dropped: dict[str, list[str]] = {}
 
-    # 인물 보존 목록이 없으면 인물 관련 구조화 필터 제거 (검색어로 전이 유도)
+    # 인물 보존 목록이 없으면 인물 관련 구조화 필터 전부 제거.
+    # 비어있지 않으면 subset 검증으로 stage15 keep에 포함된 토큰만 통과시킨다
+    # (Stage 2 LLM이 일반 명사를 researcher 필터로 박는 hallucination 차단).
     if not allowed_people_terms:
         for key in _RESEARCHER_FILTER_KEYS:
             values = _normalize_terms(filters.pop(key, None))
             if values:
                 dropped[key] = values
+    else:
+        allowed_people_set = set(allowed_people_terms)
+        for key in _RESEARCHER_FILTER_KEYS:
+            values = _normalize_terms(filters.get(key))
+            if not values:
+                continue
+            accepted = [v for v in values if v in allowed_people_set]
+            removed = [v for v in values if v not in allowed_people_set]
+            if not accepted:
+                filters.pop(key, None)
+                if removed:
+                    dropped[key] = removed
+            elif removed:
+                filters[key] = accepted
+                dropped[key] = removed
 
     # 기관 보존 목록이 없거나 역할이 불일치하는 기관 필터 제거
     if not allowed_org_terms:
@@ -681,16 +699,25 @@ def _sanitize_stage2_structured_filters(
             if removed:
                 dropped[key] = list(dict.fromkeys([*dropped.get(key, []), *removed]))
 
-    # 탈락된 필터 용어들을 검색어(retrieval_query)에 합쳐서 정보 손실 방지
-    salvaged_terms = [term for values in dropped.values() for term in values]
+    # 탈락된 필터 용어들을 검색어(retrieval_query)에 합쳐서 정보 손실 방지.
+    # 단, researcher 필터에서 drop된 토큰은 일반 명사 hallucination일 가능성이 높으므로
+    # 검색어 salvage 대상에서 제외해 retrieval_query 오염을 차단한다.
+    researcher_keys = set(_RESEARCHER_FILTER_KEYS)
+    salvage_dropped = {k: v for k, v in dropped.items() if k not in researcher_keys}
+    salvaged_terms = [term for values in salvage_dropped.values() for term in values]
+    researcher_drops_unsalvaged = sorted(
+        {term for key, values in dropped.items() if key in researcher_keys for term in values}
+    )
     if salvaged_terms:
         payload["retrieval_query"] = _append_terms_to_query(retrieval_query, salvaged_terms)
+    if dropped:
         log_event(
             "PLANNER.STAGE2.FILTERS.SANITIZED",
             request_id=request_id,
             conversation_id=conversation_id,
             dropped_fields=sorted(key for key, values in dropped.items() if values),
             salvaged_terms=salvaged_terms,
+            researcher_drops_unsalvaged=researcher_drops_unsalvaged,
         )
 
     payload["filters"] = {key: value for key, value in filters.items() if value not in (None, [], {}, "")}
@@ -947,6 +974,52 @@ async def run_planner_stage1(
     return stage1
 
 
+def _sanitize_stage15_people_keep(
+    *,
+    stage15: PlannerEntityRolePlan,
+    signals: SurfaceSignals,
+    request_id: Optional[str],
+    conversation_id: str,
+) -> PlannerEntityRolePlan:
+    """Stage 1.5 출력의 people_terms_to_keep을 표면 신호 후보 집합으로 제한한다.
+
+    LLM이 질문에 없는 토큰을 keep으로 만들어 stage2 researcher 필터로 새는 것을
+    차단한다. 허용 후보는 `signals.people_terms ∪ signals.raw_person_hint_terms`.
+    제거된 토큰은 `must_keep_terms`에서도 함께 빼고 PEOPLE_SANITIZED 로그를 남긴다.
+    """
+    keep_orig = list(stage15.people_terms_to_keep or [])
+    if not keep_orig:
+        return stage15
+    candidate_pool = set(signals.people_terms or []) | set(
+        getattr(signals, "raw_person_hint_terms", []) or []
+    )
+    keep_accepted = [t for t in keep_orig if t in candidate_pool]
+    keep_removed = [t for t in keep_orig if t not in candidate_pool]
+    if not keep_removed:
+        return stage15
+    removed_set = set(keep_removed)
+    must_keep_accepted = [
+        t for t in (stage15.must_keep_terms or []) if t not in removed_set
+    ]
+    log_event(
+        "PLANNER.STAGE15.PEOPLE_SANITIZED",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        removed_people_terms=keep_removed,
+        accepted_people_terms=keep_accepted,
+        signals_people_terms=list(signals.people_terms or []),
+        signals_raw_person_hint_terms=list(
+            getattr(signals, "raw_person_hint_terms", []) or []
+        ),
+    )
+    return stage15.model_copy(
+        update={
+            "people_terms_to_keep": keep_accepted,
+            "must_keep_terms": must_keep_accepted,
+        }
+    )
+
+
 async def run_planner_stage15(
     *,
     question: str,
@@ -1049,6 +1122,12 @@ async def run_planner_stage15(
         semantic_kind=stage15.semantic_kind,
         dt_ms=round(stage_stats.get("dt_ms", 0.0), 1),
         planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
+    )
+    stage15 = _sanitize_stage15_people_keep(
+        stage15=stage15,
+        signals=signals,
+        request_id=request_id,
+        conversation_id=conversation_id,
     )
     return stage15
 

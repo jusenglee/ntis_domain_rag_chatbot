@@ -543,6 +543,85 @@ def _snapshot_to_payload(snapshot: Any) -> dict[str, Any]:
     return dict(getattr(snapshot, "__dict__", {}) or {})
 
 
+def _read_snapshot_field(obj: Any, key: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _write_snapshot_field(obj: Any, updates: dict[str, Any]) -> Optional[Any]:
+    """snapshot/item 의 필드 업데이트. 형태별로 dict 사본 / pydantic model_copy /
+    SimpleNamespace 사본을 만들어 반환한다. 실패 시 None.
+    """
+    if isinstance(obj, dict):
+        result = dict(obj)
+        result.update(updates)
+        return result
+    if hasattr(obj, "model_copy"):
+        try:
+            return obj.model_copy(update=updates)
+        except Exception:
+            return None
+    try:  # SimpleNamespace / 일반 객체 fallback
+        from types import SimpleNamespace
+
+        if isinstance(obj, SimpleNamespace):
+            new_obj = SimpleNamespace(**vars(obj))
+            for key, value in updates.items():
+                setattr(new_obj, key, value)
+            return new_obj
+    except Exception:
+        return None
+    return None
+
+
+def _remap_snapshot_to_published_order(snapshot: Any, *, rank_remap: list[int]) -> tuple[Any, bool]:
+    """ADR-0017: snapshot.items 를 published_rank 순서로 재배열한 새 snapshot 과 적용 여부를 반환한다.
+
+    rank_remap[i] = published_rank(i+1)이 가리키는 source display_rank (1-based).
+    snapshot 의 items 를 그 순서로 재배열하고 각 item의 display_rank 를 1..N(published_rank)로 새로 부여한다.
+    snapshot/item 이 dict / pydantic BaseModel / SimpleNamespace 어느 형태든 호환 처리.
+
+    반환: (snapshot_or_original, applied)
+      - applied=True : 재배열 적용된 새 snapshot
+      - applied=False: 검증 실패(매핑 항목 누락·갱신 실패 등) — 원본 snapshot 그대로.
+        호출자는 applied=False 면 manifest 발행을 차단/보류해야 한다 (잘못된 순서로 manifest publish 방지).
+    """
+    if snapshot is None or not rank_remap:
+        return snapshot, False
+    items = list(_read_snapshot_field(snapshot, "items") or [])
+    if not items:
+        return snapshot, False
+    by_rank: dict[int, Any] = {}
+    for item in items:
+        rank_value = _read_snapshot_field(item, "display_rank")
+        try:
+            rank_int = int(rank_value)
+        except (TypeError, ValueError):
+            continue
+        by_rank[rank_int] = item
+    reordered: list[Any] = []
+    for published_rank, source_rank in enumerate(rank_remap, start=1):
+        try:
+            source_int = int(source_rank)
+        except (TypeError, ValueError):
+            return snapshot, False
+        source_item = by_rank.get(source_int)
+        if source_item is None:
+            return snapshot, False
+        new_item = _write_snapshot_field(source_item, {"display_rank": int(published_rank)})
+        if new_item is None:
+            return snapshot, False
+        reordered.append(new_item)
+    new_snapshot = _write_snapshot_field(
+        snapshot,
+        {"items": reordered, "visible_count": len(reordered)},
+    )
+    if new_snapshot is None:
+        return snapshot, False
+    return new_snapshot, True
+
+
 def _question_has_explicit_count(question: Any) -> bool:
     return bool(_EXPLICIT_COUNT_REQUEST_PATTERN.search(str(question or "")))
 
@@ -740,7 +819,9 @@ def _build_deterministic_visible_list_candidate(
         state_snapshot=state_consistency_snapshot,
         state_policy=state_consistency_policy,
     ).model_dump()
-    if str(state_consistency.get("status") or "").strip().lower() != "supported":
+    # ADR-0017: deterministic_render 는 snapshot 순서 그대로이므로 정상적으론 supported 만 나오지만,
+    # 미래 호환 + 일관성을 위해 supported_remapped 도 인정.
+    if str(state_consistency.get("status") or "").strip().lower() not in ("supported", "supported_remapped"):
         return None
     if str(groundedness.get("status") or "").strip().lower() == "unsupported":
         return None
@@ -1581,6 +1662,31 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
             publication_groundedness = dict(verified_projection_summary.get("groundedness") or selected_groundedness)
             publication_state_consistency = dict(verified_projection_summary.get("state_consistency") or selected_state_consistency)
             enriched_meta["visible_answer_manifest_publication_source"] = "verified_projection_summary"
+        # ADR-0017: state_consistency.rank_remap 이 있으면 snapshot 을 published 순서로 재배열한 뒤 발행/저장한다.
+        # snapshot_payload 와 view_state 에 박힐 active_result_snapshot 둘 다 published 순서를 가지도록 일관 유지.
+        # 재배열 적용 실패(applied=False) 시 manifest 발행을 차단해 잘못된 순서의 manifest 가 박히는 사고를 막는다.
+        active_result_snapshot_for_publication = active_result_snapshot
+        rank_remap_payload = list(publication_state_consistency.get("rank_remap") or [])
+        if rank_remap_payload and active_result_snapshot is not None:
+            remapped_snapshot, remap_applied = _remap_snapshot_to_published_order(
+                active_result_snapshot,
+                rank_remap=rank_remap_payload,
+            )
+            if remap_applied:
+                active_result_snapshot_for_publication = remapped_snapshot
+                snapshot_payload = _snapshot_to_payload(remapped_snapshot)
+                enriched_meta["visible_answer_manifest_rank_remap"] = list(rank_remap_payload)
+            else:
+                # 재배열을 시도했으나 검증 실패 — state 는 supported_remapped 라도 manifest 는 publish 불가.
+                # state_consistency 사본을 만들고 manifest_publish_allowed/subset_accepted 를 강제 마킹해
+                # publication 단계에서 withheld_partial 로 분류되도록 한다.
+                publication_state_consistency = dict(publication_state_consistency)
+                publication_state_consistency["manifest_publish_allowed"] = False
+                publication_state_consistency["subset_accepted"] = True
+                publication_state_consistency["reason_codes"] = list(
+                    publication_state_consistency.get("reason_codes") or []
+                ) + ["rank_remap_apply_failed"]
+                enriched_meta["visible_answer_manifest_rank_remap_failed"] = list(rank_remap_payload)
         publication = build_visible_answer_manifest_publication(
             publication_applicable=publication_applicable,
             snapshot_payload=snapshot_payload,
@@ -1594,7 +1700,7 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         visible_answer_manifest = publication.published_manifest
         visible_answer_manifest_publication = publication.to_meta_dict()
         if visible_answer_manifest_status == "approved":
-            view_state_manifest_snapshot = active_result_snapshot
+            view_state_manifest_snapshot = active_result_snapshot_for_publication
         enriched_meta["visible_answer_manifest_status"] = visible_answer_manifest_status
         enriched_meta["visible_answer_manifest_publication"] = dict(visible_answer_manifest_publication or {})
         enriched_meta["answer_publishability"] = (

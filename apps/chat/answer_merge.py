@@ -97,6 +97,8 @@ _STATE_CONSISTENCY_SEVERITY = {
     "no_structured_list": 3,
     "insufficient_snapshot": 2,
     "not_applicable": 1,
+    # ADR-0017: supported_remapped 는 매핑 변환만 다를 뿐 supported 와 동등 — answer selection 시 같은 우대.
+    "supported_remapped": 0,
     "supported": 0,
 }
 
@@ -143,7 +145,11 @@ def _evaluate_state_consistency(
 
 
 def _is_state_supported(verdict: dict[str, Any] | None) -> bool:
-    return str((verdict or {}).get("status") or "").strip().lower() == "supported"
+    # ADR-0017: supported_remapped 도 supported 와 동등하게 취급. 답안 선택·deterministic projection 우대에 한정.
+    # 단, 실제 manifest 발행 여부는 verdict.manifest_publish_allowed 가 별도로 통제하므로
+    # supported_remapped + subset_accepted=True + allow_manifest_publish_on_subset=False 케이스는
+    # selection 은 통과되지만 발행은 withheld_partial 로 처리된다.
+    return str((verdict or {}).get("status") or "").strip().lower() in ("supported", "supported_remapped")
 
 
 def _state_support_rank(verdict: dict[str, Any] | None) -> int:

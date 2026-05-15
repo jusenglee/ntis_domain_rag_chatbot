@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from apps.planner.query_intent import normalize_korean_temporal_years
@@ -22,6 +22,27 @@ _ORG_HINTS = (
     "\ud68c\uc0ac",
 )
 
+# \ud55c\uad6d \ub2e8\uc131/\ubcf5\uc131 \ud654\uc774\ud2b8\ub9ac\uc2a4\ud2b8. \uc77c\ubc18 \uba85\uc0ac \ud1a0\ud070\uc744 \uc0ac\ub78c\uba85 \ud6c4\ubcf4\ub85c \ub04c\uc5b4\uc62c\ub9ac\uc9c0 \uc54a\ub3c4\ub85d
+# `_scan_unstructured_entity_terms`\uac00 \uc774 set\uc73c\ub85c \uc2dc\uc791\ud558\ub294 \ud1a0\ud070\ub9cc raw_person_hint\ub85c \ucc44\ud0dd\ud55c\ub2e4.
+_KOREAN_SURNAMES = frozenset(
+    {
+        # \ub2e8\uc131
+        "\uae40", "\uc774", "\ubc15", "\ucd5c", "\uc815", "\uc870", "\uac15", "\uc7a5",
+        "\uc724", "\uc784", "\ud55c", "\uc624", "\uc11c", "\uc2e0", "\uad8c", "\ud669",
+        "\uc548", "\uc1a1", "\uc720", "\ud64d", "\uc804", "\uace0", "\ubb38", "\uc190",
+        "\uc591", "\ubc30", "\ubc31", "\ud5c8", "\ub0a8", "\uc2ec", "\ub178", "\ud558",
+        "\uacfd", "\uc131", "\ucc28", "\uc8fc", "\uc6b0", "\uad6c", "\ubbfc", "\ub098",
+        "\uc9c4", "\uc9c0", "\uc5c4", "\ubcc0", "\ucc44", "\uc6d0", "\ucc9c", "\ubc29",
+        "\uacf5", "\ud604", "\ud568", "\ubcf5", "\ud45c", "\uc2dc", "\ub3c4", "\uacbd",
+        "\uc5f0", "\uc5ec", "\ucd94", "\uc5b4", "\ub77c", "\uae30", "\ubc18", "\uc655", "\uae08",
+        "\uc625", "\uc721", "\uc778", "\ub9f9", "\uc81c", "\ubaa8", "\ud0c1", "\uad6d",
+        "\uc5ec", "\uc9c4", "\ud3b8", "\uc6a9", "\uc608", "\ubd09",
+        # \uc8fc\uc694 \ubcf5\uc131
+        "\ub0a8\uad81", "\ud669\ubcf4", "\uc81c\uac08", "\uc0ac\uacf5", "\uc120\uc6b0",
+        "\uc11c\ubb38", "\ub3c5\uace0",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SurfaceSignals:
@@ -34,6 +55,7 @@ class SurfaceSignals:
     perf_types: list[str]
     followup_cues: list[str]
     high_salience_terms: list[str]
+    raw_person_hint_terms: list[str] = field(default_factory=list)
 
 
 def _dedupe(values: list[str]) -> list[str]:
@@ -131,15 +153,20 @@ def _scan_followup_cues(question: str) -> list[str]:
 
 
 def _scan_unstructured_entity_terms(question: str) -> list[str]:
-    """괄호가 없는 일반 텍스트에서 인명/기관명 후보를 추출합니다."""
-    # NTIS 도메인에서 제외할 공통 키워드
-    exclusions = {"과제", "성과", "연구자", "활동기록", "활동내역", "참여이력", "목록", "리스트", "보여줘", "알려줘", "찾아줘"}
+    """질문에서 한국 성씨로 시작하는 2~4자 한글 토큰만 raw 인명 후보로 추출한다.
+
+    여기서 추출된 토큰은 확정 인명이 아니라 Stage 1.5 LLM이 explicit cue와
+    함께 판단하도록 raw_person_hint_terms 채널로만 노출된다.
+    """
     candidates: list[str] = []
     for token in _tokenize(question):
-        # 2~4글자의 한글 토큰 중 제외 키워드가 아닌 것을 후보로 간주
-        if 2 <= len(token) <= 5 and all("\uac00" <= c <= "\ud7a3" for c in token):
-            if token not in exclusions:
-                candidates.append(token)
+        if not (2 <= len(token) <= 4):
+            continue
+        if not all("\uac00" <= c <= "\ud7a3" for c in token):
+            continue
+        # \ubcf5\uc131(2\uc790) \uc6b0\uc120 \ub9e4\uce6d \ud6c4 \ub2e8\uc131(1\uc790) \ub9e4\uce6d
+        if token[:2] in _KOREAN_SURNAMES or token[0] in _KOREAN_SURNAMES:
+            candidates.append(token)
     return candidates
 
 
@@ -155,11 +182,12 @@ def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSig
         if str(value).strip()
     ]
     fallback_people, fallback_orgs = _scan_parenthesized_entity_terms(question)
-    
-    # 추가: 일반 텍스트 스캔 결과 병합
-    unstructured_candidates = _scan_unstructured_entity_terms(question)
-    
-    people_terms = _dedupe(normalized_people or fallback_people or unstructured_candidates)
+
+    # 성씨 휴리스틱은 raw_hint 채널로만 노출하고, people_terms(확정 인용 신호)에는
+    # normalized/fallback 만 채택해 노이즈가 sole source로 승격되는 경로를 차단한다.
+    raw_person_hint_terms = _dedupe(_scan_unstructured_entity_terms(question))
+
+    people_terms = _dedupe(normalized_people or fallback_people)
     org_terms = _dedupe(normalized_orgs or fallback_orgs)
     perf_types = _dedupe(
         [
@@ -182,4 +210,5 @@ def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSig
         perf_types=perf_types,
         followup_cues=followup_cues,
         high_salience_terms=high_salience_terms,
+        raw_person_hint_terms=raw_person_hint_terms,
     )

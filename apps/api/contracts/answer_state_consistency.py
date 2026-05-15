@@ -13,6 +13,7 @@ AnswerStateConsistencyStatus = Literal[
     "insufficient_snapshot",
     "no_structured_list",
     "supported",
+    "supported_remapped",
     "unsupported_count",
     "unsupported_order",
     "unsupported_item_identity",
@@ -72,6 +73,9 @@ class AnswerStateConsistencyVerdict(BaseModel):
     manifest_publish_allowed: bool = False
     accepted_item_count: int = 0
     required_visible_count: int = 0
+    # ADR-0017: published_rank=i+1 항목이 가리키는 source_snapshot_rank (display_rank, 1-based).
+    # supported_remapped 일 때만 채워지며, 그 외 status에서는 빈 리스트.
+    rank_remap: list[int] = Field(default_factory=list)
 
 
 class _ParsedAnswerItem(BaseModel):
@@ -378,11 +382,13 @@ def _build_consistency_verdict(
     policy: AnswerStateConsistencyPolicy | None = None,
     subset_accepted: bool = False,
     manifest_publish_allowed: Optional[bool] = None,
+    rank_remap: list[int] | None = None,
 ) -> AnswerStateConsistencyVerdict:
     parsed = list(parsed_items or [])
     normalized_snapshot = snapshot or AnswerStateSnapshot(available=False, snapshot_source="none")
     normalized_policy = policy or AnswerStateConsistencyPolicy()
-    accepted = status == "supported"
+    # ADR-0017: supported_remapped 도 발행 허용 대상. 단순 매핑 변환이지 hallucination이 아니므로 supported와 동등 취급.
+    accepted = status in ("supported", "supported_remapped")
     publish_allowed = (
         bool(manifest_publish_allowed)
         if manifest_publish_allowed is not None
@@ -406,6 +412,7 @@ def _build_consistency_verdict(
         manifest_publish_allowed=bool(publish_allowed),
         accepted_item_count=(len(parsed) if accepted else 0),
         required_visible_count=int(normalized_snapshot.visible_count or 0),
+        rank_remap=list(rank_remap or []),
     )
 
 
@@ -740,30 +747,68 @@ def evaluate_answer_state_consistency(
         )
 
     if any(assigned_index != index for index, assigned_index in enumerate(assignments)):
-        order_mismatches = [
+        # ADR-0017: same-rank가 아니지만 _assign_snapshot_indices 가 유효 매핑을 찾았다.
+        # 그러나 supported_remapped 통과 범위는 **full-mapping(answer 개수 == snapshot.visible_count)**
+        # 으로 한정한다. partial/non-prefix subset 케이스는 기존 계약에 따라 unsupported_order 로 유지해
+        # 후속 참조용 manifest truth 가 잘못 발행되는 사고를 막는다 (ADR-0017 결정 방향 + 기존 계약 보존).
+        visible_count_int = int(snapshot.visible_count or 0)
+        if len(parsed_items) != visible_count_int:
+            order_mismatches = [
+                AnswerStateMismatch(
+                    rank=index + 1,
+                    expected_rank=snapshot.ordered_items[assigned_index].display_rank,
+                    observed_rank=parsed_items[index].observed_rank,
+                    expected_title=snapshot.ordered_items[assigned_index].title_text,
+                    observed_title=parsed_items[index].title_text,
+                    expected_ids=snapshot.ordered_items[assigned_index].ids_map,
+                    observed_ids=parsed_items[index].ids_map,
+                    reason="rank_order_mismatch",
+                )
+                for index, assigned_index in enumerate(assignments)
+                if assigned_index != index
+            ]
+            return _build_consistency_verdict(
+                status="unsupported_order",
+                reason_codes=["unsupported_order"],
+                checked_items=len(parsed_items),
+                mismatches=order_mismatches,
+                snapshot=snapshot,
+                parsed_items=parsed_items,
+                declared_count=declared_count,
+                mismatch_reason="unsupported_order",
+                policy=policy,
+            )
+        # Full-mapping: published_rank ↔ source_snapshot_rank 매핑(rank_remap)을 verdict 로 노출.
+        # rank_remap[i] = published_rank(i+1)이 가리키는 source_snapshot_rank (display_rank, 1-based).
+        rank_remap = [
+            int(snapshot.ordered_items[assigned_index].display_rank)
+            for assigned_index in assignments
+        ]
+        remap_diffs = [
             AnswerStateMismatch(
                 rank=index + 1,
-                expected_rank=snapshot.ordered_items[index].display_rank,
+                expected_rank=snapshot.ordered_items[assigned_index].display_rank,
                 observed_rank=parsed_items[index].observed_rank,
-                expected_title=snapshot.ordered_items[index].title_text,
+                expected_title=snapshot.ordered_items[assigned_index].title_text,
                 observed_title=parsed_items[index].title_text,
-                expected_ids=snapshot.ordered_items[index].ids_map,
+                expected_ids=snapshot.ordered_items[assigned_index].ids_map,
                 observed_ids=parsed_items[index].ids_map,
-                reason="rank_order_mismatch",
+                reason="answer_rank_remapped",
             )
             for index, assigned_index in enumerate(assignments)
             if assigned_index != index
         ]
         return _build_consistency_verdict(
-            status="unsupported_order",
-            reason_codes=["unsupported_order"],
+            status="supported_remapped",
+            reason_codes=["answer_rank_remapped"],
             checked_items=len(parsed_items),
-            mismatches=order_mismatches,
+            mismatches=remap_diffs,
             snapshot=snapshot,
             parsed_items=parsed_items,
             declared_count=declared_count,
-            mismatch_reason="unsupported_order",
+            mismatch_reason="answer_rank_remapped",
             policy=policy,
+            rank_remap=rank_remap,
         )
 
     return _build_consistency_verdict(

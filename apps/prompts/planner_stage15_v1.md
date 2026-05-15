@@ -64,6 +64,13 @@
 - 사람명/기관명은 broad history query일수록 반드시 must_keep_terms에 유지한다.
 - 따옴표나 인용부호로 감싼 제목성 표현은 must_keep_terms에 그대로 유지한다.
 - follow-up deictic/ordinal 또는 explicit relation 문맥이 아니면 anchor_required를 false로 둔다.
+- surface_signals.people_terms는 정규화 결과(확정 인용)이다.
+  surface_signals.raw_person_hint_terms는 한국 성씨로 시작한다는 이유만으로 잡힌 후보 힌트일 뿐이다.
+- raw_person_hint_terms 후보는 다음 explicit 증거가 인접해 있을 때만 people_terms_to_keep / must_keep_terms로 승격한다:
+    - 직함 명사: 연구자, 박사, 교수, 대표, 원장, 소장
+    - 호칭: 님
+    - 따옴표·괄호로 감싼 표기
+- raw_person_hint_terms 후보가 일반 명사·기술 용어·외래어 변형으로 읽히면 keep 금지.
   </hard_guards>
 
 <rules>
@@ -96,6 +103,8 @@
 - 따옴표로 강조된 제목 구절을 must_keep_terms에서 누락하지 말 것
 - broad history 질의를 perf type 질의로 변환하지 말 것
 - stage1의 뼈대를 바꾸려는 메모를 넣지 말 것
+- raw_person_hint_terms 후보를 explicit 증거(직함·호칭·따옴표·괄호) 없이 people_terms_to_keep으로 승격하지 말 것
+- raw_person_hint_terms 후보가 학위·직함 자체(예: "박사학위", "교수님")로 읽히면 사람명이 아니므로 keep 금지
   </anti_patterns>
 
 <examples>
@@ -157,5 +166,20 @@
 "perf_type_policy":"explicit_only",
 "notes":["quoted_title_preserved"],
 "confidence":0.94
+}
+
+질문: 디지털 웰니스 코칭 시스템 관련 최근 연구동향 알려줘
+출력:
+{
+"people_terms_to_keep":[],
+"org_terms_to_keep":[],
+"org_role_hint":null,
+"perf_type_hints":[],
+"must_keep_terms":["디지털","웰니스","코칭","시스템","연구동향"],
+"anchor_required":false,
+"semantic_kind":"generic_lookup",
+"perf_type_policy":"explicit_only",
+"notes":["concept_query_no_person","raw_person_hint_rejected"],
+"confidence":0.93
 }
 </examples>

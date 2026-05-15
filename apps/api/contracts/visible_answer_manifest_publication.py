@@ -124,7 +124,8 @@ def build_visible_answer_manifest_publication(
             status = "not_applicable"
         elif groundedness_status == "unsupported":
             status = "blocked_groundedness"
-        elif state_status != "supported":
+        # ADR-0017: supported_remapped 도 발행 허용. 매핑 정보(rank_remap)는 호출자가 state_payload에서 직접 꺼내 활용한다.
+        elif state_status not in ("supported", "supported_remapped"):
             status = "blocked_state_consistency"
         elif bool(state_payload.get("subset_accepted")) and not bool(state_payload.get("manifest_publish_allowed")):
             status = "withheld_partial"
