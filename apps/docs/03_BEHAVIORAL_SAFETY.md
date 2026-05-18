@@ -1,5 +1,21 @@
 # 03 행동안전(L2) 정책과 보정
 
+> **2026-05-18 폐기 안내**: 본 문서는 ADR-0018 이전의 `ExecutionManager` / `QuestionAnalysisV3`
+> 기반 행동안전 정책을 다루며, 더 이상 유효하지 않다. 현재 시스템은
+> [ADR-0018](./ADR/ADR-0018_Three_Layer_Authority_Separation.md)에 따라
+> JudgmentAgent / SearchAgent / FinalGuard 3계층으로 단순화되었다.
+>
+> **새 시스템의 동등 규칙**: 행동안전은 `apps.pipeline.search_agent.SearchAgent` 와
+> `apps.pipeline.final_guard.FinalGuard`가 단일 dispatch + 단일 검증으로 흡수했다.
+> bounded recovery는 워크플로우의 `refine_judgment` 노드(`apps/pipeline/workflow.py`)가
+> 1회만 동작하는 형태로 봉인되었다. 자세한 내용은 [01 아키텍처](./01_ARCHITECTURE.md) §3 참조.
+>
+> 아래 본문은 결정의 역사 추적용으로 보존한다. 코드 변경 시에는 절대 이 문서를 따르지 말 것.
+
+---
+
+## (Archived) 원본 본문
+
 이 문서는 `ExecutionManager`가 소유하는 L2 행동안전 정책과 bounded recovery 규칙을 정의한다.
 L2의 역할은 L1(`QuestionAnalysisV3`)이 고정한 의도와 식별자 의미를 보존하면서,
 정책으로 허용된 범위 안에서만 실행 순서와 보정을 제어하는 것이다.

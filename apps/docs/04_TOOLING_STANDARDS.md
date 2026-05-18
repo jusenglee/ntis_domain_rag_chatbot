@@ -1,5 +1,19 @@
 # 04 도구화 규격과 상태 격리
 
+> **2026-05-18 폐기 안내**: ADR-0018 적용 후 `apps/retrieval/tools/` 및 Agent tool backend는
+> 폐기되었다. 본 문서의 `ToolResult` / `AgentState` 기반 규약은 더 이상 유효하지 않다.
+>
+> **새 시스템의 동등 규칙**: 모든 검색 요청은 `apps.pipeline.contracts.SearchTask`로 표준화되며,
+> `SearchAgent.execute(task)`가 단일 진입점이다. tool 개념은 사라졌고
+> `strategy ∈ {exact_lookup, subject_anchor, hybrid_search, detail_anchor}` 분기가 그 역할을
+> 대신한다. 자세한 내용은 [02 실행 계약과 전략 규칙](./02_CONTRACTS_AND_RULES.md) §1 참조.
+>
+> 아래 본문은 결정의 역사 추적용으로 보존한다.
+
+---
+
+## (Archived) 원본 본문
+
 이 문서는 L2 오케스트레이션에서 사용하는 Atomic Tool 규격과 state ownership 경계를 정의한다.
 
 ---

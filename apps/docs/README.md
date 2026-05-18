@@ -1,39 +1,54 @@
 # NTIS RAG 시스템 문서 인덱스 (Documentation Index)
 
-이 디렉터리는 NTIS RAG 서비스의 아키텍처, 실행 규칙, 운영 가이드를 담고 있는 **운영 진실원(Source of Truth)** 문서 모음입니다.
-현재 production 기준은 **LLM Dialogue Agent가 대화 흐름을 판단하고, Tool Backend / Planner / Retrieval / Answer Publication Guard가 계약으로 실행을 통제하는 Agentic RAG**입니다.
+> **2026-05-18 갱신**: [ADR-0018](./ADR/ADR-0018_Three_Layer_Authority_Separation.md) 권한분리
+> 3계층 아키텍처 적용. 현재 production 기준은 **JudgmentAgent / SearchAgent / FinalGuard 3계층
+> + SearchTask 단일 캐리어**이다. 이전의 `IntentContract / Planner stagewise / ExecutionManager`
+> 기반 모델은 폐기되었다.
 
 ---
 
 ## 📖 문서 가이드
 
-| 번호 | 문서명 | 주요 내용 | 주 독자 |
-|---|---|---|---|
-| **00** | [온보딩 (Onboarding)](./00_ONBOARDING.md) | Agentic RAG 한 줄 모델, 용어, 코드/로그 읽기 순서 | 신규 개발자, PM |
-| **01** | [아키텍처와 흐름](./01_ARCHITECTURE.md) | 2층 계약(L1/L2), Shock Absorber 원칙, Agentic 실행 흐름 | 개발자, 아키텍트 |
-| **02** | [실행 계약과 전략 규칙](./02_CONTRACTS_AND_RULES.md) | L1 의도, Smart Coercion 범위, detail/follow-up 계약 | 개발자, QA |
-| **03** | [행동 안전 (L2)](./03_BEHAVIORAL_SAFETY.md) | Bounded recovery, Internal Error Loop, SEARCH_RECOVERY 금지 조건 | 개발자, 운영 |
-| **04** | [도구화 표준](./04_TOOLING_STANDARDS.md) | Agent-facing tool 경계, query materialization, 상태 격리 | 개발자 |
-| **05** | [API 응답 명세](./05_API_응답명세.md) | `/query/stream` 이벤트, contract-invalid/provider failure 응답 | 프런트엔드, 연동 |
-| **06** | [운영과 환경](./06_운영과_환경.md) | 로그 triage, 정상 개발환경 경고, 검증 명령 | 운영, SRE |
-| **07** | [회귀 기준과 점검](./07_회귀기준과_점검.md) | 골든 테스트, detail/follow-up 회귀 계약 | QA, 개발자 |
-| **08** | [리팩토링 로드맵](./08_단계적_리팩토링_로드맵.md) | 문서 드리프트 이후 코드 리팩토링 단계 | 개발자, PM |
+| 번호 | 문서명 | 상태 | 주요 내용 | 주 독자 |
+|---|---|---|---|---|
+| **00** | [온보딩 (Onboarding)](./00_ONBOARDING.md) | ✅ ADR-0018 | 시스템 한 줄 요약, 용어, 코드/로그 읽기 순서 | 신규 개발자, PM |
+| **01** | [아키텍처와 흐름](./01_ARCHITECTURE.md) | ✅ ADR-0018 | 권한분리 3계층, L1 캐리어, 실행 흐름 | 개발자, 아키텍트 |
+| **02** | [실행 계약과 전략 규칙](./02_CONTRACTS_AND_RULES.md) | ✅ ADR-0018 | SearchTask, 식별자 의미, FinalGuard 검증 | 개발자, QA |
+| **03** | [행동 안전 (L2)](./03_BEHAVIORAL_SAFETY.md) | ⛔ Archived | `ExecutionManager` 기반 정책 (폐기) | 역사 추적용 |
+| **04** | [도구화 표준](./04_TOOLING_STANDARDS.md) | ⛔ Archived | Agent tool backend 규약 (폐기) | 역사 추적용 |
+| **05** | [API 응답 명세](./05_API_응답명세.md) | ✅ ADR-0018 | `/query`, `/query/stream`, `/health` 응답 명세 | 프런트엔드, 연동 |
+| **06** | [운영과 환경](./06_운영과_환경.md) | ✅ ADR-0018 | 부팅·로그 triage·환경 변수·이슈 대응 | 운영, SRE |
+| **07** | [회귀 기준과 점검](./07_회귀기준과_점검.md) | ✅ ADR-0018 | 4건 회귀 + 6건 follow-up 시나리오, 65 passed gate | QA, 개발자 |
+| **08** | [리팩토링 로드맵](./08_단계적_리팩토링_로드맵.md) | ⛔ Archived | ADR-0018로 흡수됨 | 역사 추적용 |
 
 ---
 
 ## 🛠️ 참고 자료
 
-*   [ADR/](./ADR/): 아키텍처 결정 기록 (Architecture Decision Records)
-*   [reference/](./reference/): 레거시 문서 및 참고 데이터
-*   [reports/](./reports/): 시스템 분석 리포트
+* [ADR/](./ADR/) — 아키텍처 결정 기록
+  - [ADR-0001](./ADR/ADR-0001_LLM-First%20Dialogue%20Agent%20over%20Contract-Guarded%20RAG%20Tools.md) — LLM-first Dialogue Agent 원형
+  - [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md) — Shock Absorber 원칙 (`SearchTask`에 흡수됨)
+  - [ADR-0017](./ADR/ADR-0017_Answer_Rank_Remapped_Reference_Manifest.md) — published_rank manifest (FinalGuard 구현)
+  - [ADR-0018](./ADR/ADR-0018_Three_Layer_Authority_Separation.md) — **현재 진실원**
+* [reference/](./reference/) — 레거시 문서
+* [reports/](./reports/) — 분석 리포트
+  - [ADR-0018 레거시 제거 매니페스트](./reports/ADR-0018_Legacy_Cleanup_Manifest.md) — 폐기된 모듈 목록
 
 ---
 
-## 💡 핵심 키워드
+## 💡 핵심 키워드 (ADR-0018 이후)
 
-*   **L1 (Intent Truth):** "사용자가 무엇을 원하는가?" (Dialogue Agent가 확정한 대화 의도, 대상, 식별자 축의 진실)
-*   **L2 (Technical Fact):** "의도를 어떻게 기술적으로 달성하는가?" (Planner가 컴파일한 필터, 검색어와 Orchestrator의 보정 정책)
-*   **Shock Absorber:** LLM의 사소한 부수 파라미터 오류를 L1 의도에 맞게 흡수하되, L1 진실은 절대 고치지 않는 완충 원칙.
-*   **Smart Coercion:** `limit`, `display_limit` 같은 표시/개수 파라미터만 좁게 교정하는 규칙.
-*   **Internal Error Loop:** tool backend/planner 오류를 사용자 모호성으로 위장하지 않고 Agent에게 최대 1회 compact observation으로 되돌리는 자기 교정 루프.
-*   **Atomic Tool:** 상태가 없는(Stateless) 순수 기능 조회 모듈.
+* **JudgmentAgent** — "사용자가 무엇을 원했는가" 결정. rule-based + LLM JSON 출력.
+* **SearchAgent** — SearchTask만 받아 Qdrant 조회 후 SearchResult 반환.
+* **FinalGuard** — groundedness + published_rank manifest 검증 + 발행 결정.
+* **SearchTask** — L1 의도를 텍스트로 평탄화하지 않고 끝까지 들고 가는 단일 캐리어.
+* **CanonicalEvidence** — raw payload를 정규화한 prompt-safe 단위.
+* **ReferenceManifest** — published_rank ↔ source_snapshot_rank 매핑 (ADR-0017).
+* **Strategy** — `exact_lookup` / `subject_anchor` / `hybrid_search` / `detail_anchor` 4 분기.
+
+### 더 이상 사용하지 않는 키워드
+
+`IntentContract`, `IntentPayloadV3`, `QuestionAnalysisV3`, `Planner stagewise`,
+`ExecutionManager`, `Shock Absorber 정책`, `Smart Coercion`, `Internal Error Loop`,
+`Atomic Tool`, `Agent dialogue router`, `RAG_LOOKUP_FILTER_POLICY`,
+`drift detection`, `prefix_subset` 정책, `merge_answers`.
