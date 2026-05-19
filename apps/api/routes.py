@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from apps.api.streaming.contracts import StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
 from apps.api.streaming.sse_encoder import encode_stream_event
-from apps.pipeline.state import PipelineState
+from apps.pipeline.agent_state import AgentPipelineState
 
 
 class QueryRequest(BaseModel):
@@ -51,11 +51,11 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
     def _get_kv_store(request: Request) -> Any:
         return getattr(getattr(request.app, "state", None), "kv_store", None)
 
-    def _build_state(payload: QueryRequest, request: Request, *, emitter: Optional[AsyncStreamEmitter]) -> PipelineState:
+    def _build_state(payload: QueryRequest, request: Request, *, emitter: Optional[AsyncStreamEmitter]) -> AgentPipelineState:
         conversation_id = (payload.conversation_id or "").strip() or str(uuid.uuid4())
         request_id = f"{conversation_id}-{uuid.uuid4().hex[:8]}"
         turn_id = f"turn:{int(time.time())}:{uuid.uuid4().hex[:8]}"
-        return PipelineState(
+        return AgentPipelineState(
             question=payload.question.strip(),
             conversation_id=conversation_id,
             request_id=request_id,
@@ -81,9 +81,11 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
             "references": references,
             "latencies": dict(_get(final_state, "latencies", {}) or {}),
             "total_ms": _calc_total_ms(final_state),
-            "judgment": _dump(_get(final_state, "judgment")),
-            "search_task": _dump(_get(final_state, "search_task")),
-            "final_answer": _dump(_get(final_state, "final_answer")),
+            "dialogue_intent": _dump(_get(final_state, "dialogue_intent")),
+            "entity_resolution": _dump(_get(final_state, "entity_resolution")),
+            "search_plan": _dump(_get(final_state, "search_plan")),
+            "evidence_bundle_view": _get_evidence_view(final_state),
+            "guard_decision": _dump(_get(final_state, "guard_decision")),
         }
 
     @app.get("/", response_class=HTMLResponse)
@@ -105,9 +107,11 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
 
     @app.post("/query")
     async def query(payload: QueryRequest, request: Request) -> JSONResponse:
-        """단일 응답 엔드포인트. 스트리밍 없이 워크플로우 결과만 JSON으로."""
-        if not payload.question or not payload.question.strip():
-            raise HTTPException(status_code=400, detail="question is empty")
+        """단일 응답 엔드포인트. 스트리밍 없이 워크플로우 결과만 JSON으로.
+
+        빈 질문은 400으로 거부하지 않고 그대로 워크플로우에 위임한다 — DialogueAgent가
+        ``kind=clarification`` 으로 안전 닫기 응답을 만든다 (R7 회귀 가드 참조).
+        """
         graph = _get_graph(request)
         state = _build_state(payload, request, emitter=None)
         try:
@@ -123,9 +127,10 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
 
         파이프라인이 emitter에 publish하는 동안 라우트는 큐를 읽어 SSE로 인코딩한다.
         graph 실행이 끝나면 done 이벤트 한 번 보내고 종료한다.
+
+        빈 질문은 400으로 거부하지 않고 그대로 워크플로우에 위임한다 — DialogueAgent가
+        ``kind=clarification`` 으로 안전 닫기 응답을 만든다.
         """
-        if not payload.question or not payload.question.strip():
-            raise HTTPException(status_code=400, detail="question is empty")
         graph = _get_graph(request)
         emitter = AsyncStreamEmitter()
         state = _build_state(payload, request, emitter=emitter)
@@ -241,3 +246,10 @@ def _calc_total_ms(state: Any) -> float:
     if not started:
         return 0.0
     return (time.perf_counter() - started) * 1000.0
+
+
+def _get_evidence_view(state: Any) -> Optional[str]:
+    bundle = _get(state, "evidence_bundle", None)
+    if bundle is None:
+        return None
+    return getattr(bundle, "view", None)

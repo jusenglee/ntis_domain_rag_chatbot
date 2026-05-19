@@ -1,0 +1,956 @@
+"""Phase 10: 7-agent 재설계의 LangGraph 워크플로우 빌더.
+
+흐름:
+    load_session
+      → dialogue_agent
+            ├─ direct_answer    → emit_direct_answer    → save_session
+            ├─ clarification    → emit_clarification    → save_session
+            └─ search/refine/detail
+                → entity_resolver
+                    ├─ clarification_needed → emit_clarification → save_session
+                    └─ otherwise
+                        → search_planner
+                              ├─ no plan       → emit_internal_error
+                              └─ has plan
+                                  → retrieval_agent
+                                        ├─ status=error → emit_internal_error
+                                        └─ otherwise
+                                            → evidence_curator
+                                                → answer_agent
+                                                      → critic_agent
+                                                            ├─ publish        → save_session
+                                                            ├─ repair_answer  → answer_agent (repair_attempted=True)
+                                                            │                    → critic_agent (1회 한도, 위반 시 clarify/error)
+                                                            ├─ clarify        → emit_clarification → save_session
+                                                            └─ internal_error → emit_internal_error  → save_session
+
+SessionState 슬롯 (3 평행 슬롯) — load 시 SessionMemory → SessionState,
+save 시 SessionState → SessionMemory 변환.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any, Dict, List, Optional
+
+from loguru import logger
+
+from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
+from apps.conversation.session_memory import (
+    PublishedManifestContext,
+    SessionMemory,
+    SubjectQueryContext,
+)
+from apps.conversation.view_state import DisplayItem, DisplaySnapshot, FocusEntity
+from apps.pipeline.agent_state import AgentPipelineState
+from apps.pipeline.agents import (
+    AnswerAgent,
+    CriticAgent,
+    DialogueAgent,
+    EntityResolverAgent,
+    EvidenceCuratorAgent,
+    FocusedDetailSlot,
+    ManifestSlot,
+    RetrievalAgent,
+    SearchPlannerAgent,
+    SessionState,
+    SessionStateAdapter,
+    SubjectSlot,
+)
+from apps.pipeline.contracts import ReferenceManifest
+from apps.pipeline.log_helpers import preview, short_id
+from apps.pipeline.session_store import load_pipeline_session, save_pipeline_session
+
+
+# ============================================================================
+# Dependency container
+# ============================================================================
+
+class AgentPipelineDeps:
+    """7-agent workflow가 노드 내부에서 호출하는 컴포넌트 묶음."""
+
+    def __init__(
+        self,
+        *,
+        dialogue_agent: DialogueAgent,
+        entity_resolver: EntityResolverAgent,
+        search_planner: SearchPlannerAgent,
+        retrieval_agent: RetrievalAgent,
+        evidence_curator: EvidenceCuratorAgent,
+        answer_agent: AnswerAgent,
+        critic_agent: CriticAgent,
+    ) -> None:
+        self.dialogue_agent = dialogue_agent
+        self.entity_resolver = entity_resolver
+        self.search_planner = search_planner
+        self.retrieval_agent = retrieval_agent
+        self.evidence_curator = evidence_curator
+        self.answer_agent = answer_agent
+        self.critic_agent = critic_agent
+
+
+# ============================================================================
+# Node implementations
+# ============================================================================
+
+async def node_load_session(state: AgentPipelineState) -> Dict[str, Any]:
+    """KV에서 SessionMemory 복원 후 SessionState로 어댑팅.
+
+    외부에서 state.session_state를 명시적으로 주입한 경우(테스트·재실행 시나리오)는
+    KV 로드를 건너뛰고 그대로 사용한다. 운영 라우트(`routes.py`)는 session_state를
+    빈 채로 전달하므로 KV 로드가 그대로 작동한다.
+    """
+    rid = short_id(state.request_id)
+    if state.session_state and (
+        state.session_state.has_subject()
+        or state.session_state.has_manifest()
+        or state.session_state.has_focused_detail()
+    ):
+        logger.info(
+            f"[load_session] req={rid} cid={short_id(state.conversation_id)} "
+            f"using_injected_session_state=True "
+            f"has_subject={state.session_state.has_subject()} "
+            f"has_manifest={state.session_state.has_manifest()} "
+            f"has_focused_detail={state.session_state.has_focused_detail()}"
+        )
+        return {"session_state": state.session_state}
+
+    memory = await load_pipeline_session(
+        kv_store=state.kv_store,
+        conversation_id=state.conversation_id,
+    )
+    session_state = SessionStateAdapter.from_session_memory(
+        memory, conversation_id=state.conversation_id
+    )
+    logger.info(
+        f"[load_session] req={rid} cid={short_id(state.conversation_id)} "
+        f"has_subject={session_state.has_subject()} "
+        f"has_manifest={session_state.has_manifest()} "
+        f"has_focused_detail={session_state.has_focused_detail()} "
+        f"q_len={len(state.question or '')} q={preview(state.question, limit=80)!r}"
+    )
+    return {"session_memory": memory, "session_state": session_state}
+
+
+def _make_node_dialogue(deps: AgentPipelineDeps):
+    async def node_dialogue(state: AgentPipelineState) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        intent = await deps.dialogue_agent.decide(
+            question=state.question,
+            session=state.session_state,
+            request_id=state.request_id,
+            turn_id=state.turn_id,
+            conversation_id=state.conversation_id,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            f"[dialogue] req={short_id(state.request_id)} kind={intent.kind} "
+            f"target_hint={intent.target_hint} action_hint={intent.action_hint} "
+            f"manifest_rank={intent.manifest_rank} subject_name={intent.subject_name!r} "
+            f"latency_ms={latency:.1f}"
+        )
+        return {
+            "dialogue_intent": intent,
+            "latencies": {"dialogue_agent": latency / 1000.0},
+        }
+
+    return node_dialogue
+
+
+def _make_node_entity_resolver(deps: AgentPipelineDeps):
+    async def node_entity_resolver(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.dialogue_intent is None:
+            return {}
+        t0 = time.perf_counter()
+        resolution = deps.entity_resolver.resolve(
+            intent=state.dialogue_intent,
+            session=state.session_state,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            f"[entity_resolver] req={short_id(state.request_id)} "
+            f"source={resolution.resolution_source} forced_target={resolution.forced_target} "
+            f"clarification_needed={resolution.clarification_needed} "
+            f"manifest_rank={resolution.manifest_rank} latency_ms={latency:.1f}"
+        )
+        return {
+            "entity_resolution": resolution,
+            "latencies": {"entity_resolver": latency / 1000.0},
+        }
+
+    return node_entity_resolver
+
+
+def _make_node_search_planner(deps: AgentPipelineDeps):
+    async def node_search_planner(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.dialogue_intent is None or state.entity_resolution is None:
+            return {}
+        t0 = time.perf_counter()
+        plan = deps.search_planner.plan(
+            intent=state.dialogue_intent,
+            resolution=state.entity_resolution,
+            request_id=state.request_id,
+            turn_id=state.turn_id,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        if plan is None:
+            logger.info(
+                f"[search_planner] req={short_id(state.request_id)} plan=None "
+                f"intent_kind={state.dialogue_intent.kind} latency_ms={latency:.1f}"
+            )
+        else:
+            logger.info(
+                f"[search_planner] req={short_id(state.request_id)} "
+                f"tasks={len(plan.tasks)} merge={plan.merge_strategy} "
+                f"reason={plan.plan_reason} latency_ms={latency:.1f}"
+            )
+        return {
+            "search_plan": plan,
+            "latencies": {"search_planner": latency / 1000.0},
+        }
+
+    return node_search_planner
+
+
+def _make_node_retrieval(deps: AgentPipelineDeps):
+    async def node_retrieval(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.search_plan is None:
+            return {}
+        t0 = time.perf_counter()
+        result = await deps.retrieval_agent.execute(state.search_plan)
+        latency = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            f"[retrieval] req={short_id(state.request_id)} status={result.status} "
+            f"evidence_n={len(result.evidences)} total_hits={result.total_hits} "
+            f"latency_ms={latency:.1f}"
+        )
+        return {
+            "search_result": result,
+            "latencies": {"retrieval_agent": latency / 1000.0},
+        }
+
+    return node_retrieval
+
+
+def _make_node_evidence_curator(deps: AgentPipelineDeps):
+    async def node_evidence_curator(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.search_result is None or state.dialogue_intent is None:
+            return {}
+        t0 = time.perf_counter()
+        bundle = deps.evidence_curator.curate(
+            result=state.search_result,
+            intent=state.dialogue_intent,
+            resolution=state.entity_resolution,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            f"[evidence_curator] req={short_id(state.request_id)} view={bundle.view} "
+            f"items={len(bundle.items)} groups={len(bundle.groups)} latency_ms={latency:.1f}"
+        )
+        return {
+            "evidence_bundle": bundle,
+            "latencies": {"evidence_curator": latency / 1000.0},
+        }
+
+    return node_evidence_curator
+
+
+def _make_node_answer(deps: AgentPipelineDeps):
+    async def node_answer(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.evidence_bundle is None or state.dialogue_intent is None:
+            return {}
+        t0 = time.perf_counter()
+        repair_hint: Optional[str] = None
+        if state.repair_attempted and state.guard_decision is not None:
+            repair_hint = state.guard_decision.repair_hint
+        draft = await deps.answer_agent.generate(
+            bundle=state.evidence_bundle,
+            intent=state.dialogue_intent,
+            request_id=state.request_id,
+            emitter=state.stream_emitter,
+            repair_hint=repair_hint,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        logger.info(
+            f"[answer] req={short_id(state.request_id)} template={draft.template} "
+            f"chars={len(draft.text)} citations={len(draft.citations)} "
+            f"truncated={draft.truncated} repair_hint={bool(repair_hint)} latency_ms={latency:.1f}"
+        )
+        return {
+            "answer_draft": draft,
+            "latencies": {"answer_agent": latency / 1000.0},
+        }
+
+    return node_answer
+
+
+def _make_node_critic(deps: AgentPipelineDeps):
+    async def node_critic(state: AgentPipelineState) -> Dict[str, Any]:
+        if state.answer_draft is None or state.evidence_bundle is None or state.dialogue_intent is None:
+            return {}
+        t0 = time.perf_counter()
+        decision = deps.critic_agent.critique(
+            draft=state.answer_draft,
+            bundle=state.evidence_bundle,
+            intent=state.dialogue_intent,
+            repair_attempted=state.repair_attempted,
+        )
+        latency = (time.perf_counter() - t0) * 1000.0
+        update: Dict[str, Any] = {
+            "guard_decision": decision,
+            "latencies": {"critic_agent": latency / 1000.0},
+        }
+        # repair_answer로 분기되면 다음 라운드에서 repair_attempted=True
+        if decision.decision == "repair_answer":
+            update["repair_attempted"] = True
+        # publish 시 artifact 즉시 생성
+        if decision.decision == "publish":
+            artifact = _make_publish_artifact(decision=decision, draft=state.answer_draft)
+            update["answer_artifact"] = artifact
+            update["final_answer_text"] = artifact.text
+        logger.info(
+            f"[critic] req={short_id(state.request_id)} decision={decision.decision} "
+            f"reasoning={decision.reasoning!r} latency_ms={latency:.1f}"
+        )
+        return update
+
+    return node_critic
+
+
+# ============================================================================
+# Terminal emit nodes
+# ============================================================================
+
+async def node_emit_direct_answer(state: AgentPipelineState) -> Dict[str, Any]:
+    intent = state.dialogue_intent
+    text = intent.direct_text if intent and intent.direct_text else ""
+    if state.stream_emitter is not None and text:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key="dialogue_direct",
+            )
+        )
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="direct_answer",
+        references=[],
+        source_refs=[],
+    )
+    logger.info(
+        f"[emit_direct_answer] req={short_id(state.request_id)} chars={len(text)} "
+        f"preview={preview(text, limit=80)!r}"
+    )
+    return {"answer_artifact": artifact, "final_answer_text": text}
+
+
+async def node_emit_clarification(state: AgentPipelineState) -> Dict[str, Any]:
+    """clarify 결정: DialogueAgent / EntityResolver / CriticAgent 중 어느 단계가
+    클arification을 발행했는지에 따라 텍스트를 결정한다.
+    """
+    decision = state.guard_decision
+    intent = state.dialogue_intent
+    resolution = state.entity_resolution
+
+    text: Optional[str] = None
+    source = "none"
+    if decision is not None and decision.decision == "clarify" and decision.clarification_question:
+        text = decision.clarification_question
+        source = "critic"
+    elif resolution is not None and resolution.clarification_needed and resolution.clarification_reason:
+        text = resolution.clarification_reason
+        source = "entity_resolver"
+    elif intent is not None and intent.kind == "clarification" and intent.clarification_question:
+        text = intent.clarification_question
+        source = "dialogue"
+
+    if not text:
+        text = "추가 정보가 필요합니다. 질문을 조금 더 구체적으로 알려주시겠어요?"
+
+    if state.stream_emitter is not None:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key="clarification",
+            )
+        )
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="clarification",
+        references=[],
+        source_refs=[],
+    )
+    logger.info(
+        f"[emit_clarification] req={short_id(state.request_id)} source={source} "
+        f"chars={len(text)} preview={preview(text, limit=80)!r}"
+    )
+    return {"answer_artifact": artifact, "final_answer_text": text}
+
+
+async def node_emit_meta_answer(state: AgentPipelineState) -> Dict[str, Any]:
+    """ask_meta 즉답 노드 — 검색 없이 manifest/focused_detail의 tag·axis로 분류 답변 생성.
+
+    예: "이게 과제야 성과야?" → manifest item.tag(IRD_NAI_PJT_INFO vs IRD_NAI_RI_*)와
+    id_axis(pjt_id vs rst_id), rst_id 접두어(CNL/PTR/SNW/REP/EQU/...)로 결정적 답변.
+
+    LLM 호출 없음. 출력은 AnswerArtifact(answer_kind="direct_answer").
+    """
+    intent = state.dialogue_intent
+    resolution = state.entity_resolution
+    text = _build_meta_answer_text(intent=intent, resolution=resolution, session_state=state.session_state)
+    if state.stream_emitter is not None and text:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key="meta_classify",
+            )
+        )
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="direct_answer",
+        references=[],
+        source_refs=[],
+        meta={"kind": "ask_meta_short_circuit"},
+    )
+    logger.info(
+        f"[emit_meta_answer] req={short_id(state.request_id)} "
+        f"manifest_rank={resolution.manifest_rank if resolution else None} "
+        f"target={resolution.manifest_resolved_target if resolution else None} "
+        f"chars={len(text)} preview={preview(text, limit=80)!r}"
+    )
+    return {"answer_artifact": artifact, "final_answer_text": text}
+
+
+async def node_emit_internal_error(state: AgentPipelineState) -> Dict[str, Any]:
+    text = "내부 오류로 답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    if state.stream_emitter is not None:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key="internal_error",
+            )
+        )
+    reason = "unknown"
+    error_code = "pipeline_internal_error"
+    if state.guard_decision is not None and state.guard_decision.decision == "internal_error":
+        reason = state.guard_decision.error_reason or state.guard_decision.reasoning or reason
+        error_code = state.guard_decision.error_code or error_code
+    elif state.search_result is not None and state.search_result.status == "error":
+        reason = f"search_error:{state.search_result.error_code}"
+        error_code = state.search_result.error_code or error_code
+    error_meta = ErrorArtifact(error_code=error_code, reason=reason, retryable=False)
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="error",
+        error=error_meta,
+        references=[],
+        source_refs=[],
+    )
+    logger.warning(
+        f"[emit_internal_error] req={short_id(state.request_id)} reason={reason!r}"
+    )
+    return {"answer_artifact": artifact, "final_answer_text": text}
+
+
+# ============================================================================
+# Save session
+# ============================================================================
+
+async def node_save_session(state: AgentPipelineState) -> Dict[str, Any]:
+    """SessionState를 갱신 후 SessionMemory로 직렬화해 KV에 저장.
+
+    publish 시 view에 따라 슬롯 갱신 전략을 분기한다 (P0-2 회귀 대응):
+
+    ┌────────────────────────┬──────────────┬───────────────┬───────────────┐
+    │ view                   │ SubjectSlot  │ ManifestSlot  │ FocusedDetail │
+    ├────────────────────────┼──────────────┼───────────────┼───────────────┤
+    │ single_detail          │ 갱신*        │ 유지 (덮어쓰기 X) │ 갱신 (anchor) │
+    │ subject_activity       │ 갱신*        │ 갱신          │ 클리어        │
+    │ list_compact           │ 갱신*        │ 갱신          │ 클리어        │
+    │ stats_summary          │ 갱신*        │ 갱신          │ 클리어        │
+    │ comparison_table       │ 갱신*        │ 갱신          │ 클리어        │
+    │ empty                  │ 유지         │ 유지          │ 유지          │
+    └────────────────────────┴──────────────┴───────────────┴───────────────┘
+    *SubjectSlot은 entity_resolution.subject가 있을 때만 갱신.
+
+    핵심: detail 응답이 직전 turn의 list manifest를 단일 항목으로 덮어쓰면 사용자의
+    "다른 번호" follow-up이 깨진다. 대신 focused_detail에 anchor만 저장한다.
+    """
+    state_obj: SessionState = state.session_state
+    rid = short_id(state.request_id)
+    publishing = state.guard_decision is not None and state.guard_decision.decision == "publish"
+    view = state.evidence_bundle.view if state.evidence_bundle is not None else None
+
+    if publishing:
+        # 1) SubjectSlot 갱신 (entity_resolution.subject가 있을 때, view 무관)
+        if state.entity_resolution is not None and state.entity_resolution.subject is not None:
+            subj = state.entity_resolution.subject
+            ids_map: Dict[str, List[str]] = {}
+            if subj.person_no:
+                ids_map["person_no"] = [subj.person_no]
+            if subj.org_id:
+                ids_map["org_id"] = [subj.org_id]
+            state_obj = state_obj.with_subject(
+                SubjectSlot(
+                    subject_kind=subj.kind,
+                    subject_name=subj.display_name,
+                    subject_ids_map=ids_map,
+                    identity_status=subj.identity_status,
+                    affiliation_org_name=subj.affiliation_org_name,
+                    last_turn_id=state.turn_id,
+                )
+            )
+
+        manifest = state.guard_decision.reference_manifest
+
+        # 2) view별 ManifestSlot / FocusedDetailSlot 갱신 분기
+        if view == "single_detail" and manifest is not None and manifest.items:
+            # detail은 manifest를 덮어쓰지 않고 focused_detail에 anchor만 저장.
+            anchor = _build_focus_entity_from_manifest(manifest=manifest, state=state)
+            if anchor is not None:
+                state_obj = state_obj.with_focused_detail(
+                    FocusedDetailSlot(anchor=anchor, focused_turn_id=state.turn_id)
+                )
+        elif view in {"list_compact", "subject_activity", "stats_summary", "comparison_table"}:
+            # 새 list publish — manifest 갱신 + 직전 focused_detail 클리어 (stale).
+            if manifest is not None and manifest.items:
+                snapshot = _manifest_to_display_snapshot(manifest=manifest, state=state)
+                if snapshot is not None:
+                    result_kind = _result_kind_from_resolution(state)
+                    state_obj = state_obj.with_manifest(
+                        ManifestSlot(
+                            result_kind=result_kind,
+                            snapshot=snapshot,
+                            published_turn_id=state.turn_id,
+                        )
+                    )
+            state_obj = state_obj.with_focused_detail(None)
+        # view == "empty" 또는 None: 슬롯 모두 그대로 유지.
+
+    # 3) SessionState → SessionMemory 반영
+    memory = SessionStateAdapter.to_session_memory(state_obj, base=state.session_memory)
+
+    # 4) KV 저장
+    saved = False
+    if state.kv_store is not None and state.conversation_id:
+        saved = await save_pipeline_session(
+            kv_store=state.kv_store,
+            conversation_id=state.conversation_id,
+            memory=memory,
+        )
+
+    total = state.total_ms() if state.request_started_at else 0.0
+    logger.info(
+        f"[save_session] req={rid} cid={short_id(state.conversation_id)} "
+        f"publishing={publishing} view={view} "
+        f"has_subject={state_obj.has_subject()} has_manifest={state_obj.has_manifest()} "
+        f"has_focused_detail={state_obj.has_focused_detail()} "
+        f"kv_saved={saved} total_ms={total:.1f}"
+    )
+    return {"session_memory": memory, "session_state": state_obj}
+
+
+# ============================================================================
+# Routing
+# ============================================================================
+
+def route_after_dialogue(state: AgentPipelineState) -> str:
+    intent = state.dialogue_intent
+    if intent is None:
+        return "emit_internal_error"
+    if intent.kind == "direct_answer":
+        return "emit_direct_answer"
+    if intent.kind == "clarification":
+        return "emit_clarification"
+    return "entity_resolver"
+
+
+def route_after_entity_resolver(state: AgentPipelineState) -> str:
+    resolution = state.entity_resolution
+    if resolution is None:
+        return "emit_internal_error"
+    if resolution.clarification_needed:
+        return "emit_clarification"
+    return "search_planner"
+
+
+def route_after_search_planner(state: AgentPipelineState) -> str:
+    if state.search_plan is None:
+        intent = state.dialogue_intent
+        # ask_meta는 검색 없이 즉답 — manifest item의 tag/axis로 분류 답변 생성.
+        if intent is not None and intent.kind == "ask_meta":
+            return "emit_meta_answer"
+        # 그 외 plan=None(DialogueAgent가 search/detail로 분류했지만 query 부재 등) → clarify.
+        return "emit_clarification"
+    return "retrieval_agent"
+
+
+def route_after_retrieval(state: AgentPipelineState) -> str:
+    if state.search_result is None:
+        return "emit_internal_error"
+    if state.search_result.status == "error":
+        return "emit_internal_error"
+    return "evidence_curator"
+
+
+def route_after_critic(state: AgentPipelineState) -> str:
+    decision = state.guard_decision
+    if decision is None:
+        return "emit_internal_error"
+    if decision.decision == "publish":
+        return "save_session"
+    if decision.decision == "repair_answer":
+        return "answer_agent"
+    if decision.decision == "clarify":
+        return "emit_clarification"
+    return "emit_internal_error"
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def _make_publish_artifact(*, decision: Any, draft: Any) -> AnswerArtifact:
+    refs: List[Dict[str, Any]] = []
+    source_refs: List[Any] = []
+    if decision.reference_manifest is not None:
+        for item in decision.reference_manifest.items:
+            refs.append(
+                {
+                    "rank": item.published_rank,
+                    "id": item.id,
+                    "tag": item.tag,
+                    "title": item.title,
+                }
+            )
+            source_refs.append(item)
+    answer_kind = "llm_streamed"
+    if draft.template == "no_result":
+        answer_kind = "no_result"
+    return AnswerArtifact(
+        text=decision.text or "",
+        answer_kind=answer_kind,
+        stream_metrics=dict(draft.stream_metrics or {}),
+        references=refs,
+        source_refs=source_refs,
+        meta={"critic_reasoning": decision.reasoning},
+    )
+
+
+def _manifest_to_display_snapshot(
+    *,
+    manifest: ReferenceManifest,
+    state: AgentPipelineState,
+) -> Optional[DisplaySnapshot]:
+    if manifest is None or not manifest.items:
+        return None
+    items: List[DisplayItem] = []
+    for ref in manifest.items:
+        if ref.id_axis in ("pjt_id", "pjt_no"):
+            entity_kind = "project"
+        elif ref.id_axis == "person_no":
+            entity_kind = "people"
+        elif ref.id_axis == "org_id":
+            entity_kind = "org"
+        else:
+            entity_kind = "perf"
+        kwargs: Dict[str, Any] = {
+            "display_rank": ref.published_rank,
+            "entity_kind": entity_kind,
+            "doc_type": ref.tag,
+            "doc_id": ref.id,
+            "title_text": ref.title,
+        }
+        if ref.id_axis == "pjt_id":
+            kwargs["pjt_id"] = ref.id
+        elif ref.id_axis == "pjt_no":
+            kwargs["pjt_no"] = ref.id
+        elif ref.id_axis == "rst_id":
+            kwargs["rst_id"] = ref.id
+        elif ref.id_axis == "person_no":
+            kwargs["person_no"] = ref.id
+        elif ref.id_axis == "org_id":
+            kwargs["org_id"] = ref.id
+        items.append(DisplayItem(**kwargs))
+    return DisplaySnapshot(
+        view_id=f"{state.conversation_id}:turn:{state.turn_id}",
+        conversation_id=state.conversation_id,
+        turn_id=state.turn_id,
+        request_id=state.request_id,
+        context_kind=_result_kind_from_resolution(state),
+        requested_count=len(items),
+        visible_count=len(items),
+        raw_count=manifest.total_visible,
+        items=items,
+    )
+
+
+def _result_kind_from_resolution(state: AgentPipelineState) -> str:
+    resolution = state.entity_resolution
+    if resolution is not None and resolution.forced_target:
+        return resolution.forced_target
+    intent = state.dialogue_intent
+    if intent is not None and intent.target_hint:
+        return intent.target_hint
+    return "project"
+
+
+# ============================================================================
+# ask_meta 즉답 헬퍼
+# ============================================================================
+
+# rst_id 접두어 → 사람-읽기 NTIS 성과 분류 (apps/api/rag_mapper/schema_types.py DataTag 매핑).
+_RST_PREFIX_TO_LABEL: Dict[str, str] = {
+    "CNL": "논문(Conventional Literature)",
+    "JNL": "논문(Journal)",
+    "PTR": "특허",
+    "SNW": "소프트웨어",
+    "REP": "연구보고서",
+    "BIN": "생명정보",
+    "COM": "화합물",
+    "TAI": "기술요약",
+    "NVR": "신품종",
+    "EQU": "시설·장비",
+    "BRS": "생물자원",
+}
+
+_TAG_TO_LABEL: Dict[str, str] = {
+    "IRD_NAI_PJT_INFO": "과제(국가 R&D 사업)",
+    "IRD_NAI_RI_PAPER": "성과 — 논문",
+    "IRD_NAI_RI_IPR": "성과 — 특허",
+    "IRD_NAI_RI_SW": "성과 — 소프트웨어",
+    "IRD_NAI_RI_RSCH_RPT": "성과 — 연구보고서",
+    "IRD_NAI_RI_FCLT_EQUIP": "성과 — 시설·장비",
+    "IRD_NAI_RI_VARIETY": "성과 — 신품종",
+}
+
+_TARGET_TO_LABEL: Dict[str, str] = {
+    "project": "과제(국가 R&D 사업)",
+    "perf": "성과(논문/특허/SW/장비 등)",
+    "people": "사람(연구자)",
+    "org": "기관",
+    "support": "지원·매뉴얼",
+}
+
+
+def _classify_rst_id(rst_id: str) -> Optional[str]:
+    """rst_id 접두어로부터 사람-읽기 분류 반환. 접두어 매칭 실패 시 None."""
+    if not rst_id or "-" not in rst_id:
+        return None
+    prefix = rst_id.split("-", 1)[0].upper()
+    return _RST_PREFIX_TO_LABEL.get(prefix)
+
+
+def _build_meta_answer_text(
+    *,
+    intent: Optional[Any],
+    resolution: Optional[Any],
+    session_state: Optional[SessionState],
+) -> str:
+    """ask_meta 답변 본문 구성. 우선순위:
+
+    1. resolution.manifest_resolved_target / manifest_resolved_axis (EntityResolver가
+       manifest_rank를 해소한 경우)
+    2. focused_detail anchor (해소 실패 시 fallback)
+    3. 둘 다 없으면 안내 메시지
+    """
+    rank: Optional[int] = (
+        intent.manifest_rank if intent and intent.manifest_rank is not None else None
+    )
+    rank_label = f"{rank}번 항목은" if rank else "해당 항목은"
+
+    # 1) resolution 기반 분류
+    if resolution is not None:
+        target = resolution.manifest_resolved_target
+        axis = resolution.manifest_resolved_axis
+        # rst_id 접두어 우선 — 가장 구체적인 정보
+        for rst_value in (resolution.identifiers.rst_id or []):
+            label = _classify_rst_id(rst_value)
+            if label:
+                return f"{rank_label} **성과** 유형이며 세부 종류는 **{label}**입니다."
+        # tag 직접 매핑이 가능한지 진단에서 확인
+        tag_label = None
+        diag = getattr(resolution, "diagnostics", {}) or {}
+        manifest_tag = diag.get("manifest_item_doc_type") or diag.get(
+            "focused_detail_doc_type"
+        )
+        if manifest_tag:
+            tag_label = _TAG_TO_LABEL.get(manifest_tag.strip())
+        if tag_label:
+            return f"{rank_label} **{tag_label}**입니다."
+        # target 단위 분류
+        if target:
+            target_label = _TARGET_TO_LABEL.get(target)
+            if target_label:
+                return f"{rank_label} **{target_label}** 유형입니다."
+
+    # 2) focused_detail anchor 기반 분류 (resolution이 manifest_rank 해소 못한 경우)
+    if session_state is not None and session_state.has_focused_detail():
+        anchor = session_state.focused_detail.anchor
+        if anchor.rst_id:
+            label = _classify_rst_id(anchor.rst_id)
+            if label:
+                return f"{rank_label} **성과** 유형이며 세부 종류는 **{label}**입니다."
+        if anchor.doc_type:
+            tag_label = _TAG_TO_LABEL.get(anchor.doc_type.strip())
+            if tag_label:
+                return f"{rank_label} **{tag_label}**입니다."
+        if anchor.kind:
+            target_label = _TARGET_TO_LABEL.get(anchor.kind)
+            if target_label:
+                return f"{rank_label} **{target_label}** 유형입니다."
+
+    return (
+        "현재 직전 검색 결과(또는 가장 최근 본 상세 항목)가 없어 분류를 즉답할 수 없습니다. "
+        "어떤 항목의 유형을 알고 싶은지 다시 알려주실 수 있나요?"
+    )
+
+
+def _build_focus_entity_from_manifest(
+    *,
+    manifest: ReferenceManifest,
+    state: AgentPipelineState,
+) -> Optional[FocusEntity]:
+    """single_detail view의 단일 ReferenceItem → FocusEntity (focused_detail 슬롯용).
+
+    EvidenceBundle.items[0]보다 ReferenceManifest.items[0]을 진실원으로 쓴다 — CriticAgent가
+    이미 tag/id_axis 정합 검증을 마친 후이기 때문.
+    """
+    if manifest is None or not manifest.items:
+        return None
+    ref = manifest.items[0]
+    if ref.id_axis in ("pjt_id", "pjt_no"):
+        kind = "project"
+    elif ref.id_axis == "person_no":
+        kind = "people"
+    elif ref.id_axis == "org_id":
+        kind = "org"
+    else:
+        kind = "perf"
+    kwargs: Dict[str, Any] = {
+        "kind": kind,
+        "source": "critic_publish",
+        "view_id": f"{state.conversation_id}:turn:{state.turn_id}",
+        "display_rank": ref.published_rank,
+        "doc_type": ref.tag,
+        "doc_id": ref.id,
+        "title_text": ref.title,
+    }
+    if ref.id_axis == "pjt_id":
+        kwargs["pjt_id"] = ref.id
+    elif ref.id_axis == "pjt_no":
+        kwargs["pjt_no"] = ref.id
+    elif ref.id_axis == "rst_id":
+        kwargs["rst_id"] = ref.id
+    elif ref.id_axis == "person_no":
+        kwargs["person_no"] = ref.id
+    elif ref.id_axis == "org_id":
+        kwargs["org_id"] = ref.id
+    return FocusEntity(**kwargs)
+
+
+# ============================================================================
+# Workflow builder
+# ============================================================================
+
+def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
+    """LangGraph StateGraph (7-agent flow) 컴파일.
+
+    Args:
+        deps: 7개 에이전트 의존성 묶음.
+
+    Returns:
+        compiled LangGraph (ainvoke / astream 사용 가능).
+    """
+    from langgraph.graph import END, StateGraph
+
+    graph = StateGraph(AgentPipelineState)
+
+    # 노드
+    graph.add_node("load_session", node_load_session)
+    graph.add_node("dialogue_agent", _make_node_dialogue(deps))
+    graph.add_node("entity_resolver", _make_node_entity_resolver(deps))
+    graph.add_node("search_planner", _make_node_search_planner(deps))
+    graph.add_node("retrieval_agent", _make_node_retrieval(deps))
+    graph.add_node("evidence_curator", _make_node_evidence_curator(deps))
+    graph.add_node("answer_agent", _make_node_answer(deps))
+    graph.add_node("critic_agent", _make_node_critic(deps))
+    graph.add_node("emit_direct_answer", node_emit_direct_answer)
+    graph.add_node("emit_clarification", node_emit_clarification)
+    graph.add_node("emit_meta_answer", node_emit_meta_answer)
+    graph.add_node("emit_internal_error", node_emit_internal_error)
+    graph.add_node("save_session", node_save_session)
+
+    # 엣지
+    graph.set_entry_point("load_session")
+    graph.add_edge("load_session", "dialogue_agent")
+
+    graph.add_conditional_edges(
+        "dialogue_agent",
+        route_after_dialogue,
+        {
+            "emit_direct_answer": "emit_direct_answer",
+            "emit_clarification": "emit_clarification",
+            "entity_resolver": "entity_resolver",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "entity_resolver",
+        route_after_entity_resolver,
+        {
+            "search_planner": "search_planner",
+            "emit_clarification": "emit_clarification",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "search_planner",
+        route_after_search_planner,
+        {
+            "retrieval_agent": "retrieval_agent",
+            "emit_clarification": "emit_clarification",
+            "emit_meta_answer": "emit_meta_answer",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "retrieval_agent",
+        route_after_retrieval,
+        {
+            "evidence_curator": "evidence_curator",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
+
+    graph.add_edge("evidence_curator", "answer_agent")
+    graph.add_edge("answer_agent", "critic_agent")
+
+    graph.add_conditional_edges(
+        "critic_agent",
+        route_after_critic,
+        {
+            "save_session": "save_session",
+            "answer_agent": "answer_agent",
+            "emit_clarification": "emit_clarification",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
+
+    graph.add_edge("emit_direct_answer", "save_session")
+    graph.add_edge("emit_clarification", "save_session")
+    graph.add_edge("emit_meta_answer", "save_session")
+    graph.add_edge("emit_internal_error", "save_session")
+    graph.add_edge("save_session", END)
+
+    return graph.compile()

@@ -27,11 +27,17 @@ from fastapi import FastAPI
 from loguru import logger
 
 from apps.chat.llm_runtime import build_llm
-from apps.pipeline.final_guard import FinalGuard
-from apps.pipeline.judgment_agent import JudgmentAgent
-from apps.pipeline.llm_generator import LLMGenerator
+from apps.pipeline.agent_workflow import AgentPipelineDeps, build_agent_pipeline_graph
+from apps.pipeline.agents import (
+    AnswerAgent,
+    CriticAgent,
+    DialogueAgent,
+    EntityResolverAgent,
+    EvidenceCuratorAgent,
+    RetrievalAgent,
+    SearchPlannerAgent,
+)
 from apps.pipeline.search_agent import SearchAgent
-from apps.pipeline.workflow import PipelineDeps, build_pipeline_graph
 from apps.platform.storage import FileKVStore, KVStore
 
 
@@ -124,26 +130,32 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     app.state.embed_e5i = rag_resources.embed_e5i
     app.state.embed_e5 = rag_resources.embed_e5
 
-    # 2) LLM 어댑터 빌드 (Solar = JudgmentAgent, Gemma = LLMGenerator)
-    judgment_llm = build_llm(model_name="solar_vllm_0")
+    # 2) LLM 어댑터 빌드 (Solar = DialogueAgent 분류, Gemma = AnswerAgent 답변)
+    dialogue_llm = build_llm(model_name="solar_vllm_0")
     answer_llm = build_llm(model_name="gemma_triton_0")
-    app.state.judgment_llm = judgment_llm
+    app.state.dialogue_llm = dialogue_llm
     app.state.answer_llm = answer_llm
 
-    # 3) Pipeline 컴포넌트 구성
-    judgment_agent = JudgmentAgent(llm=judgment_llm)
+    # 3) 7-agent 컴포넌트 구성 (DialogueAgent → EntityResolver → SearchPlanner
+    #    → RetrievalAgent → EvidenceCurator → AnswerAgent → CriticAgent).
     search_agent = SearchAgent(
         qdrant_client=rag_resources.qdrant_client,
         embed_e5i=rag_resources.embed_e5i,
         embed_e5=rag_resources.embed_e5,
     )
-    llm_generator = LLMGenerator(llm=answer_llm)
-    final_guard = FinalGuard()
-    deps = PipelineDeps(
-        judgment_agent=judgment_agent,
-        search_agent=search_agent,
-        llm_generator=llm_generator,
-        final_guard=final_guard,
+    deps = AgentPipelineDeps(
+        dialogue_agent=DialogueAgent(llm=dialogue_llm),
+        entity_resolver=EntityResolverAgent(),
+        search_planner=SearchPlannerAgent(),
+        retrieval_agent=RetrievalAgent(
+            qdrant_client=rag_resources.qdrant_client,
+            embed_e5i=rag_resources.embed_e5i,
+            embed_e5=rag_resources.embed_e5,
+            task_executor=search_agent,
+        ),
+        evidence_curator=EvidenceCuratorAgent(),
+        answer_agent=AnswerAgent(llm=answer_llm),
+        critic_agent=CriticAgent(),
     )
     app.state.pipeline_deps = deps
 
@@ -160,8 +172,8 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     app.state.metrics_http = httpx.AsyncClient(timeout=httpx.Timeout(config.metrics_timeout_seconds))
 
     # 6) LangGraph 컴파일
-    app.state.graph = build_pipeline_graph(deps)
-    logger.info("3-layer pipeline compiled successfully")
+    app.state.graph = build_agent_pipeline_graph(deps)
+    logger.info("7-agent pipeline compiled successfully")
 
 
 async def shutdown_app_runtime(app: FastAPI) -> None:
@@ -183,7 +195,7 @@ async def shutdown_app_runtime(app: FastAPI) -> None:
             pass
 
     # LLM 어댑터
-    for attr in ("judgment_llm", "answer_llm"):
+    for attr in ("dialogue_llm", "answer_llm"):
         llm = getattr(app.state, attr, None)
         if llm is None:
             continue

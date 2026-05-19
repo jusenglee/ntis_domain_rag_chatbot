@@ -34,28 +34,28 @@ async def load_pipeline_session(
 ) -> SessionMemory:
     """KV에서 SessionMemory를 복원. 없거나 손상이면 빈 객체."""
     if kv_store is None or not conversation_id:
-        return SessionMemory(conversation_id=conversation_id)
+        return SessionMemory()
 
     try:
         raw = await kv_store.get(_session_key(conversation_id))
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[session_store] load failed: cid={conversation_id} err={exc}")
-        return SessionMemory(conversation_id=conversation_id)
+        return SessionMemory()
 
     if not raw:
-        return SessionMemory(conversation_id=conversation_id)
+        return SessionMemory()
 
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError) as exc:
         logger.warning(f"[session_store] invalid json: cid={conversation_id} err={exc}")
-        return SessionMemory(conversation_id=conversation_id)
+        return SessionMemory()
 
     try:
         memory = SessionMemory.model_validate(payload)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[session_store] schema mismatch: cid={conversation_id} err={exc}")
-        return SessionMemory(conversation_id=conversation_id)
+        return SessionMemory()
 
     return memory
 

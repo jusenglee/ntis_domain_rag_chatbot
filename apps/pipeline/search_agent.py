@@ -32,6 +32,11 @@ from apps.pipeline.retrieval import (
     lookup_by_axis,
     normalize_qdrant_points,
 )
+from apps.pipeline.retrieval.qdrant_search import _build_qdrant_filter
+
+
+# aggregate 도구 — 1인/1기관 단위 결과 상한. 너무 크게 잡으면 memory/latency 부담.
+_AGGREGATE_SCROLL_LIMIT = 1000
 
 
 class SearchAgent:
@@ -129,6 +134,8 @@ class SearchAgent:
             return self._exec_detail_anchor(task)
         if task.strategy == "hybrid_search":
             return self._exec_hybrid_search(task)
+        if task.strategy == "aggregate":
+            return self._exec_aggregate(task)
         raise ValueError(f"unknown strategy: {task.strategy}")
 
     # ----- exact_lookup -----
@@ -190,6 +197,89 @@ class SearchAgent:
     def _exec_detail_anchor(self, task: SearchTask) -> tuple[List[CanonicalEvidence], int]:
         """단일 대상 상세를 위한 hybrid. limit=1로 강제되어 있음."""
         return self._run_hybrid(task)
+
+    # ----- aggregate -----
+    def _exec_aggregate(self, task: SearchTask) -> tuple[List[CanonicalEvidence], int]:
+        """stats 도구 — Qdrant scroll로 페이로드를 받아 Python에서 group_by count.
+
+        Qdrant 자체에는 GROUP BY가 없으므로, subject/식별자/필터 조건만 만족하는 페이로드를
+        최대 ``_AGGREGATE_SCROLL_LIMIT`` 개까지 pull한 뒤 메모리에서 group_by 카운트한다.
+        NTIS 1인/1기관 단위 결과는 보통 수십~수백 건이라 단일 scroll로 처리 가능.
+
+        결과는 CanonicalEvidence 1건 = 1 그룹으로 표현:
+            - title          = 그룹 키 (예: "2020", "한국과학기술정보연구원")
+            - facts.count    = 그룹 카운트
+            - facts.group_by = aggregate_by 축 이름
+            - source_type    = collection-route
+            - snapshot_rank  = count 내림차순 1..N
+        """
+        aggregate_by = task.aggregate_by
+        if aggregate_by is None:
+            return [], 0
+
+        bucket_counts: dict[str, int] = {}
+        total_scanned = 0
+        for collection in task.collections:
+            try:
+                qdrant_filter = _build_qdrant_filter(
+                    filters=task.filters,
+                    subject=task.subject,
+                    identifiers=task.identifiers,
+                    collection=collection,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[aggregate] filter build failed: collection={collection} err={exc}")
+                continue
+
+            points = _scroll_payload(
+                qdrant_client=self._qdrant_client,
+                collection=collection,
+                qdrant_filter=qdrant_filter,
+                limit=_AGGREGATE_SCROLL_LIMIT,
+            )
+            total_scanned += len(points)
+            for point in points:
+                payload = getattr(point, "payload", None) or {}
+                key = _extract_group_key(payload=payload, aggregate_by=aggregate_by)
+                if not key:
+                    continue
+                bucket_counts[key] = bucket_counts.get(key, 0) + 1
+
+        if not bucket_counts:
+            logger.info(
+                f"[aggregate] by={aggregate_by} collections={list(task.collections)} "
+                f"scanned={total_scanned} groups=0"
+            )
+            return [], 0
+
+        # count 내림차순 정렬
+        sorted_buckets = sorted(bucket_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        evidences: List[CanonicalEvidence] = []
+        primary_route = self._collection_to_route(task.collections[0])
+        for rank, (group_key, count) in enumerate(sorted_buckets[: task.limit], start=1):
+            evidences.append(
+                CanonicalEvidence(
+                    identity=f"agg::{aggregate_by}::{group_key}",
+                    source_type=primary_route,
+                    tag="AGGREGATE",
+                    ids={},
+                    title=str(group_key),
+                    summary="",
+                    facts={
+                        "count": count,
+                        "group_by": aggregate_by,
+                        "group_key": group_key,
+                    },
+                    snapshot_rank=rank,
+                    score=float(count),
+                )
+            )
+
+        logger.info(
+            f"[aggregate] by={aggregate_by} collections={list(task.collections)} "
+            f"scanned={total_scanned} groups={len(bucket_counts)} returned={len(evidences)}"
+        )
+        return evidences, len(bucket_counts)
 
     def _run_hybrid(self, task: SearchTask) -> tuple[List[CanonicalEvidence], int]:
         merged: List[CanonicalEvidence] = []
@@ -284,3 +374,117 @@ class SearchAgent:
         if hits == 0:
             return "empty"
         return "single"
+
+
+# ============================================================================
+# aggregate 도구 헬퍼 (모듈 함수 — SearchAgent 외부에서도 단위 테스트 가능)
+# ============================================================================
+
+def _scroll_payload(
+    *,
+    qdrant_client: Any,
+    collection: str,
+    qdrant_filter: Any,
+    limit: int,
+) -> List[Any]:
+    """Qdrant scroll 1회 호출 (with_payload=True, with_vectors=False).
+
+    aggregate 도구에서만 사용. 페이지네이션은 limit이 충분히 크다고 가정해 1회로 끝낸다.
+    """
+    try:
+        points, _ = qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=qdrant_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[aggregate] qdrant scroll failed: collection={collection} err={exc}")
+        return []
+    return list(points or [])
+
+
+# group_by 축별 payload 경로 후보. NTIS payload는 동일 정보가 top-level / meta_basic /
+# meta_detail에 분산될 수 있어 dict-walk로 첫 번째 non-empty 값을 채택.
+_GROUP_KEY_PATHS: dict[str, list[list[str]]] = {
+    "year": [
+        ["stt_dt"],
+        ["start_year"],
+        ["pjt_strt_dt"],
+        ["meta_basic", "stt_dt"],
+        ["meta_basic", "pjt_strt_dt"],
+        ["meta_detail", "stt_dt"],
+        ["year"],
+    ],
+    "lead_org": [
+        ["org_nm"],
+        ["pjt_prfrm_org_nm"],
+        ["meta_basic", "pjt_prfrm_org_nm"],
+        ["meta_basic", "org_nm"],
+        ["meta_detail", "org_nm"],
+    ],
+    "tag": [
+        ["tag"],
+        ["meta_basic", "tag"],
+        ["doc_type"],
+    ],
+    "perf_type": [
+        ["perf_type"],
+        ["meta_basic", "perf_type"],
+        ["rst_clsf_nm"],
+    ],
+}
+
+
+def _walk_payload(payload: dict, path: list[str]) -> Optional[Any]:
+    """payload[a][b][c] 경로 따라 값 탐색. 중간 None이면 None."""
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+        if current is None:
+            return None
+    return current
+
+
+def _extract_group_key(*, payload: dict, aggregate_by: str) -> Optional[str]:
+    """payload에서 aggregate_by 축에 해당하는 그룹 키 추출.
+
+    - year: 날짜/연도 문자열에서 첫 4자리만 추출 (예: "2020-01-01" → "2020", "20200101" → "2020")
+    - 그 외: 문자열 그대로 trim
+    """
+    paths = _GROUP_KEY_PATHS.get(aggregate_by, [])
+    raw: Optional[Any] = None
+    for path in paths:
+        candidate = _walk_payload(payload, path)
+        if candidate is None:
+            continue
+        if isinstance(candidate, (list, tuple)):
+            for item in candidate:
+                if item:
+                    candidate = item
+                    break
+        if candidate:
+            raw = candidate
+            break
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if aggregate_by == "year":
+        # 처음 4자리 숫자 추출 (정규식 미사용, char-class 안전 검사)
+        digits = "".join(ch for ch in text[:8] if ch.isdigit())
+        if len(digits) >= 4:
+            year_str = digits[:4]
+            # 합리적인 연도 범위 [1900, 2100]
+            try:
+                year = int(year_str)
+                if 1900 <= year <= 2100:
+                    return year_str
+            except ValueError:
+                return None
+        return None
+    return text[:120]  # 너무 긴 라벨 잘라냄

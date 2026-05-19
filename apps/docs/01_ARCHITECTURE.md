@@ -1,9 +1,24 @@
 # 01 아키텍처와 흐름 (Architecture & Flow)
 
-> **2026-05-18 갱신**: ADR-0018 권한분리 3계층 아키텍처 적용. 본 문서는 새 `apps.pipeline`
-> 패키지를 진실원으로 한다. 이전 `IntentContract` / `IntentPayloadV3` / `QuestionAnalysisV3` /
-> `Planner stagewise` 등 레거시 용어는 더 이상 유효하지 않다. 변경 결정은
-> [ADR-0018](./ADR/ADR-0018_Three_Layer_Authority_Separation.md) 참조.
+> **2026-05-19 갱신**: [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) **7-agent
+> 재설계**가 현재 진실원이다. 본 문서 본문의 "3계층 (Judgment/Search/FinalGuard)" 서술은
+> 진화의 출발점일 뿐 더 이상 production 기준이 아니다. 새 흐름은:
+>
+> ```
+> DialogueAgent → EntityResolverAgent → SearchPlannerAgent → RetrievalAgent
+>     → EvidenceCuratorAgent → AnswerAgent → CriticAgent
+> ```
+>
+> 권한 분리 원칙은 그대로지만 책임 분해 단위가 3 → 7로 세분화됐고, 세션은 단일
+> `current_context`가 아니라 3 평행 슬롯(`SessionState.current_subject`,
+> `published_manifest`, `focused_detail`)으로 관리된다.
+>
+> 이전 ADR-0018 텍스트는 역사 추적용으로 남겨두며, 코드 레벨 변경 사항은
+> [ADR-0019의 Migration 섹션](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md#migration-phase-11-시점에-완료)
+> 을 참조하라.
+>
+> ⚠️ 본문의 `JudgmentAgent` / `FinalGuard` / `LLMGenerator` / `apps/pipeline/workflow.py` 언급은
+> 모두 폐기된 모듈이다. 후속 모델 대응표는 ADR-0019 또는 README.md를 참조.
 
 ---
 

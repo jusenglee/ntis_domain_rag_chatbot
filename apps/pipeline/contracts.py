@@ -30,7 +30,11 @@ SearchStrategy = Literal[
     "subject_anchor",     # subject(person/org) anchor 강제 주입 후 hybrid
     "hybrid_search",      # 일반 hybrid 검색
     "detail_anchor",      # 단일 대상 상세 (limit=1)
+    "aggregate",          # Qdrant scroll → Python group_by count (stats 도구)
 ]
+
+# aggregate 도구의 group_by 축 (P0 stats — ADR-0019 후속 확장).
+AggregateBy = Literal["year", "lead_org", "tag", "perf_type"]
 
 SearchResultStatus = Literal["single", "multiple", "empty", "error"]
 
@@ -173,6 +177,9 @@ class SearchTask(BaseModel):
     limit: int = Field(default=10, ge=1, le=50)
     display_limit: int = Field(default=10, ge=1, le=50)
 
+    # aggregate 도구 전용 — group_by 축. strategy="aggregate"일 때만 의미가 있다.
+    aggregate_by: Optional[AggregateBy] = None
+
     # 자연어 보조 (드리프트 비교 대상 아님)
     retrieval_query: str = Field(default="", max_length=2000)
 
@@ -195,6 +202,10 @@ class SearchTask(BaseModel):
         # subject_anchor 전략은 subject가 있어야 함
         if self.strategy == "subject_anchor" and self.subject is None:
             raise ValueError("strategy=subject_anchor requires subject")
+
+        # aggregate 전략은 aggregate_by가 있어야 함
+        if self.strategy == "aggregate" and self.aggregate_by is None:
+            raise ValueError("strategy=aggregate requires aggregate_by")
 
         # display_limit <= limit
         if self.display_limit > self.limit:
@@ -268,73 +279,18 @@ class SearchResult(BaseModel):
 
 
 # ============================================================================
-# 3. JudgmentAgent 결정 계약
+# 3. ReferenceItem / ReferenceManifest (CriticAgent 출력 채널)
 # ============================================================================
-
-class DirectAnswer(BaseModel):
-    """JudgmentAgent가 검색 없이 즉시 답할 수 있다고 판단한 경우."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    text: str
-    reason: str = ""
-
-
-class Clarification(BaseModel):
-    """JudgmentAgent가 사용자에게 추가 질문이 필요하다고 판단한 경우."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    question: str
-    options: List[str] = Field(default_factory=list)
-    reason: str = ""
-
-
-class JudgmentDecision(BaseModel):
-    """JudgmentAgent의 최종 결정 (3가지 중 정확히 하나).
-
-    하나만 채워야 한다. 두 개 이상 채우면 검증 실패.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    search_task: Optional[SearchTask] = None
-    direct_answer: Optional[DirectAnswer] = None
-    clarification: Optional[Clarification] = None
-
-    @model_validator(mode="after")
-    def _validate_exactly_one(self) -> "JudgmentDecision":
-        filled = [bool(self.search_task), bool(self.direct_answer), bool(self.clarification)]
-        if sum(filled) != 1:
-            raise ValueError(
-                "JudgmentDecision must have exactly one of {search_task, direct_answer, clarification}"
-            )
-        return self
-
-    @property
-    def kind(self) -> Literal["search", "direct_answer", "clarification"]:
-        if self.search_task:
-            return "search"
-        if self.direct_answer:
-            return "direct_answer"
-        return "clarification"
-
-
-# ============================================================================
-# 4. LLM 생성 / FinalGuard 계약
-# ============================================================================
-
-class GeneratedAnswer(BaseModel):
-    """단일 LLM 생성 결과. FinalGuard 입력의 한 부분."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    text: str
-    model_key: str
-    latency_ms: float = 0.0
-    truncated: bool = False
-    stream_metrics: Dict[str, Any] = Field(default_factory=dict)
-
+#
+# 본 파일의 JudgmentDecision / DirectAnswer / Clarification / GeneratedAnswer /
+# FinalAnswer 모델은 7-agent 재설계(2026-05-19, Phase 11)에서 제거되었다.
+# 후속 모델 대응표:
+#   JudgmentDecision  → apps.pipeline.agents.contracts.DialogueIntent
+#   DirectAnswer      → DialogueIntent(kind="direct_answer", direct_text=...)
+#   Clarification     → DialogueIntent(kind="clarification", ...) /
+#                        GuardDecision(decision="clarify", ...)
+#   GeneratedAnswer   → apps.pipeline.agents.contracts.AnswerDraft
+#   FinalAnswer       → apps.pipeline.agents.contracts.GuardDecision
 
 class ReferenceItem(BaseModel):
     """ADR-0017의 published_rank 기반 출처 항목.
@@ -365,32 +321,8 @@ class ReferenceManifest(BaseModel):
     block_reason: Optional[str] = None
 
 
-class FinalAnswer(BaseModel):
-    """FinalGuard의 최종 결정. 답변 발행/명확화/내부오류 중 하나."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision: Literal["publish", "clarify", "internal_error"]
-    text: Optional[str] = None
-    reference_manifest: Optional[ReferenceManifest] = None
-    clarification: Optional[Clarification] = None
-    reasoning: str = ""
-    diagnostics: Dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate_decision_payload(self) -> "FinalAnswer":
-        if self.decision == "publish":
-            if not self.text:
-                raise ValueError("decision=publish requires text")
-            if not self.reference_manifest:
-                raise ValueError("decision=publish requires reference_manifest")
-        if self.decision == "clarify" and not self.clarification:
-            raise ValueError("decision=clarify requires clarification")
-        return self
-
-
 # ============================================================================
-# 5. 헬퍼: build_search_task
+# 4. 헬퍼: build_search_task
 # ============================================================================
 
 def build_search_task(
@@ -408,18 +340,22 @@ def build_search_task(
     limit: int = 10,
     display_limit: int = 10,
     collections: Optional[Sequence[Collection]] = None,
+    aggregate_by: Optional[AggregateBy] = None,
 ) -> SearchTask:
-    """JudgmentAgent가 쓰는 SearchTask 빌더.
+    """SearchPlannerAgent가 쓰는 SearchTask 빌더.
 
     전략(SearchStrategy)과 collections는 입력으로부터 자동 결정한다.
+    ``aggregate_by``가 주어지면 strategy="aggregate"로 강제.
     """
 
     ids = identifiers or IdentifierBundle()
     flt = filters or FilterBundle()
 
     # 전략 결정
-    if ids.has_any() and action == "detail":
-        strategy: SearchStrategy = "exact_lookup"
+    if aggregate_by is not None:
+        strategy: SearchStrategy = "aggregate"
+    elif ids.has_any() and action == "detail":
+        strategy = "exact_lookup"
     elif ids.has_any():
         strategy = "exact_lookup"
     elif subject is not None:
@@ -460,6 +396,7 @@ def build_search_task(
         collections=cols,  # type: ignore[arg-type]
         limit=limit,
         display_limit=display_limit,
+        aggregate_by=aggregate_by,
         retrieval_query=retrieval_query.strip(),
         request_id=request_id,
         turn_id=turn_id,

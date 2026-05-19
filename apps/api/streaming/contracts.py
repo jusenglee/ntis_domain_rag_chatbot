@@ -25,7 +25,6 @@ class StreamEvent:
 
     kind: Literal[
         "conversation",
-        "status",
         "answer.chunk",
         "reference.set",
         "done",

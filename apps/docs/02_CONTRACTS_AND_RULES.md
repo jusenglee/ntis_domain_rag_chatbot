@@ -1,8 +1,21 @@
 # 02 실행 계약과 전략 규칙 (Contracts & Rules)
 
-> **2026-05-18 갱신**: ADR-0018 권한분리 3계층 아키텍처 적용. 본 문서는 새 `apps.pipeline.contracts`
-> 모듈의 Pydantic 모델을 진실원으로 한다. 이전 `IntentContract`, `IntentPayloadV3`,
-> `QuestionAnalysisV3`, `HardContractV1`, `SoftStrategyHintsV1` 등은 폐기되었다.
+> **2026-05-19 갱신**: [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) 7-agent
+> 재설계 적용. 진실원은 다음 두 모듈이다:
+>
+> - `apps/pipeline/agents/contracts.py` — 신규 6개 계약 (`DialogueIntent`,
+>   `EntityResolution`, `SearchPlan`, `EvidenceBundle`, `AnswerDraft`, `GuardDecision`).
+>   모두 `frozen=True, extra="forbid"`.
+> - `apps/pipeline/contracts.py` — 재사용 계약 (`SearchTask`, `CanonicalEvidence`,
+>   `SearchResult`, `IdentifierBundle`, `SubjectAnchor`, `FilterBundle`, `ReferenceItem`,
+>   `ReferenceManifest`).
+>
+> 본문에서 언급되는 "JudgmentAgent / SearchAgent / FinalGuard" 경계는 7-agent로 재분해되었다.
+> 정확한 호출 경계는 ADR-0019의 Agent 표를 참조.
+>
+> ⚠️ 폐기된 모델: `JudgmentDecision`, `DirectAnswer`, `Clarification`(contracts.py 모델),
+> `GeneratedAnswer`, `FinalAnswer`. 후속 모델은 README.md "더 이상 사용하지 않는 키워드"
+> 섹션 또는 ADR-0019 참조.
 
 ---
 

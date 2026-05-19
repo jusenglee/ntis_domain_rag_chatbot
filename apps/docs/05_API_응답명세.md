@@ -1,9 +1,26 @@
 # API 응답 명세
 
 이 문서는 현재 `apps/api/routes.py` 기준의 HTTP/SSE 응답 계약만 정리한다.
-내부 실행 계약(SearchTask, SearchResult, FinalAnswer, canonical evidence)은 [`02_CONTRACTS_AND_RULES.md`](./02_CONTRACTS_AND_RULES.md)를 참고한다.
 
-> **2026-05-18 갱신**: ADR-0018 적용 후 라우트가 슬림 버전으로 재작성되었다. 폐기된 엔드포인트(`/query/debug`, `/metrics`, `/metrics/stream`, `/health/details`)는 더 이상 제공되지 않는다.
+> **2026-05-19 갱신**: [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) 7-agent
+> 재설계 적용. `/query` 응답 payload의 진단 키가 다음으로 교체되었다:
+>
+> | 폐기된 키 | 후속 키 |
+> |---|---|
+> | `judgment` | `dialogue_intent` (+ `entity_resolution`) |
+> | `search_task` | `search_plan` |
+> | `final_answer` | `guard_decision` (+ `evidence_bundle_view`) |
+>
+> SSE `StreamEvent.kind`는 4종만 유효: `conversation`, `answer.chunk`, `reference.set`, `done`.
+> 이전 `status` kind는 사용처 없이 남아 있어 [ADR-0019에서 제거됨](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md).
+>
+> **빈 질문**(`question == ""`)은 라우트에서 400으로 거부하지 않고 워크플로우에 위임 →
+> `DialogueAgent`가 `answer_kind="clarification"` 응답을 만든다.
+>
+> 내부 실행 계약은 [`02_CONTRACTS_AND_RULES.md`](./02_CONTRACTS_AND_RULES.md)와
+> [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md)를 참고하라.
+> 폐기된 엔드포인트(`/query/debug`, `/metrics`, `/metrics/stream`, `/health/details`)는
+> 그대로 폐기 상태.
 
 ## Source of Truth
 
