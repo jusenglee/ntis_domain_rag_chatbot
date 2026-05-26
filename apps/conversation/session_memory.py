@@ -23,9 +23,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
+
+_logger = logging.getLogger(__name__)
 
 from apps.conversation.view_state import (
     ActiveScope,
@@ -116,6 +119,30 @@ class ClarificationContext(BaseModel):
     followup_rights: FollowupRights = Field(default_factory=FollowupRights)
 
 
+class ProjectGroupAnchor(BaseModel):
+    """pjt_no 기준 동일 과제 그룹 앵커. 확정된 pjt_no 없이는 생성 불가."""
+    pjt_no: str
+    title: str
+    pjt_ids: List[str] = Field(default_factory=list)
+    years: List[int] = Field(default_factory=list)
+    lead_researcher: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_pjt_no(self) -> "ProjectGroupAnchor":
+        if not self.pjt_no:
+            raise ValueError("ProjectGroupAnchor requires non-empty pjt_no")
+        return self
+
+
+class GroupAnchorContext(BaseModel):
+    """resolve_project_title 성공 후 발행되는 pjt_no 그룹 앵커 컨텍스트."""
+    context_type: Literal["group_anchor"] = "group_anchor"
+    anchor: ProjectGroupAnchor
+    followup_rights: FollowupRights = Field(
+        default_factory=lambda: FollowupRights(refinement_allowed=True)
+    )
+
+
 CurrentContext = Annotated[
     Union[
         EmptyContext,
@@ -123,6 +150,7 @@ CurrentContext = Annotated[
         DetailAnchorContext,
         SubjectQueryContext,
         ClarificationContext,
+        GroupAnchorContext,
     ],
     Field(discriminator="context_type"),
 ]
@@ -151,7 +179,8 @@ def load_session_memory(payload: Any) -> SessionMemory:
     if isinstance(payload, dict):
         try:
             return SessionMemory.model_validate(payload)
-        except Exception:
+        except Exception as exc:
+            _logger.warning("SESSION_MEMORY.PARSE_FAILED: invalid session payload, resetting to empty. error=%s", exc)
             return empty_session_memory()
     return empty_session_memory()
 
@@ -1044,35 +1073,55 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
             ),
         )
         mentions = [recent_mention_from_focus_entity(focus, source="detail_focus")]
-        return view_state.model_copy(
-            update={
-                "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
-                "recent_mentions": mentions,
-                "last_query_contract": {
-                    "turn_kind": "subject_query",
-                    "context_kind": context.result_kind,
-                    "subject_kind": context.subject_kind,
-                    "subject_name": context.subject_name,
-                    "answer_publishability": answer_publishability,
-                    "publication_status": publication_status or answer_publishability,
-                    "subject_publication_status": publication_status or "answer_published",
-                    "subject_identity_status": context.identity_status,
-                    "subject_identity_candidate_count": _identity_candidate_count(
-                        context.subject_kind,
-                        context.subject_ids_map,
-                    ),
-                    "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
-                    "subject_continuity_retained": _subject_continuity_retained(context),
-                    "followup_rights": "none",
-                    "refinement_allowed": refinement_allowed,
-                    "subject_refinement_allowed": refinement_allowed,
-                    "current_subject_confidence": _current_subject_confidence(
-                        publication_status,
-                        context.identity_status,
-                    ),
-                },
-            }
-        )
+        # 차단 또는 보류 상태에서도 manifest 자체는 살려서 후속 turn에 ordinal 참조 가능하도록 view_state에 펼친다.
+        # ordinal_allowed 자체는 followup_rights 에서 별도 결정되며, manifest 항목 ID 가시성은 별 신호다.
+        manifest_snapshot = context.result_manifest if isinstance(context.result_manifest, DisplaySnapshot) else None
+        manifest_visible = _snapshot_visible_count(manifest_snapshot) if manifest_snapshot is not None else 0
+        ordinal_allowed_in_subject = bool(context.followup_rights.ordinal_allowed)
+        update_fields: Dict[str, Any] = {
+            "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
+            "recent_mentions": mentions,
+            "last_query_contract": {
+                "turn_kind": "subject_query",
+                "context_kind": context.result_kind,
+                "subject_kind": context.subject_kind,
+                "subject_name": context.subject_name,
+                "answer_publishability": answer_publishability,
+                "publication_status": publication_status or answer_publishability,
+                "subject_publication_status": publication_status or "answer_published",
+                "subject_identity_status": context.identity_status,
+                "subject_identity_candidate_count": _identity_candidate_count(
+                    context.subject_kind,
+                    context.subject_ids_map,
+                ),
+                "subject_identity_resolved": _subject_identity_resolved(context.identity_status),
+                "subject_continuity_retained": _subject_continuity_retained(context),
+                "followup_rights": "ordinal_allowed" if ordinal_allowed_in_subject else "none",
+                "refinement_allowed": refinement_allowed,
+                "subject_refinement_allowed": refinement_allowed,
+                "current_subject_confidence": _current_subject_confidence(
+                    publication_status,
+                    context.identity_status,
+                ),
+                "subject_manifest_visible_count": int(manifest_visible),
+                "subject_manifest_ordinal_allowed": ordinal_allowed_in_subject,
+            },
+        }
+        if manifest_snapshot is not None and manifest_visible > 0:
+            list_mentions = [
+                recent_mention_from_display_item(item, source="list_snapshot", turn_index=idx)
+                for idx, item in enumerate(manifest_snapshot.items[:12])
+            ]
+            update_fields["visible_answer_manifest"] = manifest_snapshot
+            update_fields["active_scope"] = ActiveScope(
+                result_set=manifest_snapshot,
+                focus=focus,
+                scope_kind="list",
+            )
+            update_fields["active_result_set_kind"] = context.result_kind
+            update_fields["active_result_view_id"] = manifest_snapshot.view_id
+            update_fields["recent_mentions"] = [*mentions, *list_mentions]
+        return view_state.model_copy(update=update_fields)
 
     if isinstance(context, DetailAnchorContext):
         return view_state.model_copy(
@@ -1084,6 +1133,28 @@ def view_state_from_current_context(memory: Optional[SessionMemory]) -> Conversa
                     "context_kind": context.anchor.kind,
                     "answer_publishability": "publishable",
                     "followup_rights": "none",
+                },
+            }
+        )
+
+    if isinstance(context, GroupAnchorContext):
+        focus = FocusEntity(
+            kind="project",
+            source="group_anchor_context",
+            title_text=context.anchor.title,
+            pjt_no=context.anchor.pjt_no,
+        )
+        refinement_allowed = bool(context.followup_rights.refinement_allowed)
+        return view_state.model_copy(
+            update={
+                "active_scope": ActiveScope(focus=focus, scope_kind="detail"),
+                "recent_mentions": [recent_mention_from_focus_entity(focus, source="detail_focus")],
+                "last_query_contract": {
+                    "turn_kind": "group_anchor",
+                    "context_kind": "project",
+                    "answer_publishability": "publishable",
+                    "followup_rights": "refinement_allowed" if refinement_allowed else "none",
+                    "refinement_allowed": refinement_allowed,
                 },
             }
         )

@@ -204,6 +204,8 @@
 
 `ReferenceItem`의 외부 contract는 그대로 `tag` / `id` / `title`만 사용한다. 다만 route 내부적으로 `canonical_evidence`를 fallback source로 쓸 때는 raw qdrant payload가 아니므로, `tag`가 없으면 `source_type` known mapping 또는 `pjt_id -> project` bridge 규칙으로만 `tag`를 복원한다.
 
+정상 RAG 경로에서 `selected_answer_artifact.references`는 최종 프롬프트에 실제로 포함된 evidence packer의 `refs` 순서를 우선 소유한다. 따라서 `reference.set.references`의 기본 순서와 개수는 raw/canonical 후보 전체가 아니라 프롬프트 JSON 항목(`identity.rank`)과 lockstep인 prompt refs를 따른다. `canonical_evidence`와 context hit는 artifact reference가 없을 때만 fallback source다.
+
 ```json
 {
   "tag": "IRD_NAI_PJT_INFO",
@@ -217,16 +219,20 @@
 | `tag` | string | 프론트엔드가 그대로 소비하는 raw tag |
 | `id` | string | 프론트엔드가 그대로 소비하는 식별자 |
 | `title` | string | 프론트엔드가 그대로 소비하는 제목 |
+| `invalid` | boolean | optional. `true`이면 필수 reference 필드가 부족한 후보를 버리지 않고 실은 항목 |
+| `invalid_reason` | string | optional. `missing_tag`, `missing_project_or_result_id`, `missing_title` 등 |
+| `candidate_source` | string | optional. invalid 후보의 수집 단계 (`artifact_references`, `canonical_evidence`, `documents_used`) |
 
 - route는 reference를 `selected_answer_artifact.references -> canonical_evidence -> context hit` 순서로 복구한다.
 - route는 `tag`, `title`, `id`를 정규화하지 않는다. 프론트엔드에 전달할 최종 `ReferenceItem`만 구성한다.
 - qdrant top-level reference 추출 규칙은 아래와 같다.
-  - `tag`: 최상위 `tag`
-  - `title`: 최상위 `title1` -> `title2` -> `title_text`
-  - `id`: 최상위 `pjt_id` -> `rst_id`
-- route 내부 호환성 때문에 이미 `title`/`id` 형태로 들어온 artifact reference도 마지막 fallback으로 읽을 수 있지만, qdrant 원본 기준의 우선순위는 위 규칙이 source of truth다.
-- invalid reference payload는 fail-open으로 드롭되며, 현재 소스에서 유효한 reference가 하나도 없을 때만 다음 소스로 fallback한다.
-- `tag`, `title`, `id` 중 하나라도 비어 있으면 해당 candidate는 발행하지 않는다.
+  - `tag`: 최상위 `tag` -> `source_table`
+  - `title`: 최상위 `title1` -> `title2` -> `title_text` -> `title`
+  - `id`: `tag=IRD_NAI_PJT_INFO`이면 최상위 `pjt_id` -> `id` -> `doc_id` -> `rst_id`; 그 외에는 `rst_id` -> `pjt_id` -> `id` -> `doc_id`
+- route 내부 호환성 때문에 prompt refs처럼 이미 `tag`/`source_table`, `title`, `id`/`doc_id` 형태로 들어온 artifact reference도 읽을 수 있지만, 프로젝트 tag에서는 `pjt_id` 축이 우선이다.
+- invalid reference payload는 더 이상 discard하지 않는다. route는 `REFERENCE.INVALID_PAYLOAD` 로그를 남긴 뒤 원본 candidate의 JSON-safe copy를 `reference.set.references`에 포함한다.
+- invalid 항목은 `invalid: true`, `invalid_reason`, `candidate_source`를 포함한다. 클라이언트는 이 항목을 일반 출처 링크와 동일하게 처리하면 안 된다.
+- fallback은 현재 source에서 emit된 reference가 하나도 없을 때만 다음 source로 이동한다. invalid 항목도 emit된 reference로 계산한다.
 
 ---
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from apps.evidence.citation_registry import CitationRegistry
+    from apps.evidence.source_reference import SourceReference
 
 
 def _normalize_records(value: Any) -> list[dict[str, Any]]:
@@ -30,9 +34,12 @@ class ToolResult:
     status: str
     rows: list[dict[str, Any]] = field(default_factory=list)
     canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
     render_profile: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] = field(default_factory=dict)
     latency_ms: float = 0.0
+    source_refs: list["SourceReference"] = field(default_factory=list)
+    citation_registry: "CitationRegistry | None" = None
 
 
 def build_tool_result(
@@ -44,14 +51,20 @@ def build_tool_result(
 ) -> ToolResult:
     rows: list[dict[str, Any]] = []
     canonical_evidence: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
     render_profile: dict[str, Any] = dict(default_render_profile or {})
     diagnostics: dict[str, Any] = {}
 
+    source_refs_passthrough: list = []
+    citation_registry_passthrough: Any = None
     if isinstance(raw_result, dict):
         rows = _normalize_records(raw_result.get("documents") or raw_result.get("rows") or [])
         canonical_evidence = _normalize_records(
             raw_result.get("canonical_evidence") or raw_result.get("canonical") or []
         )
+        references = _normalize_records(raw_result.get("references") or raw_result.get("refs") or [])
+        source_refs_passthrough = list(raw_result.get("source_refs") or [])
+        citation_registry_passthrough = raw_result.get("citation_registry")
         if not canonical_evidence and rows:
             canonical_evidence = list(rows)
         render_profile = dict(raw_result.get("render_profile") or default_render_profile or {})
@@ -83,7 +96,10 @@ def build_tool_result(
         status=status,
         rows=rows,
         canonical_evidence=canonical_evidence,
+        references=references,
         render_profile=render_profile,
         diagnostics=diagnostics,
         latency_ms=float(latency_ms),
+        source_refs=list(source_refs_passthrough),
+        citation_registry=citation_registry_passthrough,
     )

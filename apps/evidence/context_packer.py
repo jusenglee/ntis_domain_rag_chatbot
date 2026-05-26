@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
 
 from apps.evidence.context_compression_service import compress_many_sync
+from apps.evidence.source_reference import SourceReference
 from apps.platform.settings import (
     RAG_CONTEXT_COMPRESS_MAX_DOCS,
     RAG_EVIDENCE_EXACT_VERIFY_FLOOR,
@@ -22,6 +23,7 @@ class PromptUnitCandidate:
     ref: Dict[str, Any]
     parent_anchor_key: str = ""
     turn_id: str = ""
+    source_ref: Optional[SourceReference] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -39,6 +41,7 @@ class PackedContextResult:
     dropped_by_budget: int
     compressed_count: int
     lineages: List[Dict[str, Any]]
+    source_refs: List[SourceReference] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -81,6 +84,7 @@ class BudgetedContextPacker:
         *,
         prompt_units: List[Dict[str, Any]],
         refs: List[Dict[str, Any]],
+        source_refs: List[SourceReference],
         candidate: PromptUnitCandidate,
         provisional_used_tokens: int,
         force_exact_verify: bool = False,
@@ -96,13 +100,22 @@ class BudgetedContextPacker:
                 return False, provisional_used_tokens
         prompt_units.append(candidate.envelope)
         refs.append(candidate.ref)
+        if candidate.source_ref is not None:
+            source_refs.append(candidate.source_ref)
         return True, provisional_after
 
-    def _finalize_context(self, prompt_units: List[Dict[str, Any]], refs: List[Dict[str, Any]]) -> tuple[str, int]:
+    def _finalize_context(
+        self,
+        prompt_units: List[Dict[str, Any]],
+        refs: List[Dict[str, Any]],
+        source_refs: List[SourceReference],
+    ) -> tuple[str, int]:
         while prompt_units and self._exact_used_tokens(prompt_units) > self.budget_tokens:
             prompt_units.pop()
             if refs:
                 refs.pop()
+            if source_refs:
+                source_refs.pop()
         context = serialize_json(prompt_units)
         used_tokens = self._exact_used_tokens(prompt_units)
         return context, used_tokens
@@ -115,6 +128,7 @@ class BudgetedContextPacker:
     ) -> PackedContextResult:
         prompt_units: List[Dict[str, Any]] = []
         refs: List[Dict[str, Any]] = []
+        source_refs: List[SourceReference] = []
         overflow: List[PromptUnitCandidate] = []
         provisional_used_tokens = 0
         dropped_by_budget = 0
@@ -123,6 +137,7 @@ class BudgetedContextPacker:
             inserted, provisional_used_tokens = self._try_insert(
                 prompt_units=prompt_units,
                 refs=refs,
+                source_refs=source_refs,
                 candidate=candidate,
                 provisional_used_tokens=provisional_used_tokens,
             )
@@ -162,10 +177,12 @@ class BudgetedContextPacker:
                     ref=candidate.ref,
                     parent_anchor_key=candidate.parent_anchor_key,
                     turn_id=candidate.turn_id,
+                    source_ref=candidate.source_ref,
                 )
                 inserted, provisional_used_tokens = self._try_insert(
                     prompt_units=prompt_units,
                     refs=refs,
+                    source_refs=source_refs,
                     candidate=compressed_candidate,
                     provisional_used_tokens=provisional_used_tokens,
                     force_exact_verify=True,
@@ -178,7 +195,7 @@ class BudgetedContextPacker:
         else:
             dropped_by_budget += len(overflow)
 
-        context, used_tokens = self._finalize_context(prompt_units, refs)
+        context, used_tokens = self._finalize_context(prompt_units, refs, source_refs)
         return PackedContextResult(
             context=context,
             prompt_units=list(prompt_units),
@@ -190,4 +207,5 @@ class BudgetedContextPacker:
             dropped_by_budget=int(dropped_by_budget),
             compressed_count=compressed_count,
             lineages=lineages,
+            source_refs=list(source_refs),
         )

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apps.platform.runtime_strategy_policy import RECOVERY_POLICIES, RuntimeStrategyPolicy, resolve_runtime_strategy_policy
 from apps.retrieval.tools.project_tools import fetch_project_detail, search_projects_by_text
 from apps.retrieval.tools.route_search_tools import search_route_by_text
 from apps.retrieval.tools.relation_tools import fetch_project_performance
 from apps.retrieval.tools.types import ToolResult
+
+if TYPE_CHECKING:
+    from apps.evidence.citation_registry import CitationRegistry
+    from apps.evidence.source_reference import SourceReference
 
 
 @dataclass(frozen=True)
@@ -23,10 +27,13 @@ class ExecutionInput:
 class ExecutionOutcome:
     docs: list[dict[str, Any]] = field(default_factory=list)
     canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
     render_profile: dict[str, Any] = field(default_factory=dict)
     execution_trace: list[dict[str, Any]] = field(default_factory=list)
     no_result_message: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    source_refs: list["SourceReference"] = field(default_factory=list)
+    citation_registry: "CitationRegistry | None" = None
 
 
 _TOOL_REGISTRY = {
@@ -68,6 +75,20 @@ class ExecutionManager:
                 ],
                 diagnostics={"reason": "no_runtime_strategy_policy"},
             )
+
+        # DETAIL_COUNT_NORMALIZATION_GUARD: detail 액션은 limit=1 강제
+        _qa_action = str(getattr(execution_input.question_analysis, "action", "") or "").strip().lower()
+        _qa_output_type = str(getattr(execution_input.question_analysis, "output_type", "") or "").strip().lower()
+        if _qa_action == "detail" or _qa_output_type == "detail":
+            _req_limit = int(execution_input.request_meta.get("limit") or 1)
+            if _req_limit > 1:
+                execution_input = ExecutionInput(
+                    question_analysis=execution_input.question_analysis,
+                    retrieval_query=execution_input.retrieval_query,
+                    target_cols=execution_input.target_cols,
+                    request_meta={**execution_input.request_meta, "limit": 1},
+                    collaborator_bundle=execution_input.collaborator_bundle,
+                )
 
         if policy.name == "LOOKUP_MISSING_RECOVERY":
             return self._execute_lookup_missing_recovery(execution_input, policy)
@@ -164,6 +185,26 @@ class ExecutionManager:
                 diagnostics={"recovery_blocked": True, "reason": "exact_id_no_relax"},
             )
 
+        # detail 액션은 text search 복구 금지 — 없는 항목을 유사 결과로 치환해서는 안 됨
+        _output_type = str(getattr(qa, "output_type", "") or "").strip().lower()
+        _action = str(getattr(qa, "action", "") or "").strip().lower()
+        if _action == "detail" or _output_type == "detail":
+            trace.append(
+                {
+                    "step": 2,
+                    "phase": "policy_gate",
+                    "policy": policy.name,
+                    "tool_name": policy.secondary,
+                    "status": "blocked",
+                    "reason": "detail_no_search_recovery",
+                }
+            )
+            return ExecutionOutcome(
+                execution_trace=trace,
+                no_result_message="요청하신 항목을 찾지 못했습니다.",
+                diagnostics={"recovery_blocked": True, "reason": "detail_no_search_recovery"},
+            )
+
         secondary_result = _TOOL_REGISTRY[policy.secondary](
             query=str(execution_input.retrieval_query or project_id),
             filters=filters if policy.inherit_filters else {},
@@ -198,10 +239,13 @@ class ExecutionManager:
             return ExecutionOutcome(
                 docs=list(secondary_result.rows),
                 canonical_evidence=list(secondary_result.canonical_evidence),
+                references=list(secondary_result.references),
                 render_profile=dict(secondary_result.render_profile or {}),
                 execution_trace=trace,
                 no_result_message=None,
                 diagnostics=diagnostics,
+                source_refs=list(secondary_result.source_refs or []),
+                citation_registry=getattr(secondary_result, "citation_registry", None),
             )
 
         no_result_message = _resolve_no_result_message(
@@ -654,10 +698,13 @@ def _tool_result_to_outcome(
     return ExecutionOutcome(
         docs=list(result.rows),
         canonical_evidence=list(result.canonical_evidence),
+        references=list(result.references),
         render_profile=dict(result.render_profile or {}),
         execution_trace=list(trace),
         no_result_message=message,
         diagnostics=diagnostics,
+        source_refs=list(result.source_refs or []),
+        citation_registry=getattr(result, "citation_registry", None),
     )
 
 

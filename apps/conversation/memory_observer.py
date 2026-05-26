@@ -89,6 +89,7 @@ def log_memory_snapshot(
     history_turns: Optional[int] = None,
     view_state: Any = None,
     note: Optional[str] = None,
+    kv_store: Any = None,
 ) -> None:
     """MEMORY.SNAPSHOT 이벤트를 방출한다 (load/save 시점 호출용)."""
     try:
@@ -109,6 +110,7 @@ def log_memory_snapshot(
                 subject_index_size = len(subject_index)
             elif isinstance(subject_index, (list, tuple)):
                 subject_index_size = len(subject_index)
+        kv_backend = str(getattr(kv_store, "backend_name", "") or "").strip() or None
         log_event(
             "MEMORY.SNAPSHOT",
             request_id=request_id,
@@ -126,6 +128,7 @@ def log_memory_snapshot(
             view_recent_mentions=recent_mentions_count,
             view_manifest_items=manifest_items,
             view_subject_index_size=subject_index_size,
+            kv_backend=kv_backend,
             note=note,
         )
     except Exception:
@@ -169,36 +172,6 @@ def log_fact_followup_miss(
         pass
 
 
-def log_context_router_transition(
-    *,
-    request_id: Optional[str],
-    conversation_id: Optional[str],
-    from_source: str,
-    to_source: str,
-    reason: str,
-    final_status: Optional[str] = None,
-    final_confidence: Optional[float] = None,
-    recent_mention_count: Optional[int] = None,
-) -> None:
-    """CONTEXT.ROUTER.FALLBACK 이벤트를 방출한다.
-
-    - from_source: 시도 기원 (heuristic / llm)
-    - to_source: 최종 채택 (heuristic / llm)
-    - reason: heuristic_ambiguous | heuristic_unresolved | low_confidence_fallback | llm_error_fallback:<Type>
-    """
-    try:
-        log_event(
-            "CONTEXT.ROUTER.FALLBACK",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            from_source=_as_text(from_source) or "unknown",
-            to_source=_as_text(to_source) or "unknown",
-            reason=_as_text(reason) or "unknown",
-            final_status=final_status,
-            final_confidence=(
-                None if final_confidence is None else round(float(final_confidence or 0.0), 3)
-            ),
-            recent_mention_count=recent_mention_count,
-        )
-    except Exception:
-        pass
+# Removed per ADR-0015 Stage 4: `log_context_router_transition` emitted the
+# `CONTEXT.ROUTER.FALLBACK` event for the legacy `context_router` heuristic↔LLM
+# fallback path. With `context_router` deleted, no caller remains.

@@ -150,14 +150,21 @@ def build_prompt_reference(
     facts = canonical_item.get("facts") if isinstance(canonical_item.get("facts"), dict) else {}
     urls = payload.get("urls") if isinstance(payload.get("urls"), list) else []
     systems = payload.get("systems") if isinstance(payload.get("systems"), list) else []
-    return {
+    tag = _first_non_empty(facts.get("tag"), payload.get("tag"))
+    source_type = _first_non_empty(canonical_item.get("source_type"), payload.get("source_type"))
+    ref = {
+        "tag": tag,
+        "id": _first_non_empty(ids.get("rst_id"), ids.get("pjt_id"), ids.get("doc_id"), payload.get("id")),
         "doc_id": _first_non_empty(ids.get("doc_id"), payload.get("doc_id"), payload.get("id")),
         "title": _first_non_empty(facts.get("title"), payload.get("title_text"), payload.get("title1"), payload.get("title2")),
         "score": float(final_score),
         "urls": list(urls),
         "systems": list(systems),
-        "source_table": _first_non_empty(facts.get("tag"), payload.get("tag")),
+        "source_table": tag,
     }
+    if source_type:
+        ref["source_type"] = source_type
+    return ref
 
 
 def build_prompt_evidence_envelope(

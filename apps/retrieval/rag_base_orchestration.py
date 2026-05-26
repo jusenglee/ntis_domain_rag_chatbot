@@ -78,6 +78,7 @@ class BaseFilterPolicyInputs:
     lookup_filter_enabled: bool
     title_filter_server_applied: bool
     planner_org_filter_present: bool
+    anchor_strict_conf_ok: bool
     org_role: Optional[str]
     org_terms: List[str]
     people_terms: List[str]
@@ -232,6 +233,7 @@ def execute_base_orchestration(
         lookup_filter_enabled=filter_inputs.lookup_filter_enabled,
         title_filter_server_applied=filter_inputs.title_filter_server_applied,
         planner_org_filter_present=filter_inputs.planner_org_filter_present,
+        anchor_strict_conf_ok=filter_inputs.anchor_strict_conf_ok,
         org_role=filter_inputs.org_role,
         org_terms=list(filter_inputs.org_terms or []),
         people_terms=list(filter_inputs.people_terms or []),
