@@ -57,7 +57,7 @@ from apps.pipeline.agents import (
     SessionStateAdapter,
     SubjectSlot,
 )
-from apps.pipeline.contracts import ReferenceManifest
+from apps.pipeline.contracts import CanonicalEvidence, ReferenceManifest, SearchResult
 from apps.pipeline.log_helpers import preview, short_id
 from apps.pipeline.session_store import load_pipeline_session, save_pipeline_session
 
@@ -191,6 +191,7 @@ def _make_node_search_planner(deps: AgentPipelineDeps):
             resolution=state.entity_resolution,
             request_id=state.request_id,
             turn_id=state.turn_id,
+            session=state.session_state,
         )
         latency = (time.perf_counter() - t0) * 1000.0
         if plan is None:
@@ -216,9 +217,31 @@ def _make_node_retrieval(deps: AgentPipelineDeps):
     async def node_retrieval(state: AgentPipelineState) -> Dict[str, Any]:
         if state.search_plan is None:
             return {}
+        # P0-B 캐싱: 단일 task + 단일 식별자 + focused_detail 캐시 hit → SearchAgent skip.
+        cached = _try_cached_detail(plan=state.search_plan, session_state=state.session_state)
+        if cached is not None:
+            logger.info(
+                f"[retrieval] req={short_id(state.request_id)} CACHE_HIT "
+                f"identity={cached.evidences[0].identity if cached.evidences else 'n/a'} "
+                f"skipped_qdrant_call=True"
+            )
+            return {
+                "search_result": cached,
+                "latencies": {"retrieval_agent": 0.0},
+            }
         t0 = time.perf_counter()
         result = await deps.retrieval_agent.execute(state.search_plan)
         latency = (time.perf_counter() - t0) * 1000.0
+        # ask_similar: anchor 자신은 결과에서 제외 (focused_detail.cached_ids 일치 evidence 제거).
+        if (
+            state.search_plan is not None
+            and state.search_plan.plan_reason == "ask_similar"
+            and state.session_state is not None
+            and state.session_state.has_focused_detail()
+        ):
+            result = _exclude_anchor_self(
+                result=result, anchor_ids=state.session_state.focused_detail.cached_ids or {}
+            )
         logger.info(
             f"[retrieval] req={short_id(state.request_id)} status={result.status} "
             f"evidence_n={len(result.evidences)} total_hits={result.total_hits} "
@@ -305,7 +328,11 @@ def _make_node_critic(deps: AgentPipelineDeps):
             update["repair_attempted"] = True
         # publish 시 artifact 즉시 생성
         if decision.decision == "publish":
-            artifact = _make_publish_artifact(decision=decision, draft=state.answer_draft)
+            artifact = _make_publish_artifact(
+                decision=decision,
+                draft=state.answer_draft,
+                bundle=state.evidence_bundle,
+            )
             update["answer_artifact"] = artifact
             update["final_answer_text"] = artifact.text
         logger.info(
@@ -391,6 +418,39 @@ async def node_emit_clarification(state: AgentPipelineState) -> Dict[str, Any]:
     return {"answer_artifact": artifact, "final_answer_text": text}
 
 
+async def node_emit_children_list(state: AgentPipelineState) -> Dict[str, Any]:
+    """ask_children 즉답 노드 — 검색 없이 focused_detail의 child_entities로 답변.
+
+    조건:
+        - session_state.focused_detail이 있음
+        - focused_detail에 child_entities (참여연구자/참여기관/연계성과) 캐시됨
+
+    답변 형식: 글머리표 + 이름·역할·소속. raw person_no/org_id는 노출하지 않음 (P1-2 정직성 유지).
+    """
+    rid = short_id(state.request_id)
+    text = _build_children_list_text(session_state=state.session_state)
+    if state.stream_emitter is not None and text:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key="children_list",
+            )
+        )
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="direct_answer",
+        references=[],
+        source_refs=[],
+        meta={"kind": "ask_children_short_circuit"},
+    )
+    logger.info(
+        f"[emit_children_list] req={rid} chars={len(text)} preview={preview(text, limit=80)!r}"
+    )
+    return {"answer_artifact": artifact, "final_answer_text": text}
+
+
 async def node_emit_meta_answer(state: AgentPipelineState) -> Dict[str, Any]:
     """ask_meta 즉답 노드 — 검색 없이 manifest/focused_detail의 tag·axis로 분류 답변 생성.
 
@@ -428,7 +488,16 @@ async def node_emit_meta_answer(state: AgentPipelineState) -> Dict[str, Any]:
 
 
 async def node_emit_internal_error(state: AgentPipelineState) -> Dict[str, Any]:
-    text = "내부 오류로 답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    reason = "unknown"
+    error_code = "pipeline_internal_error"
+    if state.guard_decision is not None and state.guard_decision.decision == "internal_error":
+        reason = state.guard_decision.error_reason or state.guard_decision.reasoning or reason
+        error_code = state.guard_decision.error_code or error_code
+    elif state.search_result is not None and state.search_result.status == "error":
+        reason = f"search_error:{state.search_result.error_code}"
+        error_code = state.search_result.error_code or error_code
+    # error_code별 사용자 친화 메시지 + retryable 결정
+    text, retryable = _user_facing_error_message(error_code=error_code, reason=reason)
     if state.stream_emitter is not None:
         await state.stream_emitter.publish(
             StreamEvent(
@@ -438,15 +507,7 @@ async def node_emit_internal_error(state: AgentPipelineState) -> Dict[str, Any]:
                 model_key="internal_error",
             )
         )
-    reason = "unknown"
-    error_code = "pipeline_internal_error"
-    if state.guard_decision is not None and state.guard_decision.decision == "internal_error":
-        reason = state.guard_decision.error_reason or state.guard_decision.reasoning or reason
-        error_code = state.guard_decision.error_code or error_code
-    elif state.search_result is not None and state.search_result.status == "error":
-        reason = f"search_error:{state.search_result.error_code}"
-        error_code = state.search_result.error_code or error_code
-    error_meta = ErrorArtifact(error_code=error_code, reason=reason, retryable=False)
+    error_meta = ErrorArtifact(error_code=error_code, reason=reason, retryable=retryable)
     artifact = AnswerArtifact(
         text=text,
         answer_kind="error",
@@ -455,9 +516,47 @@ async def node_emit_internal_error(state: AgentPipelineState) -> Dict[str, Any]:
         source_refs=[],
     )
     logger.warning(
-        f"[emit_internal_error] req={short_id(state.request_id)} reason={reason!r}"
+        f"[emit_internal_error] req={short_id(state.request_id)} reason={reason!r} "
+        f"error_code={error_code!r} retryable={retryable}"
     )
     return {"answer_artifact": artifact, "final_answer_text": text}
+
+
+def _user_facing_error_message(*, error_code: str, reason: str) -> tuple[str, bool]:
+    """error_code별 사용자 친화 메시지 + 재시도 가능 여부.
+
+    Returns:
+        (text, retryable)
+    """
+    code = (error_code or "").lower()
+    if "timeout" in code or "deadline" in code:
+        return (
+            "검색이 너무 오래 걸려 응답을 받지 못했습니다. "
+            "조건을 좀 더 좁혀(예: 연도 범위 축소, 단일 키워드) 다시 시도해 주세요.",
+            True,
+        )
+    if "qdrant" in code or "search_dispatch_failed" in code or "all_tasks_failed" in code:
+        return (
+            "검색 시스템이 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해 주세요. "
+            "문제가 지속되면 운영팀에 알려주세요.",
+            True,
+        )
+    if "empty_generation" in code:
+        return (
+            "답변 모델이 응답을 생성하지 못했습니다. 질문을 조금 더 구체적으로 표현해 "
+            "다시 시도해 주세요.",
+            True,
+        )
+    if "llm" in code or "model" in code:
+        return (
+            "답변 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+            True,
+        )
+    # 기본
+    return (
+        "내부 오류로 답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        False,
+    )
 
 
 # ============================================================================
@@ -513,12 +612,35 @@ async def node_save_session(state: AgentPipelineState) -> Dict[str, Any]:
 
         # 2) view별 ManifestSlot / FocusedDetailSlot 갱신 분기
         if view == "single_detail" and manifest is not None and manifest.items:
-            # detail은 manifest를 덮어쓰지 않고 focused_detail에 anchor만 저장.
+            # detail은 manifest를 덮어쓰지 않고 focused_detail에 anchor + evidence 캐시 저장.
             anchor = _build_focus_entity_from_manifest(manifest=manifest, state=state)
             if anchor is not None:
-                state_obj = state_obj.with_focused_detail(
-                    FocusedDetailSlot(anchor=anchor, focused_turn_id=state.turn_id)
+                # evidence 본문 캐싱 (P0-B + ask_children 즉답).
+                evidence = (
+                    state.evidence_bundle.items[0]
+                    if state.evidence_bundle and state.evidence_bundle.items
+                    else None
                 )
+                slot_kwargs: Dict[str, Any] = {
+                    "anchor": anchor,
+                    "focused_turn_id": state.turn_id,
+                }
+                if evidence is not None:
+                    slot_kwargs.update(
+                        {
+                            "title": evidence.title or None,
+                            "summary": evidence.summary or None,
+                            "facts": dict(evidence.facts or {}),
+                            "roles": {k: list(v) for k, v in (evidence.roles or {}).items()},
+                            "child_entities": [
+                                dict(e) for e in (evidence.child_entities or []) if isinstance(e, dict)
+                            ],
+                            "cached_ids": dict(evidence.ids or {}),
+                            "cached_tag": evidence.tag,
+                            "cached_source_type": evidence.source_type,
+                        }
+                    )
+                state_obj = state_obj.with_focused_detail(FocusedDetailSlot(**slot_kwargs))
         elif view in {"list_compact", "subject_activity", "stats_summary", "comparison_table"}:
             # 새 list publish — manifest 갱신 + 직전 focused_detail 클리어 (stale).
             if manifest is not None and manifest.items:
@@ -588,6 +710,9 @@ def route_after_search_planner(state: AgentPipelineState) -> str:
         # ask_meta는 검색 없이 즉답 — manifest item의 tag/axis로 분류 답변 생성.
         if intent is not None and intent.kind == "ask_meta":
             return "emit_meta_answer"
+        # ask_children도 즉답 — focused_detail.child_entities 캐시 활용.
+        if intent is not None and intent.kind == "ask_children":
+            return "emit_children_list"
         # 그 외 plan=None(DialogueAgent가 search/detail로 분류했지만 query 부재 등) → clarify.
         return "emit_clarification"
     return "retrieval_agent"
@@ -618,19 +743,37 @@ def route_after_critic(state: AgentPipelineState) -> str:
 # Helpers
 # ============================================================================
 
-def _make_publish_artifact(*, decision: Any, draft: Any) -> AnswerArtifact:
+def _make_publish_artifact(
+    *,
+    decision: Any,
+    draft: Any,
+    bundle: Optional[Any] = None,
+) -> AnswerArtifact:
+    """ReferenceManifest + Bundle → AnswerArtifact.
+
+    references[N]에 evidence.score를 첨부해 운영 UI가 신뢰도 표시 가능.
+    score는 published_rank ↔ snapshot_rank 매핑으로 EvidenceBundle.items에서 추출.
+    """
+    # evidence rank → score 매핑 (published_rank == snapshot_rank by ADR-0017).
+    score_by_rank: Dict[int, float] = {}
+    if bundle is not None:
+        for ev in (bundle.items or []):
+            score_by_rank[ev.snapshot_rank] = float(ev.score or 0.0)
+
     refs: List[Dict[str, Any]] = []
     source_refs: List[Any] = []
     if decision.reference_manifest is not None:
         for item in decision.reference_manifest.items:
-            refs.append(
-                {
-                    "rank": item.published_rank,
-                    "id": item.id,
-                    "tag": item.tag,
-                    "title": item.title,
-                }
-            )
+            ref_dict: Dict[str, Any] = {
+                "rank": item.published_rank,
+                "id": item.id,
+                "tag": item.tag,
+                "title": item.title,
+            }
+            score = score_by_rank.get(item.source_snapshot_rank)
+            if score is not None:
+                ref_dict["score"] = round(score, 4)
+            refs.append(ref_dict)
             source_refs.append(item)
     answer_kind = "llm_streamed"
     if draft.template == "no_result":
@@ -749,6 +892,182 @@ def _classify_rst_id(rst_id: str) -> Optional[str]:
     return _RST_PREFIX_TO_LABEL.get(prefix)
 
 
+def _exclude_anchor_self(
+    *,
+    result: SearchResult,
+    anchor_ids: Dict[str, str],
+) -> SearchResult:
+    """ask_similar 결과에서 anchor 자신과 동일한 식별자를 가진 evidence 제거.
+
+    각 axis(pjt_id/rst_id/pjt_no/person_no/org_id)별로 anchor_ids 값과 일치하면 제외.
+    snapshot_rank는 1..N으로 재부여.
+    """
+    if not result.evidences or not anchor_ids:
+        return result
+    keep: List[CanonicalEvidence] = []
+    excluded = 0
+    for ev in result.evidences:
+        is_self = False
+        for axis in ("pjt_id", "rst_id", "pjt_no", "person_no", "org_id"):
+            anchor_val = (anchor_ids.get(axis) or "").strip()
+            ev_val = (ev.ids.get(axis) or "").strip() if ev.ids else ""
+            if anchor_val and ev_val and anchor_val == ev_val:
+                is_self = True
+                break
+        if is_self:
+            excluded += 1
+            continue
+        keep.append(ev)
+    if not excluded:
+        return result
+    renumbered = [ev.model_copy(update={"snapshot_rank": i + 1}) for i, ev in enumerate(keep)]
+    new_diag = dict(result.diagnostics or {})
+    new_diag["ask_similar_excluded_self"] = excluded
+    return result.model_copy(
+        update={
+            "evidences": renumbered,
+            "total_hits": max(0, result.total_hits - excluded),
+            "diagnostics": new_diag,
+        }
+    )
+
+
+def _try_cached_detail(
+    *,
+    plan: Any,
+    session_state: Optional[SessionState],
+) -> Optional[SearchResult]:
+    """P0-B 캐싱 — 단일 detail task가 focused_detail.cached_ids와 일치하면 캐시 SearchResult 생성.
+
+    조건 (모두 만족):
+        - session_state.focused_detail 있음
+        - focused_detail.cached_ids 비어있지 않음 (evidence 본문 캐시됨)
+        - plan.tasks 정확히 1개 + action="detail" + strategy="exact_lookup"
+        - task의 identifiers와 cached_ids가 동일 axis/value 매칭
+
+    Returns:
+        cache hit이면 SearchResult(status="single", evidences=[cached]).
+        miss면 None.
+    """
+    if session_state is None or not session_state.has_focused_detail():
+        return None
+    slot = session_state.focused_detail
+    if not slot.cached_ids:
+        return None
+    if plan is None or len(plan.tasks) != 1:
+        return None
+    task = plan.tasks[0]
+    if task.action != "detail" or task.strategy != "exact_lookup":
+        return None
+
+    # task의 identifiers와 cached_ids 매칭 — 어떤 axis든 한 개라도 일치하면 hit.
+    matched_axis: Optional[str] = None
+    for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+        task_values = getattr(task.identifiers, axis) or []
+        cached_value = (slot.cached_ids.get(axis) or "").strip()
+        if cached_value and cached_value in task_values:
+            matched_axis = axis
+            break
+    if matched_axis is None:
+        return None
+
+    # 캐시된 evidence 재구성.
+    cached_ev = CanonicalEvidence(
+        identity=f"cached::{matched_axis}::{slot.cached_ids[matched_axis]}",
+        source_type=slot.cached_source_type or (slot.anchor.kind if slot.anchor else "project"),
+        tag=slot.cached_tag,
+        ids=dict(slot.cached_ids),
+        title=slot.title or (slot.anchor.title_text if slot.anchor else ""),
+        summary=slot.summary or "",
+        facts=dict(slot.facts or {}),
+        roles={k: list(v) for k, v in (slot.roles or {}).items()},
+        child_entities=list(slot.child_entities or []),
+        snapshot_rank=1,
+        score=1.0,
+    )
+    return SearchResult(
+        status="single",
+        evidences=[cached_ev],
+        total_hits=1,
+        diagnostics={
+            "cache_hit": True,
+            "cache_source": "focused_detail",
+            "matched_axis": matched_axis,
+        },
+    )
+
+
+def _build_children_list_text(*, session_state: Optional[SessionState]) -> str:
+    """focused_detail.child_entities를 사람-읽기 가능한 글머리표로 정리.
+
+    parent_relation별 분류:
+        - top_level_researcher / participant_researcher → [참여연구자]
+        - lead_org / prtcp_org → [참여기관]
+        - related_perf → [연계 성과]
+    """
+    if session_state is None or not session_state.has_focused_detail():
+        return (
+            "직전에 본 상세 항목 정보가 세션에 없어 참여자/참여기관을 즉답할 수 없습니다. "
+            "먼저 특정 항목의 상세 정보를 요청해 주세요."
+        )
+    slot = session_state.focused_detail
+    children = slot.child_entities or []
+    title = slot.title or slot.anchor.title_text or "직전 항목"
+
+    researchers: List[Dict[str, Any]] = []
+    orgs: List[Dict[str, Any]] = []
+    perfs: List[Dict[str, Any]] = []
+    for entity in children:
+        if not isinstance(entity, dict):
+            continue
+        name = (entity.get("display_name") or "").strip()
+        if not name:
+            continue
+        kind = (entity.get("kind") or "").lower()
+        relation = (entity.get("parent_relation") or "").lower()
+        if kind == "people" or "researcher" in relation:
+            researchers.append(entity)
+        elif kind == "org" or "org" in relation:
+            orgs.append(entity)
+        elif kind == "perf" or "perf" in relation:
+            perfs.append(entity)
+
+    if not (researchers or orgs or perfs):
+        return f"'{title}'의 참여자/참여기관 정보가 저장된 근거에 없습니다."
+
+    parts: List[str] = [f"'{title}'의 참여자·참여기관 정보입니다."]
+    if researchers:
+        parts.append(f"\n**참여연구자 ({len(researchers)}명)**")
+        for e in researchers[:50]:
+            line = f"- {e.get('display_name')}"
+            role = (e.get("role") or "").strip()
+            aff = (e.get("affiliation") or "").strip()
+            if role:
+                line += f" ({role})"
+            if aff:
+                line += f" — {aff}"
+            parts.append(line)
+    if orgs:
+        parts.append(f"\n**참여기관 ({len(orgs)}곳)**")
+        for e in orgs[:30]:
+            line = f"- {e.get('display_name')}"
+            role = (e.get("role") or "").strip()
+            if role and role != "lead_org":
+                line += f" ({role})"
+            elif role == "lead_org":
+                line += " (주관)"
+            parts.append(line)
+    if perfs:
+        parts.append(f"\n**연계 성과 ({len(perfs)}건)**")
+        for e in perfs[:30]:
+            line = f"- {e.get('display_name')}"
+            relation = (e.get("parent_relation") or "").strip()
+            if relation:
+                line += f" ({relation})"
+            parts.append(line)
+    return "\n".join(parts)
+
+
 def _build_meta_answer_text(
     *,
     intent: Optional[Any],
@@ -808,10 +1127,100 @@ def _build_meta_answer_text(
             if target_label:
                 return f"{rank_label} **{target_label}** 유형입니다."
 
+    # 3) manifest 전체 메타 (2026-05-26 — manifest_rank=None + 직전 manifest 존재 시
+    #    인명·유형·연도 분포를 한 문장으로 보고. 사용자 의도가 "전부 같은 사람이야?"/"전부
+    #    같은 유형이야?" 같은 manifest 통계 질문일 때 답할 수 있게 한다).
+    if (
+        rank is None
+        and session_state is not None
+        and session_state.has_manifest()
+        and getattr(session_state.published_manifest, "snapshot", None) is not None
+    ):
+        snapshot = session_state.published_manifest.snapshot
+        items = list(snapshot.items or [])
+        if items:
+            text = _summarize_manifest_meta(items)
+            if text:
+                return text
+
     return (
         "현재 직전 검색 결과(또는 가장 최근 본 상세 항목)가 없어 분류를 즉답할 수 없습니다. "
         "어떤 항목의 유형을 알고 싶은지 다시 알려주실 수 있나요?"
     )
+
+
+def _summarize_manifest_meta(items: List[Any]) -> str:
+    """직전 manifest의 인명·유형·연도 분포를 한 문장으로 요약 (manifest 전체 메타 질문 답변).
+
+    items: List[DisplayItem] (apps.conversation.view_state.DisplayItem)
+
+    Returns:
+        "직전 결과 N건은 [유형분포], 연도 [범위], [인명분포]입니다." 형식 한국어 문장.
+        분류 가능한 시그널이 없으면 빈 문자열.
+    """
+    n = len(items)
+    if n == 0:
+        return ""
+
+    # --- entity_kind / doc_type 분포 ---
+    kind_counts: Dict[str, int] = {}
+    for it in items:
+        kind = (getattr(it, "entity_kind", "") or "").strip() or "unknown"
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    kind_label_map = {"project": "과제", "perf": "성과", "people": "사람", "org": "기관", "support": "지원"}
+    if len(kind_counts) == 1:
+        only_kind = next(iter(kind_counts))
+        kind_text = f"모두 {kind_label_map.get(only_kind, only_kind)}"
+    else:
+        parts = [
+            f"{kind_label_map.get(k, k)} {c}건"
+            for k, c in sorted(kind_counts.items(), key=lambda kv: -kv[1])
+        ]
+        kind_text = ", ".join(parts)
+
+    # --- 연도 분포 ---
+    years = [int(it.year) for it in items if getattr(it, "year", None) is not None]
+    year_text = ""
+    if years:
+        y_min, y_max = min(years), max(years)
+        year_text = f"{y_min}년" if y_min == y_max else f"{y_min}~{y_max}년"
+
+    # --- 인명 분포 (person_no 우선, 없으면 researchers 첫 항목) ---
+    person_keys: List[str] = []
+    person_names: List[str] = []
+    name_by_key: Dict[str, str] = {}
+    for it in items:
+        pid = (getattr(it, "person_no", "") or "").strip()
+        names = list(getattr(it, "researchers", []) or [])
+        first_name = (names[0] if names else "").strip()
+        if pid:
+            person_keys.append(pid)
+            if pid not in name_by_key and first_name:
+                name_by_key[pid] = first_name
+        elif first_name:
+            person_keys.append(f"name:{first_name}")
+            name_by_key.setdefault(f"name:{first_name}", first_name)
+        person_names.extend([n.strip() for n in names if n and n.strip()])
+    unique_keys = sorted(set(person_keys))
+    person_text = ""
+    if person_keys:
+        if len(unique_keys) == 1:
+            only_name = name_by_key.get(unique_keys[0]) or "동일 인물"
+            person_text = f"모두 {only_name}님의 활동"
+        else:
+            top_name_counts: Dict[str, int] = {}
+            for k in person_keys:
+                nm = name_by_key.get(k, "(이름 미상)")
+                top_name_counts[nm] = top_name_counts.get(nm, 0) + 1
+            top = sorted(top_name_counts.items(), key=lambda kv: -kv[1])[:3]
+            person_text = "인물 분포 " + ", ".join(f"{nm}({c})" for nm, c in top)
+
+    fragments = [f"직전 결과 {n}건은 {kind_text}"]
+    if year_text:
+        fragments.append(year_text)
+    if person_text:
+        fragments.append(person_text)
+    return ", ".join(fragments) + "입니다."
 
 
 def _build_focus_entity_from_manifest(
@@ -886,6 +1295,7 @@ def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
     graph.add_node("emit_direct_answer", node_emit_direct_answer)
     graph.add_node("emit_clarification", node_emit_clarification)
     graph.add_node("emit_meta_answer", node_emit_meta_answer)
+    graph.add_node("emit_children_list", node_emit_children_list)
     graph.add_node("emit_internal_error", node_emit_internal_error)
     graph.add_node("save_session", node_save_session)
 
@@ -921,6 +1331,7 @@ def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
             "retrieval_agent": "retrieval_agent",
             "emit_clarification": "emit_clarification",
             "emit_meta_answer": "emit_meta_answer",
+            "emit_children_list": "emit_children_list",
         },
     )
 
@@ -950,6 +1361,7 @@ def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
     graph.add_edge("emit_direct_answer", "save_session")
     graph.add_edge("emit_clarification", "save_session")
     graph.add_edge("emit_meta_answer", "save_session")
+    graph.add_edge("emit_children_list", "save_session")
     graph.add_edge("emit_internal_error", "save_session")
     graph.add_edge("save_session", END)
 

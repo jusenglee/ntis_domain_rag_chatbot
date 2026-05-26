@@ -1,13 +1,21 @@
 # NTIS RAG 시스템 문서 인덱스 (Documentation Index)
 
-> **2026-05-19 갱신**: [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) 7-agent
-> 재설계 적용. 현재 production 기준은 **DialogueAgent → EntityResolverAgent →
-> SearchPlannerAgent → RetrievalAgent → EvidenceCuratorAgent → AnswerAgent →
-> CriticAgent (7-agent 권한분리 + frozen Pydantic 계약)** 이다.
+> **2026-05-22 갱신**: [ADR-0020](./ADR/ADR-0020_Tooling_Catalog_Expansion.md) 도구 카탈로그
+> 확장. ADR-0019의 7-agent core 위에 19 phase에 걸쳐 추가된 도구·필터·캐싱·진단을 단일
+> 진실원으로 정리. production 기준은 **7-agent core (ADR-0019) + 확장 카탈로그 (ADR-0020)**.
 >
-> 이전 ADR-0018(JudgmentAgent / SearchAgent / FinalGuard 3계층 + SearchTask 단일 캐리어)는
-> 진화의 출발점으로만 참고하라. JudgmentAgent / FinalGuard / LLMGenerator / `apps/pipeline/workflow.py` /
-> `apps/pipeline/state.py` 5개 모듈은 ADR-0019에서 git rm 폐기되었다.
+> 핵심 변경 요약:
+> - **DialogueKind 10종** (ask_search/ask_detail/ask_meta/ask_children/ask_similar +
+>   refine_previous/compare/stats/direct_answer/clarification)
+> - **SearchStrategy 4종** (`detail_anchor` 제거; exact_lookup/subject_anchor/hybrid_search/aggregate)
+> - **단축 노드 5종** (emit_direct_answer/clarification/meta_answer/children_list/internal_error)
+> - **FilterBundle** = year + lead/participant_org + perf_type + coparticipants(AND) + exclude_*(NOT)
+> - **stats 집계 6 축** (year/lead_org/tag/perf_type/participant_org/participant_person)
+> - **결정적 추출 fallback 6종** (LLM 안전망)
+> - **FocusedDetailSlot evidence 캐싱** (P0-B) — 동일 식별자 재조회 0ms
+> - **response.diagnostics** — 매 turn 도구 분기·캐시·세션 상태 단일 dict 노출
+>
+> 이전 ADR-0018(JudgmentAgent / SearchAgent / FinalGuard 3계층)는 진화의 출발점으로만 참고.
 
 ---
 
@@ -34,22 +42,36 @@
   - [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md) — Shock Absorber 원칙 (계약에 흡수됨)
   - [ADR-0017](./ADR/ADR-0017_Answer_Rank_Remapped_Reference_Manifest.md) — published_rank manifest (CriticAgent 구현)
   - [ADR-0018](./ADR/ADR-0018_Three_Layer_Authority_Separation.md) — 3계층 권한분리 (ADR-0019의 토대)
-  - [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) — **현재 진실원: 7-agent 재설계**
+  - [ADR-0019](./ADR/ADR-0019_Seven_Agent_Agentic_Redesign.md) — 7-agent core
+  - [ADR-0020](./ADR/ADR-0020_Tooling_Catalog_Expansion.md) — **현재 진실원: 19 phase 도구 카탈로그 확장**
 * [reference/](./reference/) — 레거시 문서
 * [reports/](./reports/) — 분석 리포트
 
 ---
 
-## 💡 핵심 키워드 (ADR-0019 이후)
+## 💡 핵심 키워드 (ADR-0020 시점)
 
-### 7-agent (순서)
-* **DialogueAgent** — 사용자 의도 분류만 (LLM 1회 호출 → `DialogueIntent` JSON).
-* **EntityResolverAgent** — 결정적 식별자 해소 (manifest_rank, rst_id→perf 강제, ASCII 식별자 형식 검증).
-* **SearchPlannerAgent** — `SearchPlan` 생성 (1개 이상의 `SearchTask` + merge_strategy).
-* **RetrievalAgent** — `SearchPlan` 병렬 실행 (`asyncio.gather`) + merge + dedup.
-* **EvidenceCuratorAgent** — view 결정(single_detail/subject_activity/list_compact/stats_summary/comparison_table/empty) + display_rank 최종 고정.
-* **AnswerAgent** — view별 prompt 분기 + LLM 답변 stream + `[N]` 인용 파싱.
-* **CriticAgent** — citation 정합 검증 + ReferenceManifest 발행 + repair/clarify/error 결정 (FinalGuard 후속).
+### 7-agent (순서) — ADR-0019
+* **DialogueAgent** — 사용자 의도 분류 + **결정적 추출 fallback 6종** (manifest_rank/focused_detail anaphora/refine_promotion/sort_by/year_window/length_hint).
+* **EntityResolverAgent** — manifest_rank / focused_detail anaphora / manifest_filter / 식별자 ASCII 검증 / rst_id→perf 강제.
+* **SearchPlannerAgent** — `SearchPlan` 생성 (`SearchTask` × N + merge_strategy + aggregate_by + sort_by).
+* **RetrievalAgent** — 병렬 실행 + **cache hit 시 SearchAgent skip** (P0-B).
+* **EvidenceCuratorAgent** — view 결정 + display_rank 고정 + **activity_summary 통계**.
+* **AnswerAgent** — view별 prompt + **사용자 조건 reflection** + **length_hint** + LLM stream.
+* **CriticAgent** — citation 정합 + ReferenceManifest 발행 + repair/clarify/error.
+
+### 도구 (DialogueKind 10종) — ADR-0020
+`ask_search` / `ask_detail` / **`ask_meta`** / **`ask_children`** / **`ask_similar`** / `refine_previous` / `compare` / `stats` / `direct_answer` / `clarification`
+
+### 단축 노드 5종 — ADR-0020
+`emit_direct_answer` / `emit_clarification` / **`emit_meta_answer`** / **`emit_children_list`** / `emit_internal_error`
+
+### 검색·필터·정렬 — ADR-0020
+* **SearchStrategy 4종**: exact_lookup / subject_anchor / hybrid_search / aggregate (`detail_anchor` 제거)
+* **FilterBundle**: year + lead/participant_org + perf_type + **coparticipants(AND)** + **exclude_*(NOT)**
+* **stats 집계 6 축**: year / lead_org / tag / perf_type / **participant_org** / **participant_person**
+* **SortBy 3 모드**: relevance / recent_desc / recent_asc + LLM 정직성 가드
+* **Length Hint 3 모드**: brief / default / detailed
 
 ### 계약 (모두 frozen Pydantic, `extra="forbid"`)
 * `DialogueIntent`, `EntityResolution`, `SearchPlan`, `EvidenceBundle`, `AnswerDraft`, `GuardDecision`

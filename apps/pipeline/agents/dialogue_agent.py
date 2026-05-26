@@ -134,6 +134,11 @@ class DialogueAgent:
                 confidence=0.1,
             )
 
+        # 결정적 보강: manifest_rank·focused_detail 같은 1:1 매핑은 EntityResolverAgent가 처리.
+        # DialogueAgent 단계의 키워드 매칭 후처리 (refine_promotion / year_window / length_hint /
+        # sort_by / exclude_* / coparticipants)는 2026-05-26 재설계로 제거.
+        # LLM 분류 결과를 그대로 신뢰하며, 의미 판단은 LLM·prompt가 담당한다.
+
         logger.debug(
             f"[DialogueAgent] kind={intent.kind} target_hint={intent.target_hint} "
             f"action_hint={intent.action_hint} subject={intent.subject_name!r} "
@@ -158,17 +163,24 @@ def _build_system_prompt() -> str:
         "\n"
         "[출력 schema — 단일 JSON 객체]\n"
         "{\n"
-        '  "kind":             "ask_search"|"ask_detail"|"ask_meta"|"refine_previous"|"compare"|"stats"|"direct_answer"|"clarification",\n'
+        '  "kind":             "ask_search"|"ask_detail"|"ask_meta"|"ask_children"|"ask_similar"|"refine_previous"|"compare"|"stats"|"direct_answer"|"clarification",\n'
         '  "target_hint":      "project"|"perf"|"people"|"org"|"support"|null,\n'
         '  "action_hint":      "list"|"detail"|"stats"|"topic"|"download"|null,\n'
         '  "subject_name":     "<사람/기관 이름>"|null,\n'
         '  "subject_kind":     "people"|"org"|null,\n'
         '  "subject_affiliation_hint": "<소속 기관>"|null,\n'
+        '  "coparticipants":   ["<공동 참여자 이름>", ...],   // "A와 B가 같이 참여한" 패턴, subject 외 추가 인명\n'
+        '  "exclude_org_name":   ["<제외할 기관>", ...],     // "X 제외", "Y 빼고" 패턴\n'
+        '  "exclude_perf_type":  ["PAPER"|"PATENT"|..., ...],\n'
+        '  "exclude_person_name":["<제외할 인명>", ...],\n'
         '  "identifier_hints": {"pjt_id":[...], "pjt_no":[...], "rst_id":[...]} | {},\n'
         '  "manifest_rank":    <정수>|null,\n'
         '  "year_from":        <정수>|null,\n'
         '  "year_to":          <정수>|null,\n'
         '  "perf_type_hint":   ["PAPER"|"PATENT"|"SOFTWARE"|"REPORT"|"EQUIPMENT"|"COMPOUND"|"ORGSM_INFO"|"ORGSM_RESOURCE"|"TECH_INFO"|"NVR"],\n'
+        '  "sort_by":          "relevance"|"recent_desc"|"recent_asc",   // 기본 "relevance"(score 순)\n'
+        '  "length_hint":      "brief"|"default"|"detailed",         // 답변 길이 선호\n'
+        '  "aggregate_hint":   "year"|"lead_org"|"tag"|"perf_type"|"participant_org"|"participant_person"|null,  // kind=stats일 때 집계 축\n'
         '  "compare_targets":  [{"name":"...", "kind":"people|org|project|perf"}, ...]  // kind=compare일 때만\n'
         '  "query":            "<자연어 검색 질의 — 사용자 핵심 표현 보존>",\n'
         '  "direct_text":      "<인사·잡담 응답>" | null,\n'
@@ -198,11 +210,32 @@ def _build_system_prompt() -> str:
         "                  예: \"이게 과제야 성과야?\", \"8번 데이터는 과제인가 성과인가\", \"이거 무슨 종류야?\",\n"
         "                      \"이 항목 유형은?\", \"논문이야 특허야?\"\n"
         "                  **detail 본문(목표·기간·내용)을 요청하면 ask_meta가 아니라 ask_detail.**\n"
-        "4. refine_previous — 직전 결과를 조건 추가로 좁힘 (이름은 안 바뀜). 예: \"2020년 이후만\", \"논문만\"\n"
-        "5. compare      — 둘 이상 비교. 예: \"A 사업과 B 사업 비교\"\n"
-        "6. stats        — 통계·집계. 예: \"연도별 과제 수\"\n"
-        "7. direct_answer — 인사·잡담. 예: \"안녕\"\n"
-        "8. clarification — 정보 부족으로 검색 불가. 예: \"찾아줘\" (대상 없음)\n"
+        "4. ask_children — **직전 1개 항목의 자식 엔티티 명단만** 요청. previous_manifest 또는\n"
+        "                  focused_detail이 필수이며, 그 항목 *자신*의 참여자·참여기관 목록을 노출하는 도구.\n"
+        "                  허용 예: \"참여자 목록만 보여줘\", \"참여연구자만\", \"참여기관 알려줘\",\n"
+        "                          \"이 과제 참여한 사람들\", \"2번 항목의 연구자들\"\n"
+        "                  **금지 (이런 경우는 ask_search로 분류):**\n"
+        "                    - \"X 연구자의 *다른* 활동/연구/과제\" → ask_search(subject_name=X)\n"
+        "                      (직전 항목의 child가 아니라 X라는 사람의 활동을 새로 검색)\n"
+        "                    - \"이 사람이 *참여한* 다른 항목\" → ask_search(subject_name=...)\n"
+        "                    - \"이 기관의 *다른* 과제\" → ask_search(subject_name=...)\n"
+        "                  즉 ask_children은 \"이 항목 안의 자식\"이지 \"이 자식이 참여한 다른 항목\"이 아니다.\n"
+        "5. ask_similar  — 직전 항목과 **유사한 다른 항목**을 찾아달라는 요청. focused_detail이 필수.\n"
+        "                  focused_detail.title을 query로 사용해 hybrid_search 호출. anchor 자신은 결과에서 제외.\n"
+        "                  예: \"이것과 비슷한 과제\", \"이 항목과 유사한\", \"비슷한 연구\", \"관련 사업\"\n"
+        "6. refine_previous — 직전 결과를 조건 추가로 좁힘 (이름은 안 바뀜). 예: \"2020년 이후만\", \"논문만\"\n"
+        "7. compare      — 둘 이상 비교. 예: \"A 사업과 B 사업 비교\"\n"
+        "8. stats        — 통계·집계. 예: \"연도별 과제 수\"\n"
+        "                  aggregate_hint 축 선택:\n"
+        "                    - year                 : \"연도별\" (기본)\n"
+        "                    - lead_org             : \"수행기관별\" / \"기관별\" (사업의 수행기관)\n"
+        "                    - tag / perf_type      : \"분야별\" / \"유형별\" / \"종류별\"\n"
+        "                                             (project이면 tag, perf면 perf_type)\n"
+        "                    - participant_org      : \"참여기관별\" / \"공동 참여기관\"\n"
+        "                    - participant_person   : \"참여자별\" / \"공동 참여자\"\n"
+        "                  사용자가 명시 안 했으면 null (Planner가 year fallback).\n"
+        "9. direct_answer — 인사·잡담. 예: \"안녕\"\n"
+        "10. clarification — 정보 부족으로 검색 불가. 예: \"찾아줘\" (대상 없음)\n"
         "\n"
         "[manifest_rank — 직전 발행 manifest 인용]\n"
         "previous_manifest 가 비어있지 않을 때 사용자가 manifest의 한 항목을 가리키면 그 rank를\n"
@@ -223,11 +256,60 @@ def _build_system_prompt() -> str:
         "주의: focused_detail이 있는데 사용자가 새로운 list를 원하면(\"목록\", \"전체\", \"다른\") kind=\"ask_search\"\n"
         "또는 \"refine_previous\"로 분류하고 focused_detail은 무시합니다.\n"
         "\n"
-        "[refine_previous — 직전 subject 보존]\n"
-        "previous_subject 가 있고 사용자가 이름을 다시 말하지 않고 조건만 바꾸면 kind=\"refine_previous\".\n"
-        "subject_name/subject_kind/subject_affiliation_hint 는 previous_subject 값 그대로 복사.\n"
-        "예: previous_subject=\"신동구\"+이전 turn 활동내역 발행 + 사용자 \"2020년 이후만\"\n"
-        "→ kind=\"refine_previous\", subject_name=\"신동구\", year_from=2020.\n"
+        "[exclude_* — 제외(negative) 필터]\n"
+        "사용자가 \"X 제외\", \"Y 빼고\", \"~을 제외한\" 패턴으로 특정 항목을 빼달라고 하면 다음 필드를 채운다:\n"
+        "   - exclude_org_name: 기관 이름 제외 (예: \"KISTI 제외\" → [\"KISTI\"])\n"
+        "   - exclude_perf_type: 성과 유형 제외 (예: \"특허 빼고\" → [\"PATENT\"])\n"
+        "   - exclude_person_name: 인명 제외 (예: \"김재수 빼고\" → [\"김재수\"])\n"
+        "필터는 must_not으로 결합. 양수(include) 조건과 함께 사용 가능.\n"
+        "\n"
+        "[coparticipants — 공동 참여 조건]\n"
+        "사용자가 두 명 이상이 함께 참여한 결과를 원할 때 (\"A와 B가 같이 참여한\", \"A, B가 공동 연구한\")\n"
+        "1순위 인물을 subject_name에, 나머지 인물(들)을 coparticipants 배열에 채운다.\n"
+        "시스템은 prtcp_mp_hm_nm_list로 각 이름을 AND로 매칭한다.\n"
+        "예: \"신동구와 김재수가 같이 참여한 과제\"\n"
+        "→ {\"subject_name\":\"신동구\",\"subject_kind\":\"people\",\"coparticipants\":[\"김재수\"],...}\n"
+        "주의: 비교(compare)는 \"A vs B\" 같은 분리 비교. coparticipants는 \"A AND B 모두 참여\".\n"
+        "\n"
+        "[length_hint — 답변 길이 선호]\n"
+        "사용자가 명시적으로 답변 길이를 요청하면 length_hint를 채운다:\n"
+        "   - \"간단히\", \"한 줄로\", \"짧게\", \"요약만\" → \"brief\"\n"
+        "   - \"자세히\", \"상세히\", \"더 자세히\", \"풀어서\" → \"detailed\"\n"
+        "   - 그 외(기본) → \"default\"\n"
+        "\n"
+        "[sort_by — 정렬 의도]\n"
+        "사용자가 명시적으로 정렬을 요청하면 sort_by를 채운다:\n"
+        "   - \"최근순\", \"최신순\", \"가장 최근\", \"근래\" → \"recent_desc\"\n"
+        "   - \"오래된 순\", \"예전부터\", \"초기부터\" → \"recent_asc\"\n"
+        "   - 그 외(기본) → \"relevance\" (Qdrant score 순)\n"
+        "주의: 시스템은 stan_yr(연도) 기준으로 정렬한다. 연도 정보가 없는 항목은 끝으로 밀린다.\n"
+        "\n"
+        "[refine_previous vs ask_search — 핵심 분기]\n"
+        "사용자 발화 의도가 (a) 직전 결과를 좁히는 것인지 (b) 직전 결과를 버리고 새로 검색하는 것인지\n"
+        "명확히 판단한다. 잘못 분류하면 시스템이 이전의 잘못된 manifest를 부분집합 fetch하는\n"
+        "치명적 회귀가 발생한다.\n"
+        "\n"
+        "**kind=\"refine_previous\" (직전 결과 유지·좁히기) 분류 조건**:\n"
+        "  - previous_subject 또는 previous_manifest가 비어 있지 않음\n"
+        "  - 사용자가 **직전 결과를 의미적으로 인정**하고 그 위에 조건을 더함\n"
+        "    (a) previous_subject가 있고 이름 재언급 없이 조건만 추가:\n"
+        "        예: previous_subject=\"신동구\" + \"2020년 이후만\"\n"
+        "        → subject_name=\"신동구\"(복사), year_from=2020\n"
+        "    (b) previous_manifest가 있고 사용자가 manifest 내 부분집합을 요청:\n"
+        "        예: 직전 자동차 과제 10건 + \"공학/전자 관련만 골라줘\"\n"
+        "        → 시스템이 직전 manifest를 좁히는 도구 활성화\n"
+        "\n"
+        "**kind=\"ask_search\" (새 검색) 분류 조건** — refine_previous로 분류하지 마세요:\n"
+        "  - 사용자가 직전 결과의 적합성에 대해 **불만·의문·재요청**을 표시\n"
+        "    예: \"그게 아니라 LLM 관련을 원했어\", \"내가 요구한 거는 X였는데\", \n"
+        "        \"이게 아니야\", \"다시 검색해줘\", \"잘못 찾았네\"\n"
+        "  - 사용자가 **previous_manifest와 무관한 새 주제·키워드**를 도입\n"
+        "    예: previous_manifest=자동차 과제 + \"LLM 연구\" → 새 검색 (자동차 manifest의 부분집합 아님)\n"
+        "  - 사용자가 **명시적으로 \"다시 / 새로 / 처음부터\"**를 요청\n"
+        "이런 경우 manifest를 무시하고 ask_search로 분류해야 새 검색이 실행된다.\n"
+        "\n"
+        "**판단이 모호하면 ask_search를 선택하는 것이 안전** — 새 검색은 사용자가 다시 좁힐 수 있지만,\n"
+        "잘못된 manifest_filter는 사용자가 잘못된 결과를 반복적으로 보게 만든다.\n"
         "\n"
         "[예시 출력]\n"
         "Q: \"신동구 연구자(한국과학기술정보연구원)의 활동내역\"\n"
@@ -257,20 +339,63 @@ def _build_system_prompt() -> str:
         "→ {\"kind\":\"ask_meta\",\"manifest_rank\":8,\"identifier_hints\":{},"
         "\"query\":\"8번 유형 분류\",\"reason\":\"메타 분류 질문\",\"confidence\":0.9}\n"
         "\n"
+        "Q: \"이 과제 참여자 목록만 보여줘\" (focused_detail 있음)\n"
+        "→ {\"kind\":\"ask_children\",\"identifier_hints\":{},\"manifest_rank\":null,"
+        "\"query\":\"참여자 목록\",\"reason\":\"focused_detail child entity 요청\",\"confidence\":0.95}\n"
+        "\n"
+        "Q: \"이것과 비슷한 과제 더 있어?\" (focused_detail 있음)\n"
+        "→ {\"kind\":\"ask_similar\",\"identifier_hints\":{},\"manifest_rank\":null,"
+        "\"query\":\"유사 과제\",\"reason\":\"focused_detail 기반 유사 검색\",\"confidence\":0.9}\n"
+        "\n"
+        "Q: \"유재수 연구책임자의 다른 참여연구는?\" (focused_detail에 X 항목 있음)\n"
+        "→ {\"kind\":\"ask_search\",\"target_hint\":\"people\",\"action_hint\":\"list\","
+        "\"subject_name\":\"유재수\",\"subject_kind\":\"people\","
+        "\"query\":\"유재수 참여 연구\","
+        "\"reason\":\"focused_detail child의 다른 활동 검색 (multi-hop이 아니라 새 subject 검색)\","
+        "\"confidence\":0.9}\n"
+        "**중요**: 직전 항목의 참여자였더라도 그 사람의 다른 활동을 묻는 것은 ask_children이 아닌\n"
+        "ask_search이다 (ask_children은 '이 항목 자체의 자식', 새 subject 활동은 새 검색).\n"
+        "\n"
         "Q: \"신동구 연구자의 연도별 참여 건수\"\n"
         "→ {\"kind\":\"stats\",\"target_hint\":\"people\",\"action_hint\":\"stats\","
         "\"subject_name\":\"신동구\",\"subject_kind\":\"people\","
+        "\"aggregate_hint\":\"year\","
         "\"query\":\"신동구 연도별 참여 건수\",\"reason\":\"연도별 집계\",\"confidence\":0.9}\n"
         "\n"
         "Q: \"한국과학기술정보연구원의 기관별 사업 수\"\n"
         "→ {\"kind\":\"stats\",\"target_hint\":\"org\",\"action_hint\":\"stats\","
         "\"subject_name\":\"한국과학기술정보연구원\",\"subject_kind\":\"org\","
+        "\"aggregate_hint\":\"lead_org\","
         "\"query\":\"한국과학기술정보연구원 기관별 사업 수\",\"reason\":\"기관별 집계\",\"confidence\":0.85}\n"
+        "\n"
+        "Q: \"자동차 관련 연구과제를 가장 최근순으로 찾아줘\"\n"
+        "→ {\"kind\":\"ask_search\",\"target_hint\":\"project\",\"action_hint\":\"list\","
+        "\"sort_by\":\"recent_desc\",\"query\":\"자동차 관련 연구과제\","
+        "\"reason\":\"최신순 정렬 요청\",\"confidence\":0.9}\n"
+        "\n"
+        "Q: \"신동구와 김재수가 같이 참여한 과제\"\n"
+        "→ {\"kind\":\"ask_search\",\"target_hint\":\"people\",\"action_hint\":\"list\","
+        "\"subject_name\":\"신동구\",\"subject_kind\":\"people\","
+        "\"coparticipants\":[\"김재수\"],"
+        "\"query\":\"신동구 김재수 공동 참여 과제\",\"reason\":\"공동 참여 AND 조건\","
+        "\"confidence\":0.9}\n"
+        "\n"
+        "Q: \"신동구 활동 중 KISTI 제외하고 보여줘\"\n"
+        "→ {\"kind\":\"ask_search\",\"target_hint\":\"people\",\"action_hint\":\"list\","
+        "\"subject_name\":\"신동구\",\"subject_kind\":\"people\","
+        "\"exclude_org_name\":[\"KISTI\"],"
+        "\"query\":\"신동구 활동\",\"reason\":\"기관 제외 필터\",\"confidence\":0.9}\n"
         "\n"
         "Q: \"2020년 이후만 보여줘\" (previous_subject=신동구)\n"
         "→ {\"kind\":\"refine_previous\",\"target_hint\":\"people\",\"action_hint\":\"list\","
         "\"subject_name\":\"신동구\",\"subject_kind\":\"people\",\"year_from\":2020,"
         "\"query\":\"신동구 2020년 이후 활동\",\"reason\":\"직전 subject + 연도 필터\",\"confidence\":0.85}\n"
+        "\n"
+        "Q: \"공학/전자 관련만 골라줘\" (previous_manifest=자동차 list 10건, previous_subject 없음)\n"
+        "→ {\"kind\":\"refine_previous\",\"target_hint\":\"project\",\"action_hint\":\"list\","
+        "\"subject_name\":null,\"identifier_hints\":{},"
+        "\"query\":\"자동차 공학/전자 관련 과제\","
+        "\"reason\":\"manifest 부분집합 필터링 의도\",\"confidence\":0.85}\n"
         "\n"
         "Q: \"안녕\"\n"
         "→ {\"kind\":\"direct_answer\",\"direct_text\":\"안녕하세요. 무엇을 도와드릴까요?\","
@@ -369,6 +494,8 @@ _VALID_KINDS = {
     "ask_search",
     "ask_detail",
     "ask_meta",
+    "ask_children",
+    "ask_similar",
     "refine_previous",
     "compare",
     "stats",
@@ -434,6 +561,16 @@ def _build_intent_from_llm(parsed: Dict[str, Any], question: str) -> DialogueInt
         if s and s not in perf_type_hint:
             perf_type_hint.append(s)
 
+    coparticipants: List[str] = []
+    for v in parsed.get("coparticipants") or []:
+        s = str(v).strip()
+        if s and s not in coparticipants:
+            coparticipants.append(s)
+
+    exclude_org_name = _clean_str_list(parsed.get("exclude_org_name"))
+    exclude_perf_type = [s.upper() for s in _clean_str_list(parsed.get("exclude_perf_type"))]
+    exclude_person_name = _clean_str_list(parsed.get("exclude_person_name"))
+
     compare_targets: List[CompareTarget] = []
     for entry in parsed.get("compare_targets") or []:
         if not isinstance(entry, dict):
@@ -444,6 +581,22 @@ def _build_intent_from_llm(parsed: Dict[str, Any], question: str) -> DialogueInt
             compare_targets.append(CompareTarget(name=name, kind=ck))  # type: ignore[arg-type]
 
     query = str(parsed.get("query") or question).strip()
+
+    # sort_by — LLM 분류만. 결정적 추출 fallback 제거 (2026-05-26 재설계).
+    sort_by_raw = _opt_str("sort_by")
+    sort_by = sort_by_raw if sort_by_raw in {"relevance", "recent_desc", "recent_asc"} else "relevance"
+
+    # length_hint — LLM 분류만.
+    length_hint_raw = _opt_str("length_hint")
+    length_hint = length_hint_raw if length_hint_raw in {"brief", "default", "detailed"} else "default"
+
+    # aggregate_hint — stats kind에서 LLM이 분류 (year/lead_org/tag/perf_type/participant_*).
+    aggregate_hint_raw = _opt_str("aggregate_hint")
+    aggregate_hint = (
+        aggregate_hint_raw
+        if aggregate_hint_raw in {"year", "lead_org", "tag", "perf_type", "participant_org", "participant_person"}
+        else None
+    )
 
     confidence_raw = parsed.get("confidence")
     try:
@@ -487,7 +640,14 @@ def _build_intent_from_llm(parsed: Dict[str, Any], question: str) -> DialogueInt
         year_from=year_from,
         year_to=year_to,
         perf_type_hint=perf_type_hint,
+        coparticipants=coparticipants,
+        exclude_org_name=exclude_org_name,
+        exclude_perf_type=exclude_perf_type,
+        exclude_person_name=exclude_person_name,
         compare_targets=compare_targets,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        length_hint=length_hint,  # type: ignore[arg-type]
+        aggregate_hint=aggregate_hint,  # type: ignore[arg-type]
         query=query,
         direct_text=direct_text,
         clarification_question=clarification_question,

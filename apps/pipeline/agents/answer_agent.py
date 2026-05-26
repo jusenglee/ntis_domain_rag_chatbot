@@ -43,21 +43,14 @@ from apps.pipeline.contracts import CanonicalEvidence
 
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "당신은 NTIS(국가과학기술지식정보서비스) RAG 챗봇입니다. "
-    "사용자 질문에 대한 답변은 반드시 아래 [근거 출처] 블록의 정보만 사용해야 하며, "
-    "근거에 없는 사실(이름, 식별자, 숫자, 기관)을 추정하거나 만들어내지 않습니다.\n\n"
-    "출력 규칙:\n"
-    "1. 답변은 한국어 자연어로 작성합니다.\n"
-    "2. list 형식 답변은 각 항목 끝에 출처 번호 [N]을 표기합니다. N은 [근거 출처]의 순번과 동일합니다.\n"
-    "3. detail 형식 답변은 1개 대상의 상세 정보를 풀어 설명하고 마지막에 [1]을 인용합니다.\n"
-    "4. compare 형식 답변은 비교 대상별로 항목을 나누어 정리하고 각 항목 끝에 [N]을 표기합니다.\n"
-    "5. 동일한 사업(pjt_no)의 여러 연차는 한 항목으로 묶지 말고 [근거 출처] 순번대로 별도 항목으로 둡니다.\n"
-    "6. 근거가 부족하면 솔직히 '제공된 근거로는 확인할 수 없습니다'라고 답합니다.\n"
-    "7. **식별자 비노출**: pjt_id / pjt_no / rst_id / person_no / org_id / org_code / biz_no / doi / issn 같은\n"
-    "   raw 식별자 값을 답변 본문에 직접 적지 마세요. [근거 출처]의 식별자 라인은 LLM이 어떤 항목을\n"
-    "   가리키는지 식별하기 위한 내부 단서일 뿐이며, 사용자에게는 [N] 인용 번호로만 노출됩니다.\n"
-    "   허용: 사업/성과의 사람-읽기 가능 이름(제목, 사업명, 수행기관명, 기간, 연도).\n"
-    "   금지: 'pjt_id=1234567890', 'rst_id=CNL-...', 'person_no=ntis:B551...' 같은 명시적 식별자 표기.\n"
+    "당신은 NTIS(국가과학기술지식정보서비스) RAG 챗봇입니다.\n\n"
+    "**핵심 규칙 (3가지)**:\n"
+    "1. 한국어 자연어로 답변합니다.\n"
+    "2. 답변 내용은 반드시 [근거 출처] 블록의 evidence에서 직접 확인 가능해야 합니다. "
+    "근거에 없는 인물·기관·식별자·숫자를 만들어내지 마세요. 근거가 부족하면 "
+    "'제공된 근거로는 확인할 수 없습니다'라고 답합니다.\n"
+    "3. 사용자에게 보여줄 각 항목 끝에 출처 번호 [N]을 표기합니다 (N은 [근거 출처] 순번). "
+    "raw 식별자(pjt_id/rst_id/person_no 등)는 본문에 적지 말고 [N] 인용으로만 노출합니다.\n"
 )
 
 
@@ -245,13 +238,16 @@ def _template_from_view(view: str) -> str:
 # ============================================================================
 
 def _build_user_message(*, bundle: EvidenceBundle, intent: DialogueIntent) -> str:
-    """LLM에 넘기는 user message: 질문 + 근거 블록 + view별 지시사항.
+    """LLM에 넘기는 user message: [context] + [근거 출처] + (child) + [사용자 질문] + [요청 형식].
 
-    single_detail view에서는 evidence.child_entities(참여연구자/참여기관)를 별도 블록으로 노출해
-    "참여연구자는?" 같은 follow-up 질문에 LLM이 직접 답할 수 있게 한다.
+    2026-05-26 공격적 재설계: 사용자 조건/활동 요약/score 분포/정렬/그룹 힌트의 5개 메타 블록을
+    단일 [context] 블록으로 통합. evidence·question·instructions는 별도 블록 유지.
+
+    single_detail view에서는 evidence.child_entities(참여연구자/참여기관)를 [근거 출처] 뒤에
+    별도 블록으로 노출해 "참여연구자는?" follow-up 질문에 LLM이 직접 답할 수 있게 한다.
     """
+    context_block = _build_context_block(bundle=bundle, intent=intent)
     evidence_block = _format_evidence_block(bundle.items)
-    group_block = _format_group_block(bundle)
     child_block = (
         _format_child_entities_block(bundle.items[0])
         if bundle.view == "single_detail" and bundle.items
@@ -259,14 +255,54 @@ def _build_user_message(*, bundle: EvidenceBundle, intent: DialogueIntent) -> st
     )
     question = (intent.query or "").strip() or "(질문이 비어 있습니다)"
     instructions = _instructions_for_view(bundle=bundle, intent=intent)
-    parts = [evidence_block]
-    if group_block:
-        parts.append(group_block)
+    parts: List[str] = []
+    if context_block:
+        parts.append(context_block)
+    parts.append(evidence_block)
     if child_block:
         parts.append(child_block)
     parts.append(f"\n[사용자 질문]\n{question}\n")
     parts.append(instructions)
     return "\n".join(parts)
+
+
+def _build_context_block(*, bundle: EvidenceBundle, intent: DialogueIntent) -> str:
+    """5개 메타 블록을 단일 [context]로 통합 — 사용자 조건 / 활동 요약 / score 분포 / 정렬 / 그룹.
+
+    각 sub-block은 `## 라벨` sub-section으로 들어간다. 비어 있는 sub-block은 생략.
+    sort_by는 LLM이 도입부 정직성 판단에 필요하므로 항상 노출 (relevance 포함).
+    """
+    sections: List[str] = []
+    intent_text = _summarize_user_intent(intent=intent, item_count=len(bundle.items))
+    if intent_text:
+        sections.append(_promote_to_subsection(intent_text))
+    if bundle.view == "subject_activity":
+        act = _format_activity_summary_block(bundle)
+        if act:
+            sections.append(_promote_to_subsection(act))
+    score = _format_score_distribution_block(bundle)
+    if score:
+        sections.append(_promote_to_subsection(score))
+    sections.append(f"## 정렬\n  - sort_by={intent.sort_by}")
+    group = _format_group_block(bundle)
+    if group:
+        sections.append(_promote_to_subsection(group))
+    if not sections:
+        return ""
+    return "[context]\n" + "\n\n".join(sections) + "\n"
+
+
+def _promote_to_subsection(block_text: str) -> str:
+    """`[라벨]\n...` 형태 sub-block을 `## 라벨\n...` 형태로 변환해 [context] 안에 통합."""
+    text = block_text.rstrip()
+    if not text.startswith("["):
+        return text
+    end = text.find("]")
+    if end == -1:
+        return text
+    label = text[1:end].strip()
+    rest = text[end + 1:].lstrip("\n")
+    return f"## {label}\n{rest}"
 
 
 def _format_evidence_block(items: List[CanonicalEvidence]) -> str:
@@ -302,6 +338,153 @@ def _format_evidence_block(items: List[CanonicalEvidence]) -> str:
         if ev.facts.get("goal"):
             goal = str(ev.facts["goal"])[:200].replace("\n", " ").strip()
             lines.append(f"  - 목표: {goal}")
+    return "\n".join(lines) + "\n"
+
+
+def _summarize_user_intent(*, intent: DialogueIntent, item_count: int) -> str:
+    """active filter를 한 줄 요약해 LLM에 노출. 답변 도입부에 사용자 조건 반복 유도.
+
+    **주의 (P0 hotfix 2026-05-22)**: 가이드 문장은 구체 인물명·조직명·연도 같은 사용자가
+    한 적 없는 토큰을 절대 포함하지 않는다. LLM이 예시 문장을 그대로 베껴 거짓 답변을
+    생성하는 회귀가 있었다. 가이드는 placeholder만 사용.
+
+    또 manifest_rank가 유일한 active 신호일 때는 reflection 블록을 만들지 않는다 (LLM이
+    "N번 항목 상세"라고 답변에 이미 자연스럽게 표기하므로 추가 가이드는 거짓 위험만 증가).
+    """
+    lines: List[str] = []
+    substantive_signal = False  # subject/year/perf_type/coparticipants/exclude_* 같은 진짜 사용자 조건
+    if intent.subject_name:
+        kind_label = {"people": "people", "org": "org"}.get(intent.subject_kind or "", intent.subject_kind or "")
+        aff = (intent.subject_affiliation_hint or "").strip()
+        if aff:
+            lines.append(f"  - 대상: '{intent.subject_name}' ({kind_label}, {aff} 소속)")
+        else:
+            lines.append(f"  - 대상: '{intent.subject_name}' ({kind_label})")
+        substantive_signal = True
+    if intent.year_from or intent.year_to:
+        if intent.year_from and intent.year_to:
+            lines.append(f"  - 연도: {intent.year_from}년 ~ {intent.year_to}년")
+        elif intent.year_from:
+            lines.append(f"  - 연도: {intent.year_from}년 이후")
+        elif intent.year_to:
+            lines.append(f"  - 연도: {intent.year_to}년 이전")
+        substantive_signal = True
+    if intent.perf_type_hint:
+        lines.append(f"  - 성과 유형: {', '.join(intent.perf_type_hint)}")
+        substantive_signal = True
+    if intent.coparticipants:
+        lines.append(f"  - 공동 참여자: {', '.join(intent.coparticipants)}")
+        substantive_signal = True
+    if intent.exclude_org_name:
+        lines.append(f"  - 제외 기관: {', '.join(intent.exclude_org_name)}")
+        substantive_signal = True
+    if intent.exclude_perf_type:
+        lines.append(f"  - 제외 성과 유형: {', '.join(intent.exclude_perf_type)}")
+        substantive_signal = True
+    if intent.exclude_person_name:
+        lines.append(f"  - 제외 인명: {', '.join(intent.exclude_person_name)}")
+        substantive_signal = True
+    if intent.sort_by and intent.sort_by != "relevance":
+        sort_label = {"recent_desc": "최근순", "recent_asc": "오래된 순"}.get(intent.sort_by, intent.sort_by)
+        lines.append(f"  - 정렬: {sort_label}")
+        substantive_signal = True
+    if intent.length_hint and intent.length_hint != "default":
+        length_label = {"brief": "간결한 요약", "detailed": "상세한 설명"}.get(intent.length_hint, intent.length_hint)
+        lines.append(f"  - 답변 길이: {length_label}")
+        # length_hint만으로는 substantive_signal 승격 안 함 (단독으론 reflection 가치 작음)
+    if intent.manifest_rank:
+        lines.append(f"  - 직전 N번 항목 인용: {intent.manifest_rank}")
+        # manifest_rank 단독은 substantive_signal 아님 (LLM이 답변에 이미 자연 반영)
+    if not lines:
+        return ""
+    if not substantive_signal:
+        # manifest_rank/length_hint만 있는 경우 → reflection 블록 미생성 (거짓 답변 위험 회피)
+        return ""
+    lines.append(f"  - 결과 건수: {item_count}")
+    return (
+        "[사용자 조건 요약]\n"
+        + "\n".join(lines)
+        + "\n답변 도입부에 위 조건들을 사용자가 한 그대로 (또는 자연스럽게 묶어서) 반복해\n"
+        "사용자가 의도가 정확히 이해됐음을 확인할 수 있게 하세요. **위 조건에 없는 인물명·"
+        "조직명·필터값을 임의로 만들어 도입부에 넣지 마세요.** 조건이 없는 항목은 도입부에서\n"
+        "언급하지 않습니다.\n"
+    )
+
+
+def _format_score_distribution_block(bundle: EvidenceBundle) -> str:
+    """retrieval score 분포를 LLM에 노출해 신뢰도 판단 자료로 활용.
+
+    휴리스틱 threshold 없이 score 분포만 보여주고 LLM이 판단하도록 한다:
+    - top이 충분히 높고 spread도 적정하면 일반 답변
+    - top이 낮거나 모두 비슷한 점수면 LLM이 도입부에 정직 안내
+      ("검색 결과가 요청과 정확히 일치하지 않을 수 있습니다")
+
+    이 블록은 사례별 땜빵 아니라 모든 retrieval에 자동 노출되는 일반 신호.
+    """
+    dist = (bundle.diagnostics or {}).get("score_distribution")
+    if not isinstance(dist, dict) or not dist.get("n"):
+        return ""
+    top = dist.get("top", 0.0)
+    median = dist.get("median", 0.0)
+    bottom = dist.get("min", 0.0)
+    spread = dist.get("spread", 0.0)
+    n = dist.get("n", 0)
+    return (
+        f"[retrieval score 분포]\n"
+        f"  - 결과 {n}건, 최고 {top:.3f} · 중앙 {median:.3f} · 최저 {bottom:.3f} · 폭 {spread:.3f}\n"
+        f"점수가 낮거나(top<<일반적 기대치) 모든 결과의 점수가 비슷해 분포가 평평하면(spread가\n"
+        f"매우 작으면) 검색 결과가 사용자 질문과 의미적으로 잘 매칭되지 않은 것입니다.\n"
+        f"이 경우 답변 도입부에 \"검색 결과가 요청과 정확히 일치하지 않을 수 있습니다\"라고\n"
+        f"정직하게 안내한 뒤 결과를 보여주세요. (시스템 9·10번 규칙 — 도입부 grounding).\n"
+    )
+
+
+def _format_activity_summary_block(bundle: EvidenceBundle) -> str:
+    """subject_activity view의 활동 요약 통계를 prompt 블록으로 노출.
+
+    답변 도입부에 "신동구는 과제 7건 / 성과 3건, 주요 기관 KISTI(5), 활동 연도 2008~2025"
+    같은 한눈 요약을 LLM이 작성하도록 유도.
+    """
+    summary = (bundle.diagnostics or {}).get("activity_summary")
+    if not isinstance(summary, dict):
+        return ""
+    lines: List[str] = ["[활동 요약]"]
+    total = summary.get("total")
+    by_source = summary.get("by_source") or {}
+    if total:
+        # source 분포 표기 (project/perf만 사람-읽기 라벨)
+        label_map = {"project": "과제", "perf": "성과", "people": "사람", "org": "기관", "support": "지원"}
+        parts = [
+            f"{label_map.get(src, src)} {count}건"
+            for src, count in by_source.items() if count > 0
+        ]
+        if parts:
+            lines.append(f"  - 총 {total}건 ({', '.join(parts)})")
+        else:
+            lines.append(f"  - 총 {total}건")
+    year_min = summary.get("year_min")
+    year_max = summary.get("year_max")
+    if year_min and year_max:
+        if year_min == year_max:
+            lines.append(f"  - 활동 연도: {year_min}년")
+        else:
+            lines.append(f"  - 활동 연도: {year_min}년 ~ {year_max}년")
+    top_orgs = summary.get("top_orgs") or []
+    if top_orgs:
+        org_labels = [f"{o['name']}({o['count']})" for o in top_orgs[:3]]
+        lines.append(f"  - 주요 수행기관: {', '.join(org_labels)}")
+    # subject 인물의 역할 분포 (anchor 인물 검색 시 grounding 신호)
+    subject_roles = summary.get("subject_roles") or []
+    if subject_roles:
+        role_labels = [f"{r['role']}({r['count']})" for r in subject_roles[:4]]
+        match_count = summary.get("subject_match_count")
+        match_text = f" / 매칭 {match_count}건" if match_count else ""
+        lines.append(f"  - 대상 인물의 역할: {', '.join(role_labels)}{match_text}")
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "답변 도입부에 위 요약을 1~2문장으로 자연스럽게 요약한 뒤 활동 list로 이어가세요."
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -393,9 +576,34 @@ def _format_group_block(bundle: EvidenceBundle) -> str:
     return "\n".join(lines) + "\n"
 
 
+_LENGTH_HINT_INSTRUCTIONS = {
+    "brief": (
+        "[답변 길이: brief] 사용자가 간결한 답변을 요청했습니다. "
+        "각 항목은 1줄(약 50자 이내)로 핵심만 정리하고 도입부도 한 문장으로 짧게 유지하세요."
+    ),
+    "detailed": (
+        "[답변 길이: detailed] 사용자가 상세한 답변을 요청했습니다. "
+        "각 항목에 사업/성과 핵심 정보(수행기관·기간·요약)를 2~3줄로 풀어 설명하고, "
+        "도입부에서 결과 전반을 2~3문장으로 종합하세요."
+    ),
+    "default": "",
+}
+
+
 def _instructions_for_view(*, bundle: EvidenceBundle, intent: DialogueIntent) -> str:
-    """view별 지시사항. display_limit 같은 강제 한도는 EvidenceCurator가 이미 결정했으므로
-    여기서는 자연어 가이드만 둔다.
+    """view별 지시사항 + length_hint 가이드 결합."""
+    base = _base_instructions_for_view(bundle=bundle, intent=intent)
+    length_extra = _LENGTH_HINT_INSTRUCTIONS.get(intent.length_hint, "")
+    if length_extra:
+        return base + length_extra + "\n"
+    return base
+
+
+def _base_instructions_for_view(*, bundle: EvidenceBundle, intent: DialogueIntent) -> str:
+    """view별 자연어 가이드 (length_hint 미적용 원본).
+
+    display_limit 같은 강제 한도는 EvidenceCurator가 이미 결정했으므로 여기서는 자연어
+    가이드만 둔다.
     """
     n = len(bundle.items)
     if bundle.view == "single_detail":
@@ -477,13 +685,58 @@ def _parse_citations(text: str) -> List[Citation]:
 # ============================================================================
 
 def _no_result_text_for(intent: DialogueIntent) -> str:
+    """결과 0건일 때 사용자에게 보여줄 메시지 + 다음 시도 가이드.
+
+    intent의 필터/식별자를 분석해 무엇이 결과를 0건으로 만들었을 가능성이 높은지 진단:
+        - year_from/year_to 있음 → "연도 조건을 빼고 다시 시도"
+        - subject_name 있고 affiliation 없음 → "소속 기관 함께 알려주면 정확도 ↑"
+        - identifier_hints 있음 → "식별자 형식 확인"
+        - perf_type_hint 있음 → "성과 유형을 빼고 다시 시도"
+        - coparticipants 있음 → "공동 참여자 조건이 좁힐 수 있음"
+    """
     name = (intent.subject_name or "").strip()
-    if name:
-        return _NO_RESULT_TEMPLATE_TEXTS["subject"].format(name=name)
+    has_year = intent.year_from is not None or intent.year_to is not None
+    has_perf_type = bool(intent.perf_type_hint)
+    has_coparticipants = bool(intent.coparticipants)
     ids_kv = _format_identifier_hints(intent)
-    if ids_kv:
-        return _NO_RESULT_TEMPLATE_TEXTS["identifier"].format(ids=ids_kv)
-    return _NO_RESULT_TEMPLATE_TEXTS["default"]
+
+    suggestions: List[str] = []
+    if has_year:
+        year_range = []
+        if intent.year_from:
+            year_range.append(f"{intent.year_from}년 이후")
+        if intent.year_to:
+            year_range.append(f"{intent.year_to}년 이전")
+        year_label = " · ".join(year_range) or "지정한 연도"
+        suggestions.append(f"연도 조건({year_label})을 빼고 다시 시도")
+    if name and not (intent.subject_affiliation_hint or "").strip():
+        suggestions.append(f"'{name}'의 소속 기관을 함께 알려주시면 동명이인 구분이 가능")
+    if has_perf_type:
+        types_label = ", ".join(intent.perf_type_hint)
+        suggestions.append(f"성과 유형({types_label}) 조건을 빼고 다시 시도")
+    if has_coparticipants:
+        labels = ", ".join(intent.coparticipants)
+        suggestions.append(f"공동 참여자({labels}) 조건을 빼고 다시 시도")
+    if ids_kv and not name:
+        suggestions.append(
+            "식별자 형식 확인: pjt_id는 10자리 숫자, pjt_no는 'K-20-...' 코드, "
+            "rst_id는 CNL/JNL/PTR/SNW/REP/EQU 접두어"
+        )
+
+    # 본문 구성
+    if name:
+        base = _NO_RESULT_TEMPLATE_TEXTS["subject"].format(name=name)
+    elif ids_kv:
+        base = _NO_RESULT_TEMPLATE_TEXTS["identifier"].format(ids=ids_kv)
+    else:
+        base = _NO_RESULT_TEMPLATE_TEXTS["default"]
+
+    if not suggestions:
+        return base
+    suggestion_text = "\n\n다음 중 하나를 시도해 보세요:\n" + "\n".join(
+        f"  - {s}" for s in suggestions
+    )
+    return base + suggestion_text
 
 
 def _format_identifier_hints(intent: DialogueIntent) -> str:

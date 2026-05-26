@@ -37,6 +37,7 @@ from apps.pipeline.agents import (
     RetrievalAgent,
     SearchPlannerAgent,
 )
+from apps.pipeline.agents.grounding.llm_judge import LLMJudgeChecker
 from apps.pipeline.search_agent import SearchAgent
 from apps.platform.storage import FileKVStore, KVStore
 
@@ -143,6 +144,15 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         embed_e5i=rag_resources.embed_e5i,
         embed_e5=rag_resources.embed_e5,
     )
+    # CriticAgent grounding 검증 — 2026-05-26 기본 활성화. LLM-as-Judge로 답변과
+    # evidence 의미 일치 판정. 회귀 시 환경변수 RAG_GROUNDING_CHECKER_ENABLED=false 로 우회.
+    grounding_enabled = (os.environ.get("RAG_GROUNDING_CHECKER_ENABLED", "true").strip().lower()
+                         not in {"0", "false", "no", "off"})
+    grounding_checker = LLMJudgeChecker(llm=dialogue_llm) if grounding_enabled else None
+    logger.info(
+        f"CriticAgent grounding_checker={'enabled (LLMJudgeChecker on dialogue_llm)' if grounding_enabled else 'disabled (env override)'}"
+    )
+
     deps = AgentPipelineDeps(
         dialogue_agent=DialogueAgent(llm=dialogue_llm),
         entity_resolver=EntityResolverAgent(),
@@ -155,7 +165,7 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         ),
         evidence_curator=EvidenceCuratorAgent(),
         answer_agent=AnswerAgent(llm=answer_llm),
-        critic_agent=CriticAgent(),
+        critic_agent=CriticAgent(grounding_checker=grounding_checker),
     )
     app.state.pipeline_deps = deps
 

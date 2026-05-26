@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from apps.pipeline.contracts import (
+    AggregateBy,
     Axis,
     CanonicalEvidence,
     FilterBundle,
@@ -41,6 +42,8 @@ DialogueKind = Literal[
     "ask_search",         # 일반 검색 (사람/기관/주제)
     "ask_detail",         # 단일 대상 상세
     "ask_meta",           # 직전 항목의 메타 분류 질문 (과제/성과 여부, 종류, 식별자 형식) — 검색 없이 manifest로 즉답
+    "ask_children",       # 직전 항목의 자식 엔티티 목록 (참여연구자/참여기관) — 검색 없이 focused_detail 캐시로 즉답
+    "ask_similar",        # 직전 항목과 유사한 항목 — focused_detail.title을 query로 사용한 hybrid_search
     "refine_previous",    # 직전 결과를 조건 추가로 좁힘
     "compare",            # 둘 이상 비교
     "stats",              # 통계/집계
@@ -82,6 +85,14 @@ class DialogueIntent(BaseModel):
     subject_kind: Optional[Literal["people", "org"]] = None
     subject_affiliation_hint: Optional[str] = None
 
+    # 공동 참여자 힌트 — subject 외의 추가 인명들 (AND 결합). "A와 B가 같이 참여한" 패턴.
+    coparticipants: List[str] = Field(default_factory=list)
+
+    # 제외(negative) 필터 — "X 제외", "특허 빼고" 같은 follow-up 패턴.
+    exclude_org_name: List[str] = Field(default_factory=list)
+    exclude_perf_type: List[str] = Field(default_factory=list)
+    exclude_person_name: List[str] = Field(default_factory=list)
+
     # 식별자 힌트 (LLM이 텍스트에서 추출). 검증은 EntityResolver.
     identifier_hints: Dict[str, List[str]] = Field(default_factory=dict)
     # 예: {"pjt_id": ["1345214806"], "pjt_no": ["K-20-..."], "rst_id": ["REP-2010-..."]}
@@ -93,6 +104,16 @@ class DialogueIntent(BaseModel):
     year_from: Optional[int] = Field(default=None, ge=1900, le=2100)
     year_to: Optional[int] = Field(default=None, ge=1900, le=2100)
     perf_type_hint: List[str] = Field(default_factory=list)
+
+    # 정렬 힌트 (P0-β). 사용자가 "최근순"/"오래된 순" 명시 시 채움. 기본 "relevance"(score).
+    sort_by: Literal["relevance", "recent_desc", "recent_asc"] = "relevance"
+
+    # 답변 길이 힌트. 사용자가 "간단히/한 줄/자세히/더 자세히" 명시 시 채움.
+    length_hint: Literal["brief", "default", "detailed"] = "default"
+
+    # stats kind에서 집계 축 힌트. LLM이 "참여기관별/참여자별/기관별/분야별" 같은
+    # 사용자 의도를 분류해 채움. 비어 있으면 Planner는 "year" fallback.
+    aggregate_hint: Optional[AggregateBy] = None
 
     # compare kind일 때만 사용.
     compare_targets: List[CompareTarget] = Field(default_factory=list)

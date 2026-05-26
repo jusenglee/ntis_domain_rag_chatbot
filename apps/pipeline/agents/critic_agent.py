@@ -1,7 +1,9 @@
 """Phase 9: CriticAgent — AnswerDraft 검증 + ReferenceManifest 발행.
 
 설계 원칙:
-    - 결정적(deterministic) 검증기. LLM 호출 없음.
+    - 기본 검증은 결정적(deterministic). LLM 호출 없음.
+    - 선택적 grounding_checker: LLM-as-Judge로 답변 vs evidence 의미 일치 검증.
+      운영 측이 활성화 결정 (비용·latency 트레이드오프). 비활성화 시 기존 동작 유지.
     - 입력: AnswerDraft + EvidenceBundle + DialogueIntent (+ repair_attempted 플래그)
     - 출력: GuardDecision (publish | repair_answer | clarify | internal_error)
     - 본 모듈이 ReferenceManifest의 최종 발행자. 답변 본문 [N] ↔ manifest.published_rank ↔
@@ -13,19 +15,16 @@
     2. citation 0개이면서 본문이 인용 의무를 갖는 template → repair_answer (1회 한도)
                                                           → repair 소진 후엔 clarify로 전환
     3. cited rank가 evidence 범위를 벗어남 → repair_answer (1회 한도) → 소진 후 clarify
-    4. (정상) ReferenceManifest 발행 → publish
-
-repair 1회 제한:
-    - 외부 state(workflow)가 repair_attempted=True를 두 번째 invocation에 전달.
-    - CriticAgent 자체는 stateless. 결정만 내림.
-
-복구할 수 없는 위반(out_of_range, missing_citation)은 사용자에게 clarify로 안내.
+    4. **grounding 검증 (활성 시)** — LLM-as-Judge로 답변-evidence 의미 일치 확인.
+       not_grounded이면 repair_answer (1회 한도). 휴리스틱 단어 매칭 아님.
+    5. (정상) ReferenceManifest 발행 → publish
 """
 
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from loguru import logger
 
@@ -42,6 +41,46 @@ from apps.pipeline.contracts import (
     ReferenceItem,
     ReferenceManifest,
 )
+
+
+class GroundingChecker(Protocol):
+    """답변과 evidence content의 의미 일치를 검증하는 LLM-as-Judge 인터페이스.
+
+    구현체는 LLM 호출 또는 dense vector similarity 같은 정통 방법을 사용.
+    휴리스틱 단어 매칭은 금지.
+
+    Note: 인터페이스는 sync. 내부에 async LLM 호출이 있다면 구현체가
+    ``asyncio.run`` 또는 별도 thread로 wrapping해 sync로 노출.
+    """
+
+    def check(
+        self,
+        *,
+        answer_text: str,
+        evidences: List[CanonicalEvidence],
+        question: str,
+    ) -> "GroundingVerdict":
+        """답변이 evidence에 grounded인지 판정.
+
+        Returns:
+            GroundingVerdict — verdict + reason + diagnostics
+        """
+        ...
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GroundingVerdict:
+    """grounding 검증 결과."""
+
+    verdict: str  # "grounded" | "not_grounded" | "partial"
+    reason: str = ""
+    diagnostics: Dict[str, Any] = None  # type: ignore[assignment]
+
+    def is_acceptable(self) -> bool:
+        return self.verdict in {"grounded", "partial"}
 
 
 # 답변 본문의 [N] 인용 패턴.
@@ -74,7 +113,15 @@ _TEMPLATES_REQUIRING_CITATION = {"list", "detail", "compare", "stats"}
 # ============================================================================
 
 class CriticAgent:
-    """AnswerDraft 검증 + ReferenceManifest 발행."""
+    """AnswerDraft 검증 + ReferenceManifest 발행.
+
+    Args:
+        grounding_checker: Optional. LLM-as-Judge가 답변-evidence 의미 일치를 검증.
+            None이면 기존 결정적 검증만 수행. 운영 측에서 활성화 결정.
+    """
+
+    def __init__(self, *, grounding_checker: Optional[GroundingChecker] = None) -> None:
+        self._grounding_checker = grounding_checker
 
     def critique(
         self,
@@ -169,23 +216,73 @@ class CriticAgent:
                 diagnostics={"template": draft.template},
             )
 
-        # ---- 3. ReferenceManifest 발행 ----
+        # ---- 3. grounding 검증 (LLM-as-Judge, optional) ----
+        # 활성화 시: 답변과 evidence의 의미 일치를 LLM이 판정. not_grounded이면 repair_answer.
+        # 비활성화(기본): skip.
+        grounding_diag: Optional[Dict[str, Any]] = None
+        if self._grounding_checker is not None:
+            try:
+                t0 = time.perf_counter()
+                verdict = self._grounding_checker.check(
+                    answer_text=text,
+                    evidences=list(bundle.items),
+                    question=(intent.query or "").strip(),
+                )
+                grounding_diag = {
+                    "verdict": verdict.verdict,
+                    "reason": verdict.reason,
+                    "latency_ms": (time.perf_counter() - t0) * 1000,
+                    "extra": verdict.diagnostics or {},
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[CriticAgent] grounding_checker raised: {exc}")
+                grounding_diag = {"verdict": "error", "reason": str(exc)}
+                verdict = GroundingVerdict(verdict="error", reason=str(exc))
+
+            if verdict.verdict == "not_grounded":
+                logger.info(
+                    f"[CriticAgent] grounding=not_grounded reason={verdict.reason!r} "
+                    f"repair_attempted={repair_attempted}"
+                )
+                if not repair_attempted:
+                    return GuardDecision(
+                        decision="repair_answer",
+                        repair_hint=(
+                            "답변이 [근거 출처] 내용과 의미적으로 일치하지 않습니다. "
+                            "근거의 실제 제목·요약·기관·기간을 바탕으로 답변을 다시 작성하세요. "
+                            "검색 결과와 무관한 키워드를 도입부에 적지 마세요. "
+                            f"검증 사유: {verdict.reason[:200]}"
+                        ),
+                        reasoning="grounding_check_failed",
+                        diagnostics={"grounding": grounding_diag},
+                    )
+                # repair 소진 — publish하되 unverified warning을 진단에 기록.
+                logger.warning(
+                    "[CriticAgent] grounding=not_grounded after repair attempt; "
+                    "publishing with warning"
+                )
+
+        # ---- 4. ReferenceManifest 발행 ----
         manifest, issues = _build_manifest(bundle.items)
         reasoning = "published" if not issues else "published_with_warnings"
+
+        diag: Dict[str, Any] = {
+            "cited_ranks": cited_ranks,
+            "evidence_count": max_rank,
+            "manifest_issues": issues,
+            "template": draft.template,
+            "view": bundle.view,
+            "truncated": draft.truncated,
+        }
+        if grounding_diag is not None:
+            diag["grounding"] = grounding_diag
 
         return GuardDecision(
             decision="publish",
             text=text,
             reference_manifest=manifest,
             reasoning=reasoning,
-            diagnostics={
-                "cited_ranks": cited_ranks,
-                "evidence_count": max_rank,
-                "manifest_issues": issues,
-                "template": draft.template,
-                "view": bundle.view,
-                "truncated": draft.truncated,
-            },
+            diagnostics=diag,
         )
 
 

@@ -62,12 +62,28 @@ class ManifestSlot(BaseModel):
 
 
 class FocusedDetailSlot(BaseModel):
-    """focused_detail 슬롯. 가장 최근 본 단일 대상."""
+    """focused_detail 슬롯. 가장 최근 본 단일 대상.
+
+    P0-B 캐싱: evidence 본문(facts/roles/child_entities/summary)을 함께 저장해
+    같은 식별자 재조회를 회피하고, ask_children 같은 child entity follow-up을
+    검색 없이 결정적으로 즉답할 수 있게 한다.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     anchor: FocusEntity
     focused_turn_id: Optional[str] = None
+
+    # evidence 캐시 (P0-B). 직전 single_detail evidence의 핵심 필드만 보존.
+    # 너무 큰 데이터는 피하고 prompt 재구성에 필요한 정보만.
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    facts: Dict[str, Any] = Field(default_factory=dict)
+    roles: Dict[str, List[str]] = Field(default_factory=dict)
+    child_entities: List[Dict[str, Any]] = Field(default_factory=list)
+    cached_ids: Dict[str, str] = Field(default_factory=dict)   # evidence.ids 복사
+    cached_tag: Optional[str] = None
+    cached_source_type: Optional[str] = None
 
 
 # ============================================================================

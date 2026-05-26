@@ -86,6 +86,8 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
             "search_plan": _dump(_get(final_state, "search_plan")),
             "evidence_bundle_view": _get_evidence_view(final_state),
             "guard_decision": _dump(_get(final_state, "guard_decision")),
+            # 운영 진단 (도구 분기·캐시·세션 상태) — 회귀 추적·대시보드용
+            "diagnostics": _build_diagnostics(final_state, artifact),
         }
 
     @app.get("/", response_class=HTMLResponse)
@@ -253,3 +255,98 @@ def _get_evidence_view(state: Any) -> Optional[str]:
     if bundle is None:
         return None
     return getattr(bundle, "view", None)
+
+
+def _build_diagnostics(state: Any, artifact: Any) -> dict[str, Any]:
+    """운영 진단 메타 — 매 turn 도구 분기·캐싱·세션 상태를 한 dict로 노출.
+
+    포함 키:
+        - dialogue_kind, sort_by, coparticipants_n
+        - resolution_source, manifest_resolved_target, dropped_identifier_hints
+        - plan_reason, plan_task_count
+        - search_status, search_cache_hit, retrieval_diag (latency 등)
+        - evidence_view, evidence_count, child_entity_count
+        - guard_decision, guard_reasoning, manifest_published_n
+        - session: has_subject / has_manifest / has_focused_detail / cached_ids_axis
+        - artifact_meta (도구 라벨)
+    """
+    diag: dict[str, Any] = {}
+
+    intent = _get(state, "dialogue_intent", None)
+    if intent is not None:
+        diag["dialogue_kind"] = getattr(intent, "kind", None)
+        diag["sort_by"] = getattr(intent, "sort_by", "relevance")
+        diag["coparticipants_n"] = len(getattr(intent, "coparticipants", []) or [])
+        diag["manifest_rank_in"] = getattr(intent, "manifest_rank", None)
+
+    resolution = _get(state, "entity_resolution", None)
+    if resolution is not None:
+        diag["resolution_source"] = getattr(resolution, "resolution_source", None)
+        diag["resolution_target"] = getattr(resolution, "manifest_resolved_target", None) or getattr(
+            resolution, "forced_target", None
+        )
+        res_diag = getattr(resolution, "diagnostics", None) or {}
+        if isinstance(res_diag, dict):
+            dropped = res_diag.get("dropped_identifier_hints")
+            if dropped:
+                diag["dropped_identifier_hints"] = dropped
+
+    plan = _get(state, "search_plan", None)
+    if plan is not None:
+        diag["plan_reason"] = getattr(plan, "plan_reason", None)
+        diag["plan_task_count"] = len(getattr(plan, "tasks", []) or [])
+        diag["plan_merge_strategy"] = getattr(plan, "merge_strategy", None)
+
+    sr = _get(state, "search_result", None)
+    if sr is not None:
+        diag["search_status"] = getattr(sr, "status", None)
+        diag["search_evidence_n"] = len(getattr(sr, "evidences", []) or [])
+        diag["search_total_hits"] = getattr(sr, "total_hits", 0)
+        sr_diag = getattr(sr, "diagnostics", None) or {}
+        if isinstance(sr_diag, dict):
+            if sr_diag.get("cache_hit"):
+                diag["search_cache_hit"] = True
+                diag["search_cache_matched_axis"] = sr_diag.get("matched_axis")
+            if "latency_ms" in sr_diag:
+                diag["search_latency_ms"] = sr_diag["latency_ms"]
+
+    bundle = _get(state, "evidence_bundle", None)
+    if bundle is not None:
+        diag["evidence_view"] = getattr(bundle, "view", None)
+        diag["evidence_count"] = len(getattr(bundle, "items", []) or [])
+        b_diag = getattr(bundle, "diagnostics", None) or {}
+        if isinstance(b_diag, dict) and "child_entity_count" in b_diag:
+            diag["child_entity_count"] = b_diag["child_entity_count"]
+
+    guard = _get(state, "guard_decision", None)
+    if guard is not None:
+        diag["guard_decision"] = getattr(guard, "decision", None)
+        diag["guard_reasoning"] = getattr(guard, "reasoning", None)
+        ref_manifest = getattr(guard, "reference_manifest", None)
+        if ref_manifest is not None:
+            diag["manifest_published_n"] = len(getattr(ref_manifest, "items", []) or [])
+            diag["manifest_publication_status"] = getattr(ref_manifest, "publication_status", None)
+
+    session_state = _get(state, "session_state", None)
+    if session_state is not None:
+        sess: dict[str, Any] = {
+            "has_subject": bool(getattr(session_state, "current_subject", None)),
+            "has_manifest": bool(getattr(session_state, "published_manifest", None)),
+            "has_focused_detail": bool(getattr(session_state, "focused_detail", None)),
+        }
+        focused = getattr(session_state, "focused_detail", None)
+        if focused is not None:
+            cached_ids = getattr(focused, "cached_ids", None) or {}
+            sess["focused_detail_cached_axes"] = sorted(cached_ids.keys()) if isinstance(cached_ids, dict) else []
+        subj = getattr(session_state, "current_subject", None)
+        if subj is not None:
+            sess["subject_kind"] = getattr(subj, "subject_kind", None)
+            sess["subject_name"] = getattr(subj, "subject_name", None)
+        diag["session"] = sess
+
+    if artifact is not None:
+        artifact_meta = getattr(artifact, "meta", None) or {}
+        if isinstance(artifact_meta, dict) and artifact_meta:
+            diag["artifact_meta"] = dict(artifact_meta)
+
+    return diag

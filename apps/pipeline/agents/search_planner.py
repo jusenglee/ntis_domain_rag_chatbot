@@ -23,6 +23,7 @@ from apps.pipeline.agents.contracts import (
     EntityResolution,
     SearchPlan,
 )
+from apps.pipeline.agents.session_state import SessionState
 from apps.pipeline.contracts import (
     Action,
     AggregateBy,
@@ -61,6 +62,7 @@ class SearchPlannerAgent:
         resolution: EntityResolution,
         request_id: str,
         turn_id: str,
+        session: Optional["SessionState"] = None,
     ) -> Optional[SearchPlan]:
         """SearchPlan을 만든다. 검색이 불필요한 의도(direct_answer/clarification)면 None.
 
@@ -69,9 +71,31 @@ class SearchPlannerAgent:
             - SearchPlan → RetrievalAgent에 전달
         """
         if intent.kind in {"direct_answer", "clarification", "ask_meta"}:
-            # ask_meta는 manifest item의 tag/axis만 보고 결정적으로 즉답 가능 — 검색 불필요.
-            # workflow가 plan=None + kind=ask_meta를 보고 emit_meta_answer로 분기한다.
+            # ask_meta는 검색 없이 결정적으로 즉답 가능.
+            # workflow가 plan=None + kind=ask_meta → emit_meta_answer 로 분기.
             return None
+
+        # ask_children — 분기 (focused_detail 캐시 즉답 vs retrieval 재조회):
+        #   - 식별자 해소가 안 됨 → plan=None → emit_children_list (focused_detail.cached child 사용)
+        #   - 식별자 해소됨 (manifest_rank 또는 identifier_literal) → 정상 exact_lookup 후
+        #     single_detail view → AnswerAgent의 child_entities 블록으로 답변
+        if intent.kind == "ask_children":
+            if not resolution.identifiers.has_any():
+                return None
+            # 식별자 있음 → 일반 detail lookup으로 처리 (아래 _plan_identifier_lookup 분기로 떨어짐)
+            # 하단 흐름에 위임
+
+        # ---- ask_similar — focused_detail.title을 query로 사용한 hybrid_search ----
+        if intent.kind == "ask_similar":
+            task = self._plan_similar(intent, resolution, request_id, turn_id, session)
+            if task is None:
+                return None
+            return SearchPlan(
+                tasks=[task],
+                merge_strategy="single",
+                max_results=_action_limit("list"),
+                plan_reason="ask_similar",
+            )
 
         # ---- manifest 해소가 있으면 단일 exact_lookup ----
         if resolution.manifest_rank is not None and resolution.identifiers.has_any():
@@ -81,6 +105,20 @@ class SearchPlannerAgent:
                 merge_strategy="single",
                 max_results=1,
                 plan_reason="manifest_rank_resolved",
+            )
+
+        # ---- manifest 부분집합 좁히기 (refine_previous + manifest filter) ----
+        if (
+            resolution.resolution_source == "manifest_filter"
+            and resolution.identifiers.has_any()
+        ):
+            task = self._plan_identifier_lookup(intent, resolution, request_id, turn_id)
+            # manifest 전체를 다시 가져와 reranking → list 한도까지 노출.
+            return SearchPlan(
+                tasks=[task],
+                merge_strategy="single",
+                max_results=_action_limit("list"),
+                plan_reason="manifest_filter",
             )
 
         # ---- 직접 식별자(literal) ----
@@ -192,6 +230,59 @@ class SearchPlannerAgent:
             judgment_reason="identifier_literal",
         )
 
+    def _plan_similar(
+        self,
+        intent: DialogueIntent,
+        resolution: EntityResolution,
+        request_id: str,
+        turn_id: str,
+        session: Optional["SessionState"],
+    ) -> Optional[SearchTask]:
+        """ask_similar — focused_detail.title을 query로 사용한 hybrid_search.
+
+        조건: session.focused_detail이 있어야 함. 없으면 None (workflow가 clarify 분기).
+        target: focused_detail.anchor.kind → project/perf 추정.
+        """
+        if session is None or not session.has_focused_detail():
+            logger.info("[SearchPlanner] ask_similar: no focused_detail in session")
+            return None
+        anchor = session.focused_detail.anchor
+        title = (session.focused_detail.title or anchor.title_text or "").strip()
+        if not title:
+            logger.info("[SearchPlanner] ask_similar: no title to query")
+            return None
+
+        # target 추정 — anchor.kind 우선
+        anchor_kind = (anchor.kind or "project").lower()
+        if anchor_kind == "perf":
+            target: Target = "perf"
+            collections: List[str] = ["ntis_perf_v1"]
+        elif anchor_kind in ("people", "org"):
+            # 사람/기관 anchor는 의미가 모호하니 project로 기본화
+            target = "project"
+            collections = ["ntis_project_v1"]
+        else:
+            target = "project"
+            collections = ["ntis_project_v1"]
+
+        # anchor 자신은 결과 후처리에서 제외 — judgment_reason에 anchor id 기록.
+        anchor_id = (
+            anchor.rst_id or anchor.pjt_id or anchor.pjt_no or anchor.person_no or anchor.org_id or ""
+        )
+        return build_search_task(
+            action="list",
+            target=target,
+            filters=resolution.filters,
+            retrieval_query=title,  # focused_detail.title을 query로 사용
+            request_id=request_id,
+            turn_id=turn_id,
+            limit=_action_limit("list") + 1,  # anchor 제외 후에도 N개 노출
+            display_limit=_action_limit("list"),
+            collections=collections,  # type: ignore[arg-type]
+            sort_by=intent.sort_by,
+            judgment_reason=f"ask_similar:anchor={anchor_id}",
+        )
+
     def _plan_stats(
         self,
         intent: DialogueIntent,
@@ -201,20 +292,10 @@ class SearchPlannerAgent:
     ) -> List[SearchTask]:
         """stats 도구 — aggregate task. subject가 있으면 그 anchor로 좁힘.
 
-        aggregate_by 결정 우선순위:
-            1. 쿼리에 "기관별" → "lead_org"
-            2. 쿼리에 "분야별"/"유형별"/"종류별" → "tag" (project) 또는 "perf_type" (perf)
-            3. 그 외(기본) → "year"
+        aggregate_by는 DialogueAgent가 intent.aggregate_hint로 LLM 분류한 값을 신뢰한다
+        (2026-05-26 위임 확장). LLM 미분류 시 'year' fallback.
         """
-        query = (intent.query or "").lower()
-        if "기관별" in query or "기관" in query and "별" in query:
-            aggregate_by: AggregateBy = "lead_org"
-        elif any(k in query for k in ("분야별", "유형별", "종류별", "타입별")):
-            # subject_kind/target에 따라 perf_type vs tag
-            forced = resolution.forced_target or "project"
-            aggregate_by = "perf_type" if forced == "perf" else "tag"
-        else:
-            aggregate_by = "year"
+        aggregate_by: AggregateBy = intent.aggregate_hint or "year"
 
         # collections — subject_kind/target에 따라
         target: Target = resolution.forced_target or intent.target_hint or "project"  # type: ignore[assignment]
@@ -240,6 +321,8 @@ class SearchPlannerAgent:
                 display_limit=20,
                 collections=[collection],  # type: ignore[arg-type]
                 aggregate_by=aggregate_by,
+                # year 집계 + recent_*: SearchAgent가 연도순 정렬. 그 외는 count 내림차순.
+                sort_by=intent.sort_by,
                 judgment_reason=f"stats_aggregate:{aggregate_by}:{collection}",
             )
             tasks.append(task)
@@ -271,6 +354,7 @@ class SearchPlannerAgent:
                 limit=limit,
                 display_limit=limit,
                 collections=[collection],
+                sort_by=intent.sort_by,
                 judgment_reason=f"subject_activity:{collection}",
             )
             tasks.append(task)
@@ -335,6 +419,7 @@ class SearchPlannerAgent:
             turn_id=turn_id,
             limit=_action_limit(action),
             display_limit=_action_limit(action),
+            sort_by=intent.sort_by,
             judgment_reason="generic_query",
         )
 

@@ -439,6 +439,29 @@ def _collect_facts(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, A
     tag = _first_non_empty(payload.get("tag"), meta.get("tag"))
     relation = _first_non_empty(payload.get("relation"), meta.get("relation"))
 
+    # 2026-05-26: 참여자 이름↔역할 매핑을 facts에 노출. anchor 인물 검색 시 grounding
+    # judge가 evidence와 인물의 의미 매칭을 할 수 있게 한다 (이전엔 인명만 있어서 partial verdict).
+    participant_role_map: List[Dict[str, str]] = []
+    for member in _normalize_nested_list(payload.get("prtcp_mp")):
+        name = _clean_text(member.get("hm_nm")) or _clean_text(member.get("person_name"))
+        if not name:
+            continue
+        role = _clean_text(member.get("role_slct_nm")) or _clean_text(member.get("role_nm")) or _clean_text(member.get("role"))
+        entry: Dict[str, str] = {"name": name}
+        if role:
+            entry["role"] = role
+        participant_role_map.append(entry)
+    # top-level (perf payload 자체가 연구자일 때)
+    top_level_name = _clean_text(payload.get("hm_nm")) or _clean_text(payload.get("person_name"))
+    if top_level_name:
+        top_level_role = _clean_text(payload.get("role_slct_nm")) or _clean_text(payload.get("role_nm")) or _clean_text(payload.get("role"))
+        entry = {"name": top_level_name}
+        if top_level_role:
+            entry["role"] = top_level_role
+        # 중복 방지 (top-level 이름이 prtcp_mp에도 있을 수 있음)
+        if not any(p["name"] == top_level_name for p in participant_role_map):
+            participant_role_map.append(entry)
+
     facts: Dict[str, Any] = {}
     if title:
         facts["title"] = title
@@ -462,6 +485,8 @@ def _collect_facts(payload: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, A
         facts["tag"] = tag
     if relation:
         facts["relation"] = relation
+    if participant_role_map:
+        facts["participant_role_map"] = participant_role_map
     return facts
 
 

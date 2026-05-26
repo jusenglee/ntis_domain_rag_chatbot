@@ -28,13 +28,25 @@ Axis = Literal["pjt_id", "pjt_no", "rst_id", "person_no", "org_id"]
 SearchStrategy = Literal[
     "exact_lookup",       # ids_map의 식별자로 by-id 조회
     "subject_anchor",     # subject(person/org) anchor 강제 주입 후 hybrid
-    "hybrid_search",      # 일반 hybrid 검색
-    "detail_anchor",      # 단일 대상 상세 (limit=1)
+    "hybrid_search",      # 일반 hybrid 검색 (detail action도 hybrid + limit=1 강제)
     "aggregate",          # Qdrant scroll → Python group_by count (stats 도구)
 ]
 
 # aggregate 도구의 group_by 축 (P0 stats — ADR-0019 후속 확장).
-AggregateBy = Literal["year", "lead_org", "tag", "perf_type"]
+# - year / lead_org / tag / perf_type : 1 payload = 1 그룹 키
+# - participant_org / participant_person : nested array 평탄화 → 1 payload = N 그룹 키
+AggregateBy = Literal[
+    "year",
+    "lead_org",
+    "tag",
+    "perf_type",
+    "participant_org",
+    "participant_person",
+]
+
+# 정렬 옵션 (P0-β — 사용자가 "최근순"/"오래된 순" 요청 시 SearchAgent 후처리에서 적용).
+# "relevance"는 Qdrant score 그대로(기본값). 그 외는 Python 후처리 정렬.
+SortBy = Literal["relevance", "recent_desc", "recent_asc"]
 
 SearchResultStatus = Literal["single", "multiple", "empty", "error"]
 
@@ -130,8 +142,15 @@ class FilterBundle(BaseModel):
     year_to: Optional[int] = Field(default=None, ge=1900, le=2100)
     lead_org_name: List[str] = Field(default_factory=list)
     participant_org_name: List[str] = Field(default_factory=list)
+    # 공동 참여자 필터 (P1 multi-anchor). subject가 1순위 참여자라면 이 필드는 2순위 이상의
+    # 공동 참여자 인명을 담아 모두 must AND로 매칭한다 (예: 신동구 + [김재수, 이지철]).
+    participant_person_name: List[str] = Field(default_factory=list)
     perf_type: List[str] = Field(default_factory=list)   # PAPER, PATENT, SOFTWARE, REPORT, EQUIPMENT 등
     domain_keywords: List[str] = Field(default_factory=list)  # 자유 키워드 필터
+    # negative 필터 — Qdrant must_not으로 결합. "KISTI 제외", "특허 빼고" 같은 자연 follow-up.
+    exclude_org_name: List[str] = Field(default_factory=list)
+    exclude_perf_type: List[str] = Field(default_factory=list)
+    exclude_person_name: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_year_range(self) -> "FilterBundle":
@@ -145,8 +164,12 @@ class FilterBundle(BaseModel):
             or self.year_to
             or self.lead_org_name
             or self.participant_org_name
+            or self.participant_person_name
             or self.perf_type
             or self.domain_keywords
+            or self.exclude_org_name
+            or self.exclude_perf_type
+            or self.exclude_person_name
         )
 
 
@@ -179,6 +202,9 @@ class SearchTask(BaseModel):
 
     # aggregate 도구 전용 — group_by 축. strategy="aggregate"일 때만 의미가 있다.
     aggregate_by: Optional[AggregateBy] = None
+
+    # 결과 정렬 옵션 (P0-β). 기본 "relevance" = Qdrant score 순.
+    sort_by: SortBy = "relevance"
 
     # 자연어 보조 (드리프트 비교 대상 아님)
     retrieval_query: str = Field(default="", max_length=2000)
@@ -341,6 +367,7 @@ def build_search_task(
     display_limit: int = 10,
     collections: Optional[Sequence[Collection]] = None,
     aggregate_by: Optional[AggregateBy] = None,
+    sort_by: SortBy = "relevance",
 ) -> SearchTask:
     """SearchPlannerAgent가 쓰는 SearchTask 빌더.
 
@@ -361,7 +388,9 @@ def build_search_task(
     elif subject is not None:
         strategy = "subject_anchor"
     else:
-        strategy = "detail_anchor" if action == "detail" else "hybrid_search"
+        # detail action이어도 식별자/subject 없으면 hybrid_search로 처리. SearchTask validator가
+        # action=detail일 때 limit=1을 강제하므로 결과는 단일 대상 detail로 노출됨.
+        strategy = "hybrid_search"
 
     # axis 결정
     axis: Optional[Axis] = axis_hint or ids.best_axis()
@@ -397,6 +426,7 @@ def build_search_task(
         limit=limit,
         display_limit=display_limit,
         aggregate_by=aggregate_by,
+        sort_by=sort_by,
         retrieval_query=retrieval_query.strip(),
         request_id=request_id,
         turn_id=turn_id,

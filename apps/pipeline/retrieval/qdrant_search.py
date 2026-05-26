@@ -241,16 +241,65 @@ def _build_qdrant_filter(
                 filters.participant_org_name,
             )
         )
+    if filters.participant_person_name:
+        # 공동 참여자(co-participant) 인명 — 각 이름을 **개별 must 조건**으로 AND 결합한다.
+        # 예: ["김재수", "이지철"] → 두 사람 모두 참여한 과제만 매칭.
+        # 평탄화 array `prtcp_mp_hm_nm_list`가 1순위(인덱스 있음), nested는 보조.
+        for person_name in filters.participant_person_name:
+            cleaned = (person_name or "").strip()
+            if not cleaned:
+                continue
+            must.append(
+                _match_any_across_paths(
+                    ["prtcp_mp_hm_nm_list", "prtcp_mp.hm_nm"],
+                    [cleaned],
+                )
+            )
+    # negative 필터 (must_not) — "X 제외", "특허 빼고" 같은 사용자 follow-up.
+    if filters.exclude_org_name:
+        must_not.append(
+            _match_any_across_paths(
+                ["org_nm", "prtcp_org.org_nm", "meta_basic.pjt_prfrm_org_nm"],
+                filters.exclude_org_name,
+            )
+        )
+    if filters.exclude_perf_type:
+        # perf_type 약어 → NTIS DataTag 확장 (perf_type include와 동일 규칙)
+        expanded = _expand_perf_type_aliases(filters.exclude_perf_type)
+        must_not.append(_match_any_across_paths(["perf_type", "meta_basic.perf_type", "tag"], expanded))
+    if filters.exclude_person_name:
+        for person_name in filters.exclude_person_name:
+            cleaned = (person_name or "").strip()
+            if not cleaned:
+                continue
+            must_not.append(
+                _match_any_across_paths(
+                    ["prtcp_mp_hm_nm_list", "prtcp_mp.hm_nm"],
+                    [cleaned],
+                )
+            )
     if filters.perf_type:
-        must.append(_match_any_across_paths(["perf_type", "meta_basic.perf_type", "tag"], filters.perf_type))
+        # DialogueAgent는 약어("PATENT", "PAPER")를 LLM에서 추출하지만 NTIS payload의 tag는
+        # "IRD_NAI_RI_IPR", "IRD_NAI_RI_PAPER" 형식. 약어 → NTIS tag 변환 후 양쪽 모두 시도.
+        expanded = _expand_perf_type_aliases(filters.perf_type)
+        must.append(_match_any_across_paths(["perf_type", "meta_basic.perf_type", "tag"], expanded))
     if filters.year_from or filters.year_to:
-        # NTIS payload는 stan_yr / start_dt 등 다양한 시점 필드를 보유. 가장 보편적인 stan_yr 기준.
-        gte = filters.year_from
-        lte = filters.year_to
+        # NTIS payload의 stan_yr는 **문자열**("2013")로 저장되어 있어 numeric Range(gte/lte)는
+        # 매칭이 안 되고 0건을 반환한다 (2026-05-21 회귀). 안전 대응:
+        # year_from..year_to 범위의 모든 연도를 문자열 MatchAny로 전개.
+        # 범위 미지정 끝은 합리적 경계(현재연도+5, 2000)로 채움.
+        lo = filters.year_from if filters.year_from is not None else 2000
+        hi = filters.year_to if filters.year_to is not None else 2030
+        if lo > hi:
+            lo, hi = hi, lo
+        # 비정상적으로 큰 범위는 잘라낸다 (Qdrant filter 길이 폭주 방지).
+        if hi - lo > 60:
+            hi = lo + 60
+        year_values = [str(y) for y in range(int(lo), int(hi) + 1)]
         must.append(
-            FieldCondition(
-                key="stan_yr",
-                range=Range(gte=gte, lte=lte),
+            _match_any_across_paths(
+                ["stan_yr", "meta_basic.stan_yr"],
+                year_values,
             )
         )
 
@@ -272,6 +321,46 @@ def _match_any_across_paths(paths: Sequence[str], values: Sequence[str]) -> Filt
     return Filter(
         should=[FieldCondition(key=path, match=MatchAny(any=cleaned)) for path in paths],
     )
+
+
+# 약어 ↔ NTIS DataTag 매핑. DialogueAgent LLM은 "PATENT", "PAPER" 같은 약어를 출력하지만
+# NTIS payload의 perf_type/tag 필드는 IRD_NAI_RI_* 형식. 매칭 시 양쪽 모두 시도.
+_PERF_TYPE_ALIASES: Dict[str, List[str]] = {
+    "PAPER": ["PAPER", "IRD_NAI_RI_PAPER"],
+    "PATENT": ["PATENT", "IRD_NAI_RI_IPR", "IPR"],
+    "SOFTWARE": ["SOFTWARE", "IRD_NAI_RI_SW", "SW"],
+    "REPORT": ["REPORT", "IRD_NAI_RI_RSCH_RPT"],
+    "EQUIPMENT": ["EQUIPMENT", "IRD_NAI_RI_FCLT_EQUIP", "FCLT_EQUIP"],
+    "COMPOUND": ["COMPOUND", "IRD_NAI_RI_COMPOUND"],
+    "ORGSM_INFO": ["ORGSM_INFO", "IRD_NAI_RI_ORGSM_INFO"],
+    "ORGSM_RESOURCE": ["ORGSM_RESOURCE", "IRD_NAI_RI_ORGSM_RESOURCE"],
+    "TECH_INFO": ["TECH_INFO", "IRD_NAI_RI_TECH_INFO"],
+    "TECH_SUMMARY": ["TECH_SUMMARY", "IRD_NAI_RI_TECH_INFO"],
+    "NVR": ["NVR", "IRD_NAI_RI_NVR"],
+    "VARIETY": ["VARIETY", "IRD_NAI_RI_NVR"],
+    "STANDARD": ["STANDARD", "IRD_NAI_RI_TOT_STD"],
+}
+
+
+def _expand_perf_type_aliases(values: Sequence[str]) -> List[str]:
+    """perf_type 약어 리스트를 NTIS DataTag와 약어 모두 포함한 매칭 후보로 확장.
+
+    예: ["PATENT"] → ["PATENT", "IRD_NAI_RI_IPR", "IPR"]
+        ["IRD_NAI_RI_PAPER"] → ["IRD_NAI_RI_PAPER"] (이미 NTIS tag면 그대로)
+    """
+    expanded: List[str] = []
+    seen: set[str] = set()
+    for v in values:
+        key = str(v).strip()
+        if not key:
+            continue
+        upper = key.upper()
+        candidates = _PERF_TYPE_ALIASES.get(upper, [key])
+        for c in candidates:
+            if c not in seen:
+                expanded.append(c)
+                seen.add(c)
+    return expanded
 
 
 def _payload_paths_for_axis(axis: str) -> List[str]:

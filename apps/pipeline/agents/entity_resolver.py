@@ -99,6 +99,20 @@ class EntityResolverAgent:
             )
             return focused_info
 
+        # ---- 1.7. refine_previous + manifest 좁히기 (P0-γ 후속) ----
+        # 사용자가 "공학 관련만 골라줘" 같은 manifest 부분집합 의도를 표현했을 때
+        # (intent.kind == "refine_previous" AND subject 없음 AND identifier_hints 없음)
+        # session.published_manifest의 모든 식별자를 IdentifierBundle에 채워 exact_lookup으로 다시
+        # 가져오게 한다. AnswerAgent가 사용자 query로 자연어 reranking.
+        manifest_filter_info = _resolve_manifest_filter(intent=intent, session=session)
+        if manifest_filter_info is not None:
+            logger.info(
+                f"[EntityResolver] manifest_filter resolved "
+                f"target={manifest_filter_info.manifest_resolved_target} "
+                f"ids_count={sum(len(getattr(manifest_filter_info.identifiers, axis) or []) for axis in ('pjt_id','pjt_no','rst_id','person_no','org_id'))}"
+            )
+            return manifest_filter_info
+
         # ---- 2. identifier_hints → IdentifierBundle (형식 검증 + 드롭 진단) ----
         identifiers, dropped_hints = _build_identifier_bundle(intent.identifier_hints)
 
@@ -314,6 +328,99 @@ def _resolve_focused_detail(
     )
 
 
+def _resolve_manifest_filter(
+    *,
+    intent: DialogueIntent,
+    session: SessionState,
+) -> Optional[EntityResolution]:
+    """refine_previous + manifest 좁히기 도구 (P0-γ 후속).
+
+    조건 (모두 만족):
+        - intent.kind == "refine_previous"
+        - session.has_manifest()
+        - intent.subject_name 없음 (subject 보존 분기는 별도 처리)
+        - identifier_hints 비어있음 (직접 식별자 명시는 별도 처리)
+
+    동작:
+        published_manifest.snapshot.items의 모든 식별자(pjt_id/rst_id/pjt_no 등)를
+        IdentifierBundle에 채워 SearchPlanner가 exact_lookup으로 다시 evidence를 가져오게 한다.
+        AnswerAgent는 intent.query 키워드로 자연어 reranking/필터링.
+
+    Returns:
+        EntityResolution(resolution_source="manifest_filter")
+    """
+    if intent.kind != "refine_previous":
+        return None
+    if not session.has_manifest():
+        return None
+    if intent.subject_name:
+        return None
+    if intent.identifier_hints:
+        for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+            if intent.identifier_hints.get(axis):
+                return None
+
+    snapshot = session.published_manifest.snapshot
+    items = snapshot.items or []
+    if not items:
+        return None
+
+    pjt_ids: List[str] = []
+    pjt_nos: List[str] = []
+    rst_ids: List[str] = []
+    person_nos: List[str] = []
+    org_ids: List[str] = []
+    for item in items:
+        if item.pjt_id and item.pjt_id not in pjt_ids:
+            pjt_ids.append(item.pjt_id)
+        if item.pjt_no and item.pjt_no not in pjt_nos:
+            pjt_nos.append(item.pjt_no)
+        if item.rst_id and item.rst_id not in rst_ids:
+            rst_ids.append(item.rst_id)
+        if item.person_no and item.person_no not in person_nos:
+            person_nos.append(item.person_no)
+        if item.org_id and item.org_id not in org_ids:
+            org_ids.append(item.org_id)
+
+    identifiers = IdentifierBundle(
+        pjt_id=pjt_ids,
+        pjt_no=pjt_nos,
+        rst_id=rst_ids,
+        person_no=person_nos,
+        org_id=org_ids,
+    )
+    if not identifiers.has_any():
+        return None
+
+    # target은 manifest의 result_kind를 우선 사용 (snapshot.context_kind).
+    target_raw = (session.published_manifest.result_kind or snapshot.context_kind or "project").strip()
+    target: Target = target_raw if target_raw in {"project", "perf", "people", "org", "support"} else "project"  # type: ignore[assignment]
+
+    return EntityResolution(
+        subject=None,
+        identifiers=identifiers,
+        filters=_build_filter_bundle(intent),
+        manifest_rank=None,
+        manifest_resolved_target=target,
+        manifest_resolved_axis=identifiers.best_axis(),
+        forced_target=target,
+        ambiguity_candidates=[],
+        clarification_needed=False,
+        clarification_reason=None,
+        resolution_source="manifest_filter",
+        diagnostics={
+            "manifest_item_count": len(items),
+            "ids_count": {
+                "pjt_id": len(pjt_ids),
+                "pjt_no": len(pjt_nos),
+                "rst_id": len(rst_ids),
+                "person_no": len(person_nos),
+                "org_id": len(org_ids),
+            },
+        },
+    )
+
+
 def _resolve_target_from_anchor(anchor) -> Target:
     """FocusEntity의 doc_type(tag) 또는 kind로부터 target 결정.
 
@@ -442,7 +549,9 @@ def _resolve_subject(
     """intent.subject_* 또는 refine_previous일 때 session.current_subject 복원."""
     # intent에 subject가 명시되어 있으면 그것을 우선
     if intent.subject_name:
-        kind = intent.subject_kind or ("org" if "기관" in (intent.subject_name or "") else "people")
+        # 2026-05-26: subject_kind는 DialogueAgent LLM 분류 결과를 신뢰. 미분류 시만
+        # "people" fallback (기존 "기관" substring 휴리스틱은 false positive 위험으로 제거).
+        kind = intent.subject_kind or "people"
         identity_status = (
             "resolved_with_org" if intent.subject_affiliation_hint else "ambiguous_name_only"
         )
@@ -485,11 +594,36 @@ def _build_filter_bundle(intent: DialogueIntent) -> FilterBundle:
         s = str(v).strip().upper()
         if s and s not in perf_types:
             perf_types.append(s)
+    coparticipants: List[str] = []
+    for v in intent.coparticipants or []:
+        s = str(v).strip()
+        if s and s not in coparticipants and s != (intent.subject_name or "").strip():
+            coparticipants.append(s)
+    exclude_orgs = _clean_str_list(intent.exclude_org_name)
+    exclude_perf = [s.upper() for s in _clean_str_list(intent.exclude_perf_type)]
+    exclude_persons = _clean_str_list(intent.exclude_person_name)
     return FilterBundle(
         year_from=intent.year_from,
         year_to=intent.year_to,
         perf_type=perf_types,
+        participant_person_name=coparticipants,
+        exclude_org_name=exclude_orgs,
+        exclude_perf_type=exclude_perf,
+        exclude_person_name=exclude_persons,
     )
+
+
+def _clean_str_list(values: List[str]) -> List[str]:
+    """리스트 정리 — 공백 제거 + 빈 값 드롭 + dedup (순서 유지)."""
+    out: List[str] = []
+    seen: set[str] = set()
+    for v in values or []:
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 
 # ============================================================================

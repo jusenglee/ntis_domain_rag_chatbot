@@ -79,6 +79,13 @@ class EvidenceCuratorAgent:
         child_entity_count = 0
         if view == "single_detail" and items:
             child_entity_count = len(items[0].child_entities or [])
+        # subject_activity view에서 활동 요약 통계 산출 (AnswerAgent가 prompt에 노출)
+        activity_summary: Optional[Dict[str, Any]] = None
+        if view == "subject_activity" and items:
+            activity_summary = _compute_activity_summary(
+                items,
+                subject_name=(intent.subject_name or "").strip() or None,
+            )
         diagnostics: Dict[str, Any] = {
             "view": view,
             "intent_kind": intent.kind,
@@ -89,6 +96,14 @@ class EvidenceCuratorAgent:
             "result_status": result.status,
             "curation_latency_ms": (time.perf_counter() - t0) * 1000,
         }
+        if activity_summary is not None:
+            diagnostics["activity_summary"] = activity_summary
+        # retrieval score 분포를 EvidenceBundle로 전파 (AnswerAgent가 prompt에 노출).
+        # 휴리스틱 threshold 없이 LLM이 신뢰도 판단에 활용.
+        result_diag = result.diagnostics or {}
+        score_dist = result_diag.get("score_distribution")
+        if score_dist is not None:
+            diagnostics["score_distribution"] = score_dist
 
         bundle = EvidenceBundle(
             view=view,
@@ -155,6 +170,105 @@ def _finalize_display_rank(evidences: List[CanonicalEvidence]) -> List[Canonical
         else:
             out.append(ev.model_copy(update={"snapshot_rank": i}))
     return out
+
+
+# ============================================================================
+# Activity summary (subject_activity view 통계 — AnswerAgent prompt에 노출)
+# ============================================================================
+
+def _compute_activity_summary(
+    items: List[CanonicalEvidence],
+    subject_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """subject_activity view의 evidence를 분석해 한눈 요약 통계 생성.
+
+    Args:
+        items: subject_activity view에 들어갈 evidence 목록.
+        subject_name: anchor 인물명. 지정되면 evidence별 facts.participant_role_map에서
+            매칭되는 항목의 role 분포를 subject_roles로 집계 (2026-05-26 추가).
+
+    Returns:
+        {
+          "total": N,
+          "by_source": {"project": int, "perf": int},
+          "year_min": int|None, "year_max": int|None,
+          "top_orgs": [{"name": str, "count": int}, ...] (상위 3),
+          "subject_roles": [{"role": str, "count": int}, ...]   # subject_name 매칭 시
+        }
+    """
+    by_source: Dict[str, int] = {}
+    org_counts: Dict[str, int] = {}
+    years: List[int] = []
+    subject_role_counts: Dict[str, int] = {}
+    subject_match_count = 0
+    subject_norm = (subject_name or "").strip()
+    for ev in items:
+        src = (ev.source_type or "unknown").lower()
+        by_source[src] = by_source.get(src, 0) + 1
+        # lead_org_name (roles) — list of str
+        lead_orgs = ev.roles.get("lead_org_name") if ev.roles else None
+        if isinstance(lead_orgs, list):
+            for org in lead_orgs:
+                key = (str(org) or "").strip()
+                if not key:
+                    continue
+                org_counts[key] = org_counts.get(key, 0) + 1
+        # stan_yr / year / period
+        year = _extract_year_from_facts(ev.facts or {})
+        if year is not None:
+            years.append(year)
+        # subject 인물의 role 추적 (anchor matching)
+        if subject_norm:
+            role_map = (ev.facts or {}).get("participant_role_map") or []
+            if isinstance(role_map, list):
+                for entry in role_map:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("name") or "").strip()
+                    if name == subject_norm:
+                        subject_match_count += 1
+                        role = str(entry.get("role") or "").strip() or "(역할 미상)"
+                        subject_role_counts[role] = subject_role_counts.get(role, 0) + 1
+
+    top_orgs = sorted(org_counts.items(), key=lambda kv: -kv[1])[:3]
+    summary: Dict[str, Any] = {
+        "total": len(items),
+        "by_source": by_source,
+        "year_min": min(years) if years else None,
+        "year_max": max(years) if years else None,
+        "top_orgs": [{"name": k, "count": v} for k, v in top_orgs],
+    }
+    if subject_role_counts:
+        summary["subject_roles"] = [
+            {"role": r, "count": c}
+            for r, c in sorted(subject_role_counts.items(), key=lambda kv: -kv[1])
+        ]
+        summary["subject_match_count"] = subject_match_count
+    return summary
+
+
+def _extract_year_from_facts(facts: Dict[str, Any]) -> Optional[int]:
+    """evidence.facts에서 연도 추출 (stan_yr/year 우선)."""
+    for source in (
+        facts.get("stan_yr"),
+        (facts.get("meta_basic") or {}).get("stan_yr") if isinstance(facts.get("meta_basic"), dict) else None,
+        facts.get("year"),
+    ):
+        if source is None:
+            continue
+        text = str(source).strip()
+        if not text:
+            continue
+        digits = "".join(ch for ch in text[:8] if ch.isdigit())
+        if len(digits) < 4:
+            continue
+        try:
+            year = int(digits[:4])
+        except ValueError:
+            continue
+        if 1900 <= year <= 2100:
+            return year
+    return None
 
 
 # ============================================================================

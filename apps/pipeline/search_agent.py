@@ -80,6 +80,9 @@ class SearchAgent:
             "strategy": task.strategy,
             "latency_ms": latency_ms,
             "collections": list(task.collections),
+            # 모든 retrieval에 score 분포 자동 첨부 (사례 무관 일반 진단).
+            # AnswerAgent prompt가 score를 LLM에 노출해 신뢰도 판단에 활용.
+            "score_distribution": _compute_score_distribution(visible),
         }
 
         # status별 evidence 노출 정책:
@@ -130,8 +133,6 @@ class SearchAgent:
             return self._exec_exact_lookup(task)
         if task.strategy == "subject_anchor":
             return self._exec_hybrid_with_anchor(task)
-        if task.strategy == "detail_anchor":
-            return self._exec_detail_anchor(task)
         if task.strategy == "hybrid_search":
             return self._exec_hybrid_search(task)
         if task.strategy == "aggregate":
@@ -194,10 +195,6 @@ class SearchAgent:
         """일반 hybrid (anchor/identifier 없음)."""
         return self._run_hybrid(task)
 
-    def _exec_detail_anchor(self, task: SearchTask) -> tuple[List[CanonicalEvidence], int]:
-        """단일 대상 상세를 위한 hybrid. limit=1로 강제되어 있음."""
-        return self._run_hybrid(task)
-
     # ----- aggregate -----
     def _exec_aggregate(self, task: SearchTask) -> tuple[List[CanonicalEvidence], int]:
         """stats 도구 — Qdrant scroll로 페이로드를 받아 Python에서 group_by count.
@@ -240,10 +237,10 @@ class SearchAgent:
             total_scanned += len(points)
             for point in points:
                 payload = getattr(point, "payload", None) or {}
-                key = _extract_group_key(payload=payload, aggregate_by=aggregate_by)
-                if not key:
-                    continue
-                bucket_counts[key] = bucket_counts.get(key, 0) + 1
+                keys = _extract_group_keys(payload=payload, aggregate_by=aggregate_by)
+                # 한 payload가 여러 그룹에 동시에 카운트되더라도 각 그룹 +1씩
+                for key in keys:
+                    bucket_counts[key] = bucket_counts.get(key, 0) + 1
 
         if not bucket_counts:
             logger.info(
@@ -252,8 +249,20 @@ class SearchAgent:
             )
             return [], 0
 
-        # count 내림차순 정렬
-        sorted_buckets = sorted(bucket_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        # 정렬: sort_by 옵션이 시간 정렬이고 aggregate_by="year"이면 연도순. 그 외는 count 내림차순.
+        sort_label = "count_desc"
+        if aggregate_by == "year" and task.sort_by in ("recent_desc", "recent_asc"):
+            reverse = task.sort_by == "recent_desc"
+            sorted_buckets = sorted(
+                bucket_counts.items(),
+                key=lambda kv: kv[0],
+                reverse=reverse,
+            )
+            sort_label = task.sort_by
+        else:
+            # count 내림차순 (기본)
+            sorted_buckets = sorted(bucket_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
         evidences: List[CanonicalEvidence] = []
         primary_route = self._collection_to_route(task.collections[0])
         for rank, (group_key, count) in enumerate(sorted_buckets[: task.limit], start=1):
@@ -277,7 +286,8 @@ class SearchAgent:
 
         logger.info(
             f"[aggregate] by={aggregate_by} collections={list(task.collections)} "
-            f"scanned={total_scanned} groups={len(bucket_counts)} returned={len(evidences)}"
+            f"scanned={total_scanned} groups={len(bucket_counts)} returned={len(evidences)} "
+            f"sort={sort_label}"
         )
         return evidences, len(bucket_counts)
 
@@ -310,10 +320,14 @@ class SearchAgent:
 
         merged.sort(key=lambda ev: -ev.score)
         deduped = self._dedup_by_identity(merged)
+        # P0-β: sort_by 후처리 — relevance면 그대로(score 정렬 유지). recent_*는 stan_yr 기반.
+        if task.sort_by != "relevance":
+            deduped = _apply_sort_by(deduped, sort_by=task.sort_by)
         logger.info(
             f"[hybrid] strategy={task.strategy} | "
             + " | ".join(per_collection)
-            + f" | merged={len(merged)} deduped={len(deduped)} returned={min(len(deduped), task.limit)}"
+            + f" | merged={len(merged)} deduped={len(deduped)} returned={min(len(deduped), task.limit)} "
+            f"sort_by={task.sort_by}"
         )
         return deduped[: task.limit], len(deduped)
 
@@ -380,6 +394,105 @@ class SearchAgent:
 # aggregate 도구 헬퍼 (모듈 함수 — SearchAgent 외부에서도 단위 테스트 가능)
 # ============================================================================
 
+def _extract_year_from_evidence(ev: CanonicalEvidence) -> Optional[int]:
+    """CanonicalEvidence.facts에서 연도 추출. 4자리 숫자 + [1900, 2100] 범위만 인정.
+
+    탐색 우선순위:
+        1. facts.stan_yr
+        2. facts.meta_basic.stan_yr
+        3. facts.year
+        4. facts.group_key (group_by=="year" 일 때만, aggregate evidence 호환)
+    """
+    candidates: List[Any] = [ev.facts.get("stan_yr")]
+    meta_basic = ev.facts.get("meta_basic")
+    if isinstance(meta_basic, dict):
+        candidates.append(meta_basic.get("stan_yr"))
+    candidates.append(ev.facts.get("year"))
+    if ev.facts.get("group_by") == "year":
+        candidates.append(ev.facts.get("group_key"))
+    for source in candidates:
+        if source is None:
+            continue
+        text = str(source).strip()
+        if not text:
+            continue
+        digits = "".join(ch for ch in text[:8] if ch.isdigit())
+        if len(digits) < 4:
+            continue
+        try:
+            year = int(digits[:4])
+        except ValueError:
+            continue
+        if 1900 <= year <= 2100:
+            return year
+    return None
+
+
+def _compute_score_distribution(evidences: List[CanonicalEvidence]) -> Dict[str, Any]:
+    """SearchResult.diagnostics에 첨부되는 score 분포.
+
+    사용처: AnswerAgent prompt가 LLM에 score 노출 → LLM이 신뢰도 판단.
+    하드코딩 임계값은 도입하지 않는다 (점수 의미는 도메인·embedding마다 다르므로 hard cut은
+    위험). 대신 분포를 그대로 노출하고 LLM이 도입부에 정직 안내하도록 한다.
+
+    Returns:
+        - n: 항목 수
+        - top: 최고 점수
+        - median: 중앙값
+        - min: 최저 점수
+        - spread: top - min (분포 폭)
+        - score_per_rank: rank별 점수 (LLM이 도입부에 활용)
+    """
+    if not evidences:
+        return {"n": 0, "top": 0.0, "median": 0.0, "min": 0.0, "spread": 0.0, "score_per_rank": []}
+    scores = [float(ev.score or 0.0) for ev in evidences]
+    sorted_scores = sorted(scores, reverse=True)
+    top = sorted_scores[0]
+    bottom = sorted_scores[-1]
+    mid_idx = len(sorted_scores) // 2
+    median = (
+        sorted_scores[mid_idx]
+        if len(sorted_scores) % 2 == 1
+        else (sorted_scores[mid_idx - 1] + sorted_scores[mid_idx]) / 2.0
+    )
+    return {
+        "n": len(scores),
+        "top": round(top, 4),
+        "median": round(median, 4),
+        "min": round(bottom, 4),
+        "spread": round(top - bottom, 4),
+        # rank별 score (snapshot_rank 순서대로). 동일 reranking 가능하도록.
+        "score_per_rank": [
+            {"rank": ev.snapshot_rank, "score": round(float(ev.score or 0.0), 4)}
+            for ev in evidences
+        ],
+    }
+
+
+def _apply_sort_by(
+    evidences: List[CanonicalEvidence],
+    *,
+    sort_by: str,
+) -> List[CanonicalEvidence]:
+    """sort_by에 따른 evidence 재정렬.
+
+    - "recent_desc" / "recent_asc": stan_yr 기준. 연도 누락 항목은 항상 끝으로.
+    - 그 외(미지원/relevance): 입력 그대로.
+    """
+    if not evidences or sort_by not in ("recent_desc", "recent_asc"):
+        return evidences
+
+    reverse = sort_by == "recent_desc"
+
+    def _sort_key(ev: CanonicalEvidence) -> tuple[int, int]:
+        year = _extract_year_from_evidence(ev)
+        if year is None:
+            return (1, 0)  # 연도 없음 → 끝으로
+        return (0, -year if reverse else year)
+
+    return sorted(evidences, key=_sort_key)
+
+
 def _scroll_payload(
     *,
     qdrant_client: Any,
@@ -409,6 +522,10 @@ def _scroll_payload(
 # meta_detail에 분산될 수 있어 dict-walk로 첫 번째 non-empty 값을 채택.
 _GROUP_KEY_PATHS: dict[str, list[list[str]]] = {
     "year": [
+        # NTIS 실데이터에서 stan_yr이 진실원("2013" 같은 문자열). stt_dt 등은 null인 경우 많음.
+        ["stan_yr"],
+        ["meta_basic", "stan_yr"],
+        ["meta_detail", "stan_yr"],
         ["stt_dt"],
         ["start_year"],
         ["pjt_strt_dt"],
@@ -434,7 +551,20 @@ _GROUP_KEY_PATHS: dict[str, list[list[str]]] = {
         ["meta_basic", "perf_type"],
         ["rst_clsf_nm"],
     ],
+    # participant_* 는 nested array 경로. _extract_group_keys가 array 평탄화 처리.
+    "participant_org": [
+        ["prtcp_org_nm_list"],         # top-level 평탄화 (있을 경우)
+        ["prtcp_org", "org_nm"],       # nested array
+        ["participant_org_name"],
+    ],
+    "participant_person": [
+        ["prtcp_mp_hm_nm_list"],       # top-level 평탄화 (인덱스 있음)
+        ["prtcp_mp", "hm_nm"],         # nested array
+    ],
 }
+
+# nested array 그룹화 축 — 한 payload당 multiple group_keys 산출 가능.
+_NESTED_GROUP_AXES = {"participant_org", "participant_person"}
 
 
 def _walk_payload(payload: dict, path: list[str]) -> Optional[Any]:
@@ -450,10 +580,12 @@ def _walk_payload(payload: dict, path: list[str]) -> Optional[Any]:
 
 
 def _extract_group_key(*, payload: dict, aggregate_by: str) -> Optional[str]:
-    """payload에서 aggregate_by 축에 해당하는 그룹 키 추출.
+    """payload에서 aggregate_by 축에 해당하는 단일 그룹 키 추출 (1:1 매핑 축).
 
-    - year: 날짜/연도 문자열에서 첫 4자리만 추출 (예: "2020-01-01" → "2020", "20200101" → "2020")
+    - year: 날짜/연도 문자열에서 첫 4자리만 추출 (예: "2020-01-01" → "2020")
     - 그 외: 문자열 그대로 trim
+
+    nested array 축(participant_*)에는 사용하지 않음. _extract_group_keys 사용.
     """
     paths = _GROUP_KEY_PATHS.get(aggregate_by, [])
     raw: Optional[Any] = None
@@ -488,3 +620,53 @@ def _extract_group_key(*, payload: dict, aggregate_by: str) -> Optional[str]:
                 return None
         return None
     return text[:120]  # 너무 긴 라벨 잘라냄
+
+
+def _extract_group_keys(*, payload: dict, aggregate_by: str) -> List[str]:
+    """payload에서 aggregate_by 축의 그룹 키 N개 산출 (1:N 매핑 — nested 축 지원).
+
+    - participant_org / participant_person: 평탄화 array 또는 nested.{field}를 모두 평탄화
+    - 그 외: _extract_group_key를 호출해 단일 키 반환 (List[1] 또는 [])
+    """
+    if aggregate_by not in _NESTED_GROUP_AXES:
+        single = _extract_group_key(payload=payload, aggregate_by=aggregate_by)
+        return [single] if single else []
+
+    keys: List[str] = []
+    seen: set[str] = set()
+    paths = _GROUP_KEY_PATHS.get(aggregate_by, [])
+    for path in paths:
+        # nested 경로: path 첫 키가 nested array일 수도 있고, 두 번째 키가 nested array 내부 필드일 수도.
+        # 일반화: walk → list/dict-of-list 모두 처리.
+        candidate = _walk_payload(payload, path)
+        if candidate is None and len(path) >= 2:
+            # nested.{field} 패턴 — payload[path[0]]가 list of dicts라면 각 dict에서 path[1] 추출.
+            outer = payload.get(path[0])
+            if isinstance(outer, list):
+                inner_field = path[1]
+                for item in outer:
+                    if isinstance(item, dict):
+                        val = item.get(inner_field)
+                        if val:
+                            text = str(val).strip()
+                            if text and text not in seen:
+                                seen.add(text)
+                                keys.append(text[:120])
+                continue
+        if candidate is None:
+            continue
+        if isinstance(candidate, (list, tuple)):
+            for item in candidate:
+                if isinstance(item, dict):
+                    # nested array 내부 dict — 직접 처리 안 함 (위 분기에서 처리됨)
+                    continue
+                text = (str(item) or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    keys.append(text[:120])
+            continue
+        text = str(candidate).strip()
+        if text and text not in seen:
+            seen.add(text)
+            keys.append(text[:120])
+    return keys
