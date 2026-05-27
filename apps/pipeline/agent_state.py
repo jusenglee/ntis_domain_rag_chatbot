@@ -35,6 +35,7 @@ from apps.pipeline.agents.contracts import (
     GuardDecision,
     SearchPlan,
 )
+from apps.pipeline.agents.planner_contracts import PlanState
 from apps.pipeline.agents.session_state import SessionState
 from apps.pipeline.contracts import SearchResult
 
@@ -94,6 +95,10 @@ class AgentPipelineState(BaseModel):
 
     # ── 재시도 가드 ──────────────────────────────────────────────────────
     repair_attempted: bool = False   # CriticAgent의 repair_answer는 1회만 허용
+
+    # ── Phase 3 agentic loop 상태 ────────────────────────────────────────
+    # RAG_AGENTIC_MODE=true일 때만 사용. PlannerAgent + ToolExecutor가 누적 갱신.
+    plan_state: Optional[PlanState] = None
 
     def total_ms(self) -> float:
         if self.request_started_at is None:

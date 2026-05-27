@@ -14,14 +14,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
 
 from apps.pipeline.agents.critic_agent import GroundingVerdict
 from apps.pipeline.contracts import CanonicalEvidence
+
+
+def _critic_thinking_enabled() -> bool:
+    """Solar 102B의 thinking 모드를 Critic grounding 판정에 활성화할지 — 기본 True.
+
+    답변-evidence 의미 일치 판정은 품질이 중요한 작업. 환경변수 RAG_CRITIC_THINKING_ENABLED로 토글.
+    """
+    raw = os.environ.get("RAG_CRITIC_THINKING_ENABLED", "true").strip().lower()
+    return raw not in {"", "0", "false", "no", "off"}
 
 
 _GROUNDING_SYSTEM_PROMPT = (
@@ -60,6 +70,7 @@ class LLMJudgeChecker:
         self._llm = llm
         self._max_evidence = max_evidence
         self._max_answer_chars = max_answer_chars
+        self._thinking_enabled = _critic_thinking_enabled()
 
     def check(
         self,
@@ -93,7 +104,11 @@ class LLMJudgeChecker:
         evidences: List[CanonicalEvidence],
         question: str,
     ) -> GroundingVerdict:
-        """이미 event loop 안에서 호출됐을 때의 fallback — 별도 thread로 새 loop 실행."""
+        """이미 event loop 안에서 호출됐을 때의 fallback — 별도 thread로 새 loop 실행.
+
+        2026-05-27: thinking 모드 활성 시 응답이 분 단위. future timeout을 환경변수로 확장
+        (`RAG_CRITIC_THREAD_TIMEOUT_SECONDS`, 기본 600s). 회귀 시 짧게 설정 가능.
+        """
         import concurrent.futures
 
         def _runner():
@@ -101,9 +116,13 @@ class LLMJudgeChecker:
                 answer_text=answer_text, evidences=evidences, question=question,
             ))
 
+        try:
+            thread_timeout = float(os.environ.get("RAG_CRITIC_THREAD_TIMEOUT_SECONDS", "600"))
+        except (TypeError, ValueError):
+            thread_timeout = 600.0
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_runner)
-            return future.result(timeout=30.0)
+            return future.result(timeout=thread_timeout)
 
     async def _check_async(
         self,
@@ -121,11 +140,19 @@ class LLMJudgeChecker:
             SystemMessage(content=_GROUNDING_SYSTEM_PROMPT),
             HumanMessage(content=user_payload),
         ]
+        thinking_kwargs: Dict[str, Any] = {}
+        if self._thinking_enabled:
+            thinking_kwargs = {
+                "disable_thinking": False,
+                "reasoning_effort": "medium",
+                "include_reasoning": False,  # 본문에 reasoning 합치면 JSON 파싱 깨질 위험
+            }
         try:
             response = await self._llm.ainvoke(
                 messages,
                 temperature=0.0,
-                max_tokens=256,
+                max_tokens=512 if self._thinking_enabled else 256,
+                **thinking_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[LLMJudgeChecker] llm.ainvoke failed: {exc}")

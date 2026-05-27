@@ -56,7 +56,9 @@ class OpenAICompatChatModel(BaseChatModel):
     model_name: str = "/model"
     base_url: str = "http://vllm_solar:8010/v1"
     api_key: str = "EMPTY"
-    timeout: float = 120.0
+    # 2026-05-27: thinking 모드 활성 호출(PlannerAgent / LLMJudgeChecker)은 분 단위 응답 시간을 가질 수
+    # 있어 client 전체 타임아웃을 충분히 길게 둔다. RAG_LLM_TIMEOUT_SECONDS 환경변수로 운영 토글.
+    timeout: float = 600.0
 
     # 기본 샘플링 설정
     default_temperature: float = 0.2

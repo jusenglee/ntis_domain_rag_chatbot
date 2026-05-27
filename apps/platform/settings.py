@@ -386,7 +386,9 @@ class SolarVLLMConfig:
         if not base_url:
             raise ValueError("SOLAR_VLLM_BASE_URL must not be empty")
 
-        timeout = _get_env_float("SOLAR_VLLM_TIMEOUT", 120.0, min_value=0.000001)
+        # 2026-05-27: Solar thinking 모드(PlannerAgent / Critic grounding judge)는 분 단위 응답.
+        # 기본 600s. 운영 회귀 시 SOLAR_VLLM_TIMEOUT=120 같이 명시 환경변수로 우회 가능.
+        timeout = _get_env_float("SOLAR_VLLM_TIMEOUT", 600.0, min_value=0.000001)
 
         return cls(model_name=model_name, base_url=base_url, api_key=api_key or "EMPTY", timeout=timeout)
 

@@ -64,6 +64,18 @@ class PublishedManifestContext(BaseModel):
 class DetailAnchorContext(BaseModel):
     context_type: Literal["detail_anchor"] = "detail_anchor"
     anchor: FocusEntity
+    # 2026-05-27 Step 3: FocusedDetailSlot의 evidence 캐시 필드를 1:1 보존.
+    # 이전엔 anchor만 KV에 저장돼 turn 간에 child_entities·cached_ids가 소실 → "방금 본 항목의
+    # 참여자 누구?" 같은 follow-up이 즉답 불가로 회귀했음.
+    # 모든 신규 필드는 default 있는 옵셔널이라 이전 KV 페이로드와 역호환.
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    facts: Dict[str, Any] = Field(default_factory=dict)
+    roles: Dict[str, List[str]] = Field(default_factory=dict)
+    child_entities: List[Dict[str, Any]] = Field(default_factory=list)
+    cached_ids: Dict[str, str] = Field(default_factory=dict)
+    cached_tag: Optional[str] = None
+    cached_source_type: Optional[str] = None
     followup_rights: FollowupRights = Field(default_factory=FollowupRights)
 
 

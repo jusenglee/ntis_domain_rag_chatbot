@@ -165,8 +165,11 @@ class CriticAgent:
 
         if out_of_range:
             logger.info(
-                f"[CriticAgent] out_of_range={out_of_range} max={max_rank} "
-                f"template={draft.template} repair_attempted={repair_attempted}"
+                f"[CriticAgent] citation_out_of_range(인용 범위 위반 감지) "
+                f"out_of_range={out_of_range}(범위 밖 인용 번호) "
+                f"max={max_rank}(허용 최대) "
+                f"template={draft.template}(답변 템플릿) "
+                f"repair_attempted={repair_attempted}(재시도 여부)"
             )
             if not repair_attempted:
                 return GuardDecision(
@@ -192,8 +195,9 @@ class CriticAgent:
 
         if draft.template in _TEMPLATES_REQUIRING_CITATION and not cited_ranks:
             logger.info(
-                f"[CriticAgent] missing_citations template={draft.template} "
-                f"repair_attempted={repair_attempted}"
+                f"[CriticAgent] missing_citations(인용 누락 감지) "
+                f"template={draft.template}(템플릿) "
+                f"repair_attempted={repair_attempted}(재시도 여부)"
             )
             if not repair_attempted:
                 return GuardDecision(
@@ -235,14 +239,17 @@ class CriticAgent:
                     "extra": verdict.diagnostics or {},
                 }
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[CriticAgent] grounding_checker raised: {exc}")
+                logger.warning(
+                    f"[CriticAgent] grounding_check_failure(LLM judge 호출 실패) error={exc}"
+                )
                 grounding_diag = {"verdict": "error", "reason": str(exc)}
                 verdict = GroundingVerdict(verdict="error", reason=str(exc))
 
             if verdict.verdict == "not_grounded":
                 logger.info(
-                    f"[CriticAgent] grounding=not_grounded reason={verdict.reason!r} "
-                    f"repair_attempted={repair_attempted}"
+                    f"[CriticAgent] grounding=not_grounded(답변-evidence 의미 불일치 감지) "
+                    f"reason={verdict.reason!r}(판정 사유) "
+                    f"repair_attempted={repair_attempted}(재시도 여부)"
                 )
                 if not repair_attempted:
                     return GuardDecision(
@@ -258,8 +265,8 @@ class CriticAgent:
                     )
                 # repair 소진 — publish하되 unverified warning을 진단에 기록.
                 logger.warning(
-                    "[CriticAgent] grounding=not_grounded after repair attempt; "
-                    "publishing with warning"
+                    "[CriticAgent] grounding=not_grounded_after_repair(재시도 후에도 not_grounded) "
+                    "decision=publish_with_warning(경고 달고 발행)"
                 )
 
         # ---- 4. ReferenceManifest 발행 ----

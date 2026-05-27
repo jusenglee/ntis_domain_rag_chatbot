@@ -146,6 +146,71 @@ class DialogueIntent(BaseModel):
 
 
 # ============================================================================
+# 1b. DialogueAgent 2-pass 내부 contracts (2026-05-26 근본 원인 1·2 해결)
+# ============================================================================
+# - Pass 1 (IntentClassification): kind + anaphora만. 짧은 prompt로 분류 신뢰성 우선.
+# - Pass 2 (SlotExtraction): kind에 필요한 슬롯만. kind-specific 짧은 prompt로 NER 안정.
+# 둘은 외부에 노출되는 DialogueIntent로 merge되어 downstream(EntityResolver/SearchPlanner)
+# 호환을 깨지 않는다.
+
+
+class IntentClassification(BaseModel):
+    """Pass 1 결과 — 의도 분류 + manifest_rank 인용 + direct/clarification 즉답.
+
+    이 단의 책임은 **"사용자가 무엇을 원하는가"** 와 **"직전 turn의 어느 항목을 가리키는가"** 만.
+    슬롯(subject_name·year·perf_type 등)은 Pass 2가 채운다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: DialogueKind
+    target_hint: Optional[Target] = None
+    action_hint: Optional[Literal["list", "detail", "stats", "topic", "download"]] = None
+    manifest_rank: Optional[int] = Field(default=None, ge=1)
+
+    # direct_answer / clarification는 슬롯 추출 불필요 — 여기서 즉시 종료.
+    direct_text: Optional[str] = None
+    clarification_question: Optional[str] = None
+    clarification_options: List[str] = Field(default_factory=list)
+
+    reason: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class SlotExtraction(BaseModel):
+    """Pass 2 결과 — kind에 맞는 슬롯만 추출.
+
+    Pass 1의 kind에 따라 prompt를 분기하여 호출하므로 모든 필드를 채울 필요 없음.
+    예: kind=ask_search → subject/year/perf_type/sort_by/length_hint/aggregate_hint 등.
+       kind=stats        → subject + aggregate_hint.
+       kind=compare      → compare_targets.
+       kind=refine_previous → subject_name(검증) + year/exclude_* 등.
+       kind=ask_children    → subject_name(검증 대상) 또는 비움.
+       kind=ask_meta        → 비움 (필요 시 subject_name만).
+       kind=ask_detail      → identifier_hints 또는 비움(manifest_rank가 Pass 1에서 채워짐).
+       kind=ask_similar     → 비움.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subject_name: Optional[str] = None
+    subject_kind: Optional[Literal["people", "org"]] = None
+    subject_affiliation_hint: Optional[str] = None
+    coparticipants: List[str] = Field(default_factory=list)
+    exclude_org_name: List[str] = Field(default_factory=list)
+    exclude_perf_type: List[str] = Field(default_factory=list)
+    exclude_person_name: List[str] = Field(default_factory=list)
+    identifier_hints: Dict[str, List[str]] = Field(default_factory=dict)
+    year_from: Optional[int] = Field(default=None, ge=1900, le=2100)
+    year_to: Optional[int] = Field(default=None, ge=1900, le=2100)
+    perf_type_hint: List[str] = Field(default_factory=list)
+    sort_by: Literal["relevance", "recent_desc", "recent_asc"] = "relevance"
+    length_hint: Literal["brief", "default", "detailed"] = "default"
+    aggregate_hint: Optional[AggregateBy] = None
+    compare_targets: List[CompareTarget] = Field(default_factory=list)
+
+
+# ============================================================================
 # 2. EntityResolverAgent — 식별자/주체 해소
 # ============================================================================
 

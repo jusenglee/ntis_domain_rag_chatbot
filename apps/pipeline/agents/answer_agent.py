@@ -122,9 +122,12 @@ class AnswerAgent:
 
         prompt_chars = len(self._system_prompt) + len(user_text)
         logger.info(
-            f"[AnswerAgent] start model={model_key} req={request_id[:8]} "
-            f"view={bundle.view} template={template} evidence_n={len(bundle.items)} "
-            f"prompt_chars={prompt_chars} max_tokens={max_tokens}"
+            f"[AnswerAgent] generation_start(답변 생성 시작) "
+            f"model={model_key}(모델) req={request_id[:8]} "
+            f"view={bundle.view}(뷰) template={template}(템플릿) "
+            f"evidence_n={len(bundle.items)}(근거 건수) "
+            f"prompt_chars={prompt_chars}(프롬프트 길이) "
+            f"max_tokens={max_tokens}(최대 토큰)"
         )
 
         t0 = time.perf_counter()
@@ -154,7 +157,10 @@ class AnswerAgent:
         except Exception as exc:  # noqa: BLE001
             error_msg = str(exc)
             truncated = True
-            logger.exception(f"[AnswerAgent] stream failed: model={model_key} err={exc}")
+            logger.exception(
+                f"[AnswerAgent] stream_failure(LLM 스트림 실패) "
+                f"model={model_key}(모델) error={exc} truncated=True(답변 잘림)"
+            )
 
         final_text = "".join(chunks).strip()
         latency_ms = (time.perf_counter() - t0) * 1000
@@ -170,9 +176,12 @@ class AnswerAgent:
 
         preview = final_text.replace("\n", " ")[:100]
         logger.info(
-            f"[AnswerAgent] done model={model_key} latency_ms={latency_ms:.1f} "
-            f"chars={len(final_text)} citations={len(citations)} truncated={truncated} "
-            f"preview={preview!r}"
+            f"[AnswerAgent] generation_done(답변 생성 완료) "
+            f"model={model_key}(모델) latency_ms={latency_ms:.1f}(소요시간) "
+            f"chars={len(final_text)}(답변 길이) "
+            f"citations={len(citations)}(인용 개수) "
+            f"truncated={truncated}(잘림 여부) "
+            f"preview={preview!r}(답변 미리보기)"
         )
         return AnswerDraft(
             text=final_text,

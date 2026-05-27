@@ -187,7 +187,19 @@ class SessionStateAdapter:
                 ManifestSlot(result_kind=cc.result_kind or "project", snapshot=cc.result_manifest)
             )
         elif isinstance(cc, DetailAnchorContext):
-            state = state.with_focused_detail(FocusedDetailSlot(anchor=cc.anchor))
+            # 2026-05-27 Step 3: evidence 캐시 필드도 같이 복원 (이전엔 anchor만 → child_entities·
+            # cached_ids 빈 dict로 복원되어 다음 turn ask_children 즉답 회귀).
+            state = state.with_focused_detail(FocusedDetailSlot(
+                anchor=cc.anchor,
+                title=cc.title,
+                summary=cc.summary,
+                facts=dict(cc.facts or {}),
+                roles={k: list(v) for k, v in (cc.roles or {}).items()},
+                child_entities=list(cc.child_entities or []),
+                cached_ids=dict(cc.cached_ids or {}),
+                cached_tag=cc.cached_tag,
+                cached_source_type=cc.cached_source_type,
+            ))
         # EmptyContext / 그 외는 빈 슬롯 유지
 
         return state
@@ -237,7 +249,20 @@ def _pick_current_context(state: SessionState):
             result_manifest=manifest_snapshot,
         )
     if state.focused_detail is not None:
-        return DetailAnchorContext(anchor=state.focused_detail.anchor)
+        slot = state.focused_detail
+        # 2026-05-27 Step 3: focused_detail evidence 캐시(title/summary/facts/roles/child_entities/
+        # cached_ids/cached_tag/cached_source_type)를 1:1로 직렬화. KV 무손실 보장.
+        return DetailAnchorContext(
+            anchor=slot.anchor,
+            title=slot.title,
+            summary=slot.summary,
+            facts=dict(slot.facts or {}),
+            roles={k: list(v) for k, v in (slot.roles or {}).items()},
+            child_entities=list(slot.child_entities or []),
+            cached_ids=dict(slot.cached_ids or {}),
+            cached_tag=slot.cached_tag,
+            cached_source_type=slot.cached_source_type,
+        )
     if state.published_manifest is not None:
         return PublishedManifestContext(
             result_kind=state.published_manifest.result_kind,

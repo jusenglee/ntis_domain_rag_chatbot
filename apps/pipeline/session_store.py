@@ -39,7 +39,10 @@ async def load_pipeline_session(
     try:
         raw = await kv_store.get(_session_key(conversation_id))
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[session_store] load failed: cid={conversation_id} err={exc}")
+        logger.warning(
+            f"[session_store] load_failure(KV 읽기 실패) cid={conversation_id} error={exc} "
+            f"fallback=empty_session(새 세션으로 진행)"
+        )
         return SessionMemory()
 
     if not raw:
@@ -48,13 +51,19 @@ async def load_pipeline_session(
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError) as exc:
-        logger.warning(f"[session_store] invalid json: cid={conversation_id} err={exc}")
+        logger.warning(
+            f"[session_store] invalid_json(저장된 페이로드가 JSON 아님) "
+            f"cid={conversation_id} error={exc} fallback=empty_session"
+        )
         return SessionMemory()
 
     try:
         memory = SessionMemory.model_validate(payload)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[session_store] schema mismatch: cid={conversation_id} err={exc}")
+        logger.warning(
+            f"[session_store] schema_mismatch(저장된 스키마가 현재 모델과 호환 안 됨) "
+            f"cid={conversation_id} error={exc} fallback=empty_session"
+        )
         return SessionMemory()
 
     return memory
@@ -79,5 +88,7 @@ async def save_pipeline_session(
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[session_store] save failed: cid={conversation_id} err={exc}")
+        logger.warning(
+            f"[session_store] save_failure(KV 저장 실패) cid={conversation_id} error={exc}"
+        )
         return False

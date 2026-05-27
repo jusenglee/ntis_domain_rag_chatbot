@@ -67,7 +67,11 @@ from apps.pipeline.session_store import load_pipeline_session, save_pipeline_ses
 # ============================================================================
 
 class AgentPipelineDeps:
-    """7-agent workflow가 노드 내부에서 호출하는 컴포넌트 묶음."""
+    """7-agent workflow가 노드 내부에서 호출하는 컴포넌트 묶음.
+
+    Phase 3 추가: planner_agent / tool_executor — RAG_AGENTIC_MODE=true 일 때만 사용.
+    None이면 정적 그래프(기존 흐름)만 동작.
+    """
 
     def __init__(
         self,
@@ -79,6 +83,9 @@ class AgentPipelineDeps:
         evidence_curator: EvidenceCuratorAgent,
         answer_agent: AnswerAgent,
         critic_agent: CriticAgent,
+        planner_agent: Any = None,
+        tool_executor: Any = None,
+        adequacy_gate: Any = None,
     ) -> None:
         self.dialogue_agent = dialogue_agent
         self.entity_resolver = entity_resolver
@@ -87,6 +94,10 @@ class AgentPipelineDeps:
         self.evidence_curator = evidence_curator
         self.answer_agent = answer_agent
         self.critic_agent = critic_agent
+        self.planner_agent = planner_agent
+        self.tool_executor = tool_executor
+        # Phase 5 (c1) — Adequacy Gate (옵셔널). 미주입 시 tool_executor→planner_loop 기존 흐름.
+        self.adequacy_gate = adequacy_gate
 
 
 # ============================================================================
@@ -107,11 +118,11 @@ async def node_load_session(state: AgentPipelineState) -> Dict[str, Any]:
         or state.session_state.has_focused_detail()
     ):
         logger.info(
-            f"[load_session] req={rid} cid={short_id(state.conversation_id)} "
-            f"using_injected_session_state=True "
-            f"has_subject={state.session_state.has_subject()} "
-            f"has_manifest={state.session_state.has_manifest()} "
-            f"has_focused_detail={state.session_state.has_focused_detail()}"
+            f"[load_session] injected_state_used(이미 주입된 SessionState 사용) "
+            f"req={rid} cid={short_id(state.conversation_id)} "
+            f"has_subject={state.session_state.has_subject()}(주제 슬롯) "
+            f"has_manifest={state.session_state.has_manifest()}(매니페스트 슬롯) "
+            f"has_focused_detail={state.session_state.has_focused_detail()}(상세 슬롯)"
         )
         return {"session_state": state.session_state}
 
@@ -123,11 +134,13 @@ async def node_load_session(state: AgentPipelineState) -> Dict[str, Any]:
         memory, conversation_id=state.conversation_id
     )
     logger.info(
-        f"[load_session] req={rid} cid={short_id(state.conversation_id)} "
-        f"has_subject={session_state.has_subject()} "
-        f"has_manifest={session_state.has_manifest()} "
-        f"has_focused_detail={session_state.has_focused_detail()} "
-        f"q_len={len(state.question or '')} q={preview(state.question, limit=80)!r}"
+        f"[load_session] kv_restored(KV에서 SessionState 복원) "
+        f"req={rid} cid={short_id(state.conversation_id)} "
+        f"has_subject={session_state.has_subject()}(주제 슬롯) "
+        f"has_manifest={session_state.has_manifest()}(매니페스트 슬롯) "
+        f"has_focused_detail={session_state.has_focused_detail()}(상세 슬롯) "
+        f"q_len={len(state.question or '')}(질문 길이) "
+        f"q={preview(state.question, limit=80)!r}(질문 미리보기)"
     )
     return {"session_memory": memory, "session_state": session_state}
 
@@ -143,11 +156,45 @@ def _make_node_dialogue(deps: AgentPipelineDeps):
             conversation_id=state.conversation_id,
         )
         latency = (time.perf_counter() - t0) * 1000.0
+        # 2026-05-26: 디버깅 가시성 — LLM이 채운 모든 핵심 신호를 한 줄에 노출.
+        # 회귀 진단 시 어느 필드가 과추출됐는지(예: subject_name="LLM") 즉시 확인 가능.
+        signals: List[str] = []
+        if intent.subject_name:
+            signals.append(f"subject={intent.subject_kind}:{intent.subject_name!r}")
+        if intent.subject_affiliation_hint:
+            signals.append(f"aff={intent.subject_affiliation_hint!r}")
+        if intent.identifier_hints:
+            signals.append(f"id_hints={ {k: len(v) for k, v in intent.identifier_hints.items() if v} }")
+        if intent.year_from or intent.year_to:
+            signals.append(f"year={intent.year_from}~{intent.year_to}")
+        if intent.perf_type_hint:
+            signals.append(f"perf_type={intent.perf_type_hint}")
+        if intent.coparticipants:
+            signals.append(f"coparticipants={intent.coparticipants}")
+        if intent.exclude_org_name:
+            signals.append(f"exclude_org={intent.exclude_org_name}")
+        if intent.exclude_perf_type:
+            signals.append(f"exclude_perf={intent.exclude_perf_type}")
+        if intent.exclude_person_name:
+            signals.append(f"exclude_person={intent.exclude_person_name}")
+        if intent.sort_by and intent.sort_by != "relevance":
+            signals.append(f"sort={intent.sort_by}")
+        if intent.length_hint and intent.length_hint != "default":
+            signals.append(f"length={intent.length_hint}")
+        if intent.aggregate_hint:
+            signals.append(f"agg={intent.aggregate_hint}")
+        signals_text = " ".join(signals) if signals else "-"
         logger.info(
-            f"[dialogue] req={short_id(state.request_id)} kind={intent.kind} "
-            f"target_hint={intent.target_hint} action_hint={intent.action_hint} "
-            f"manifest_rank={intent.manifest_rank} subject_name={intent.subject_name!r} "
-            f"latency_ms={latency:.1f}"
+            f"[dialogue] intent_classified(의도 분류 완료) "
+            f"req={short_id(state.request_id)} "
+            f"kind={intent.kind}(의도 종류) "
+            f"target_hint={intent.target_hint}(타깃 도메인) "
+            f"action_hint={intent.action_hint}(액션 힌트) "
+            f"manifest_rank={intent.manifest_rank}(직전 manifest 인용) "
+            f"conf={intent.confidence:.2f}(신뢰도) "
+            f"signals=[{signals_text}](추출된 신호) "
+            f"q={preview(intent.query, limit=60)!r}(질의) "
+            f"latency_ms={latency:.1f}(소요시간)"
         )
         return {
             "dialogue_intent": intent,
@@ -167,11 +214,45 @@ def _make_node_entity_resolver(deps: AgentPipelineDeps):
             session=state.session_state,
         )
         latency = (time.perf_counter() - t0) * 1000.0
+        # 2026-05-26: subject anchor·identifiers·filters를 디버깅 가시성 위해 노출.
+        subj = resolution.subject
+        subj_text = (
+            f"{subj.kind}:{subj.display_name!r}(person_no={subj.person_no},org_id={subj.org_id},status={subj.identity_status})"
+            if subj is not None else "none"
+        )
+        ids = resolution.identifiers
+        id_counts: List[str] = []
+        if ids:
+            for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+                values = getattr(ids, axis, None) or []
+                if values:
+                    id_counts.append(f"{axis}={len(values)}")
+        id_text = ",".join(id_counts) if id_counts else "empty"
+        flt = resolution.filters
+        flt_parts: List[str] = []
+        if flt:
+            if flt.year_from or flt.year_to:
+                flt_parts.append(f"year={flt.year_from}~{flt.year_to}")
+            if flt.perf_type:
+                flt_parts.append(f"perf_type={flt.perf_type}")
+            if flt.exclude_org_name:
+                flt_parts.append(f"excl_org={flt.exclude_org_name}")
+            if flt.exclude_perf_type:
+                flt_parts.append(f"excl_perf={flt.exclude_perf_type}")
+            if flt.exclude_person_name:
+                flt_parts.append(f"excl_person={flt.exclude_person_name}")
+        flt_text = " ".join(flt_parts) if flt_parts else "-"
         logger.info(
-            f"[entity_resolver] req={short_id(state.request_id)} "
-            f"source={resolution.resolution_source} forced_target={resolution.forced_target} "
-            f"clarification_needed={resolution.clarification_needed} "
-            f"manifest_rank={resolution.manifest_rank} latency_ms={latency:.1f}"
+            f"[entity_resolver] resolution_ready(엔티티 해소 완료) "
+            f"req={short_id(state.request_id)} "
+            f"source={resolution.resolution_source}(해소 출처) "
+            f"forced_target={resolution.forced_target}(강제 타깃) "
+            f"manifest_rank={resolution.manifest_rank}(인용 번호) "
+            f"clarify={resolution.clarification_needed}(되묻기 필요) "
+            f"subject={subj_text}(주제) "
+            f"ids=[{id_text}](식별자) "
+            f"filters=[{flt_text}](필터) "
+            f"latency_ms={latency:.1f}(소요시간)"
         )
         return {
             "entity_resolution": resolution,
@@ -196,15 +277,39 @@ def _make_node_search_planner(deps: AgentPipelineDeps):
         latency = (time.perf_counter() - t0) * 1000.0
         if plan is None:
             logger.info(
-                f"[search_planner] req={short_id(state.request_id)} plan=None "
-                f"intent_kind={state.dialogue_intent.kind} latency_ms={latency:.1f}"
+                f"[search_planner] no_plan(검색 계획 없음 — 즉답 분기 또는 검색 불필요) "
+                f"req={short_id(state.request_id)} "
+                f"intent_kind={state.dialogue_intent.kind}(의도 종류) "
+                f"latency_ms={latency:.1f}(소요시간)"
             )
         else:
             logger.info(
-                f"[search_planner] req={short_id(state.request_id)} "
-                f"tasks={len(plan.tasks)} merge={plan.merge_strategy} "
-                f"reason={plan.plan_reason} latency_ms={latency:.1f}"
+                f"[search_planner] plan_ready(검색 계획 생성 완료) "
+                f"req={short_id(state.request_id)} "
+                f"tasks={len(plan.tasks)}(작업 수) "
+                f"merge={plan.merge_strategy}(병합 전략) "
+                f"reason={plan.plan_reason}(계획 사유) "
+                f"latency_ms={latency:.1f}(소요시간)"
             )
+            # 2026-05-26: 각 task의 action/target/strategy/collections/aggregate를 1줄씩 노출.
+            rid = short_id(state.request_id)
+            for i, task in enumerate(plan.tasks):
+                task_subj = task.subject
+                subj_text = (
+                    f"{task_subj.kind}:{task_subj.display_name!r}"
+                    if task_subj is not None else "none"
+                )
+                logger.info(
+                    f"[search_planner] task_detail "
+                    f"req={rid} task[{i}] "
+                    f"action={task.action}(액션) target={task.target}(타깃) "
+                    f"strategy={task.strategy}(전략) "
+                    f"collections={list(task.collections)}(컬렉션) "
+                    f"aggregate_by={task.aggregate_by}(집계 축) "
+                    f"subject={subj_text}(주제 anchor) "
+                    f"sort_by={task.sort_by}(정렬) "
+                    f"q={preview(task.retrieval_query, limit=60)!r}(질의)"
+                )
         return {
             "search_plan": plan,
             "latencies": {"search_planner": latency / 1000.0},
@@ -221,9 +326,10 @@ def _make_node_retrieval(deps: AgentPipelineDeps):
         cached = _try_cached_detail(plan=state.search_plan, session_state=state.session_state)
         if cached is not None:
             logger.info(
-                f"[retrieval] req={short_id(state.request_id)} CACHE_HIT "
-                f"identity={cached.evidences[0].identity if cached.evidences else 'n/a'} "
-                f"skipped_qdrant_call=True"
+                f"[retrieval] cache_hit(focused_detail 캐시 적중 — Qdrant 호출 skip) "
+                f"req={short_id(state.request_id)} "
+                f"identity={cached.evidences[0].identity if cached.evidences else 'n/a'}(증거 식별자) "
+                f"skipped_qdrant_call=True(Qdrant 호출 생략)"
             )
             return {
                 "search_result": cached,
@@ -243,10 +349,52 @@ def _make_node_retrieval(deps: AgentPipelineDeps):
                 result=result, anchor_ids=state.session_state.focused_detail.cached_ids or {}
             )
         logger.info(
-            f"[retrieval] req={short_id(state.request_id)} status={result.status} "
-            f"evidence_n={len(result.evidences)} total_hits={result.total_hits} "
-            f"latency_ms={latency:.1f}"
+            f"[retrieval] result_ready(검색 결과 완료) "
+            f"req={short_id(state.request_id)} "
+            f"status={result.status}(결과 상태: single/multiple/empty/error) "
+            f"evidence_n={len(result.evidences)}(증거 건수) "
+            f"total_hits={result.total_hits}(전체 매칭 수) "
+            f"latency_ms={latency:.1f}(소요시간)"
         )
+        # 2026-05-26: 0건 진단 — filter가 너무 좁거나 anchor가 NTIS에 없을 때 무엇이 잘렸는지.
+        if result.status == "empty" or len(result.evidences) == 0:
+            tasks = list(state.search_plan.tasks) if state.search_plan else []
+            diag_lines: List[str] = []
+            for i, task in enumerate(tasks):
+                ts = task.subject
+                subj = (
+                    f"{ts.kind}:{ts.display_name!r}(person_no={ts.person_no},org_id={ts.org_id})"
+                    if ts is not None else "none"
+                )
+                flt = task.filters
+                flt_parts: List[str] = []
+                if flt:
+                    if flt.year_from or flt.year_to:
+                        flt_parts.append(f"year={flt.year_from}~{flt.year_to}")
+                    if flt.perf_type:
+                        flt_parts.append(f"perf_type={flt.perf_type}")
+                    if flt.exclude_org_name:
+                        flt_parts.append(f"excl_org={flt.exclude_org_name}")
+                    if flt.exclude_perf_type:
+                        flt_parts.append(f"excl_perf={flt.exclude_perf_type}")
+                ids = task.identifiers
+                id_counts = []
+                if ids:
+                    for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+                        values = getattr(ids, axis, None) or []
+                        if values:
+                            id_counts.append(f"{axis}={len(values)}")
+                diag_lines.append(
+                    f"  task[{i}] strategy={task.strategy} collections={list(task.collections)} "
+                    f"subject={subj} filters=[{' '.join(flt_parts) or '-'}] "
+                    f"ids=[{','.join(id_counts) or 'empty'}] "
+                    f"q={preview(task.retrieval_query, limit=60)!r}"
+                )
+            logger.warning(
+                f"[retrieval][EMPTY_DIAG] req={short_id(state.request_id)} "
+                f"plan_reason={state.search_plan.plan_reason if state.search_plan else 'none'}\n"
+                + "\n".join(diag_lines)
+            )
         return {
             "search_result": result,
             "latencies": {"retrieval_agent": latency / 1000.0},
@@ -267,8 +415,10 @@ def _make_node_evidence_curator(deps: AgentPipelineDeps):
         )
         latency = (time.perf_counter() - t0) * 1000.0
         logger.info(
-            f"[evidence_curator] req={short_id(state.request_id)} view={bundle.view} "
-            f"items={len(bundle.items)} groups={len(bundle.groups)} latency_ms={latency:.1f}"
+            f"[evidence_curator] curated(증거 묶음 완료) "
+            f"req={short_id(state.request_id)} "
+            f"view={bundle.view}(노출 뷰) items={len(bundle.items)}(증거 건수) "
+            f"groups={len(bundle.groups)}(그룹 수) latency_ms={latency:.1f}(소요시간)"
         )
         return {
             "evidence_bundle": bundle,
@@ -295,9 +445,14 @@ def _make_node_answer(deps: AgentPipelineDeps):
         )
         latency = (time.perf_counter() - t0) * 1000.0
         logger.info(
-            f"[answer] req={short_id(state.request_id)} template={draft.template} "
-            f"chars={len(draft.text)} citations={len(draft.citations)} "
-            f"truncated={draft.truncated} repair_hint={bool(repair_hint)} latency_ms={latency:.1f}"
+            f"[answer] draft_ready(답변 초안 완료) "
+            f"req={short_id(state.request_id)} "
+            f"template={draft.template}(템플릿) "
+            f"chars={len(draft.text)}(길이) "
+            f"citations={len(draft.citations)}(인용 개수) "
+            f"truncated={draft.truncated}(잘림 여부) "
+            f"repair_hint={bool(repair_hint)}(재작성 힌트 적용) "
+            f"latency_ms={latency:.1f}(소요시간)"
         )
         return {
             "answer_draft": draft,
@@ -335,9 +490,18 @@ def _make_node_critic(deps: AgentPipelineDeps):
             )
             update["answer_artifact"] = artifact
             update["final_answer_text"] = artifact.text
+        decision_kr = {
+            "publish": "발행 가능",
+            "repair_answer": "재작성 요청",
+            "clarify": "되묻기",
+            "internal_error": "내부 오류",
+        }.get(decision.decision, decision.decision)
         logger.info(
-            f"[critic] req={short_id(state.request_id)} decision={decision.decision} "
-            f"reasoning={decision.reasoning!r} latency_ms={latency:.1f}"
+            f"[critic] decision_ready(검증 결정 완료) "
+            f"req={short_id(state.request_id)} "
+            f"decision={decision.decision}({decision_kr}) "
+            f"reasoning={decision.reasoning!r}(판정 사유) "
+            f"latency_ms={latency:.1f}(소요시간)"
         )
         return update
 
@@ -428,7 +592,9 @@ async def node_emit_children_list(state: AgentPipelineState) -> Dict[str, Any]:
     답변 형식: 글머리표 + 이름·역할·소속. raw person_no/org_id는 노출하지 않음 (P1-2 정직성 유지).
     """
     rid = short_id(state.request_id)
-    text = _build_children_list_text(session_state=state.session_state)
+    text = _build_children_list_text(
+        session_state=state.session_state, intent=state.dialogue_intent
+    )
     if state.stream_emitter is not None and text:
         await state.stream_emitter.publish(
             StreamEvent(
@@ -671,11 +837,15 @@ async def node_save_session(state: AgentPipelineState) -> Dict[str, Any]:
 
     total = state.total_ms() if state.request_started_at else 0.0
     logger.info(
-        f"[save_session] req={rid} cid={short_id(state.conversation_id)} "
-        f"publishing={publishing} view={view} "
-        f"has_subject={state_obj.has_subject()} has_manifest={state_obj.has_manifest()} "
-        f"has_focused_detail={state_obj.has_focused_detail()} "
-        f"kv_saved={saved} total_ms={total:.1f}"
+        f"[save_session] persisted(KV 저장 완료) "
+        f"req={rid} cid={short_id(state.conversation_id)} "
+        f"publishing={publishing}(답변 발행 여부) "
+        f"view={view}(노출 뷰) "
+        f"has_subject={state_obj.has_subject()}(주제 슬롯) "
+        f"has_manifest={state_obj.has_manifest()}(매니페스트 슬롯) "
+        f"has_focused_detail={state_obj.has_focused_detail()}(상세 슬롯) "
+        f"kv_saved={saved}(KV 저장 성공) "
+        f"total_ms={total:.1f}(턴 총 소요시간)"
     )
     return {"session_memory": memory, "session_state": state_obj}
 
@@ -997,10 +1167,85 @@ def _try_cached_detail(
     )
 
 
-def _build_children_list_text(*, session_state: Optional[SessionState]) -> str:
+def _verify_subject_in_children(
+    *,
+    subject_name: str,
+    subject_kind: str,
+    researchers: List[Dict[str, Any]],
+    orgs: List[Dict[str, Any]],
+    title: str,
+) -> str:
+    """focused_detail의 자식 엔티티에서 subject_name을 검색해 Yes/No+역할 답변 생성.
+
+    인물(`subject_kind=people` 또는 미지정) 우선 검색. 그 후 기관(`subject_kind=org` 또는 미지정).
+    매칭 안 되면 빈 문자열 반환 — 호출자가 명단 분기로 fallback.
+    """
+    name_norm = subject_name.strip()
+    if not name_norm:
+        return ""
+
+    # 인물 매칭
+    if subject_kind != "org":
+        for entity in researchers:
+            display = (entity.get("display_name") or "").strip()
+            if not display:
+                continue
+            if display == name_norm or name_norm in display or display in name_norm:
+                role = (entity.get("role") or "").strip()
+                aff = (entity.get("affiliation") or "").strip()
+                fragments = [f"네, '{title}'의 참여연구자에 **{display}**님이 포함되어 있습니다"]
+                if role:
+                    fragments.append(f"역할은 **{role}**")
+                if aff:
+                    fragments.append(f"소속은 {aff}")
+                return ", ".join(fragments) + "."
+        # 인물 미매칭 — 책임자/주연구자 정보를 안내
+        top_level = [r for r in researchers if "top_level" in (r.get("parent_relation") or "").lower()]
+        primary = (top_level or researchers)[:3]
+        primary_text = ", ".join(
+            f"{(p.get('display_name') or '').strip()}({(p.get('role') or '역할 미상').strip()})"
+            for p in primary
+            if (p.get("display_name") or "").strip()
+        )
+        if primary_text:
+            return (
+                f"아니요, '{title}'의 참여연구자 목록에 '{name_norm}'님은 없습니다. "
+                f"확인된 참여연구자: {primary_text}."
+            )
+
+    # 기관 매칭
+    if subject_kind != "people":
+        for entity in orgs:
+            display = (entity.get("display_name") or "").strip()
+            if not display:
+                continue
+            if display == name_norm or name_norm in display or display in name_norm:
+                role = (entity.get("role") or "").strip()
+                role_label = "주관기관" if role == "lead_org" else (role or "참여기관")
+                return f"네, '{title}'의 {role_label}에 **{display}**가 포함되어 있습니다."
+        if orgs and subject_kind == "org":
+            org_names = ", ".join(
+                (e.get("display_name") or "").strip() for e in orgs[:3]
+            )
+            return (
+                f"아니요, '{title}'의 참여기관 목록에 '{name_norm}'은 없습니다. "
+                f"확인된 기관: {org_names}."
+            )
+
+    return ""
+
+
+def _build_children_list_text(
+    *,
+    session_state: Optional[SessionState],
+    intent: Optional[Any] = None,
+) -> str:
     """focused_detail.child_entities를 사람-읽기 가능한 글머리표로 정리.
 
-    parent_relation별 분류:
+    intent.subject_name이 있으면 인물·기관 검증 답변 분기(2026-05-26):
+        "김수빈 연구책임자?" → child_entities에서 매칭 검색 후 Yes/No + 역할/소속 답변.
+
+    명단 요청(intent.subject_name 없음)이면 parent_relation별 분류 글머리표:
         - top_level_researcher / participant_researcher → [참여연구자]
         - lead_org / prtcp_org → [참여기관]
         - related_perf → [연계 성과]
@@ -1034,6 +1279,24 @@ def _build_children_list_text(*, session_state: Optional[SessionState]) -> str:
 
     if not (researchers or orgs or perfs):
         return f"'{title}'의 참여자/참여기관 정보가 저장된 근거에 없습니다."
+
+    # 검증 분기: subject_name이 있으면 child_entities + (focused_detail anchor 본문의)
+    # participant_role_map에서 매칭 검색 후 Yes/No 답변.
+    subject_name = ""
+    subject_kind = ""
+    if intent is not None:
+        subject_name = (getattr(intent, "subject_name", "") or "").strip()
+        subject_kind = (getattr(intent, "subject_kind", "") or "").strip()
+    if subject_name:
+        verification = _verify_subject_in_children(
+            subject_name=subject_name,
+            subject_kind=subject_kind,
+            researchers=researchers,
+            orgs=orgs,
+            title=title,
+        )
+        if verification:
+            return verification
 
     parts: List[str] = [f"'{title}'의 참여자·참여기관 정보입니다."]
     if researchers:

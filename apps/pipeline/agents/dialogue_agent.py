@@ -22,6 +22,8 @@ from apps.pipeline.agents.contracts import (
     CompareTarget,
     DialogueIntent,
     DialogueKind,
+    IntentClassification,
+    SlotExtraction,
 )
 from apps.pipeline.agents.session_state import SessionState
 
@@ -49,12 +51,19 @@ class DialogueAgent:
         turn_id: str,
         conversation_id: str = "",
     ) -> DialogueIntent:
-        """질문 분석 → DialogueIntent.
+        """질문 분석 → DialogueIntent. 2-pass 구조 (2026-05-26 근본 원인 1·2 해결).
+
+        Pass 1: 의도 분류 + manifest_rank/direct/clarification 즉답 (짧은 prompt).
+        Pass 2: kind에 따라 필요한 슬롯만 추출 (kind-specific 짧은 prompt).
+        Merge:  두 결과를 DialogueIntent로 통합해 downstream 호환 유지.
 
         흐름:
             1. 빈 질문 → kind=clarification (안전 닫기)
-            2. LLM 호출 → JSON → DialogueIntent
-            3. JSON 파싱 실패/예외 → kind=clarification 안전 닫기
+            2. Pass 1 호출 → IntentClassification
+            3. direct_answer/clarification → Pass 2 skip 후 즉시 종료
+            4. Pass 2 호출 → SlotExtraction
+            5. merge → DialogueIntent
+            6. 어느 단계든 실패 → kind=clarification 안전 닫기
         """
         q = (question or "").strip()
         if not q:
@@ -65,97 +74,466 @@ class DialogueAgent:
                 confidence=1.0,
             )
 
+        cid = conversation_id or session.conversation_id or ""
         try:
-            return await self._llm_decide(
-                question=q,
-                session=session,
-                request_id=request_id,
-                turn_id=turn_id,
-                conversation_id=conversation_id,
+            classification = await self._classify_pass1(
+                question=q, session=session, request_id=request_id, conversation_id=cid,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception(f"[DialogueAgent] llm_decide failed: err={exc}")
+            logger.exception(
+                f"[DialogueAgent] pass1_failure(Pass1 의도 분류 실패) error={exc} "
+                f"fallback=clarification(되묻기로 안전 종료)"
+            )
             return DialogueIntent(
                 kind="clarification",
                 clarification_question="질문 의도를 파악하지 못했습니다. 좀 더 구체적으로 알려주실 수 있나요?",
-                reason=f"llm_failure:{exc}",
+                # legacy 호환 — reason에 "llm_failure" 키워드 포함
+                reason=f"llm_failure(pass1):{exc}",
                 confidence=0.1,
             )
 
+        # direct_answer / clarification은 Pass 2 불필요 — 즉시 종료.
+        if classification.kind in ("direct_answer", "clarification"):
+            return _merge_to_intent(classification=classification, slots=None, query=q)
+
+        try:
+            slots = await self._extract_pass2(
+                question=q, session=session, classification=classification,
+                request_id=request_id, conversation_id=cid,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[DialogueAgent] pass2_failure(Pass2 슬롯 추출 실패) "
+                f"kind={classification.kind} error={exc} "
+                f"fallback=empty_slots(빈 슬롯으로 진행)"
+            )
+            slots = SlotExtraction()  # 안전한 빈 슬롯으로 fallback
+
+        try:
+            intent = _merge_to_intent(classification=classification, slots=slots, query=q)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[DialogueAgent] merge_failure(Pass1+Pass2 병합 실패) error={exc} "
+                f"fallback=clarification(되묻기로 안전 종료)"
+            )
+            return DialogueIntent(
+                kind="clarification",
+                clarification_question="질문 의도를 파악하지 못했습니다. 좀 더 구체적으로 알려주실 수 있나요?",
+                reason=f"merge_failed:{exc}",
+                confidence=0.1,
+            )
+
+        logger.debug(
+            f"[DialogueAgent] intent_ready(의도 분류 완료) "
+            f"kind={intent.kind} target_hint={intent.target_hint}(타깃 도메인) "
+            f"action_hint={intent.action_hint}(액션 힌트) "
+            f"subject={intent.subject_name!r}(대상) "
+            f"manifest_rank={intent.manifest_rank}(직전 manifest 인용 번호) "
+            f"year=({intent.year_from},{intent.year_to})(연도 범위)"
+        )
+        return intent
+
     # ------------------------------------------------------------------
-    # LLM 분기
+    # Pass 1 — 의도 분류
     # ------------------------------------------------------------------
 
-    async def _llm_decide(
+    async def _classify_pass1(
         self,
         *,
         question: str,
         session: SessionState,
         request_id: str,
-        turn_id: str,
-        conversation_id: str = "",
-    ) -> DialogueIntent:
-        system_prompt = _build_system_prompt()
+        conversation_id: str,
+    ) -> IntentClassification:
+        """Pass 1: kind + manifest_rank + direct/clarification 즉답."""
+        system_prompt = _build_classification_prompt()
         user_payload = _build_user_payload(question=question, session=session)
-
-        # LLM 어댑터/관측 시스템이 conversation_id 인자를 세션 식별자로 사용하므로,
-        # turn_id가 아니라 진짜 conversation_id를 전달한다 (호출자가 명시 인자로 주입).
-        cid = conversation_id or session.conversation_id or ""
         response = await self._llm.ainvoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_payload)],
             request_id=request_id,
-            conversation_id=cid,
-            temperature=0.1,
-            top_p=0.8,
-            max_tokens=768,
+            conversation_id=conversation_id,
+            temperature=0.0,  # 분류는 결정적
+            top_p=1.0,
+            max_tokens=384,
         )
         raw = getattr(response, "content", "") or ""
         parsed = _extract_json(raw)
         if parsed is None:
             logger.warning(
-                f"[DialogueAgent] llm_parse_failure raw_len={len(raw)} "
-                f"raw_preview={(raw or '')[:200]!r}"
+                f"[DialogueAgent][Pass1] parse_failure(JSON 파싱 실패) "
+                f"raw_len={len(raw)}(응답 길이) "
+                f"raw_preview={(raw or '')[:120]!r}(응답 미리보기) "
+                f"fallback=clarification(되묻기)"
             )
-            return DialogueIntent(
+            return IntentClassification(
                 kind="clarification",
                 clarification_question="질문 의도를 파악하지 못했습니다. 좀 더 구체적으로 알려주실 수 있나요?",
+                # legacy 호환 — reason="llm_parse_failure" 사용
                 reason="llm_parse_failure",
                 confidence=0.1,
             )
+        return _build_classification_from_llm(parsed)
 
-        try:
-            intent = _build_intent_from_llm(parsed, question)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[DialogueAgent] intent_construction_failed: {exc}")
-            return DialogueIntent(
-                kind="clarification",
-                clarification_question="질문 의도를 파악하지 못했습니다. 좀 더 구체적으로 알려주실 수 있나요?",
-                reason=f"intent_construction_failed:{exc}",
-                confidence=0.1,
-            )
+    # ------------------------------------------------------------------
+    # Pass 2 — kind별 슬롯 추출
+    # ------------------------------------------------------------------
 
-        # 결정적 보강: manifest_rank·focused_detail 같은 1:1 매핑은 EntityResolverAgent가 처리.
-        # DialogueAgent 단계의 키워드 매칭 후처리 (refine_promotion / year_window / length_hint /
-        # sort_by / exclude_* / coparticipants)는 2026-05-26 재설계로 제거.
-        # LLM 분류 결과를 그대로 신뢰하며, 의미 판단은 LLM·prompt가 담당한다.
-
-        logger.debug(
-            f"[DialogueAgent] kind={intent.kind} target_hint={intent.target_hint} "
-            f"action_hint={intent.action_hint} subject={intent.subject_name!r} "
-            f"manifest_rank={intent.manifest_rank} year=({intent.year_from},{intent.year_to})"
+    async def _extract_pass2(
+        self,
+        *,
+        question: str,
+        session: SessionState,
+        classification: IntentClassification,
+        request_id: str,
+        conversation_id: str,
+    ) -> SlotExtraction:
+        """Pass 2: kind별 짧은 prompt로 필요한 슬롯만 추출."""
+        system_prompt = _build_extraction_prompt(kind=classification.kind)
+        if not system_prompt:
+            # 슬롯 추출 불필요한 kind (e.g. ask_meta 기본형) → 빈 SlotExtraction.
+            return SlotExtraction()
+        user_payload = _build_extraction_user_payload(
+            question=question, session=session, classification=classification,
         )
-        return intent
+        response = await self._llm.ainvoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=user_payload)],
+            request_id=request_id,
+            conversation_id=conversation_id,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=512,
+        )
+        raw = getattr(response, "content", "") or ""
+        parsed = _extract_json(raw)
+        if parsed is None:
+            logger.warning(
+                f"[DialogueAgent][Pass2] parse_failure(슬롯 추출 JSON 파싱 실패) "
+                f"kind={classification.kind} raw_len={len(raw)} "
+                f"raw_preview={(raw or '')[:120]!r} "
+                f"fallback=empty_slots(빈 슬롯)"
+            )
+            return SlotExtraction()
+        return _build_slots_from_llm(parsed)
 
 
 # ============================================================================
-# Prompt builders
+# Prompt builders (2-pass)
 # ============================================================================
+# Pass 1: 의도 분류 (kind + manifest_rank + direct/clarification). 짧은 prompt.
+# Pass 2: kind-specific 슬롯 추출. kind별 짧은 prompt로 NER 정확도 보장.
+# _build_system_prompt: 회귀 가드(prompt 문자열 매칭) 호환 wrapper. 실제 운영 LLM
+#   호출은 Pass 1/Pass 2 prompt를 사용한다.
+
+
+def _build_classification_prompt() -> str:
+    """Pass 1 — 의도 분류 + manifest_rank + direct/clarification 즉답 prompt.
+
+    슬롯(subject_name·year·perf_type·sort_by 등)은 이 prompt에서 *절대* 채우지 않는다.
+    그 작업은 Pass 2(kind-specific)가 담당하므로 instruction following 충돌이 없다.
+    """
+    return (
+        "당신은 NTIS(국가과학기술지식정보서비스) RAG 시스템의 **의도 분류기**입니다.\n"
+        "사용자 발화를 읽고 무엇을 원하는지만 결정합니다. **슬롯(subject_name·연도·"
+        "성과 유형·정렬 등)은 다음 단계가 채우므로 이 단계에서는 채우지 마세요.**\n"
+        "\n"
+        "[출력 schema — 단일 JSON 객체]\n"
+        "{\n"
+        '  "kind": "ask_search"|"ask_detail"|"ask_meta"|"ask_children"|"ask_similar"|"refine_previous"|"compare"|"stats"|"direct_answer"|"clarification",\n'
+        '  "target_hint": "project"|"perf"|"people"|"org"|"support"|null,\n'
+        '  "action_hint": "list"|"detail"|"stats"|"topic"|"download"|null,\n'
+        '  "manifest_rank": <정수>|null,\n'
+        '  "direct_text": "<인사·잡담 응답>"|null,\n'
+        '  "clarification_question": "<되묻기 문구>"|null,\n'
+        '  "clarification_options": ["...", ...],\n'
+        '  "reason": "<짧은 판정 이유>",\n'
+        '  "confidence": 0.0~1.0\n'
+        "}\n"
+        "\n"
+        "[kind 정의]\n"
+        "1. ask_search   — 일반 검색 (사람/기관/주제로 목록 조회). 예: \"신동구 활동내역\"\n"
+        "2. ask_detail   — 단일 대상 상세. 예: \"9번 항목 상세\", \"K-20-... 정보\"\n"
+        "3. ask_meta     — 직전 항목(또는 manifest 전체)의 유형/분류/통계만.\n"
+        "                  허용: \"이게 과제야 성과야?\", \"이 항목 유형은?\", \"전부 같은 인물이야?\"\n"
+        "                  **detail 본문 요청은 ask_detail. 인물 검증(\"X 책임자?\")은 ask_children.**\n"
+        "4. ask_children — 직전 1개 항목의 자식 엔티티 명단 또는 인물·기관 검증.\n"
+        "                  명단 예: \"참여자 목록\", \"이 과제 참여한 사람들\"\n"
+        "                  검증 예: \"김수빈 연구책임자?\", \"KISTI 참여했어?\"\n"
+        "                  **금지 (이런 경우는 ask_search로):**\n"
+        "                    - \"X 연구자의 다른 활동/연구\" → ask_search\n"
+        "                    - \"이 사람이 참여한 다른 항목\" → ask_search\n"
+        "                  즉 ask_children은 \"이 항목 안의 자식\"이지 \"이 자식이 참여한 다른 항목\"이 아니다.\n"
+        "                  예: \"유재수 다른 참여연구는?\" → ask_search (subject 활동 검색)\n"
+        "5. ask_similar  — 직전 항목과 유사한 다른 항목. focused_detail 필수.\n"
+        "6. refine_previous — 직전 결과를 조건 추가로 좁힘.\n"
+        "7. compare      — 둘 이상 비교.\n"
+        "8. stats        — 통계·집계. 예: \"연도별 과제 수\"\n"
+        "9. direct_answer — 인사·잡담. direct_text를 채운다.\n"
+        "10. clarification — 정보 부족으로 검색 불가. clarification_question을 채운다.\n"
+        "\n"
+        "[manifest_rank — 직전 manifest 인용]\n"
+        "previous_manifest가 비어있지 않을 때 사용자가 manifest의 한 항목을 가리키면\n"
+        "그 정수를 manifest_rank에 채우고 kind=\"ask_detail\"(또는 refine_previous).\n"
+        "패턴: \"N번 항목\"/\"몇 번\"/제목 일치/\"[N]\" 인용/사용자가 같은 항목 재요청.\n"
+        "\n"
+        "[focused_detail — 단일 항목 anaphora]\n"
+        "focused_detail이 있고 사용자가 \"해당 항목\", \"이 과제\", \"이 논문\", \"방금 본 것\",\n"
+        "\"그것\" 같은 지시어로 가리키면 kind=\"ask_detail\"로 설정하고 manifest_rank는 null로.\n"
+        "(시스템이 자동으로 anchor 매핑.)\n"
+        "주의: focused_detail이 있는데 사용자가 새 list를 원하면(\"목록\"/\"전체\"/\"다른\")\n"
+        "kind=\"ask_search\" 또는 \"refine_previous\"로 분류하고 focused_detail은 무시한다.\n"
+        "\n"
+        "[refine_previous vs ask_search — 핵심 분기]\n"
+        "**refine_previous** 조건:\n"
+        "  - previous_subject 또는 previous_manifest가 비어 있지 않음\n"
+        "  - 사용자가 **직전 결과를 의미적으로 인정**하고 그 위에 조건만 추가\n"
+        "    예: previous_subject=\"신동구\" + \"2020년 이후만\"\n"
+        "\n"
+        "**ask_search** 조건 — refine_previous로 분류하지 마세요:\n"
+        "  - 사용자가 직전 결과의 적합성에 대해 **불만·재요청** 표시\n"
+        "    예: \"그게 아니라 LLM 관련을 원했어\", \"이게 아니야\", \"다시 검색해줘\"\n"
+        "  - 사용자가 previous_manifest와 **무관한 새 주제·키워드를 도입**\n"
+        "  - 사용자가 명시적으로 \"다시 / 새로 / 처음부터\" 요청\n"
+        "\n"
+        "**모호하면 ask_search를 선택하는 것이 안전** — 잘못된 manifest_filter는 잘못된 결과를 반복하게 만든다.\n"
+        "\n"
+        "[direct_answer / clarification]\n"
+        "- \"안녕\"/잡담 → direct_answer (direct_text 채움).\n"
+        "- \"찾아줘\"처럼 대상 없음 → clarification (clarification_question 채움).\n"
+        "\n"
+        "[절대 규칙]\n"
+        "- 응답은 반드시 단일 JSON 객체. 마크다운/주석/추가 텍스트 금지.\n"
+        "- subject_name·year_from·perf_type_hint 등 슬롯 필드는 이 단계에서 채우지 않는다.\n"
+        "  (다음 단계가 kind에 맞춰 추출한다.)\n"
+    )
+
+
+# kind별 Pass 2 prompt 캐싱
+_EXTRACTION_PROMPT_CACHE: Dict[str, str] = {}
+
+
+def _build_extraction_prompt(*, kind: DialogueKind) -> str:
+    """Pass 2 — kind별 슬롯 추출 prompt.
+
+    kind에 따라 필요한 슬롯만 명세 → prompt 짧음·모순 없음.
+    슬롯 추출이 불필요한 kind(예: direct_answer/clarification)는 빈 문자열 반환 → 호출자가 LLM 호출 skip.
+    """
+    cached = _EXTRACTION_PROMPT_CACHE.get(kind)
+    if cached is not None:
+        return cached
+
+    common_rules = (
+        "[NER 규칙 — 모든 kind 공통]\n"
+        "- 응답은 반드시 단일 JSON 객체. 마크다운 금지.\n"
+        "- subject_name은 **실제 사람/기관 이름만**. 기술 약어·일반명사 절대 금지:\n"
+        "  LLM, AI, ML, GPT, NLP, IoT, BD, VR, AR, 빅데이터, 머신러닝, 딥러닝, 인공지능,\n"
+        "  자율주행, 양자, 신소재, 전자공학, 파이썬, 리눅스, Chrome 같은 토큰은 subject_name에\n"
+        "  박지 마세요. 이런 토큰은 query 본문에 두고 subject_name=null로 비웁니다.\n"
+        "- subject_kind: subject_name이 사람이면 \"people\", 기관이면 \"org\". subject_name이 null이면 null.\n"
+        "- perf_type_hint는 사용자가 **명시적으로** 성과 유형을 지정한 경우만 (\"논문만\", \"특허만\").\n"
+        "  query에 기술 키워드(LLM/AI/SW)가 있다고 자동으로 perf_type을 박지 마세요.\n"
+        "- identifier_hints: pjt_id=10자리 숫자, pjt_no=코드 패턴(K-XX-...), rst_id=접두어(CNL-/PTR-/SNW-/REP-/EQU-/...).\n"
+        "  사업명/제목 텍스트는 identifier에 박지 마세요.\n"
+        "- year_from > year_to 금지. 명시 안 했으면 둘 다 null.\n"
+        "- exclude_org_name/exclude_perf_type/exclude_person_name는 \"X 제외/빼고\" 패턴에서만.\n"
+    )
+
+    if kind == "ask_search":
+        prompt = (
+            "당신은 NTIS RAG 챗봇의 **슬롯 추출기**입니다. Pass 1이 분류한 kind=ask_search 의도에 대해\n"
+            "필요한 슬롯만 추출합니다.\n"
+            "\n"
+            "[출력 schema — 단일 JSON 객체]\n"
+            "{\n"
+            '  "subject_name": "<사람/기관 실명>"|null,\n'
+            '  "subject_kind": "people"|"org"|null,\n'
+            '  "subject_affiliation_hint": "<소속 기관>"|null,\n'
+            '  "coparticipants": ["<공동 참여자>", ...],\n'
+            '  "exclude_org_name": [...], "exclude_perf_type": [...], "exclude_person_name": [...],\n'
+            '  "identifier_hints": {"pjt_id":[...], "pjt_no":[...], "rst_id":[...]},\n'
+            '  "year_from": <int>|null, "year_to": <int>|null,\n'
+            '  "perf_type_hint": ["PAPER|PATENT|SOFTWARE|REPORT|EQUIPMENT|COMPOUND|ORGSM_INFO|ORGSM_RESOURCE|TECH_INFO|NVR", ...],\n'
+            '  "sort_by": "relevance"|"recent_desc"|"recent_asc",\n'
+            '  "length_hint": "brief"|"default"|"detailed",\n'
+            '  "aggregate_hint": null,\n'
+            '  "compare_targets": []\n'
+            "}\n"
+            "\n"
+            "[추가 규칙 — ask_search]\n"
+            "- sort_by: \"최근순/최신순/가장 최근\"→\"recent_desc\", \"오래된 순/예전부터\"→\"recent_asc\", 그 외 \"relevance\".\n"
+            "- length_hint: \"간단히/한 줄/짧게\"→\"brief\", \"자세히/상세히\"→\"detailed\", 그 외 \"default\".\n"
+            "- coparticipants: \"A와 B가 같이 참여한\"·\"A, B 공동\"이면 1순위를 subject_name에, 나머지를 coparticipants에.\n"
+            "- subject_affiliation_hint: 사용자가 소속을 명시한 경우만 (\"X 연구자(KISTI)\").\n"
+            "- compare_targets/aggregate_hint는 ask_search에서 사용하지 않음.\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "ask_detail":
+        prompt = (
+            "Pass 1이 분류한 kind=ask_detail 의도에 대해 슬롯을 추출합니다.\n"
+            "manifest_rank는 Pass 1이 이미 채웠을 수 있습니다. 그 경우 identifier_hints는 비워두세요.\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "identifier_hints": {"pjt_id":[...], "pjt_no":[...], "rst_id":[...]},\n'
+            '  "length_hint": "brief"|"default"|"detailed",\n'
+            "  // 그 외 필드는 null/[] 기본값.\n"
+            "}\n"
+            "\n"
+            "[추가 규칙]\n"
+            "- 사용자가 직접 식별자를 말한 경우에만 identifier_hints를 채웁니다.\n"
+            "- length_hint는 사용자 표현 기반.\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "ask_meta":
+        prompt = (
+            "Pass 1이 분류한 kind=ask_meta 의도에 대해 슬롯을 추출합니다.\n"
+            "대부분 비어 있는 응답이 정상입니다 (검색 없이 manifest/focused_detail로 즉답하므로).\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "subject_name": "<인물·기관 검증 대상>"|null,\n'
+            '  "subject_kind": "people"|"org"|null,\n'
+            "  // 그 외 필드는 기본값.\n"
+            "}\n"
+            "\n"
+            "[추가 규칙]\n"
+            "- 사용자가 \"X가 책임자야?\" 같은 인물 검증 질문이면 subject_name=X를 채우세요.\n"
+            "- 그 외엔 모두 비워두세요.\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "ask_children":
+        prompt = (
+            "Pass 1이 분류한 kind=ask_children 의도에 대해 슬롯을 추출합니다.\n"
+            "사용자 의도가 (a) 명단 요청이면 모두 비우고, (b) 인물·기관 검증이면 subject_name에 검증 대상을 채웁니다.\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "subject_name": "<검증 대상 인물·기관>"|null,\n'
+            '  "subject_kind": "people"|"org"|null,\n'
+            "  // 그 외 필드는 기본값.\n"
+            "}\n"
+            "\n"
+            "[추가 규칙]\n"
+            "- 명단 요청(\"참여자 목록\", \"참여기관 알려줘\")이면 subject_name=null.\n"
+            "- 검증 질문(\"김수빈 연구책임자?\", \"KISTI 참여했어?\")이면 subject_name에 검증 대상을 채운다.\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "ask_similar":
+        # ask_similar는 focused_detail.title을 query로 사용 — 추가 슬롯 불필요
+        prompt = ""
+    elif kind == "refine_previous":
+        prompt = (
+            "Pass 1이 분류한 kind=refine_previous 의도에 대해 슬롯을 추출합니다.\n"
+            "사용자가 직전 결과에 추가한 조건(연도/제외/성과 유형 등)만 채웁니다.\n"
+            "previous_subject가 있으면 subject_name을 그대로 복사하세요.\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "subject_name": "<previous_subject 이름 복사 또는 null>",\n'
+            '  "subject_kind": "people"|"org"|null,\n'
+            '  "year_from": <int>|null, "year_to": <int>|null,\n'
+            '  "perf_type_hint": [...], "exclude_org_name": [...], "exclude_perf_type": [...], "exclude_person_name": [...],\n'
+            '  "coparticipants": [...],\n'
+            '  "sort_by": "relevance"|"recent_desc"|"recent_asc",\n'
+            '  "length_hint": "brief"|"default"|"detailed",\n'
+            "}\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "compare":
+        prompt = (
+            "Pass 1이 분류한 kind=compare 의도에 대해 비교 대상을 추출합니다.\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "compare_targets": [{"name":"<이름>", "kind":"people|org|project|perf"}, ...],\n'
+            '  "length_hint": "brief"|"default"|"detailed",\n'
+            "}\n"
+            "\n"
+            "[추가 규칙]\n"
+            "- compare_targets는 최소 2개.\n"
+            "- name은 실명·코드·식별자.\n"
+            "\n"
+            + common_rules
+        )
+    elif kind == "stats":
+        prompt = (
+            "Pass 1이 분류한 kind=stats 의도에 대해 집계 슬롯을 추출합니다.\n"
+            "\n"
+            "[출력 schema]\n"
+            "{\n"
+            '  "subject_name": "<대상 인물·기관>"|null,\n'
+            '  "subject_kind": "people"|"org"|null,\n'
+            '  "aggregate_hint": "year"|"lead_org"|"tag"|"perf_type"|"participant_org"|"participant_person"|null,\n'
+            '  "year_from": <int>|null, "year_to": <int>|null,\n'
+            "}\n"
+            "\n"
+            "[aggregate_hint 매핑]\n"
+            "- \"연도별\" → \"year\" (기본)\n"
+            "- \"수행기관별\"/\"기관별\" → \"lead_org\"\n"
+            "- \"분야별\"/\"유형별\"/\"종류별\" → project이면 \"tag\", perf이면 \"perf_type\"\n"
+            "- \"참여기관별\"/\"공동 참여기관\" → \"participant_org\"\n"
+            "- \"참여자별\"/\"공동 참여자\" → \"participant_person\"\n"
+            "- 미명시 → null (Planner가 year fallback)\n"
+            "\n"
+            + common_rules
+        )
+    else:
+        # direct_answer / clarification / 알 수 없는 kind — 추출 불필요
+        prompt = ""
+
+    _EXTRACTION_PROMPT_CACHE[kind] = prompt
+    return prompt
+
+
+def _build_extraction_user_payload(
+    *,
+    question: str,
+    session: SessionState,
+    classification: IntentClassification,
+) -> str:
+    """Pass 2 LLM user message: 질문 + 직전 turn 컨텍스트 + Pass 1 분류 결과."""
+    payload: Dict[str, Any] = {
+        "question": question,
+        "pass1": {
+            "kind": classification.kind,
+            "target_hint": classification.target_hint,
+            "action_hint": classification.action_hint,
+            "manifest_rank": classification.manifest_rank,
+        },
+    }
+    if session.has_subject():
+        sub = session.current_subject
+        payload["previous_subject"] = {
+            "name": sub.subject_name, "kind": sub.subject_kind,
+        }
+    if session.has_focused_detail():
+        anchor = session.focused_detail.anchor
+        payload["focused_detail"] = {
+            "kind": anchor.kind, "title": session.focused_detail.title,
+        }
+    return json.dumps(payload, ensure_ascii=False)
+
 
 def _build_system_prompt() -> str:
-    """DialogueAgent system prompt.
+    """**Deprecated 호환 wrapper** — 회귀 가드(prompt 문자열 매칭)용으로만 유지.
 
-    LLM은 의도 분류 + 힌트 추출만 한다. collection/strategy/식별자 최종 확정은 다음 단계 책임.
+    실제 운영 LLM 호출은 `_build_classification_prompt`(Pass 1) +
+    `_build_extraction_prompt(kind)`(Pass 2)를 사용한다. 이 함수는 둘을 concat해
+    "회귀 가드에서 검사하는 문자열들이 어디든 살아 있다"는 사실만 보존한다.
     """
+    return (
+        _build_classification_prompt()
+        + "\n\n# === Pass 2 (ask_search 슬롯 추출) — 호환 view ===\n\n"
+        + _build_extraction_prompt(kind="ask_search")
+    )
+
+
+def _build_system_prompt_v1_legacy() -> str:
+    """이전 단일 prompt 본문 — 보존 (롤백 시 참조용). 운영·호환 가드 어디서도 호출하지 않는다."""
     return (
         "당신은 NTIS(국가과학기술지식정보서비스) RAG 시스템의 **DialogueAgent**입니다. "
         "사용자 발화를 읽고 **사용자가 무엇을 원하는지**만 분류합니다. "
@@ -205,21 +583,32 @@ def _build_system_prompt() -> str:
         "[kind 분류 가이드]\n"
         "1. ask_search   — 일반 검색 (사람/기관/주제로 목록 조회). 예: \"신동구 연구자 활동내역\"\n"
         "2. ask_detail   — 단일 대상 상세. 예: \"K-20-L01-C09 상세\", \"EQU-2020-... 정보\"\n"
-        "3. ask_meta     — 직전 항목의 **유형/종류만** 묻는 메타 분류 질문. previous_manifest 또는 focused_detail이\n"
-        "                  필수. 검색 없이 manifest item의 tag/id로 즉답한다.\n"
-        "                  예: \"이게 과제야 성과야?\", \"8번 데이터는 과제인가 성과인가\", \"이거 무슨 종류야?\",\n"
-        "                      \"이 항목 유형은?\", \"논문이야 특허야?\"\n"
+        "3. ask_meta     — 직전 항목(또는 manifest 전체)의 **분류/유형/종류 통계만** 묻는 메타 질문.\n"
+        "                  previous_manifest 또는 focused_detail이 필수. 검색 없이 manifest item의\n"
+        "                  tag/id 또는 manifest 전체 통계로 즉답한다.\n"
+        "                  허용 예: \"이게 과제야 성과야?\", \"8번 데이터는 과제인가 성과인가\",\n"
+        "                          \"이거 무슨 종류야?\", \"이 항목 유형은?\", \"논문이야 특허야?\",\n"
+        "                          \"전부 같은 인물이야?\", \"다 같은 과제야?\" (manifest 전체 통계)\n"
+        "                  **금지 (이런 경우는 ask_children으로 분류):**\n"
+        "                    - \"X가 책임자/연구책임자야?\", \"X 책임자?\" — 인물 검증/확인 → ask_children\n"
+        "                    - \"X 참여했어?\", \"Y가 같이 했나?\" — 참여자 검증/확인 → ask_children\n"
         "                  **detail 본문(목표·기간·내용)을 요청하면 ask_meta가 아니라 ask_detail.**\n"
-        "4. ask_children — **직전 1개 항목의 자식 엔티티 명단만** 요청. previous_manifest 또는\n"
-        "                  focused_detail이 필수이며, 그 항목 *자신*의 참여자·참여기관 목록을 노출하는 도구.\n"
-        "                  허용 예: \"참여자 목록만 보여줘\", \"참여연구자만\", \"참여기관 알려줘\",\n"
-        "                          \"이 과제 참여한 사람들\", \"2번 항목의 연구자들\"\n"
+        "4. ask_children — **직전 1개 항목의 자식 엔티티 명단·검증** 요청. previous_manifest 또는\n"
+        "                  focused_detail이 필수이며, 그 항목 *자신*의 참여자·참여기관 목록을 노출한다.\n"
+        "                  허용 예 (명단 요청):\n"
+        "                    - \"참여자 목록만 보여줘\", \"참여연구자만\", \"참여기관 알려줘\"\n"
+        "                    - \"이 과제 참여한 사람들\", \"2번 항목의 연구자들\"\n"
+        "                  허용 예 (인물·기관 검증/확인 — subject_name에 검증 대상을 채우세요):\n"
+        "                    - \"김수빈 연구책임자?\", \"X가 책임자야?\" — 책임자가 X인지 확인 (subject_name=\"X\")\n"
+        "                    - \"홍길동 참여했어?\", \"Y가 같이 했나?\" — Y가 참여자인지 확인 (subject_name=\"Y\")\n"
+        "                    - \"KISTI가 수행기관이야?\" — 수행기관 확인 (subject_name=\"KISTI\", subject_kind=\"org\")\n"
+        "                    위 검증 질문은 child_entities + participant_role_map에서 subject_name 매칭으로 답한다.\n"
         "                  **금지 (이런 경우는 ask_search로 분류):**\n"
         "                    - \"X 연구자의 *다른* 활동/연구/과제\" → ask_search(subject_name=X)\n"
         "                      (직전 항목의 child가 아니라 X라는 사람의 활동을 새로 검색)\n"
         "                    - \"이 사람이 *참여한* 다른 항목\" → ask_search(subject_name=...)\n"
         "                    - \"이 기관의 *다른* 과제\" → ask_search(subject_name=...)\n"
-        "                  즉 ask_children은 \"이 항목 안의 자식\"이지 \"이 자식이 참여한 다른 항목\"이 아니다.\n"
+        "                  즉 ask_children은 \"이 항목 안의 자식 명단·검증\"이지 \"이 자식이 참여한 다른 항목\"이 아니다.\n"
         "5. ask_similar  — 직전 항목과 **유사한 다른 항목**을 찾아달라는 요청. focused_detail이 필수.\n"
         "                  focused_detail.title을 query로 사용해 hybrid_search 호출. anchor 자신은 결과에서 제외.\n"
         "                  예: \"이것과 비슷한 과제\", \"이 항목과 유사한\", \"비슷한 연구\", \"관련 사업\"\n"
@@ -248,6 +637,23 @@ def _build_system_prompt() -> str:
         "   - 사용자가 화내며 같은 항목을 다시 요청\n"
         "**manifest_rank를 채울 때는 identifier_hints를 비워두세요.** 시스템이 manifest에서 ID를 매핑합니다.\n"
         "**사업명 텍스트를 identifier_hints.pjt_no/pjt_id에 절대 박지 마세요.**\n"
+        "\n"
+        "[subject_name / subject_kind — 사람/기관 이름만]\n"
+        "subject_name은 **실제 사람 이름 또는 기관(법인) 이름**만 채운다. 다음은 절대 subject_name에\n"
+        "박지 마세요 — 검색 결과를 0건으로 만드는 회귀가 발생합니다:\n"
+        "  - 기술/도메인 약어·일반명사: \"LLM\", \"AI\", \"ML\", \"GPT\", \"NLP\", \"IoT\", \"BD\", \"VR\", \"AR\",\n"
+        "                              \"빅데이터\", \"머신러닝\", \"딥러닝\", \"인공지능\", \"자율주행\", \"양자\"\n"
+        "  - 학문/연구 분야명: \"생명공학\", \"신소재\", \"전자공학\"\n"
+        "  - 제품/도구명: \"파이썬\", \"리눅스\", \"Chrome\"\n"
+        "이런 토큰은 모두 `query` 본문에만 두고 subject_name은 null로 비웁니다.\n"
+        "예: \"LLM 같은 AI를 농사에 활용한 기술\" → subject_name=null, target_hint=\"project\",\n"
+        "    query=\"LLM AI 농사 활용 기술\". (subject 없는 일반 검색)\n"
+        "\n"
+        "[perf_type_hint — 성과 유형 명시적 요청만]\n"
+        "perf_type_hint는 **사용자가 명시적으로 성과 유형을 지정한 경우에만** 채운다 (예: \"논문만\",\n"
+        "\"특허만 보여줘\", \"SW만\"). 사용자 query에 'LLM/AI/SW' 같은 기술 키워드가 들어 있다고 해서\n"
+        "perf_type_hint=[\"SOFTWARE\"]로 자동 채우지 마세요 — 성과 컬렉션 외 결과를 모두 배제해\n"
+        "0건 회귀가 납니다.\n"
         "\n"
         "[focused_detail — 직전에 사용자가 본 단일 항목 anaphora]\n"
         "focused_detail 이 비어있지 않을 때 사용자가 **\"해당 항목\", \"이 과제\", \"이 논문\",\n"
@@ -368,6 +774,13 @@ def _build_system_prompt() -> str:
         "\"aggregate_hint\":\"lead_org\","
         "\"query\":\"한국과학기술정보연구원 기관별 사업 수\",\"reason\":\"기관별 집계\",\"confidence\":0.85}\n"
         "\n"
+        "Q: \"LLM 과 같은 AI를 농사에 활용/접목한 기술이 있을까?\"\n"
+        "→ {\"kind\":\"ask_search\",\"target_hint\":\"project\",\"action_hint\":\"list\","
+        "\"subject_name\":null,\"subject_kind\":null,\"perf_type_hint\":[],"
+        "\"query\":\"LLM AI 농사 활용 기술\","
+        "\"reason\":\"기술 키워드만 — subject나 perf_type 미지정\",\"confidence\":0.9}\n"
+        "(LLM/AI는 기술 약어이므로 subject_name·perf_type_hint에 박지 않는다.)\n"
+        "\n"
         "Q: \"자동차 관련 연구과제를 가장 최근순으로 찾아줘\"\n"
         "→ {\"kind\":\"ask_search\",\"target_hint\":\"project\",\"action_hint\":\"list\","
         "\"sort_by\":\"recent_desc\",\"query\":\"자동차 관련 연구과제\","
@@ -411,6 +824,7 @@ def _build_system_prompt() -> str:
         "- manifest 인용은 manifest_rank로만. identifier_hints 비우기.\n"
         "- year_from > year_to 인 응답 금지.\n"
         "- kind=compare면 compare_targets에 최소 2개.\n"
+        "- 기술 약어·일반명사(LLM, AI, 빅데이터 등)를 subject_name·perf_type_hint에 박지 말 것.\n"
     )
 
 
@@ -654,6 +1068,201 @@ def _build_intent_from_llm(parsed: Dict[str, Any], question: str) -> DialogueInt
         clarification_options=clarification_options,
         reason=str(parsed.get("reason") or "")[:200],
         confidence=confidence,
+    )
+
+
+# ============================================================================
+# 2-pass: Pass 1 / Pass 2 / merge helpers
+# ============================================================================
+
+def _build_classification_from_llm(parsed: Dict[str, Any]) -> IntentClassification:
+    """Pass 1 LLM dict → IntentClassification.
+
+    누락·이상값은 안전한 기본값으로 fallback (clarification으로 다운그레이드 아님 — kind=ask_search 안전 기본).
+    """
+    kind_raw = str(parsed.get("kind", "")).strip().lower()
+    if kind_raw not in _VALID_KINDS:
+        return IntentClassification(
+            kind="clarification",
+            clarification_question="질문 의도를 파악하지 못했습니다. 좀 더 구체적으로 알려주실 수 있나요?",
+            reason=f"pass1_unknown_kind:{kind_raw!r}",
+            confidence=0.2,
+        )
+    kind: DialogueKind = kind_raw  # type: ignore[assignment]
+
+    def _opt_str(key: str) -> Optional[str]:
+        v = parsed.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    target_hint = _opt_str("target_hint")
+    if target_hint and target_hint not in _VALID_TARGETS:
+        target_hint = None
+    action_hint = _opt_str("action_hint")
+    if action_hint and action_hint not in _VALID_ACTIONS:
+        action_hint = None
+
+    manifest_rank = _to_pos_int(parsed.get("manifest_rank"))
+
+    direct_text = _opt_str("direct_text") if kind == "direct_answer" else None
+    if kind == "direct_answer" and not direct_text:
+        direct_text = "도움이 필요하시면 좀 더 자세히 말씀해 주세요."
+
+    clarification_question = _opt_str("clarification_question") if kind == "clarification" else None
+    if kind == "clarification" and not clarification_question:
+        clarification_question = "원하시는 정보를 좀 더 구체적으로 알려주실 수 있나요?"
+
+    clarification_options = [
+        str(o).strip() for o in (parsed.get("clarification_options") or []) if str(o).strip()
+    ]
+
+    confidence_raw = parsed.get("confidence")
+    try:
+        confidence = float(confidence_raw) if confidence_raw is not None else 0.5
+    except (TypeError, ValueError):
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+
+    return IntentClassification(
+        kind=kind,
+        target_hint=target_hint,  # type: ignore[arg-type]
+        action_hint=action_hint,  # type: ignore[arg-type]
+        manifest_rank=manifest_rank,
+        direct_text=direct_text,
+        clarification_question=clarification_question,
+        clarification_options=clarification_options,
+        reason=str(parsed.get("reason") or "")[:200],
+        confidence=confidence,
+    )
+
+
+def _build_slots_from_llm(parsed: Dict[str, Any]) -> SlotExtraction:
+    """Pass 2 LLM dict → SlotExtraction. 누락은 모두 안전한 기본값."""
+    def _opt_str(key: str) -> Optional[str]:
+        v = parsed.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    subject_kind_raw = _opt_str("subject_kind")
+    subject_kind = subject_kind_raw if subject_kind_raw in {"people", "org"} else None
+
+    identifier_hints: Dict[str, List[str]] = {}
+    raw_ids = parsed.get("identifier_hints") or {}
+    if isinstance(raw_ids, dict):
+        for axis_key in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+            v = raw_ids.get(axis_key)
+            cleaned = _clean_str_list(v)
+            if cleaned:
+                identifier_hints[axis_key] = cleaned
+
+    year_from = _to_year(parsed.get("year_from"))
+    year_to = _to_year(parsed.get("year_to"))
+    if year_from is not None and year_to is not None and year_from > year_to:
+        year_from, year_to = year_to, year_from
+
+    perf_type_hint: List[str] = []
+    for v in parsed.get("perf_type_hint") or []:
+        s = str(v).strip().upper()
+        if s and s not in perf_type_hint:
+            perf_type_hint.append(s)
+
+    coparticipants: List[str] = []
+    for v in parsed.get("coparticipants") or []:
+        s = str(v).strip()
+        if s and s not in coparticipants:
+            coparticipants.append(s)
+
+    sort_by_raw = _opt_str("sort_by")
+    sort_by = sort_by_raw if sort_by_raw in {"relevance", "recent_desc", "recent_asc"} else "relevance"
+    length_hint_raw = _opt_str("length_hint")
+    length_hint = length_hint_raw if length_hint_raw in {"brief", "default", "detailed"} else "default"
+    aggregate_hint_raw = _opt_str("aggregate_hint")
+    aggregate_hint = (
+        aggregate_hint_raw
+        if aggregate_hint_raw in {"year", "lead_org", "tag", "perf_type", "participant_org", "participant_person"}
+        else None
+    )
+
+    compare_targets: List[CompareTarget] = []
+    for entry in parsed.get("compare_targets") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        ck = str(entry.get("kind") or "").strip().lower()
+        if name and ck in {"people", "org", "project", "perf"}:
+            compare_targets.append(CompareTarget(name=name, kind=ck))  # type: ignore[arg-type]
+
+    return SlotExtraction(
+        subject_name=_opt_str("subject_name"),
+        subject_kind=subject_kind,  # type: ignore[arg-type]
+        subject_affiliation_hint=_opt_str("subject_affiliation_hint"),
+        coparticipants=coparticipants,
+        exclude_org_name=_clean_str_list(parsed.get("exclude_org_name")),
+        exclude_perf_type=[s.upper() for s in _clean_str_list(parsed.get("exclude_perf_type"))],
+        exclude_person_name=_clean_str_list(parsed.get("exclude_person_name")),
+        identifier_hints=identifier_hints,
+        year_from=year_from,
+        year_to=year_to,
+        perf_type_hint=perf_type_hint,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        length_hint=length_hint,  # type: ignore[arg-type]
+        aggregate_hint=aggregate_hint,  # type: ignore[arg-type]
+        compare_targets=compare_targets,
+    )
+
+
+def _merge_to_intent(
+    *,
+    classification: IntentClassification,
+    slots: Optional[SlotExtraction],
+    query: str,
+) -> DialogueIntent:
+    """Pass 1 classification + Pass 2 slots → DialogueIntent (downstream 호환 view).
+
+    slots=None은 direct_answer/clarification (Pass 2 skip) 경로.
+    compare이지만 targets<2면 clarification으로 안전 다운그레이드.
+    """
+    s = slots or SlotExtraction()
+
+    if classification.kind == "compare" and len(s.compare_targets) < 2:
+        return DialogueIntent(
+            kind="clarification",
+            clarification_question="비교 대상 두 개를 알려주세요. 예: 'A 사업과 B 사업 비교'",
+            reason="compare_targets_insufficient",
+            confidence=0.5,
+            query=query,
+        )
+
+    return DialogueIntent(
+        kind=classification.kind,
+        target_hint=classification.target_hint,
+        action_hint=classification.action_hint,
+        subject_name=s.subject_name,
+        subject_kind=s.subject_kind,
+        subject_affiliation_hint=s.subject_affiliation_hint,
+        identifier_hints=s.identifier_hints,
+        manifest_rank=classification.manifest_rank,
+        year_from=s.year_from,
+        year_to=s.year_to,
+        perf_type_hint=s.perf_type_hint,
+        coparticipants=s.coparticipants,
+        exclude_org_name=s.exclude_org_name,
+        exclude_perf_type=s.exclude_perf_type,
+        exclude_person_name=s.exclude_person_name,
+        compare_targets=s.compare_targets,
+        sort_by=s.sort_by,
+        length_hint=s.length_hint,
+        aggregate_hint=s.aggregate_hint,
+        query=query,
+        direct_text=classification.direct_text,
+        clarification_question=classification.clarification_question,
+        clarification_options=classification.clarification_options,
+        reason=classification.reason,
+        confidence=classification.confidence,
     )
 
 

@@ -64,9 +64,17 @@ class EntityResolverAgent:
         1. manifest_rank 결정적 해소 (있으면 LLM 결정 무시)
         2. identifier_hints → IdentifierBundle 그대로 (형식 휴리스틱 없음)
         3. subject 결정 (intent.subject_* 또는 refine_previous면 session.current_subject)
-        4. filters 변환
-        5. rst_id 있으면 forced_target='perf'
+        4. **[2026-05-27]** subject가 처음 채워졌고 식별자 없으면 NTIS 이름 lookup 검증 단:
+            - 0건 → subject 폐기 (LLM의 NER 오추출 차단, retrieval은 generic search로 fallback)
+            - 1건 → person_no/org_id 채우고 identity_status="resolved" 승격
+            - 다중 → identity_status="ambiguous_name_only" 유지
+        5. filters 변환
+        6. rst_id 있으면 forced_target='perf'
     """
+
+    def __init__(self, *, qdrant_client: Any = None) -> None:
+        """qdrant_client 주입 시 subject 도메인 검증 활성. 미주입 시 기존 동작 유지."""
+        self._qdrant_client = qdrant_client
 
     def resolve(
         self,
@@ -79,10 +87,11 @@ class EntityResolverAgent:
         if manifest_info is not None:
             resolution = manifest_info
             logger.info(
-                f"[EntityResolver] manifest_rank={intent.manifest_rank} resolved "
-                f"target={resolution.manifest_resolved_target} "
-                f"axis={resolution.manifest_resolved_axis} "
-                f"ids={resolution.identifiers.model_dump()}"
+                f"[EntityResolver] manifest_rank_resolved(직전 manifest 순번 인용 해소) "
+                f"rank={intent.manifest_rank}(인용 번호) "
+                f"target={resolution.manifest_resolved_target}(타깃 도메인) "
+                f"axis={resolution.manifest_resolved_axis}(식별자 축) "
+                f"ids={resolution.identifiers.model_dump()}(매핑된 식별자)"
             )
             return resolution
 
@@ -92,10 +101,10 @@ class EntityResolverAgent:
         focused_info = _resolve_focused_detail(intent=intent, session=session)
         if focused_info is not None:
             logger.info(
-                f"[EntityResolver] focused_detail resolved "
-                f"target={focused_info.manifest_resolved_target} "
-                f"axis={focused_info.manifest_resolved_axis} "
-                f"ids={focused_info.identifiers.model_dump()}"
+                f"[EntityResolver] focused_detail_resolved(방금 본 항목 anaphora 해소) "
+                f"target={focused_info.manifest_resolved_target}(타깃) "
+                f"axis={focused_info.manifest_resolved_axis}(축) "
+                f"ids={focused_info.identifiers.model_dump()}(식별자)"
             )
             return focused_info
 
@@ -106,10 +115,14 @@ class EntityResolverAgent:
         # 가져오게 한다. AnswerAgent가 사용자 query로 자연어 reranking.
         manifest_filter_info = _resolve_manifest_filter(intent=intent, session=session)
         if manifest_filter_info is not None:
+            ids_total = sum(
+                len(getattr(manifest_filter_info.identifiers, axis) or [])
+                for axis in ('pjt_id', 'pjt_no', 'rst_id', 'person_no', 'org_id')
+            )
             logger.info(
-                f"[EntityResolver] manifest_filter resolved "
-                f"target={manifest_filter_info.manifest_resolved_target} "
-                f"ids_count={sum(len(getattr(manifest_filter_info.identifiers, axis) or []) for axis in ('pjt_id','pjt_no','rst_id','person_no','org_id'))}"
+                f"[EntityResolver] manifest_filter_resolved(직전 manifest 부분집합 좁히기) "
+                f"target={manifest_filter_info.manifest_resolved_target}(타깃) "
+                f"ids_count={ids_total}(수집된 식별자 총합)"
             )
             return manifest_filter_info
 
@@ -118,6 +131,20 @@ class EntityResolverAgent:
 
         # ---- 3. subject 결정 ----
         subject = _resolve_subject(intent=intent, session=session)
+
+        # ---- 3b. subject 도메인 검증 (2026-05-27, qdrant_client 주입 시) ----
+        # LLM이 "LLM"/"AI" 같은 기술 약어를 subject_name=people로 오추출하는 회귀를 차단.
+        # NTIS payload의 prtcp_mp_hm_nm_list / prtcp_org.org_nm에서 이름 매칭이 없으면 subject 폐기.
+        subject_lookup_diag: Dict[str, Any] = {}
+        if (
+            self._qdrant_client is not None
+            and subject is not None
+            and subject.primary_id() is None
+            and intent.kind != "refine_previous"  # refine_previous는 session 복원이라 검증 skip
+        ):
+            subject, subject_lookup_diag = _validate_subject_with_lookup(
+                subject=subject, qdrant_client=self._qdrant_client,
+            )
 
         # ---- 4. filters ----
         filters = _build_filter_bundle(intent)
@@ -168,6 +195,7 @@ class EntityResolverAgent:
                 "had_subject_in_session": session.has_subject(),
                 "had_manifest_in_session": session.has_manifest(),
                 "dropped_identifier_hints": dropped_hints,
+                **({"subject_lookup": subject_lookup_diag} if subject_lookup_diag else {}),
             },
         )
 
@@ -190,15 +218,19 @@ def _resolve_manifest_rank(
     if rank is None or rank < 1:
         return None
     if not session.has_manifest():
-        logger.info(f"[EntityResolver] manifest_rank={rank} but no manifest in session; skipping")
+        logger.info(
+            f"[EntityResolver] manifest_rank_unmatched(인용은 있으나 세션에 manifest 없음) "
+            f"rank={rank}(인용 번호) action=skip(해소 불가)"
+        )
         return None
 
     snapshot = session.published_manifest.snapshot
     items = snapshot.items or []
     if rank > len(items):
         logger.info(
-            f"[EntityResolver] manifest_rank={rank} > visible_count={len(items)}; "
-            "cannot resolve"
+            f"[EntityResolver] manifest_rank_out_of_range(인용 번호가 manifest 범위 초과) "
+            f"rank={rank}(인용 번호) visible_count={len(items)}(노출된 항목 수) "
+            f"action=skip(해소 불가)"
         )
         return None
 
@@ -581,6 +613,114 @@ def _resolve_subject(
         )
 
     return None
+
+
+# ============================================================================
+# Subject 도메인 lookup 검증 (2026-05-27 — 근본 원인 3 해결)
+# ============================================================================
+
+def _validate_subject_with_lookup(
+    *,
+    subject: SubjectAnchor,
+    qdrant_client: Any,
+) -> tuple[Optional[SubjectAnchor], Dict[str, Any]]:
+    """NTIS payload에서 subject.display_name을 검색해 결과에 따라 subject를 보강·폐기.
+
+    Args:
+        subject: 이름만 채워진 SubjectAnchor (person_no/org_id 없음).
+        qdrant_client: QdrantClient.
+
+    Returns:
+        (보강된/유지된/None subject, 진단 dict)
+        - lookup 0건: (None, {...zero...}) → caller가 subject를 폐기, generic search로 fallback.
+        - lookup 1건: (resolved subject + person_no/org_id 채움, {...single...})
+        - lookup 다중: (원본 subject 유지 + ambiguous_name_only, {...multiple...})
+    """
+    from apps.pipeline.retrieval.name_lookup import (
+        lookup_org_by_name,
+        lookup_person_by_name,
+    )
+
+    name = (subject.display_name or "").strip()
+    if not name:
+        return subject, {"skipped": "empty_name"}
+
+    if subject.kind == "people":
+        hits = lookup_person_by_name(qdrant_client=qdrant_client, name=name)
+        diag: Dict[str, Any] = {
+            "kind": "people", "name": name, "hit_count": len(hits),
+        }
+        if not hits:
+            logger.info(
+                f"[EntityResolver] subject_lookup=zero(NTIS에 인물 없음 — subject 폐기) "
+                f"name={name!r}(검증 이름) kind=people "
+                f"reason=likely_llm_ner_false_positive(LLM이 약어·일반명사를 사람으로 오추출)"
+            )
+            diag["action"] = "discarded"
+            return None, diag
+        if len(hits) == 1:
+            hit = hits[0]
+            logger.info(
+                f"[EntityResolver] subject_lookup=single(인물 1건 매칭, resolved 승격) "
+                f"name={name!r} person_no={hit.person_no}(매칭된 ID) "
+                f"affiliation={hit.affiliation!r}(소속)"
+            )
+            diag.update({
+                "action": "resolved", "person_no": hit.person_no,
+                "affiliation": hit.affiliation,
+            })
+            return SubjectAnchor(
+                kind="people",
+                display_name=hit.display_name or name,
+                person_no=hit.person_no,
+                affiliation_org_name=subject.affiliation_org_name or hit.affiliation,
+                identity_status="resolved",
+            ), diag
+        # 다중 — 동명이인. subject 유지, ambiguous 표시. retrieval가 affiliation 등으로 좁힘.
+        logger.info(
+            f"[EntityResolver] subject_lookup=multi(동명이인 — ambiguous 유지) "
+            f"name={name!r} hit_count={len(hits)}(매칭 후보 수)"
+        )
+        diag.update({"action": "ambiguous_kept", "person_no_candidates": [h.person_no for h in hits[:5]]})
+        return subject, diag
+
+    if subject.kind == "org":
+        hits = lookup_org_by_name(qdrant_client=qdrant_client, name=name)
+        diag = {"kind": "org", "name": name, "hit_count": len(hits)}
+        if not hits:
+            logger.info(
+                f"[EntityResolver] subject_lookup=zero(NTIS에 기관 없음 — subject 폐기) "
+                f"name={name!r} kind=org "
+                f"reason=likely_llm_ner_false_positive"
+            )
+            diag["action"] = "discarded"
+            return None, diag
+        if len(hits) == 1:
+            hit = hits[0]
+            logger.info(
+                f"[EntityResolver] subject_lookup=single_org(기관 1건 매칭, resolved 승격) "
+                f"name={name!r} org_id={hit.org_id}(매칭된 ID) "
+                f"org_code={hit.org_code}(코드)"
+            )
+            diag.update({
+                "action": "resolved", "org_id": hit.org_id, "org_code": hit.org_code,
+            })
+            return SubjectAnchor(
+                kind="org",
+                display_name=hit.display_name or name,
+                org_id=hit.org_id,
+                org_code=hit.org_code,
+                identity_status="resolved",
+            ), diag
+        logger.info(
+            f"[EntityResolver] subject_lookup=multi_org(동명 기관 — ambiguous 유지) "
+            f"name={name!r} hit_count={len(hits)}(매칭 후보 수)"
+        )
+        diag.update({"action": "ambiguous_kept", "org_id_candidates": [h.org_id for h in hits[:5] if h.org_id]})
+        return subject, diag
+
+    # 알 수 없는 kind — 변경 없이 통과
+    return subject, {"skipped": f"unknown_kind:{subject.kind}"}
 
 
 # ============================================================================

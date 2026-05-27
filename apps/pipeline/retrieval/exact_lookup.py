@@ -44,7 +44,7 @@ def lookup_by_axis(
     # NTIS payload는 meta_basic / meta_detail / top-level에 식별자를 가지므로 OR로 시도한다.
     payload_paths = _payload_paths_for_axis(axis)
     if not payload_paths:
-        logger.warning(f"[exact_lookup] unknown axis: {axis}")
+        logger.warning(f"[exact_lookup] unknown_axis(알 수 없는 식별자 축) axis={axis}")
         return []
 
     should_conditions = [
@@ -64,7 +64,10 @@ def lookup_by_axis(
             with_vectors=False,
         )
     except Exception as exc:
-        logger.warning(f"[exact_lookup] qdrant scroll failed: collection={collection} axis={axis} err={exc}")
+        logger.warning(
+            f"[exact_lookup] scroll_failure(Qdrant scroll 실패) "
+            f"collection={collection}(컬렉션) axis={axis}(식별자 축) error={exc}"
+        )
         return []
 
     return list(points or [])

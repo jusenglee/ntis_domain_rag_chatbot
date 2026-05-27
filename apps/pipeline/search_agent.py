@@ -65,7 +65,10 @@ class SearchAgent:
         try:
             evidences, total_hits = await self._dispatch(task)
         except Exception as exc:  # noqa: BLE001 — 모든 에러는 status=error로 흡수
-            logger.exception(f"[SearchAgent] dispatch failed: task={task.strategy} err={exc}")
+            logger.exception(
+                f"[SearchAgent] dispatch_failure(검색 실행 실패) "
+                f"strategy={task.strategy}(전략) error={exc}"
+            )
             return SearchResult(
                 status="error",
                 error_code="search_dispatch_failed",
@@ -160,8 +163,10 @@ class SearchAgent:
                     limit=max(task.limit * 3, 10),
                 )
                 logger.info(
-                    f"[exact_lookup] axis={axis} values={values[:5]} "
-                    f"collection={collection} raw_points={len(points or [])}"
+                    f"[exact_lookup] axis_scroll(축별 정확 조회) "
+                    f"axis={axis}(식별자 축) values={values[:5]}(검색 값) "
+                    f"collection={collection}(컬렉션) "
+                    f"raw_points={len(points or [])}(원시 결과 건수)"
                 )
                 if not points:
                     continue
@@ -174,15 +179,17 @@ class SearchAgent:
                 )
             if all_evidences:
                 logger.info(
-                    f"[exact_lookup] axis={axis} resolved evidences={len(all_evidences)}; "
-                    "stopping axis fallback"
+                    f"[exact_lookup] axis_resolved(축 매칭 완료) "
+                    f"axis={axis} evidences={len(all_evidences)}(매칭 건수) "
+                    f"action=stop_fallback(다음 축으로 fallback 중단)"
                 )
                 break
 
         deduped = self._dedup_by_identity(all_evidences)
         logger.info(
-            f"[exact_lookup] merged={len(all_evidences)} deduped={len(deduped)} "
-            f"final_returned={min(len(deduped), task.limit)}"
+            f"[exact_lookup] result_summary "
+            f"merged={len(all_evidences)}(전체) deduped={len(deduped)}(중복 제거 후) "
+            f"final_returned={min(len(deduped), task.limit)}(최종 반환 건수)"
         )
         return deduped[: task.limit], len(deduped)
 
@@ -225,7 +232,10 @@ class SearchAgent:
                     collection=collection,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[aggregate] filter build failed: collection={collection} err={exc}")
+                logger.warning(
+                    f"[aggregate] filter_build_failure(Qdrant filter 구성 실패) "
+                    f"collection={collection} error={exc}"
+                )
                 continue
 
             points = _scroll_payload(
@@ -244,8 +254,9 @@ class SearchAgent:
 
         if not bucket_counts:
             logger.info(
-                f"[aggregate] by={aggregate_by} collections={list(task.collections)} "
-                f"scanned={total_scanned} groups=0"
+                f"[aggregate] empty_buckets(집계 결과 없음) "
+                f"by={aggregate_by}(집계 축) collections={list(task.collections)}(컬렉션) "
+                f"scanned={total_scanned}(스캔 건수) groups=0(그룹 0개)"
             )
             return [], 0
 
@@ -285,9 +296,10 @@ class SearchAgent:
             )
 
         logger.info(
-            f"[aggregate] by={aggregate_by} collections={list(task.collections)} "
-            f"scanned={total_scanned} groups={len(bucket_counts)} returned={len(evidences)} "
-            f"sort={sort_label}"
+            f"[aggregate] result_summary "
+            f"by={aggregate_by}(집계 축) collections={list(task.collections)}(컬렉션) "
+            f"scanned={total_scanned}(스캔 건수) groups={len(bucket_counts)}(그룹 수) "
+            f"returned={len(evidences)}(반환 건수) sort={sort_label}(정렬)"
         )
         return evidences, len(bucket_counts)
 
@@ -313,6 +325,34 @@ class SearchAgent:
                 base_route=self._collection_to_route(collection),
                 action=task.action,
             )
+            # 2026-05-26: 0건일 때 진단 — 어떤 filter가 들어갔는지, query/subject가 무엇인지.
+            if not points:
+                subj = task.subject
+                subj_text = (
+                    f"{subj.kind}:{subj.display_name!r}(person_no={subj.person_no},org_id={subj.org_id})"
+                    if subj is not None else "none"
+                )
+                flt = task.filters
+                flt_parts: List[str] = []
+                if flt:
+                    if flt.year_from or flt.year_to:
+                        flt_parts.append(f"year={flt.year_from}~{flt.year_to}")
+                    if flt.perf_type:
+                        flt_parts.append(f"perf_type={flt.perf_type}")
+                    if flt.exclude_org_name:
+                        flt_parts.append(f"excl_org={flt.exclude_org_name}")
+                    if flt.exclude_perf_type:
+                        flt_parts.append(f"excl_perf={flt.exclude_perf_type}")
+                    if flt.exclude_person_name:
+                        flt_parts.append(f"excl_person={flt.exclude_person_name}")
+                logger.warning(
+                    f"[hybrid][EMPTY_DIAG] zero_hit_diagnostics(0건 진단) "
+                    f"collection={collection}(컬렉션) strategy={task.strategy}(전략) "
+                    f"subject={subj_text}(주제 anchor) "
+                    f"filters=[{' '.join(flt_parts) or '-'}](필터) "
+                    f"query={task.retrieval_query[:80]!r}(질의) "
+                    f"dt={dt_ms:.0f}ms(소요시간)"
+                )
             merged.extend(evidences)
             per_collection.append(
                 f"{collection}: raw={len(points or [])} normalized={len(evidences)} dt={dt_ms:.0f}ms"
@@ -324,10 +364,11 @@ class SearchAgent:
         if task.sort_by != "relevance":
             deduped = _apply_sort_by(deduped, sort_by=task.sort_by)
         logger.info(
-            f"[hybrid] strategy={task.strategy} | "
+            f"[hybrid] result_summary strategy={task.strategy}(전략) | "
             + " | ".join(per_collection)
-            + f" | merged={len(merged)} deduped={len(deduped)} returned={min(len(deduped), task.limit)} "
-            f"sort_by={task.sort_by}"
+            + f" | merged={len(merged)}(통합) deduped={len(deduped)}(중복 제거 후) "
+            f"returned={min(len(deduped), task.limit)}(최종 반환) "
+            f"sort_by={task.sort_by}(정렬)"
         )
         return deduped[: task.limit], len(deduped)
 
@@ -513,7 +554,10 @@ def _scroll_payload(
             with_vectors=False,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[aggregate] qdrant scroll failed: collection={collection} err={exc}")
+        logger.warning(
+            f"[aggregate] scroll_failure(Qdrant scroll 실패) "
+            f"collection={collection} error={exc}"
+        )
         return []
     return list(points or [])
 

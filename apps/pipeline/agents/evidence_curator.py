@@ -114,8 +114,9 @@ class EvidenceCuratorAgent:
             diagnostics=diagnostics,
         )
         logger.info(
-            f"[EvidenceCurator] view={view} items={len(items)} groups={len(groups)} "
-            f"intent_kind={intent.kind}"
+            f"[EvidenceCurator] bundle_ready(증거 묶음 준비 완료) "
+            f"view={view}(노출 뷰) items={len(items)}(증거 건수) "
+            f"groups={len(groups)}(그룹 수) intent_kind={intent.kind}(의도 종류)"
         )
         return bundle
 

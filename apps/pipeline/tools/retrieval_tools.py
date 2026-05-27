@@ -1,0 +1,393 @@
+"""Phase 1 — retrieval 도구 wrap.
+
+기존 `SearchAgent.execute(task)`를 도구로 노출:
+    - search.hybrid    : query + (subject) → hybrid_search 또는 subject_anchor
+    - search.exact_lookup : identifiers → exact_lookup
+    - search.aggregate : aggregate_by → 통계 집계
+
+각 도구는 SearchTask를 빌드해 SearchAgent.execute로 위임. SearchAgent의 SearchResult를
+ToolExecutor가 처리하기 쉽게 dict로 변환해 반환.
+
+설계 노트:
+    - args는 도구별로 강하게 typed 하지 않고 dict — Planner LLM이 input_schema를 보고 채움.
+    - 도구 handler 내부에서 args 검증·기본값 fallback. 잘못된 args는 ValueError로 던지면
+      ToolExecutor가 Observation(error_code="invalid_arg")로 감싼다.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from apps.pipeline.contracts import (
+    FilterBundle,
+    IdentifierBundle,
+    SubjectAnchor,
+    build_search_task,
+)
+from apps.pipeline.tools.contracts import ToolContext, ToolEntry, ToolSpec
+
+
+# ============================================================================
+# search.hybrid
+# ============================================================================
+
+SEARCH_HYBRID_SPEC = ToolSpec(
+    name="search.hybrid",
+    description=(
+        "NTIS Qdrant 컬렉션에서 hybrid(dense+sparse) 검색. subject(person/org)가 주어지면 "
+        "anchor를 강제 필터로 적용하고, 없으면 일반 hybrid 검색."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "자연어 검색 질의"},
+            "target": {
+                "type": "string",
+                "enum": ["project", "perf", "people", "org", "support"],
+                "description": "검색 대상 도메인 (collection 자동 결정)",
+            },
+            "subject": {
+                "type": ["object", "null"],
+                "description": "{kind:'people'|'org', display_name:..., person_no?:..., org_id?:...}",
+            },
+            "filters": {
+                "type": ["object", "null"],
+                "description": (
+                    "{year_from?, year_to?, perf_type?:[PAPER|PATENT|SOFTWARE|...], "
+                    "lead_org_name?:[...], participant_org_name?:[...], "
+                    "participant_person_name?:[...] (subject 외 공동 참여자 인명 AND 매칭), "
+                    "domain_keywords?:[...], "
+                    "exclude_org_name?:[...], exclude_perf_type?:[...], exclude_person_name?:[...]}"
+                ),
+            },
+            "limit": {"type": "integer", "default": 10},
+            "sort_by": {
+                "type": "string",
+                "enum": ["relevance", "recent_desc", "recent_asc"],
+                "default": "relevance",
+            },
+        },
+        "required": ["query", "target"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["single", "multiple", "empty", "error"]},
+            "evidences": {"type": "array", "description": "CanonicalEvidence dict 리스트"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="medium",
+    preconditions=[],
+)
+
+
+async def search_hybrid_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("search.hybrid: 'query' is required")
+    target = str(args.get("target") or "project").strip()
+    if target not in {"project", "perf", "people", "org", "support"}:
+        raise ValueError(f"search.hybrid: invalid 'target' = {target!r}")
+
+    subject = _parse_subject(args.get("subject"))
+    filters = _parse_filters(args.get("filters"))
+    limit = int(args.get("limit") or 10)
+    sort_by = str(args.get("sort_by") or "relevance")
+    if sort_by not in {"relevance", "recent_desc", "recent_asc"}:
+        sort_by = "relevance"
+
+    task = build_search_task(
+        action="list",
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        retrieval_query=query,
+        subject=subject,
+        filters=filters,
+        limit=limit,
+        display_limit=limit,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        judgment_reason="tool:search.hybrid",
+    )
+    if ctx.search_agent is None:
+        raise RuntimeError("search.hybrid: ctx.search_agent is None — wire via ToolContext")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ============================================================================
+# search.exact_lookup
+# ============================================================================
+
+SEARCH_EXACT_LOOKUP_SPEC = ToolSpec(
+    name="search.exact_lookup",
+    description=(
+        "식별자(pjt_id/pjt_no/rst_id/person_no/org_id)로 NTIS payload 정확 매칭. "
+        "단건 detail 조회·manifest 부분집합 재조회에 사용."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "identifiers": {
+                "type": "object",
+                "description": (
+                    "{pjt_id?:[...], pjt_no?:[...], rst_id?:[...], person_no?:[...], org_id?:[...]} — "
+                    "axis별 string list. 비어 있지 않은 axis 중 가장 우선순위 높은 것 사용."
+                ),
+            },
+            "target": {
+                "type": "string",
+                "enum": ["project", "perf", "people", "org", "support"],
+                "description": "타깃 도메인. 식별자 type으로 추론 가능 (rst_id→perf, pjt_id→project).",
+            },
+            "limit": {"type": "integer", "default": 10},
+            "action": {
+                "type": "string",
+                "enum": ["list", "detail"],
+                "default": "list",
+                "description": "detail이면 단건 반환, list면 매칭 전체.",
+            },
+        },
+        "required": ["identifiers"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidences": {"type": "array"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="fast",
+    preconditions=[],
+)
+
+
+async def search_exact_lookup_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    raw_ids = args.get("identifiers") or {}
+    if not isinstance(raw_ids, dict) or not any(raw_ids.values()):
+        raise ValueError("search.exact_lookup: 'identifiers' must be non-empty dict")
+
+    identifiers = IdentifierBundle(
+        pjt_id=_clean_list(raw_ids.get("pjt_id")),
+        pjt_no=_clean_list(raw_ids.get("pjt_no")),
+        rst_id=_clean_list(raw_ids.get("rst_id")),
+        person_no=_clean_list(raw_ids.get("person_no")),
+        org_id=_clean_list(raw_ids.get("org_id")),
+    )
+    if not identifiers.has_any():
+        raise ValueError("search.exact_lookup: identifiers all empty after cleanup")
+
+    target = str(args.get("target") or _infer_target_from_ids(identifiers)).strip()
+    if target not in {"project", "perf", "people", "org", "support"}:
+        target = "project"
+    limit = int(args.get("limit") or 10)
+    action = str(args.get("action") or "list")
+    if action not in {"list", "detail"}:
+        action = "list"
+
+    task = build_search_task(
+        action=action,  # type: ignore[arg-type]
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        identifiers=identifiers,
+        limit=limit,
+        display_limit=limit,
+        judgment_reason="tool:search.exact_lookup",
+    )
+    if ctx.search_agent is None:
+        raise RuntimeError("search.exact_lookup: ctx.search_agent is None")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ============================================================================
+# search.aggregate
+# ============================================================================
+
+SEARCH_AGGREGATE_SPEC = ToolSpec(
+    name="search.aggregate",
+    description=(
+        "NTIS payload를 stats 도구로 집계. aggregate_by 축(year/lead_org/tag/perf_type/"
+        "participant_org/participant_person)으로 그룹 count 반환."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "aggregate_by": {
+                "type": "string",
+                "enum": ["year", "lead_org", "tag", "perf_type", "participant_org", "participant_person"],
+            },
+            "target": {"type": "string", "enum": ["project", "perf", "people", "org"]},
+            "subject": {"type": ["object", "null"]},
+            "filters": {"type": ["object", "null"]},
+            "limit": {"type": "integer", "default": 30},
+        },
+        "required": ["aggregate_by", "target"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidences": {"type": "array", "description": "그룹별 count (CanonicalEvidence dict)"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="slow",
+    preconditions=[],
+)
+
+
+async def search_aggregate_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    aggregate_by = str(args.get("aggregate_by") or "").strip()
+    if aggregate_by not in {"year", "lead_org", "tag", "perf_type", "participant_org", "participant_person"}:
+        raise ValueError(f"search.aggregate: invalid aggregate_by={aggregate_by!r}")
+    target = str(args.get("target") or "project").strip()
+    if target not in {"project", "perf", "people", "org"}:
+        raise ValueError(f"search.aggregate: invalid target={target!r}")
+
+    subject = _parse_subject(args.get("subject"))
+    filters = _parse_filters(args.get("filters"))
+    limit = int(args.get("limit") or 30)
+
+    task = build_search_task(
+        action="stats",
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        subject=subject,
+        filters=filters,
+        aggregate_by=aggregate_by,  # type: ignore[arg-type]
+        limit=limit,
+        display_limit=limit,
+        judgment_reason="tool:search.aggregate",
+    )
+    if ctx.search_agent is None:
+        raise RuntimeError("search.aggregate: ctx.search_agent is None")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def _clean_list(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    if isinstance(value, (list, tuple, set)):
+        out: List[str] = []
+        seen = set()
+        for v in value:
+            s = str(v).strip()
+            if s and s not in seen:
+                out.append(s)
+                seen.add(s)
+        return out
+    return []
+
+
+def _parse_subject(value: Any) -> Optional[SubjectAnchor]:
+    if not isinstance(value, dict) or not value.get("display_name"):
+        return None
+    kind = str(value.get("kind") or "people").strip()
+    if kind not in {"people", "org"}:
+        kind = "people"
+    return SubjectAnchor(
+        kind=kind,  # type: ignore[arg-type]
+        display_name=str(value.get("display_name")).strip(),
+        person_no=str(value.get("person_no") or "").strip() or None,
+        org_id=str(value.get("org_id") or "").strip() or None,
+        org_code=str(value.get("org_code") or "").strip() or None,
+        biz_no=str(value.get("biz_no") or "").strip() or None,
+        affiliation_org_name=str(value.get("affiliation_org_name") or "").strip() or None,
+        identity_status=(
+            str(value.get("identity_status") or "ambiguous_name_only").strip()
+            if value.get("identity_status") in {"ambiguous_name_only", "resolved_with_org", "resolved"}
+            else "ambiguous_name_only"
+        ),  # type: ignore[arg-type]
+    )
+
+
+def _parse_filters(value: Any) -> Optional[FilterBundle]:
+    """tool args의 filters dict → FilterBundle.
+
+    2026-05-27 정합화: 사용자 짚은 계약 불일치 — Phase 1에서 `coparticipants` 키를 받았으나
+    `FilterBundle`은 `participant_person_name`이 정식 필드. 같은 키 별칭으로 받아 매핑하고
+    `lead_org_name`/`participant_org_name`/`domain_keywords`도 노출.
+    """
+    if not isinstance(value, dict):
+        return None
+    # 공동 참여자 인명 — 별칭 호환 (coparticipants는 DialogueIntent 측 명명, 도구는 둘 다 수용).
+    participant_persons = _clean_list(value.get("participant_person_name")) or _clean_list(
+        value.get("coparticipants")
+    )
+    return FilterBundle(
+        year_from=_to_int_or_none(value.get("year_from")),
+        year_to=_to_int_or_none(value.get("year_to")),
+        lead_org_name=_clean_list(value.get("lead_org_name")),
+        participant_org_name=_clean_list(value.get("participant_org_name")),
+        participant_person_name=participant_persons,
+        perf_type=[s.upper() for s in _clean_list(value.get("perf_type"))],
+        domain_keywords=_clean_list(value.get("domain_keywords")),
+        exclude_org_name=_clean_list(value.get("exclude_org_name")),
+        exclude_perf_type=[s.upper() for s in _clean_list(value.get("exclude_perf_type"))],
+        exclude_person_name=_clean_list(value.get("exclude_person_name")),
+    )
+
+
+def _to_int_or_none(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    if v < 1900 or v > 2100:
+        return None
+    return v
+
+
+def _infer_target_from_ids(ids: IdentifierBundle) -> str:
+    if ids.rst_id:
+        return "perf"
+    if ids.person_no:
+        return "people"
+    if ids.org_id:
+        return "org"
+    return "project"
+
+
+# ============================================================================
+# Registry entries
+# ============================================================================
+
+def retrieval_tool_entries() -> List[ToolEntry]:
+    return [
+        ToolEntry(spec=SEARCH_HYBRID_SPEC, handler=search_hybrid_handler),
+        ToolEntry(spec=SEARCH_EXACT_LOOKUP_SPEC, handler=search_exact_lookup_handler),
+        ToolEntry(spec=SEARCH_AGGREGATE_SPEC, handler=search_aggregate_handler),
+    ]
