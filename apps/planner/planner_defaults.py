@@ -6,7 +6,6 @@ from apps.api.contracts.workflow_models import PLANNER_SCHEMA_VERSION
 from apps.platform.settings import MAX_TOP_K_SIZE
 
 PLANNER_PROMPT_DEFAULTS = {
-    "stage1": "v2",
     "stage15": "v1",
     "stage2": "v2",
 }
@@ -18,7 +17,6 @@ PLANNER_DISABLE_THINKING = str(os.getenv("PLANNER_DISABLE_THINKING", "true")).st
     "yes",
     "on",
 }
-PLANNER_STAGE1_PROMPT_VERSION = os.getenv("PLANNER_STAGE1_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage1"]).strip()
 PLANNER_STAGE15_PROMPT_VERSION = os.getenv("PLANNER_STAGE15_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage15"]).strip()
 PLANNER_STAGE2_PROMPT_VERSION = os.getenv("PLANNER_STAGE2_PROMPT_VERSION", PLANNER_PROMPT_DEFAULTS["stage2"]).strip()
 PLANNER_TEMPERATURE = float(os.getenv("PLANNER_TEMPERATURE", "0.0"))

@@ -308,16 +308,12 @@ def _append_filter_parts(parts: list[str], tool_args: Dict[str, Any]) -> None:
     target = _first_text(tool_args.get("target"))
     year_from = tool_args.get("year_from")
     year_to = tool_args.get("year_to")
-    limit = tool_args.get("limit")
 
     for value in (people_name, org_name, target, role, perf_type):
         if value and value not in parts:
             parts.append(value)
     if year_from or year_to:
         parts.append(f"{year_from or ''}~{year_to or ''}")
-    limit_value = _coerce_positive_int(limit)
-    if limit_value is not None:
-        parts.append(f"{limit_value}개")
 
 
 def _question_from_search_args(tool_args: Dict[str, Any]) -> Optional[str]:
@@ -326,9 +322,6 @@ def _question_from_search_args(tool_args: Dict[str, Any]) -> Optional[str]:
         return None
 
     parts = [query]
-    domain_head = _first_text(tool_args.get("domain_head"))
-    if domain_head and domain_head != "auto":
-        parts.append(domain_head)
     _append_filter_parts(parts, tool_args)
     return " ".join(parts)
 
@@ -1284,6 +1277,8 @@ async def execute_agent_tool(
             session_memory=session_memory,
             request_id=_first_text(_get_state_attr(state, "request_id")),
             turn_id=_first_text(_get_state_attr(state, "turn_id")),
+            tool_name=name,
+            tool_args=args,
         )
         return AgentToolExecutionResult(
             observation=AgentObservation(

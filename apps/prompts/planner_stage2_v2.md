@@ -66,7 +66,29 @@
 - retrieval_query는 must_keep_terms를 가능한 한 원문 축으로 보존한다.
 - 따옴표로 감싼 제목 표현은 retrieval_query에서 제거하지 않는다.
 - ordinal/detail follow-up에서는 anchor와 요청 field 축을 함께 보존한다.
+- entity_role_plan.people_terms_to_keep가 비어 있으면 `participant_researcher_name`, `participant_researcher_names`, `researcher_name`, `people_name`, `person_name` 계열 사람명 필터를 생성하지 않는다.
+- 기술/산업/정책/역할/이력 단어를 사람명 필터로 승격하지 않는다.
   </hard_guards>
+
+<name_filter_gate>
+Stage 2는 Stage 1.5가 보존한 entity_role_plan을 기준으로 exact name filter를 연다.
+
+1. 사람명 필터 허용 조건
+   - entity_role_plan.people_terms_to_keep에 확정 개인명이 1개 이상 있어야 한다.
+   - 필터 값은 people_terms_to_keep의 exact term을 그대로 사용한다.
+   - "신동구(한국과학기술정보연구원)"처럼 확정 개인명과 명시 소속기관이 함께 있으면
+     participant_researcher_name + people_affiliation_org_name 조합을 우선한다.
+2. 사람명 필터 금지 조건
+   - people_terms_to_keep가 []이면 사람명 필터를 만들지 않는다.
+   - entity_role_plan.must_keep_terms, surface_signals.raw_person_hint_terms, user_query의 topic/descriptor를 사람명 필터 후보로 사용하지 않는다.
+   - "전문가", "박사급", "분야 전문가", "수행 경험자", "추천", "후보", "인력"은 role/history descriptor이며 사람명이 아니다.
+   - "인공지능", "AI", "반도체", "바이오", "국책", "정부", "최근", "경험", "수행", "참여" 같은 기술/정책/이력 단어는 사람명이 아니다.
+3. people discovery query 처리
+   - 특정 개인명이 없는 전문가 추천/후보 탐색은 broad people discovery로 취급한다.
+   - filters에는 사람명 필터를 넣지 않는다.
+   - retrieval_query에는 분야, 기술, 최근성, 국책/정부 과제, 수행/참여 경험, 역할/학위 수준을 보존한다.
+   - explicit_count가 없으면 추천/후보 탐색의 limit/display_limit은 10을 우선한다.
+</name_filter_gate>
 
 <rules>
 - `soft_strategy_hints`는 recall을 살리기 위한 힌트일 뿐 hard legality를 뒤집지 못한다.
@@ -74,7 +96,7 @@
   - lead_org_name
   - participant_org_name
   - people_affiliation_org_name
-- 사람명은 가능하면 participant_researcher_name으로 반영한다.
+- 사람명은 Stage 1.5가 entity_role_plan.people_terms_to_keep에 확정 개인명으로 넣은 경우에만 participant_researcher_name으로 반영한다.
 - "신동구(한국과학기술정보연구원)"처럼 연구자+소속기관이면
   participant_researcher_name + people_affiliation_org_name 조합을 우선한다.
 - ambiguous project key는 ids_map으로 확정하지 말고 candidate_keys.project_key에 둔다.
@@ -99,7 +121,8 @@ validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의
 </conflict_resolution>
 
 <preservation_rules>
-- people_terms_to_keep는 filters 또는 retrieval_query에 반드시 반영
+- people_terms_to_keep가 비어 있지 않으면 filters 또는 retrieval_query에 반드시 반영
+- people_terms_to_keep가 비어 있으면 사람명 필터를 만들지 말고 must_keep_terms를 retrieval_query에 보존
 - org_terms_to_keep는 role-scoped filters 또는 retrieval_query에 반드시 반영
 - years는 retrieval_query 또는 filters에 반드시 반영
 - perf_type_hints는 explicit 성과 요청일 때만 retrieval_query 또는 filters에 반영
@@ -114,6 +137,8 @@ validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의
 - validation_hints를 맞추기 위해 질문 의미를 왜곡하지 말 것
 - 따옴표 제목 질의를 generic detail 안내문으로 축소하지 말 것
 - ordinal/detail follow-up에서 anchor를 잃은 일반 검색문으로 바꾸지 말 것
+- people_terms_to_keep가 비어 있는데 domain/role/history term을 participant_researcher_name에 넣지 말 것
+- 전문가 추천/후보 탐색을 특정 연구자명 lookup으로 축소하지 말 것
   </anti_patterns>
 
 <examples>
@@ -148,6 +173,34 @@ validation_hints가 사용자 질문 의미와 충돌하면 사용자 질문 의
 "limit":3,
 "display_limit":3,
 "confidence":0.95
+}
+
+질문: 인공지능 반도체 분야에서 최근 국책 과제 수행 경험이 있는 박사급 전문가를 추천해줘
+출력:
+{
+"ids_map":{},
+"candidate_keys":{},
+"project_key_policy":null,
+"join_resolution_policy":null,
+"filters":{},
+"retrieval_query":"인공지능 반도체 분야 최근 국책 과제 수행 경험 박사급 전문가 추천",
+"limit":10,
+"display_limit":10,
+"confidence":0.93
+}
+
+질문: AI 농업 분야 전문가 5명 찾아줘
+출력:
+{
+"ids_map":{},
+"candidate_keys":{},
+"project_key_policy":null,
+"join_resolution_policy":null,
+"filters":{},
+"retrieval_query":"AI 농업 분야 전문가",
+"limit":5,
+"display_limit":5,
+"confidence":0.91
 }
 
 질문: 1711015550 과제 상세

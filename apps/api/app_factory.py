@@ -29,7 +29,6 @@ from apps.api.runtime_helpers import (
     mask_query_for_log,
 )
 from apps.planner.planner_defaults import (
-    PLANNER_STAGE1_PROMPT_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
     PLANNER_STAGE2_PROMPT_VERSION,
     PLANNER_STAGEWISE_ENABLED,
@@ -63,7 +62,6 @@ APP_RUNTIME_CONFIG = AppRuntimeConfig(
     redis_url=REDIS_URL,
     file_kv_root=str(os.getenv("FILE_KVSTORE_ROOT", "local_kvstore") or "local_kvstore").strip() or "local_kvstore",
     planner_stagewise_enabled=PLANNER_STAGEWISE_ENABLED,
-    planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
     planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
     planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
     ensure_payload_index_on_boot=_RAG_ENSURE_PAYLOAD_INDEX_ON_BOOT,

@@ -15,23 +15,6 @@ _CARD_FILES = {
 }
 
 _PROMPT_CARD_MANIFEST = {
-    "planner_stage1_v1": (
-        "collections_card",
-        "id_semantics_card",
-        "filter_semantics_card",
-        "perf_tag_card",
-        "field_reliability_card",
-        "semantic_disambiguation_card",
-    ),
-    "planner_stage1_v2": (
-        "collections_card",
-        "relationship_semantics_card",
-        "id_semantics_card",
-        "filter_semantics_card",
-        "perf_tag_card",
-        "field_reliability_card",
-        "semantic_disambiguation_card",
-    ),
     "planner_stage15_v1": (
         "collections_card",
         "relationship_semantics_card",

@@ -4,7 +4,7 @@ from __future__ import annotations
 """planner와 runtime이 공유하는 핵심 스키마 정의.
 
 - `IntentPayloadV3`: `rag_pipeline`으로 전달되는 앱 진입 payload
-- `PlannerStage1Decision` / `PlannerStage2Slots`: 단계별 planner 산출물
+- `PlannerStage2Slots`: 세부 planner 산출물
 - `QueryPlan` / `ExecutionContext` / `StrategySpec`: executor가 소비하는 runtime 계약
 """
 
@@ -28,25 +28,6 @@ class IntentPayloadV3:
     intent_payload_version: Literal["v3"] = "v3"
     question_analysis: Any = None
     strategy_meta: Dict[str, Any] = field(default_factory=dict)
-
-
-Stage1Relation = Literal["project_perf", "perf_project"]
-
-
-class PlannerStage1Decision(BaseModel):
-    """Stage 1 planner가 내는 경량 분류 결과다.
-
-    action, head, relation candidate처럼 큰 방향만 정하고,
-    ids/filter 같은 세부 슬롯은 다음 단계가 채우도록 역할을 분리한다.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: Literal["topic", "list", "detail", "stats", "download"]
-    head: Literal["project", "perf", "people", "org", "support"]
-    relation_candidate: Optional[Stage1Relation] = None
-    referential_followup: bool = False
-    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class PlannerStage2Slots(BaseModel):

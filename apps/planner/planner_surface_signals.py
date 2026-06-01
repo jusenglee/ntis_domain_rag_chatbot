@@ -113,6 +113,14 @@ def _scan_explicit_count(question: str) -> int | None:
     return None
 
 
+def _normalized_planner_limit(normalized_intent: Any) -> int | None:
+    try:
+        value = int(getattr(normalized_intent, "planner_limit", None))
+    except Exception:
+        return None
+    return value if value >= 1 else None
+
+
 def _scan_ordinal_ref(question: str) -> int | None:
     for token in _tokenize(question):
         for suffix in _ORDINAL_SUFFIXES:
@@ -201,7 +209,7 @@ def collect_surface_signals(question: str, normalized_intent: Any) -> SurfaceSig
     followup_cues = _scan_followup_cues(question)
     high_salience_terms = _dedupe(people_terms + org_terms + perf_types + years + id_like_terms)
     return SurfaceSignals(
-        explicit_count=_scan_explicit_count(question),
+        explicit_count=_scan_explicit_count(question) or _normalized_planner_limit(normalized_intent),
         ordinal_ref=_scan_ordinal_ref(question),
         years=years,
         id_like_terms=id_like_terms,

@@ -161,7 +161,7 @@ RAG_COLLECTION_ALLOWLIST = _split_csv(
 TRITON_URL         = _get_env_str("TRITON_URL", "203.250.234.159:8001")
 DEFAULT_MODEL_NAME = _get_env_str("TRITON_MODEL", "gpt_triton_0")
 TOKENIZER_MAP = {
-    "gemma_triton_0": _local_models_path("gemma-3-27b-it"),
+    "gemma_triton_0": ("gemma-3-27b-it"),
     "gpt_triton_0": _local_models_path("gpt-oss-120b"),
 }
 SOLAR_TOKENIZER_NAME_OR_PATH = _get_env_str("SOLAR_TOKENIZER_NAME_OR_PATH", _get_env_str("SOLAR_VLLM_MODEL", "/model"))

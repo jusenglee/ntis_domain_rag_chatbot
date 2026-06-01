@@ -21,6 +21,12 @@ from apps.api.rag_mapper.schema_types import DataTag
 from apps.api.request_overrides import merge_request_overrides
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
+from apps.api.streaming.model_keys import (
+    answer_chunk_model_keys_for_frontend,
+    normalize_stream_model_key_value,
+    sanitize_terminal_done_model_meta,
+    terminal_done_model_keys_for_frontend,
+)
 from apps.api.streaming.sse_encoder import encode_stream_event
 from apps.platform.metrics import MetricSnapshot
 from apps.platform.schemas import strategy_spec_to_response
@@ -286,16 +292,11 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
             meta["degraded"] = bool(degraded)
         if isinstance(extra_meta, dict):
             meta.update(extra_meta)
-        return meta
+        return sanitize_terminal_done_model_meta(meta)
 
     def _normalize_stream_model_key(model_key: str) -> str:
         """모델 키 값을 표준 소문자 식별자로 변환합니다."""
-        normalized = str(model_key or "").strip().lower()
-        if normalized in {"solar", "upstage"}:
-            return "solar"
-        if normalized == "gemma":
-            return "gemma"
-        return normalized
+        return normalize_stream_model_key_value(model_key)
 
     def _resolve_stream_model_label(model_key: str) -> str:
         """스트림 표시용 모델 라벨(대문자 등)을 결정합니다."""
@@ -309,6 +310,41 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
     def _emit_stream_event_lines(event: StreamEvent) -> list[str]:
         """표준 StreamEvent 객체를 SSE 라인 리스트로 변환합니다."""
         return [encode_stream_event(event)]
+
+    def _emit_terminal_done_event_lines(
+            next_event: Any,
+            *,
+            meta: dict[str, Any],
+    ) -> list[str]:
+        """terminal done을 프론트엔드 모델 패널이 해석할 수 있는 model_key로 내보냅니다."""
+        lines: list[str] = []
+        for model_key in terminal_done_model_keys_for_frontend(meta):
+            lines.extend(_emit_stream_event_lines(next_event(kind="done", model_key=model_key, meta=meta)))
+        return lines
+
+    def _emit_answer_chunk_event_lines(
+            next_event: Any,
+            *,
+            content: Any,
+            answer_kind: Any,
+            model_key: Any,
+    ) -> list[str]:
+        """사용자 가시 답변 텍스트를 프론트엔드 모델 패널별 answer.chunk로 내보냅니다."""
+        text = str(content or "").strip()
+        if not text:
+            return []
+
+        lines: list[str] = []
+        for frontend_model_key in answer_chunk_model_keys_for_frontend(
+            answer_kind=answer_kind,
+            model_key=model_key,
+        ):
+            lines.extend(
+                _emit_stream_event_lines(
+                    next_event(kind="answer.chunk", model_key=frontend_model_key, content=text)
+                )
+            )
+        return lines
 
     def _top_level_text_value(doc: Dict[str, Any], *keys: str) -> Optional[str]:
         """딕셔너리의 여러 키 중 첫 번째로 발견되는 유효한 문자열 값을 반환합니다."""
@@ -550,21 +586,27 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     ),
                     meta={"answer_source": "route_runtime_not_ready"},
                 )
+                for payload_line in _emit_answer_chunk_event_lines(
+                    _next_route_event,
+                    content=runtime_not_ready_message,
+                    answer_kind=runtime_not_ready_artifact.answer_kind,
+                    model_key=runtime_not_ready_artifact.meta.get("model_key") or "solar",
+                ):
+                    yield payload_line
                 for payload_line in _emit_stream_event_lines(
                     _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
-                for payload_line in _emit_stream_event_lines(
-                    _next_route_event(
-                        kind="done",
-                        meta=_terminal_done_meta(
-                            artifact=runtime_not_ready_artifact,
-                            output_message=runtime_not_ready_message,
-                            error=True,
-                            error_code="RUNTIME_NOT_READY",
-                            reason="compiled graph unavailable",
-                        ),
-                    )
+                runtime_not_ready_done_meta = _terminal_done_meta(
+                    artifact=runtime_not_ready_artifact,
+                    output_message=runtime_not_ready_message,
+                    error=True,
+                    error_code="RUNTIME_NOT_READY",
+                    reason="compiled graph unavailable",
+                )
+                for payload_line in _emit_terminal_done_event_lines(
+                    _next_route_event,
+                    meta=runtime_not_ready_done_meta,
                 ):
                     yield payload_line
                 return
@@ -692,10 +734,24 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
 
                 user_visible_terminal_emitted = False
                 terminal_done_meta: dict[str, Any] = {}
+                selected_answer_kind: Optional[str] = (
+                    _normalize_answer_kind(selected_artifact.answer_kind)
+                    if isinstance(selected_artifact, AnswerArtifact)
+                    else None
+                )
+                clarification_message = ""
 
                 # 명확화 요청이 있는 경우 처리
                 if clarification_payload:
                     clarification_message = str(clarification_payload.get("message") or "").strip()
+                    if not isinstance(selected_artifact, AnswerArtifact):
+                        for payload_line in _emit_answer_chunk_event_lines(
+                            _next_route_event,
+                            content=clarification_message,
+                            answer_kind="clarification",
+                            model_key="solar",
+                        ):
+                            yield payload_line
                     terminal_done_meta = _terminal_done_meta(
                         artifact=selected_artifact if isinstance(selected_artifact, AnswerArtifact) else None,
                         clarification_payload=clarification_payload,
@@ -704,20 +760,28 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     user_visible_terminal_emitted = True
 
                 # 최종 답변 텍스트 전송
-                if not clarification_payload and isinstance(selected_artifact, AnswerArtifact) and selected_artifact.text and selected_artifact.user_visible_final_required:
-                    selected_answer_kind = _normalize_answer_kind(selected_artifact.answer_kind)
-                    if selected_answer_kind not in {"llm_streamed", "error", "no_result"}:
-                        model_key = _normalize_stream_model_key(
-                            str(merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "solar")
-                        )
-                        for payload_line in _emit_stream_event_lines(
-                            _next_route_event(kind="answer.chunk", model_key=model_key, content=selected_artifact.text)
+                if isinstance(selected_artifact, AnswerArtifact) and selected_artifact.text and selected_artifact.user_visible_final_required:
+                    selected_answer_kind = selected_answer_kind or _normalize_answer_kind(selected_artifact.answer_kind)
+                    if selected_answer_kind != "llm_streamed":
+                        raw_model_key = merge_debug.get("selected_model") or selected_artifact.meta.get("model_key") or "solar"
+                        for payload_line in _emit_answer_chunk_event_lines(
+                            _next_route_event,
+                            content=selected_artifact.text,
+                            answer_kind=selected_answer_kind,
+                            model_key=raw_model_key,
                         ):
                             yield payload_line
 
                     terminal_done_meta = _terminal_done_meta(
                         artifact=selected_artifact,
-                        output_message=selected_artifact.text if selected_answer_kind in {"error", "no_result"} else None,
+                        clarification_payload=clarification_payload,
+                        output_message=(
+                            clarification_message
+                            if clarification_payload and clarification_message
+                            else selected_artifact.text
+                            if selected_answer_kind in {"error", "no_result"}
+                            else None
+                        ),
                     )
                     user_visible_terminal_emitted = True
 
@@ -740,6 +804,13 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         reason=guard_reason,
                         degraded=True,
                     )
+                    for payload_line in _emit_answer_chunk_event_lines(
+                        _next_route_event,
+                        content=guard_message,
+                        answer_kind=guard_artifact.answer_kind,
+                        model_key=guard_artifact.meta.get("model_key") or "solar",
+                    ):
+                        yield payload_line
 
                 # 4. 참조 리스트 조립 및 전송 — SSOT (source_refs) 단일 source.
                 # 정상 RAG 경로면 selected_artifact.source_refs 가 있다. 비어 있는데 evidence 경로면
@@ -810,8 +881,7 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     gemma_error_code=derive_stream_error_code(gemma_done),
                     gemma_elapsed_ms=gemma_done.get("elapsed_ms"),
                 )
-                done_event = _next_route_event(kind="done", meta=terminal_done_meta)
-                for payload_line in _emit_stream_event_lines(done_event):
+                for payload_line in _emit_terminal_done_event_lines(_next_route_event, meta=terminal_done_meta):
                     yield payload_line
 
             except Exception as exc:
@@ -850,21 +920,27 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                         error=ErrorArtifact(error_code=error_code, reason=reason),
                         meta={"degraded": True, "answer_source": "strategy_violation"},
                     )
+                    for payload_line in _emit_answer_chunk_event_lines(
+                        _next_route_event,
+                        content=user_message,
+                        answer_kind=error_artifact.answer_kind,
+                        model_key=error_artifact.meta.get("model_key") or "solar",
+                    ):
+                        yield payload_line
                     for payload_line in _emit_stream_event_lines(
                         _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                     ):
                         yield payload_line
-                    for payload_line in _emit_stream_event_lines(
-                        _next_route_event(
-                            kind="done",
-                            meta=_terminal_done_meta(
-                                artifact=error_artifact,
-                                output_message=user_message,
-                                error_code=error_code,
-                                reason=reason,
-                                degraded=True,
-                            ),
-                        )
+                    degraded_done_meta = _terminal_done_meta(
+                        artifact=error_artifact,
+                        output_message=user_message,
+                        error_code=error_code,
+                        reason=reason,
+                        degraded=True,
+                    )
+                    for payload_line in _emit_terminal_done_event_lines(
+                        _next_route_event,
+                        meta=degraded_done_meta,
                     ):
                         yield payload_line
                     return
@@ -879,22 +955,28 @@ def register_routes(app: FastAPI, deps: RouteDeps) -> None:
                     error=ErrorArtifact(error_code=error_code, reason=reason),
                     meta={"answer_source": "route_exception"},
                 )
+                for payload_line in _emit_answer_chunk_event_lines(
+                    _next_route_event,
+                    content=error_message,
+                    answer_kind=error_artifact.answer_kind,
+                    model_key=error_artifact.meta.get("model_key") or "solar",
+                ):
+                    yield payload_line
                 for payload_line in _emit_stream_event_lines(
                     _next_route_event(kind="reference.set", content="null", references=[], meta={"references": []})
                 ):
                     yield payload_line
-                for payload_line in _emit_stream_event_lines(
-                    _next_route_event(
-                        kind="done",
-                        meta=_terminal_done_meta(
-                            artifact=error_artifact,
-                            output_message=error_message,
-                            error=True,
-                            error_code=error_code,
-                            reason=reason,
-                            extra_meta={"error_detail": str(exc)},
-                        ),
-                    )
+                route_exception_done_meta = _terminal_done_meta(
+                    artifact=error_artifact,
+                    output_message=error_message,
+                    error=True,
+                    error_code=error_code,
+                    reason=reason,
+                    extra_meta={"error_detail": str(exc)},
+                )
+                for payload_line in _emit_terminal_done_event_lines(
+                    _next_route_event,
+                    meta=route_exception_done_meta,
                 ):
                     yield payload_line
                 return

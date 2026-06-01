@@ -114,6 +114,7 @@ class QuestionAnalysisV3(BaseModel):
     limit: int = Field(MAX_TOP_K_SIZE, le=MAX_TOP_K_SIZE)
     display_limit: int = Field(MAX_TOP_K_SIZE, ge=1, le=MAX_TOP_K_SIZE)
     retrieval_query: Optional[str] = None
+    qdrant_query_plan: dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(ge=0.0, le=1.0)
     hard_contract: HardContractV1 = Field(default_factory=HardContractV1)
     soft_strategy_hints: SoftStrategyHintsV1 = Field(default_factory=SoftStrategyHintsV1)
@@ -310,6 +311,8 @@ class QuestionAnalysisV3(BaseModel):
         rq = d.get("retrieval_query")
         if rq is not None and not isinstance(rq, str):
             d["retrieval_query"] = str(rq)
+        if not isinstance(d.get("qdrant_query_plan"), dict):
+            d["qdrant_query_plan"] = {}
         return d
 
     @field_validator("strategy_version")

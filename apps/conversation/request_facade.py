@@ -33,7 +33,6 @@ from apps.platform.settings import MAX_TOP_K_SIZE
 from apps.api.runtime_helpers import log_event, merge_log_fields
 from apps.api.contracts.workflow_models import HardContractV1, QuestionAnalysis, SoftStrategyHintsV1
 from apps.planner.planner_defaults import (
-    PLANNER_STAGE1_PROMPT_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
     PLANNER_STAGE2_PROMPT_VERSION,
 )
@@ -47,7 +46,7 @@ from apps.planner.query_intent import (
     extract_years,
 )
 from apps.platform.pipeline_steps import normalize_intent
-from apps.platform.schemas import IntentPayloadV3
+from apps.platform.schemas import IntentPayloadV3, default_target_collections_for_route
 from apps.conversation.view_state import (
     ConversationViewState,
     clear_view_state_scope,
@@ -1615,7 +1614,14 @@ def _build_count_contract_clarification_payload(
     }
 
 
-def _resolve_question_analysis_count(question_analysis: Any, *, question: str, request_id: Optional[str], conversation_id: str) -> Dict[str, Any]:
+def _resolve_question_analysis_count(
+    question_analysis: Any,
+    *,
+    question: str,
+    request_id: Optional[str],
+    conversation_id: str,
+    explicit_count_override: Optional[int] = None,
+) -> Dict[str, Any]:
 
     """Validate and narrowly normalize the planner-assembled count contract."""
 
@@ -1644,7 +1650,11 @@ def _resolve_question_analysis_count(question_analysis: Any, *, question: str, r
 
     is_list_like = action == "list" or output_type in _LIST_LIKE_OUTPUT_TYPES
 
-    explicit_count = parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
+    explicit_count = (
+        explicit_count_override
+        if explicit_count_override is not None
+        else parse_display_limit(question, default=_DISPLAY_LIMIT_SENTINEL)
+    )
 
     has_explicit_count = explicit_count != _DISPLAY_LIMIT_SENTINEL
 
@@ -1737,6 +1747,218 @@ def _build_explicit_only_hint(question: str) -> Dict[str, Any]:
         "years": extract_years(question),
         "perf_types": extract_perf_types(question),
         "title_terms": extract_title_terms(question),
+    }
+
+
+_AGENT_SEARCH_DOMAIN_HEADS = {"project", "perf", "people", "org", "support"}
+_AGENT_SEARCH_LIST_CUES = (
+    "추천",
+    "목록",
+    "리스트",
+    "후보",
+    "찾아",
+    "알려",
+    "보여",
+    "전문가",
+    "기관",
+    "과제",
+    "성과",
+)
+
+
+def _agent_search_domain_head(tool_args: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(tool_args, dict):
+        return None
+    domain_head = str(tool_args.get("domain_head") or "").strip().lower()
+    if domain_head == "auto":
+        return None
+    return domain_head if domain_head in _AGENT_SEARCH_DOMAIN_HEADS else None
+
+
+def _agent_search_limit(tool_args: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not isinstance(tool_args, dict):
+        return None
+    return _coerce_positive_int(tool_args.get("limit"))
+
+
+def _agent_search_prefers_list(
+    *,
+    question: str,
+    domain_head: Optional[str],
+    requested_limit: Optional[int],
+    normalized_intent: Any,
+) -> bool:
+    action = str(_get_field(normalized_intent, "action", "") or "").strip().lower()
+    output_type = str(_get_field(normalized_intent, "output_type", "") or "").strip().lower()
+    if action in {"detail", "download"} or output_type in {"detail"}:
+        return False
+    if requested_limit is not None:
+        return True
+    text = str(question or "")
+    return bool(domain_head in {"people", "org"} and any(cue in text for cue in _AGENT_SEARCH_LIST_CUES))
+
+
+def _strip_agent_search_structural_tokens(
+    query: Any,
+    *,
+    domain_head: Optional[str],
+    requested_limit: Optional[int],
+) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    removable = set()
+    if domain_head:
+        removable.add(str(domain_head).strip().lower())
+    if requested_limit is not None:
+        removable.update({f"{requested_limit}개", f"{requested_limit}건", f"{requested_limit}명"})
+
+    kept: list[str] = []
+    for token in text.split():
+        normalized = token.strip().lower()
+        if normalized in removable or token.strip() in removable:
+            continue
+        kept.append(token)
+    return " ".join(kept).strip()
+
+
+def _apply_agent_search_tool_hints(
+    normalized_intent: Any,
+    *,
+    tool_name: Optional[str],
+    tool_args: Optional[Dict[str, Any]],
+    question: str,
+) -> tuple[Any, Optional[int], Dict[str, Any]]:
+    if tool_name != "search_ntis_domain":
+        return normalized_intent, None, {"applied": False}
+
+    domain_head = _agent_search_domain_head(tool_args)
+    requested_limit = _agent_search_limit(tool_args)
+    updates: Dict[str, Any] = {"retrieval_query": str(question or "").strip() or None}
+
+    if domain_head:
+        updates["base_route"] = domain_head
+        updates["target_cols"] = default_target_collections_for_route(domain_head)
+    if requested_limit is not None:
+        updates["planner_limit"] = requested_limit
+    if _agent_search_prefers_list(
+        question=question,
+        domain_head=domain_head,
+        requested_limit=requested_limit,
+        normalized_intent=normalized_intent,
+    ):
+        updates["action"] = "list"
+        updates["output_type"] = "list"
+
+    before = {key: _get_field(normalized_intent, key, None) for key in updates}
+    patched = _replace_fields(normalized_intent, **updates)
+    after = {key: _get_field(patched, key, None) for key in updates}
+    changed = {key: {"before": before.get(key), "after": after.get(key)} for key in updates if before.get(key) != after.get(key)}
+
+    return patched, requested_limit, {
+        "applied": bool(changed),
+        "tool_name": tool_name,
+        "domain_head": domain_head,
+        "requested_limit": requested_limit,
+        "changed_fields": changed,
+    }
+
+
+def _copy_question_analysis(question_analysis: Any, updates: Dict[str, Any]) -> Any:
+    if not updates:
+        return question_analysis
+    if hasattr(question_analysis, "model_copy"):
+        return question_analysis.model_copy(update=updates)
+    return _replace_fields(question_analysis, **updates)
+
+
+def _align_agent_search_question_analysis(
+    question_analysis: Any,
+    *,
+    tool_name: Optional[str],
+    tool_args: Optional[Dict[str, Any]],
+    question: str,
+) -> tuple[Any, Dict[str, Any]]:
+    if tool_name != "search_ntis_domain" or question_analysis is None:
+        return question_analysis, {"applied": False}
+
+    domain_head = _agent_search_domain_head(tool_args)
+    requested_limit = _agent_search_limit(tool_args)
+    updates: Dict[str, Any] = {}
+
+    if domain_head:
+        updates["head"] = domain_head
+        updates["target_cols"] = default_target_collections_for_route(domain_head)
+
+    if _agent_search_prefers_list(
+        question=question,
+        domain_head=domain_head,
+        requested_limit=requested_limit,
+        normalized_intent=question_analysis,
+    ):
+        updates["action"] = "list"
+        updates["output_type"] = "list"
+        if not getattr(question_analysis, "ids_map", None) and not getattr(question_analysis, "relation", None):
+            updates["mode"] = "SEARCH"
+
+    if requested_limit is not None:
+        updates["limit"] = requested_limit
+        updates["display_limit"] = requested_limit
+
+    clean_query = _strip_agent_search_structural_tokens(
+        getattr(question_analysis, "retrieval_query", None) or question,
+        domain_head=domain_head,
+        requested_limit=requested_limit,
+    )
+    if clean_query:
+        updates["retrieval_query"] = clean_query
+
+    final_mode = str(updates.get("mode") or getattr(question_analysis, "mode", "") or "").strip().upper()
+    final_head = str(updates.get("head") or getattr(question_analysis, "head", "") or "").strip().lower()
+    final_action = str(updates.get("action") or getattr(question_analysis, "action", "") or "").strip().lower()
+    final_target_cols = list(updates.get("target_cols") or getattr(question_analysis, "target_cols", []) or [])
+    final_limit = int(updates.get("limit") or getattr(question_analysis, "limit", 20) or 20)
+    final_display_limit = int(updates.get("display_limit") or getattr(question_analysis, "display_limit", final_limit) or final_limit)
+    qdrant_plan = dict(getattr(question_analysis, "qdrant_query_plan", None) or {})
+    if qdrant_plan:
+        qa_filters = dict(getattr(question_analysis, "filters", {}) or {})
+        has_person_filter = bool(
+            qa_filters.get("participant_researcher_name")
+            or qa_filters.get("researcher_name")
+            or (isinstance(tool_args, dict) and str(tool_args.get("people_name") or "").strip())
+        )
+        postprocess = dict(qdrant_plan.get("postprocess") or {})
+        if final_head == "people" and not has_person_filter and not postprocess:
+            postprocess = {
+                "kind": "people_discovery",
+                "group_by": "participant_researcher",
+                "rank_signal": ["project_relevance", "recent_year", "national_project_history"],
+            }
+        qdrant_plan.update(
+            {
+                "mode": final_mode,
+                "head": final_head,
+                "action": final_action,
+                "target_collections": final_target_cols or default_target_collections_for_route(final_head),
+                "vector_query": clean_query or qdrant_plan.get("vector_query"),
+                "limit": final_limit,
+                "display_limit": final_display_limit,
+                "postprocess": postprocess,
+            }
+        )
+        updates["qdrant_query_plan"] = qdrant_plan
+
+    before = {key: getattr(question_analysis, key, None) for key in updates}
+    patched = _copy_question_analysis(question_analysis, updates)
+    after = {key: getattr(patched, key, None) for key in updates}
+    changed = {key: {"before": before.get(key), "after": after.get(key)} for key in updates if before.get(key) != after.get(key)}
+
+    return patched, {
+        "applied": bool(changed),
+        "tool_name": tool_name,
+        "domain_head": domain_head,
+        "requested_limit": requested_limit,
+        "changed_fields": changed,
     }
 
 
@@ -2299,6 +2521,8 @@ async def build_agent_intent_payload(
     canonical_evidence: Optional[List[Dict[str, Any]]] = None,
     view_state: Optional[ConversationViewState] = None,
     session_memory: Optional[SessionMemory] = None,
+    tool_name: Optional[str] = None,
+    tool_args: Optional[Dict[str, Any]] = None,
 ) -> tuple[Any, Any]:
     """Build guarded planner outputs after the Dialogue Agent has selected a tool.
 
@@ -2318,6 +2542,12 @@ async def build_agent_intent_payload(
         hint_perf_types=list(explicit_only_hint.get("perf_types", [])),
         hint_title_terms=list(explicit_only_hint.get("title_terms", [])),
     )
+    normalized_intent_base, agent_explicit_count, agent_hint_meta = _apply_agent_search_tool_hints(
+        normalized_intent_base,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        question=question,
+    )
     active_view_state = (
         view_state_from_current_context(session_memory)
         if session_memory is not None
@@ -2334,11 +2564,29 @@ async def build_agent_intent_payload(
         request_id=request_id,
         normalized_intent_base=normalized_intent_base,
     )
+    question_analysis, agent_alignment_meta = _align_agent_search_question_analysis(
+        question_analysis,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        question=question,
+    )
+    if agent_hint_meta.get("applied") or agent_alignment_meta.get("applied"):
+        log_event(
+            "AGENT.TOOL_ARGS.ALIGNED",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            tool_name=tool_name,
+            domain_head=agent_alignment_meta.get("domain_head") or agent_hint_meta.get("domain_head"),
+            requested_limit=agent_alignment_meta.get("requested_limit") or agent_hint_meta.get("requested_limit"),
+            intent_changed_fields=agent_hint_meta.get("changed_fields", {}),
+            question_analysis_changed_fields=agent_alignment_meta.get("changed_fields", {}),
+        )
     count_validation = _resolve_question_analysis_count(
         question_analysis,
         question=question,
         request_id=request_id,
         conversation_id=conversation_id,
+        explicit_count_override=agent_explicit_count,
     )
     normalized_intent, planner_applied = apply_question_analysis_v3(
         normalized_intent_base,
@@ -2361,7 +2609,6 @@ async def build_agent_intent_payload(
         planner_applied=int(planner_applied),
         planner_failed=0,
         planner_stagewise_enabled=int(True),
-        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
         planner_stage15_prompt_version=PLANNER_STAGE15_PROMPT_VERSION,
         planner_stage2_prompt_version=PLANNER_STAGE2_PROMPT_VERSION,
         schema_fields=["intent_payload_version", "normalized_intent", "question_analysis", "strategy_meta"],
@@ -2389,6 +2636,9 @@ async def build_agent_intent_payload(
             {
                 "tool_execution_source": "agent_tool_stagewise",
                 "planner_llm_skipped": False,
+                "agent_tool_name": tool_name,
+                "agent_tool_domain_head": agent_hint_meta.get("domain_head") or agent_alignment_meta.get("domain_head"),
+                "agent_tool_requested_limit": agent_explicit_count,
             }
         )
     # DETAIL_COUNT_NORMALIZATION_GUARD: detail 액션은 limit=1 강제

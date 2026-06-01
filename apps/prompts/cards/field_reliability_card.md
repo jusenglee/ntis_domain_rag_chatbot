@@ -5,7 +5,7 @@
 - `person_no`, `org_id`, `org_code`, `biz_no`
 
 ## strong semantic filters
-- `participant_researcher_name`
+- `participant_researcher_name` (확정 개인명에만 사용)
 - `lead_org_name`
 - `participant_org_name`
 - `people_affiliation_org_name`
@@ -19,5 +19,6 @@
 - `flat_text`, `keyword_text` = recall 보조 신호
 
 ## guidance
-- broad people/org history query에서는 inferred perf tag보다 이름/기관/역할 필터가 더 신뢰할 수 있다.
+- broad people/org history query에서는 inferred perf tag보다 확정 이름/기관/역할 필터가 더 신뢰할 수 있다.
+- 특정 개인명이 없는 전문가 추천/후보 탐색에서는 role/history descriptor를 `participant_researcher_name`으로 승격하지 않는다.
 - detail exact lookup에서는 title similarity보다 exact id / recovered anchor를 우선한다.

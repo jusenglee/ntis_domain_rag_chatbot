@@ -28,7 +28,6 @@ class AppRuntimeConfig:
     redis_url: str                # Redis 서버 주소
     file_kv_root: str             # 로컬 파일 KV 스토어 루트 경로
     planner_stagewise_enabled: bool # 플래너 단계별 실행 활성화 여부
-    planner_stage1_prompt_version: str # 단계 1 프롬프트 버전
     planner_stage15_prompt_version: str # 단계 1.5 프롬프트 버전
     planner_stage2_prompt_version: str # 단계 2 프롬프트 버전
     ensure_payload_index_on_boot: bool # 시작 시 Qdrant 페이로드 인덱스 생성 여부
@@ -254,7 +253,6 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         "APP.CONFIG",
         stage="startup",
         planner_stagewise_enabled=int(config.planner_stagewise_enabled),
-        planner_stage1_prompt_version=config.planner_stage1_prompt_version,
         planner_stage15_prompt_version=config.planner_stage15_prompt_version,
         planner_stage2_prompt_version=config.planner_stage2_prompt_version,
     )

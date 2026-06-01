@@ -4,6 +4,12 @@
 - 사람/기관 + 활동이력/활동내역/이력/업적/경력/프로필/현황/참여이력 = broad history query
 - 기본은 list이며 detail로 과도 축소하지 않는다.
 
+## people discovery semantics
+- 특정 개인명이 없는 전문가/후보/인력 추천은 people discovery query다.
+- 분야, 기술, 역할, 학위 수준, 수행/참여 이력, 최근성은 검색 의미 축으로 보존한다.
+- people discovery query를 연구자명 exact filter로 축소하지 않는다.
+- 확정 개인명이 없으면 `participant_researcher_name` 필터를 만들지 않는다.
+
 ## detail guards
 - perf detail requires explicit perf id
 - project detail prefers explicit project id
@@ -16,8 +22,10 @@
 ## ambiguity policy
 - unsure 하면 narrower choice보다 broader choice
 - invented id / invented role / invented perf type 금지
+- role/history descriptor를 invented person name으로 취급하지 말 것
 
 ## query preservation
 - 사람명/기관명을 retrieval_query에서 제거하지 말 것
 - broad query를 perf detail exact lookup으로 줄이지 말 것
 - validation_hints를 맞추기 위해 질문 의미를 왜곡하지 말 것
+- 전문가 추천/후보 탐색 조건을 retrieval_query에서 제거하지 말 것

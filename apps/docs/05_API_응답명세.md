@@ -78,10 +78,11 @@
 - route-level reasoning chunk는 내보내지 않는다. 사용자 가시 텍스트만 `answer.chunk`로 보낸다.
 - `answer.chunk`는 요청 진행 중의 provisional stream이다. 클라이언트는 같은 UI row에 대해 최초 수신한 `request_id`와 다른 `answer.chunk`/`reference.set`/`done`을 반영하면 안 된다.
 - 최종 사용자 가시 본문은 `answer.chunk`로만 전달한다. 정합성 보완이 필요하면 `done.meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
+- `direct_answer`, `clarification`, `no_result`, `error`처럼 deterministic terminal 문장이 있는 경로는 같은 문장을 `answer.chunk(event.model_key="solar")`, `answer.chunk(event.model_key="gemma")` 순서로 먼저 보낸 뒤 `reference.set`과 `done`을 보낸다.
 - `reference.set`과 `done`은 정상/오류/강등(degraded) 종료 모두에서 내려보내는 것이 원칙이다.
 - `done`은 단순 종료 신호가 아니라 terminal metadata carrier다. clarification, no-result, degraded/error, publication guard 결과는 `done.meta`에 실린다.
 - `done`은 모든 종료 사례에서 `event.model_key="solar"`와 `event.model_key="gemma"` 두 프레임으로 fan-out한다. 두 프레임의 `meta`는 동일하며, 프론트엔드는 각 모델 패널에 같은 terminal state를 반영한다.
-- `contract-invalid` 상태에서는 LLM `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 `done.meta.output_message`와 `done.meta.clarification`로 내보낸다.
+- `contract-invalid` 상태에서는 LLM 생성 `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 양쪽 모델 패널용 `answer.chunk`로 먼저 내보내고, 같은 정보를 `done.meta.output_message`와 `done.meta.clarification`에도 싣는다.
 - 모델 provider가 reasoning만 내보내고 content를 만들지 못하면 provider failure로 간주한다. 이 상태는 사용자 모호성 clarification이 아니다.
 
 ### 공통 SSE envelope
@@ -132,15 +133,23 @@
 4. `reference.set`
 5. `done` 2회 (`event.model_key="solar"`, `event.model_key="gemma"`)
 
+deterministic terminal 문장이 있는 정상/terminal 경로의 사용자 가시 종료 순서는 다음을 보장한다.
+
+1. `answer.chunk(event.model_key="solar")`
+2. `answer.chunk(event.model_key="gemma")`
+3. `reference.set`
+4. `done(event.model_key="solar")`
+5. `done(event.model_key="gemma")`
+
 ### 예외 종료 규칙
 
 - graph 미준비:
-  - `reference.set` -> `done(solar)` -> `done(gemma)`
+  - `answer.chunk(solar)` -> `answer.chunk(gemma)` -> `reference.set` -> `done(solar)` -> `done(gemma)`
 - 전략 위반을 사용자 메시지로 강등한 경우:
-  - `reference.set` -> `done(solar)` -> `done(gemma)`
+  - `answer.chunk(solar)` -> `answer.chunk(gemma)` -> `reference.set` -> `done(solar)` -> `done(gemma)`
   - 이 경로는 `done.meta.output_message`에 사용자 가시 fallback 문장을 싣는다.
 - 내부 예외:
-  - `reference.set` -> `done(solar)` -> `done(gemma)`
+  - `answer.chunk(solar)` -> `answer.chunk(gemma)` -> `reference.set` -> `done(solar)` -> `done(gemma)`
 - 최종 답변이 비어 있는 비정상 종료:
   - route guard가 `done.meta.output_message`를 강제로 생성한다.
   - `done.meta.error_code="MISSING_FINAL_ANSWER"`가 포함된다.

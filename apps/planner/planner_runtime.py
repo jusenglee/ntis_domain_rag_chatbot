@@ -31,13 +31,11 @@ from apps.chat.llm_runtime import build_llm, load_prompt_file
 
 from apps.platform.langchain_compat import BaseMessage, ChatPromptTemplate, PydanticOutputParser, SystemMessage
 
-from apps.evidence.canonical_context import render_canonical_evidence_text
 from apps.conversation.followup_anchor import anchor_to_seed_map
 from apps.conversation.view_state import (
     DisplaySnapshot,
     FocusEntity,
     get_active_subject_entity,
-    render_display_snapshot_text,
 )
 from apps.planner.planner_contract import StrategyViolation
 from apps.planner.planner_context_cards import build_planner_domain_cards
@@ -45,13 +43,13 @@ from apps.planner.planner_defaults import (
     PLANNER_DISABLE_THINKING,
     PLANNER_RUNTIME_MAX_TOP_K_SIZE,
     PLANNER_RUNTIME_SCHEMA_VERSION,
-    PLANNER_STAGE1_PROMPT_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
     PLANNER_STAGE2_PROMPT_VERSION,
     PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS,
     PLANNER_STAGEWISE_ENABLED,
     PLANNER_TEMPERATURE,
 )
+from apps.planner.agent_intent_adapter import build_agent_intent_gate
 from apps.planner.prompt_asset_paths import planner_prompt_path
 from apps.planner.planner_stage15_types import PlannerEntityRolePlan
 from apps.planner.planner_staged import (
@@ -64,8 +62,9 @@ from apps.planner.planner_staged import (
 )
 from apps.planner.planner_surface_signals import SurfaceSignals, collect_surface_signals
 from apps.planner.planner_validation import Stage2ValidationResult, validate_stage2_slots
+from apps.planner.query_compiler import compile_stage2_to_qdrant_query
 from apps.planner.query_intent import ORG_CUES
-from apps.platform.schemas import PlannerStage1Decision, PlannerStage2Slots
+from apps.platform.schemas import PlannerStage2Slots
 
 
 # Stage 2 결과물에서 허용되는 필드 목록 (Schema 정규화용)
@@ -293,19 +292,6 @@ def _normalize_stage2_slots_payload(
             dropped_non_null_fields=sorted(key for key, value in dropped.items() if value is not None),
         )
     return cleaned
-
-def intent_snapshot(normalized_intent: Any) -> dict[str, Any]:
-    """기존 파서의 결과(Intent)를 플래너가 참고하기 좋게 요약 스냅샷으로 변환합니다."""
-    return {
-        "action": getattr(normalized_intent, "action", None),
-        "base_route": getattr(normalized_intent, "base_route", None),
-        "is_id_query": bool(getattr(normalized_intent, "is_id_query", False)),
-        "people_terms": list(getattr(normalized_intent, "people_terms", []) or []),
-        "org_terms": list(getattr(normalized_intent, "org_terms", []) or []),
-        "perf_types": list(getattr(normalized_intent, "perf_types", []) or []),
-        "years": list(getattr(normalized_intent, "years", []) or []),
-    }
-
 
 def _render_prompt_template(template: str, **values: Any) -> str:
     """프롬프트 템플릿의 변수({key})를 실제 값으로 치환합니다."""
@@ -588,6 +574,8 @@ def _apply_deterministic_stage2_repair(
     repaired_slots = _sanitize_stage2_structured_filters(
         slots=repaired_slots,
         entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        question=question,
         request_id=request_id,
         conversation_id=conversation_id,
     )
@@ -625,103 +613,37 @@ def _sanitize_stage2_structured_filters(
     *,
     slots: Any,
     entity_role_plan: PlannerEntityRolePlan,
+    locked_strategy: DeterministicGateStrategy | None = None,
+    signals: SurfaceSignals | None = None,
+    question: str = "",
     request_id: Optional[str],
     conversation_id: str,
 ) -> Any:
-    """엔티티 역할 계획과 맞지 않는 필터를 제거하거나 검색어로 전환하여 데이터를 정제합니다."""
-    payload = slots.model_dump() if hasattr(slots, "model_dump") else dict(slots or {})
-    filters = dict(payload.get("filters") or {})
-    retrieval_query = str(payload.get("retrieval_query") or "").strip()
-
-    allowed_people_terms = list(getattr(entity_role_plan, "people_terms_to_keep", []) or [])
-    allowed_org_terms = list(getattr(entity_role_plan, "org_terms_to_keep", []) or [])
-    org_role_hint = str(getattr(entity_role_plan, "org_role_hint", "") or "").strip().lower()
-    dropped: dict[str, list[str]] = {}
-
-    # 인물 보존 목록이 없으면 인물 관련 구조화 필터 전부 제거.
-    # 비어있지 않으면 subset 검증으로 stage15 keep에 포함된 토큰만 통과시킨다
-    # (Stage 2 LLM이 일반 명사를 researcher 필터로 박는 hallucination 차단).
-    if not allowed_people_terms:
-        for key in _RESEARCHER_FILTER_KEYS:
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-    else:
-        allowed_people_set = set(allowed_people_terms)
-        for key in _RESEARCHER_FILTER_KEYS:
-            values = _normalize_terms(filters.get(key))
-            if not values:
-                continue
-            accepted = [v for v in values if v in allowed_people_set]
-            removed = [v for v in values if v not in allowed_people_set]
-            if not accepted:
-                filters.pop(key, None)
-                if removed:
-                    dropped[key] = removed
-            elif removed:
-                filters[key] = accepted
-                dropped[key] = removed
-
-    # 기관 보존 목록이 없거나 역할이 불일치하는 기관 필터 제거
-    if not allowed_org_terms:
-        for key in (*_GENERIC_ORG_FILTER_KEYS, *_ROLE_SCOPED_ORG_FILTER_KEYS):
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-    elif org_role_hint not in {"lead_org", "participant_org", "affiliation_org"}:
-        for key in _ROLE_SCOPED_ORG_FILTER_KEYS:
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-    elif org_role_hint == "lead_org":
-        for key in ("participant_org_name", "people_affiliation_org_name"):
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-    elif org_role_hint == "participant_org":
-        for key in ("lead_org_name", "performing_org_name", "people_affiliation_org_name"):
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-    elif org_role_hint == "affiliation_org":
-        for key in ("lead_org_name", "performing_org_name", "participant_org_name"):
-            values = _normalize_terms(filters.pop(key, None))
-            if values:
-                dropped[key] = values
-
-    # 과제 중심 쿼리인데 기관명이 일반어인 경우, 필터 대신 검색어로 전환
-    if _query_mentions_project_axis(retrieval_query) and not _query_has_explicit_org_cue(retrieval_query):
-        for key in (*_GENERIC_ORG_FILTER_KEYS, *_ROLE_SCOPED_ORG_FILTER_KEYS):
-            values = _normalize_terms(filters.get(key))
-            if not values or not all(_looks_identifier_like_filter_term(value) for value in values):
-                continue
-            removed = _normalize_terms(filters.pop(key, None))
-            if removed:
-                dropped[key] = list(dict.fromkeys([*dropped.get(key, []), *removed]))
-
-    # 탈락된 필터 용어들을 검색어(retrieval_query)에 합쳐서 정보 손실 방지.
-    # 단, researcher 필터에서 drop된 토큰은 일반 명사 hallucination일 가능성이 높으므로
-    # 검색어 salvage 대상에서 제외해 retrieval_query 오염을 차단한다.
-    researcher_keys = set(_RESEARCHER_FILTER_KEYS)
-    salvage_dropped = {k: v for k, v in dropped.items() if k not in researcher_keys}
-    salvaged_terms = [term for values in salvage_dropped.values() for term in values]
-    researcher_drops_unsalvaged = sorted(
-        {term for key, values in dropped.items() if key in researcher_keys for term in values}
+    """엔티티 역할 계획을 Qdrant query plan으로 컴파일하며 Stage2 슬롯을 정제합니다."""
+    compiled = compile_stage2_to_qdrant_query(
+        stage2_slots=slots,
+        entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        question=question,
+        signals=signals,
     )
-    if salvaged_terms:
-        payload["retrieval_query"] = _append_terms_to_query(retrieval_query, salvaged_terms)
+    dropped = compiled.dropped_filters
     if dropped:
+        researcher_drops_unsalvaged = sorted(
+            {term for key, values in dropped.items() if key in _RESEARCHER_FILTER_KEYS for term in values}
+        )
         log_event(
             "PLANNER.STAGE2.FILTERS.SANITIZED",
             request_id=request_id,
             conversation_id=conversation_id,
             dropped_fields=sorted(key for key, values in dropped.items() if values),
-            salvaged_terms=salvaged_terms,
+            salvaged_terms=list(compiled.salvaged_terms),
             researcher_drops_unsalvaged=researcher_drops_unsalvaged,
+            compiler_validation=compiled.validation.to_dict(),
+            postprocess_kind=compiled.qdrant_query_plan.postprocess.get("kind"),
         )
 
-    payload["filters"] = {key: value for key, value in filters.items() if value not in (None, [], {}, "")}
-    return PlannerStage2Slots.model_validate(payload)
+    return PlannerStage2Slots.model_validate(compiled.sanitized_slots)
 
 
 def _has_explicit_perf_seed(ids_map: dict[str, list[str]]) -> bool:
@@ -757,29 +679,6 @@ def _enforce_runtime_legality(
     # 관계(Relation) 조회 시 기준이 되는 앵커 필수
     if locked_strategy.relation in {"project_perf", "perf_project"} and not has_anchor_seed:
         _raise("PLANNER_RELATION_EXPLICIT_ANCHOR_REQUIRED", "relation query requires explicit anchor")
-
-
-def _planner_prev_context_text(
-    *,
-    prev_context: list[dict[str, Any]],
-    canonical_evidence: list[dict[str, Any]],
-    normalized_intent: Any,
-    display_snapshot: Optional[DisplaySnapshot] = None,
-) -> str:
-    """프롬프트 주입을 위해 이전 대화의 문맥 데이터를 텍스트로 렌더링합니다."""
-    if display_snapshot is not None and display_snapshot.items:
-        return render_display_snapshot_text(display_snapshot, max_chars=1200)
-    if canonical_evidence:
-        return render_canonical_evidence_text(
-            canonical_evidence,
-            {
-                "name": str(getattr(normalized_intent, "output_type", None) or "summary").strip().lower() or "summary",
-                "context_kind": str(getattr(normalized_intent, "base_route", None) or "project").strip().lower() or "project",
-            },
-            max_chars=1200,
-        )
-    prev_lines = [json.dumps(item, ensure_ascii=False)[:180] for item in (prev_context or [])[:6]]
-    return "\n".join(prev_lines) or "NONE"
 
 
 def _extract_prev_context_seed(
@@ -843,161 +742,93 @@ def _extract_prev_context_seed(
     return {}
 
 
-async def run_planner_stage1(
-    *,
-    question: str,
-    conversation_id: str,
-    request_id: Optional[str],
-    chat_history: list[BaseMessage],
-    prev_context: list[dict[str, Any]],
-    canonical_evidence: list[dict[str, Any]],
-    normalized_intent: Any,
-    display_snapshot: Optional[DisplaySnapshot],
-    cards: dict[str, str],
-) -> Any:
-    """[Stage 1] 사용자의 의도를 분석하여 핵심 액션(조회, 요약 등)과 대상(과제, 성과 등)을 분류합니다."""
-    llm = build_llm(model_name="solar_vllm_0")
-    parser = PydanticOutputParser(pydantic_object=PlannerStage1Decision)
-    
-    # 히스토리 요약 텍스트 생성
-    history_str = "\n".join([f"{type(m).__name__}: {m.content}" for m in chat_history[-4:]])
-    prev_context_text = _planner_prev_context_text(
-        prev_context=prev_context,
-        canonical_evidence=canonical_evidence,
-        normalized_intent=normalized_intent,
-        display_snapshot=display_snapshot,
+_RAW_PERSON_CONTEXT_CUES = ("연구자", "박사", "교수", "대표", "원장", "소장", "님")
+_RAW_PERSON_REJECT_FRAGMENTS = (
+    "박사급",
+    "전문가",
+    "분야",
+    "과제",
+    "기술",
+    "시스템",
+    "연구동향",
+)
+_RAW_PERSON_QUOTE_PAIRS = (
+    ("'", "'"),
+    ('"', '"'),
+    ("“", "”"),
+    ("‘", "’"),
+    ("「", "」"),
+    ("『", "』"),
+    ("(", ")"),
+    ("[", "]"),
+)
+
+
+def _raw_person_hint_has_explicit_evidence(question: str, term: str) -> bool:
+    """raw 성씨 휴리스틱 후보가 실제 인명으로 쓰였다는 문맥 증거를 확인한다."""
+    q = str(question or "")
+    candidate = str(term or "").strip()
+    if not q or not candidate:
+        return False
+    if any(fragment in candidate for fragment in _RAW_PERSON_REJECT_FRAGMENTS):
+        return False
+
+    escaped = re.escape(candidate)
+    for left, right in _RAW_PERSON_QUOTE_PAIRS:
+        if re.search(rf"{re.escape(left)}\s*{escaped}\s*{re.escape(right)}", q):
+            return True
+
+    cue_alt = "|".join(re.escape(cue) for cue in _RAW_PERSON_CONTEXT_CUES)
+    # "신동구 연구자", "신동구 박사", "신동구님"처럼 후보 바로 옆에
+    # 명시 인명 문맥이 있을 때만 raw hint를 구조화 인명으로 승격한다.
+    return bool(
+        re.search(rf"{escaped}\s*(?:{cue_alt})", q)
+        or re.search(rf"(?:{cue_alt})\s*{escaped}", q)
     )
-    
-    # 프롬프트 구성
-    system_prompt = _render_prompt_template(
-        await load_prompt_file(planner_prompt_path(f"planner_stage1_{PLANNER_STAGE1_PROMPT_VERSION}.md")),
-        **cards,
-    )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            SystemMessage(content=system_prompt),
-            (
-                "human",
-                "{format_instructions}\n<user_query>{question}</user_query>\n<history>{history}</history>\n<prev_context>{prev_context}</prev_context>\n<intent_snapshot>{intent_snapshot}</intent_snapshot>",
-            ),
-        ]
-    )
-    
-    # LLM 바인딩 설정 (재현성을 위해 파라미터 고정 및 기록)
-    llm_bind_settings = {
-        "reasoning_effort": "low",
-        "include_reasoning": False,
-        "temperature": PLANNER_TEMPERATURE,
-        "top_p": 1.0,
-        "max_tokens": 800,
-    }
-    planner_llm = llm.bind(
-        **llm_bind_settings,
-        request_id=request_id,
-        conversation_id=conversation_id,
-        planner_stage="stage1",
-        planner_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
-    )
-    
-    input_payload = {
-        "format_instructions": parser.get_format_instructions(),
-        "question": question,
-        "history": history_str or "NONE",
-        "prev_context": prev_context_text or "NONE",
-        "intent_snapshot": json.dumps(intent_snapshot(normalized_intent), ensure_ascii=False),
-    }
-    
-    common_fields = _planner_stage_common_fields(
-        stage_label="stage1",
-        prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
-        question=question,
-        input_payload=input_payload,
-        llm_settings={
-            "model_name": "solar_vllm_0",
-            **llm_bind_settings,
-        },
-    )
-    
-    # LLM 호출 및 JSON 획득
-    json_text, stage_stats = await _invoke_planner_stage_json(
-        event_prefix="PLANNER.STAGE1",
-        stage_label="stage1",
-        request_id=request_id,
-        conversation_id=conversation_id,
-        common_fields=common_fields,
-        runnable=prompt | planner_llm,
-        input_payload=input_payload,
-        start_fields={
-            "history_turns": len(chat_history[-4:]),
-            "prev_context_docs": len(prev_context),
-            "canonical_evidence_count": len(canonical_evidence),
-            "display_snapshot_items": len(getattr(display_snapshot, "items", []) or []),
-            "prev_context_chars": len(prev_context_text or ""),
-        },
-    )
-    
-    # 파싱
-    parse_started_at = time.perf_counter()
-    try:
-        stage1 = parser.parse(json_text)
-    except Exception as exc:
-        _log_planner_stage_error(
-            event_prefix="PLANNER.STAGE1",
-            request_id=request_id,
-            conversation_id=conversation_id,
-            common_fields=common_fields,
-            phase="parse",
-            exc=exc,
-            dt_ms=(time.perf_counter() - parse_started_at) * 1000.0,
-            raw_content_chars=stage_stats.get("raw_content_chars", 0),
-            json_candidate_count=stage_stats.get("json_candidate_count", 0),
-            output_json_chars=stage_stats.get("output_json_chars", 0),
-        )
-        raise
-        
-    log_event(
-        "PLANNER.STAGE1",
-        request_id=request_id,
-        conversation_id=conversation_id,
-        planner_stage="stage1",
-        action=stage1.action,
-        head=stage1.head,
-        relation_candidate=stage1.relation_candidate,
-        referential_followup=int(stage1.referential_followup),
-        confidence=round(stage1.confidence, 3),
-        dt_ms=round(stage_stats.get("dt_ms", 0.0), 1),
-        raw_content_chars=stage_stats.get("raw_content_chars", 0),
-        json_candidate_count=stage_stats.get("json_candidate_count", 0),
-        output_json_chars=stage_stats.get("output_json_chars", 0),
-        planner_stage1_prompt_version=PLANNER_STAGE1_PROMPT_VERSION,
-    )
-    return stage1
 
 
 def _sanitize_stage15_people_keep(
     *,
     stage15: PlannerEntityRolePlan,
     signals: SurfaceSignals,
+    question: str,
     request_id: Optional[str],
     conversation_id: str,
 ) -> PlannerEntityRolePlan:
     """Stage 1.5 출력의 people_terms_to_keep을 표면 신호 후보 집합으로 제한한다.
 
     LLM이 질문에 없는 토큰을 keep으로 만들어 stage2 researcher 필터로 새는 것을
-    차단한다. 허용 후보는 `signals.people_terms ∪ signals.raw_person_hint_terms`.
-    제거된 토큰은 `must_keep_terms`에서도 함께 빼고 PEOPLE_SANITIZED 로그를 남긴다.
+    차단한다. 확정 인명 신호(`signals.people_terms`)는 통과시키고, 성씨 기반 raw
+    후보는 명시 인명 문맥이 있을 때만 통과시킨다. 제거된 토큰은
+    PEOPLE_SANITIZED 로그를 남긴다.
     """
     keep_orig = list(stage15.people_terms_to_keep or [])
     if not keep_orig:
         return stage15
-    candidate_pool = set(signals.people_terms or []) | set(
-        getattr(signals, "raw_person_hint_terms", []) or []
-    )
-    keep_accepted = [t for t in keep_orig if t in candidate_pool]
-    keep_removed = [t for t in keep_orig if t not in candidate_pool]
+    confirmed_people = set(signals.people_terms or [])
+    raw_candidates = set(getattr(signals, "raw_person_hint_terms", []) or [])
+    keep_accepted: list[str] = []
+    keep_removed: list[str] = []
+    removed_without_surface_signal: list[str] = []
+    removed_without_explicit_evidence: list[str] = []
+    for term in keep_orig:
+        if term in confirmed_people:
+            keep_accepted.append(term)
+            continue
+        if term in raw_candidates:
+            if _raw_person_hint_has_explicit_evidence(question, term):
+                keep_accepted.append(term)
+            else:
+                keep_removed.append(term)
+                removed_without_explicit_evidence.append(term)
+            continue
+        keep_removed.append(term)
+        removed_without_surface_signal.append(term)
     if not keep_removed:
         return stage15
-    removed_set = set(keep_removed)
+    # 표면 신호에도 없는 hallucinated token은 must_keep에서도 제거한다. 질문에 실제로
+    # 등장한 raw 후보는 인명 필터에서만 제거하고 retrieval_query 보존 힌트는 유지한다.
+    removed_set = set(removed_without_surface_signal)
     must_keep_accepted = [
         t for t in (stage15.must_keep_terms or []) if t not in removed_set
     ]
@@ -1011,6 +842,8 @@ def _sanitize_stage15_people_keep(
         signals_raw_person_hint_terms=list(
             getattr(signals, "raw_person_hint_terms", []) or []
         ),
+        removed_without_surface_signal=removed_without_surface_signal,
+        removed_without_explicit_evidence=removed_without_explicit_evidence,
     )
     return stage15.model_copy(
         update={
@@ -1126,6 +959,7 @@ async def run_planner_stage15(
     stage15 = _sanitize_stage15_people_keep(
         stage15=stage15,
         signals=signals,
+        question=question,
         request_id=request_id,
         conversation_id=conversation_id,
     )
@@ -1299,6 +1133,9 @@ async def run_planner_stage2(
         slots = _sanitize_stage2_structured_filters(
             slots=slots,
             entity_role_plan=entity_role_plan,
+            locked_strategy=locked_strategy,
+            signals=signals,
+            question=question,
             request_id=request_id,
             conversation_id=conversation_id,
         )
@@ -1382,6 +1219,28 @@ def assemble_question_analysis(
             reason="detail_limit_normalized_to_1",
         )
 
+    compiled_query = compile_stage2_to_qdrant_query(
+        stage2_slots=payload,
+        entity_role_plan=entity_role_plan,
+        locked_strategy=locked_strategy,
+        question=question,
+        signals=signals,
+    )
+    payload["filters"] = dict(compiled_query.sanitized_slots.get("filters") or {})
+    payload["retrieval_query"] = compiled_query.sanitized_slots.get("retrieval_query") or question
+    payload["qdrant_query_plan"] = compiled_query.qdrant_query_plan.to_dict()
+    log_event(
+        "PLANNER.QUERY_COMPILER",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        compiler="stage2_qdrant_query_compiler",
+        validation_ok=int(compiled_query.validation.ok),
+        violation_codes=[item.code for item in compiled_query.validation.violations],
+        dropped_filter_keys=sorted(key for key, values in compiled_query.dropped_filters.items() if values),
+        postprocess_kind=compiled_query.qdrant_query_plan.postprocess.get("kind"),
+        target_collections=compiled_query.qdrant_query_plan.target_collections,
+    )
+
     payload["planner_source"] = "stagewise"
     # 최종 계약서 첨부
     payload["hard_contract"] = _build_hard_contract(
@@ -1428,8 +1287,8 @@ async def run_stagewise_question_analysis(
     display_snapshot = getattr(view_state, "visible_answer_manifest", None)
     focus_entity = get_active_subject_entity(view_state)
     
-    # 도메인 지식 카드 빌드
-    stage1_cards = await build_planner_domain_cards(prompt_name=f"planner_stage1_{PLANNER_STAGE1_PROMPT_VERSION}")
+    # 도메인 지식 카드 빌드. Stage 1은 Dialogue Agent/NormalizedIntent를
+    # deterministic adapter로 변환하므로 LLM prompt card를 로드하지 않는다.
     stage15_cards = await build_planner_domain_cards(prompt_name=f"planner_stage15_{PLANNER_STAGE15_PROMPT_VERSION}")
     stage2_cards = await build_planner_domain_cards(prompt_name=f"planner_stage2_{PLANNER_STAGE2_PROMPT_VERSION}")
     
@@ -1437,11 +1296,22 @@ async def run_stagewise_question_analysis(
     signals = collect_surface_signals(question, normalized_intent)
     log_event("PLANNER.SIGNALS", request_id=request_id, conversation_id=conversation_id, **_signals_payload(signals))
     
-    # Stage 1: 의도 분류
-    stage1 = await run_planner_stage1(
-        question=question, conversation_id=conversation_id, request_id=request_id,
-        chat_history=chat_history, prev_context=prev_context, canonical_evidence=canonical_evidence,
-        normalized_intent=normalized_intent, display_snapshot=display_snapshot, cards=stage1_cards,
+    # Agent intent gate: Dialogue Agent가 확정한 L1 intent를 planner gate contract로 변환.
+    stage1 = build_agent_intent_gate(
+        normalized_intent=normalized_intent,
+        signals=signals,
+    )
+    log_event(
+        "PLANNER.STAGE1",
+        request_id=request_id,
+        conversation_id=conversation_id,
+        planner_stage="stage1",
+        planner_gate_source="agent_intent_adapter",
+        action=stage1.action,
+        head=stage1.head,
+        relation_candidate=stage1.relation_candidate,
+        referential_followup=int(stage1.referential_followup),
+        confidence=round(stage1.confidence, 3),
     )
     
     # 전략 고정

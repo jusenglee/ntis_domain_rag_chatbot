@@ -376,7 +376,7 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
         answer_kind="direct_answer",
         stream_metrics={"content_chars": len(response_text or ""), "stream_content_emitted_chunks": 1},
         user_visible_final_required=True,
-        meta={"answer_source": "direct_answer", "model_key": "direct"},
+        meta={"answer_source": "direct_answer"},
     )
     return {
         "answer_gemma": response_text,
@@ -389,7 +389,7 @@ async def node_direct_answer(state: Any) -> Dict[str, Any]:
         "selected_answer_meta": artifact.to_meta_dict(),
         "next_current_context": EmptyContext(),
         "merge_debug": {
-            "selected_model": "direct",
+            "selected_model": None,
             "selected_answer_source": "direct_answer",
             "selected_answer_kind": artifact.answer_kind,
         },
