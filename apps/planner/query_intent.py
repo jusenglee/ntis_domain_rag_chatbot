@@ -536,12 +536,17 @@ def classify_query(
     wants_series = any(cue in lowered for cue in SERIES_CUES)
     min_metric_count = extract_min_metric_count(text)
     stats_metric = extract_stats_metric(text)
+    # detail 의도는 앵커(해소된 id 또는 후보 project/perf key)가 있을 때만 성립한다.
+    detail_anchor = bool(ids_map or has_project_candidate_key or has_perf_candidate_key)
 
     if wants_count or wants_comparison or min_metric_count is not None or stats_metric is not None:
         action = "stats"
     elif relation:
         action = "list"
-    elif wants_detail or ids_map or has_project_candidate_key or has_perf_candidate_key:
+    # 토픽 문구에 우연히 섞인 cue 단어(예: "교육 정보 생성"의 "정보")만으로는 detail로 보지
+    # 않는다. 앵커 없는 cue-only detail은 단일후보 가드(DETAIL_SINGLE_CANDIDATE_GUARD)에서
+    # 차단되어 0건으로 끝나므로, topic/list 탐색으로 흘려보내는 편이 안전하다.
+    elif detail_anchor:
         action = "detail"
     elif wants_list or ((has_people_focus or has_org_focus) and (has_project or has_perf)):
         action = "list"
@@ -601,7 +606,7 @@ def classify_query(
         perf_tag_filters=perf_tag_filters,
         wants_count=wants_count,
         wants_list=wants_list,
-        wants_detail=wants_detail,
+        wants_detail=bool(wants_detail and detail_anchor),
         wants_rank=wants_rank,
         min_metric_count=min_metric_count,
         stats_metric=stats_metric,

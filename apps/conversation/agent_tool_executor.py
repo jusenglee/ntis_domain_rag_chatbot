@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from apps.api.runtime_helpers import log_event, merge_log_fields
@@ -87,22 +88,89 @@ _SUBJECT_ACTION_WORDS = frozenset({"연구자", "과제", "목록", "상세", "�
 
 # bracket/quote 제목 추출용 패턴 — resolve_project_title pre-router에서 사용
 _BRACKET_TITLE_PATTERNS = (
+    r'\[\[([^\]]{5,})\]\]', # [[ ... ]]
     r'\[([^\]]{5,})\]',    # [ ... ]
     r'「([^」]{5,})」',     # 「 ... 」
+    r'\*\*([^*]{5,})\*\*',  # ** ... **
     r'"([^"]{10,})"',      # " ... "
     r"'([^']{10,})'",      # ' ... '
 )
 
 _PROJECT_CUES = ("과제", "연구", "프로젝트", "사업", "찾아", "알려", "보여")
+_PROJECT_DETAIL_CUES = ("상세정보", "상세 정보", "상세", "자세히", "자세한", "세부정보", "세부 정보", "디테일")
+_PROJECT_TITLE_LABELS = {
+    "과제",
+    "과제명",
+    "과제 제목",
+    "과제제목",
+    "연구과제",
+    "연구 과제",
+    "연구과제명",
+    "프로젝트",
+    "프로젝트명",
+    "사업",
+    "사업명",
+    "제목",
+}
+_PROJECT_TITLE_LABEL_RE = re.compile(
+    r"^\s*(?:\[(?P<bracket>[^\]]{1,20})\]\s*[:：\-–—]?\s*|"
+    r"(?P<label>과제\s*제목|과제명|연구\s*과제명|연구\s*과제|프로젝트명|프로젝트|사업명|사업|제목)\s*(?:[:：\-–—]|\s+))"
+    r"(?P<title>.+?)\s*$",
+    re.IGNORECASE,
+)
+_PROJECT_YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
+
+
+def _normalize_project_title_label(value: str) -> str:
+    return re.sub(r"[\s:：\-–—]+", "", str(value or "").strip().lower())
+
+
+def _is_project_title_label(value: str) -> bool:
+    normalized = _normalize_project_title_label(value)
+    return normalized in {_normalize_project_title_label(item) for item in _PROJECT_TITLE_LABELS}
+
+
+def _clean_project_title_candidate(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"^[\s:：\-–—]+", "", text).strip()
+    for _ in range(2):
+        text = re.sub(
+            r"\s*(?:알려\s*줘|알려주세요|보여\s*줘|보여주세요|조회해\s*줘|조회해주세요|찾아\s*줘|찾아주세요|설명해\s*줘|설명해주세요)\s*[?.!。]*$",
+            "",
+            text,
+        ).strip()
+        text = re.sub(
+            r"\s*(?:에\s*대한|에\s*관한|의)?\s*(?:상세\s*정보|세부\s*정보|상세|자세한\s*정보|자세히|디테일)\s*[?.!。]*$",
+            "",
+            text,
+        ).strip()
+    text = text.strip(" \t\r\n[]「」\"'`*")
+    return text if len(text) >= 5 else None
 
 
 def _extract_bracket_title(question: str) -> str | None:
-    """[ ] 또는 「 」 또는 10자 이상 따옴표 내 문자열에서 제목 후보를 추출합니다."""
+    """명시 제목 후보를 추출합니다. `[과제] 실제 제목` 같은 라벨형 입력도 처리합니다."""
     text = str(question or "")
+    label_match = _PROJECT_TITLE_LABEL_RE.search(text)
+    if label_match:
+        label = label_match.group("bracket") or label_match.group("label") or ""
+        if _is_project_title_label(label):
+            candidate = _clean_project_title_candidate(label_match.group("title") or "")
+            if candidate:
+                return candidate
+
     for pattern in _BRACKET_TITLE_PATTERNS:
         m = re.search(pattern, text)
         if m:
             candidate = m.group(1).strip()
+            if _is_project_title_label(candidate):
+                tail = _clean_project_title_candidate(text[m.end():])
+                if tail:
+                    return tail
+                continue
+            candidate = _clean_project_title_candidate(candidate)
             if candidate:
                 return candidate
     return None
@@ -110,6 +178,20 @@ def _extract_bracket_title(question: str) -> str | None:
 
 def _has_project_cue(question: str) -> bool:
     return any(cue in question for cue in _PROJECT_CUES)
+
+
+def _is_project_detail_request(question: str) -> bool:
+    text = str(question or "")
+    return any(cue in text for cue in _PROJECT_DETAIL_CUES)
+
+
+def _extract_question_years(question: str) -> list[int]:
+    years: list[int] = []
+    for match in _PROJECT_YEAR_RE.finditer(str(question or "")):
+        year = int(match.group(1))
+        if year not in years:
+            years.append(year)
+    return years
 
 
 def _normalize_title_for_match(title: str) -> str:
@@ -619,6 +701,199 @@ def _state_log_fields(state: Any) -> Dict[str, Any]:
 _TITLE_SIMILARITY_THRESHOLD = 0.80
 
 
+def _project_instance_year(doc: dict) -> int | None:
+    for key in ("stan_yr", "pjt_year", "year", "base_year", "prd_yr", "ancmnt_yr"):
+        raw = str((doc or {}).get(key) or "").strip()
+        match = _PROJECT_YEAR_RE.search(raw)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _filter_project_instances_for_question(instances: list[dict], question: str) -> tuple[list[dict], list[int]]:
+    years = _extract_question_years(question)
+    if not years:
+        return list(instances or []), []
+    year_set = set(years)
+    filtered = [doc for doc in (instances or []) if _project_instance_year(doc) in year_set]
+    return filtered, years
+
+
+def _unique_project_ids(instances: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for doc in instances or []:
+        pjt_id = str((doc or {}).get("pjt_id") or "").strip()
+        if pjt_id and pjt_id not in ids:
+            ids.append(pjt_id)
+    return ids
+
+
+def _first_project_instance_for_id(instances: list[dict], pjt_id: str) -> dict | None:
+    for doc in instances or []:
+        if str((doc or {}).get("pjt_id") or "").strip() == pjt_id:
+            return doc
+    return None
+
+
+def _first_doc_text(doc: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = str((doc or {}).get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _compact_project_instance_candidate(doc: dict) -> dict[str, Any]:
+    return {
+        "title": _first_doc_text(doc, "title_text", "title1", "title2") or "",
+        "pjt_id": _first_doc_text(doc, "pjt_id") or "",
+        "pjt_no": _first_doc_text(doc, "pjt_no") or "",
+        "year": _project_instance_year(doc),
+        "lead_org_name": _first_doc_text(
+            doc,
+            "lead_org_name",
+            "mng_org_nm",
+            "rsrch_org_nm",
+            "org_nm",
+            "agc_nm",
+            "sbjt_org_nm",
+        ),
+        "lead_researcher": _extract_lead_researcher_from_doc(doc),
+    }
+
+
+def _manifest_item_from_project_doc(doc: dict, *, title: str) -> Any:
+    return SimpleNamespace(
+        entity_kind="project",
+        title_text=_first_doc_text(doc, "title_text", "title1", "title2") or title,
+        pjt_id=_first_doc_text(doc, "pjt_id"),
+        pjt_no=_first_doc_text(doc, "pjt_no"),
+        rst_id=None,
+        person_no=None,
+        org_id=None,
+        org_code=None,
+        biz_no=None,
+    )
+
+
+async def _maybe_compile_project_title_detail(
+    *,
+    title: str,
+    pjt_no: str,
+    instances: list[dict],
+    state: Any,
+) -> "AgentToolExecutionResult | None":
+    question = _first_text(_get_state_attr(state, "question"), title) or title
+    if not _is_project_detail_request(question):
+        return None
+
+    scoped_instances, year_hints = _filter_project_instances_for_question(instances, question)
+    candidate_instances = scoped_instances if scoped_instances else list(instances or [])
+    pjt_ids = _unique_project_ids(scoped_instances)
+    if year_hints and not scoped_instances:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="clarification_required",
+                summary=(
+                    f"'{title}'에서 요청하신 연도({', '.join(str(y) for y in year_hints)})의 "
+                    "단일 과제 인스턴스를 찾지 못했습니다. 조회할 연도나 과제 ID를 확인해 주세요."
+                ),
+                warnings=["title_year_instance_not_found"],
+                structured_refs={
+                    "tool_name": "resolve_project_title",
+                    "title": title,
+                    "pjt_no": pjt_no,
+                    "requested_years": year_hints,
+                    "candidates": [_compact_project_instance_candidate(doc) for doc in candidate_instances[:5]],
+                },
+            )
+        )
+
+    if len(pjt_ids) != 1:
+        warning = "multiple_project_instances" if len(pjt_ids) > 1 else "pjt_id_not_found"
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="clarification_required",
+                summary=(
+                    f"'{title}'의 상세정보를 조회하려면 단일 과제 인스턴스가 필요합니다. "
+                    "연도나 과제 ID를 지정해 주세요."
+                ),
+                warnings=[warning],
+                structured_refs={
+                    "tool_name": "resolve_project_title",
+                    "title": title,
+                    "pjt_no": pjt_no,
+                    "instance_count": len(candidate_instances),
+                    "candidates": [_compact_project_instance_candidate(doc) for doc in candidate_instances[:5]],
+                },
+            )
+        )
+
+    selected_doc = _first_project_instance_for_id(scoped_instances, pjt_ids[0])
+    if selected_doc is None:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="clarification_required",
+                summary=f"'{title}'의 단일 과제 ID를 확인했지만 상세 조회 대상을 구성하지 못했습니다.",
+                warnings=["pjt_id_not_found"],
+                structured_refs={"tool_name": "resolve_project_title", "title": title, "pjt_no": pjt_no},
+            )
+        )
+
+    item = _manifest_item_from_project_doc(selected_doc, title=title)
+    try:
+        intent_payload, question_analysis = await build_agent_manifest_item_lookup_intent_payload(
+            item=item,
+            retrieval_query=question,
+            conversation_id=str(_get_state_attr(state, "conversation_id", "")),
+            request_id=_first_text(_get_state_attr(state, "request_id")),
+            turn_id=_first_text(_get_state_attr(state, "turn_id")),
+            detail_level="detail",
+            tool_execution_source="agent_tool_project_title_detail_lookup",
+        )
+    except Exception as exc:
+        return AgentToolExecutionResult(
+            observation=AgentObservation(
+                observation_type="error",
+                summary=f"resolve_project_title detail direct compile failed: {type(exc).__name__}: {exc}",
+                warnings=["planner_error"],
+                structured_refs={
+                    "tool_name": "resolve_project_title",
+                    "title": title,
+                    "pjt_no": pjt_no,
+                    "pjt_id": pjt_ids[0],
+                },
+            )
+        )
+
+    log_event(
+        "AGENT.RESOLVE_PROJECT_TITLE.DETAIL_COMPILED",
+        pjt_no=pjt_no,
+        pjt_id=pjt_ids[0],
+        title=str(getattr(item, "title_text", "") or title),
+        **_state_log_fields(state),
+    )
+    return AgentToolExecutionResult(
+        observation=AgentObservation(
+            observation_type="planned_intent",
+            summary=f"과제 제목 '{title}'을 단일 pjt_id={pjt_ids[0]} detail lookup으로 컴파일했습니다.",
+            structured_refs={
+                "tool_name": "resolve_project_title",
+                "resolved_tool_name": "lookup_specific_entity",
+                "title": str(getattr(item, "title_text", "") or title),
+                "pjt_no": pjt_no,
+                "pjt_id": pjt_ids[0],
+                "generated_question": question,
+                "question_analysis": _model_dump(question_analysis),
+                "tool_execution_source": "agent_tool_project_title_detail_lookup",
+            },
+        ),
+        intent_payload=intent_payload,
+        question_analysis=question_analysis,
+        next_current_context=None,
+    )
+
+
 async def _handle_resolve_project_title(title: str, state: Any) -> "AgentToolExecutionResult":
     """결정적 과제 제목 해결. 플래너/LLM 없이 벡터 검색 → pjt_no 그룹 확정 → GroupAnchorContext 발행."""
     from time import perf_counter
@@ -752,6 +1027,15 @@ async def _handle_resolve_project_title(title: str, state: Any) -> "AgentToolExe
                 structured_refs={"tool_name": "resolve_project_title", "pjt_no": pjt_no},
             )
         )
+
+    detail_result = await _maybe_compile_project_title_detail(
+        title=anchor.title,
+        pjt_no=pjt_no,
+        instances=instances,
+        state=state,
+    )
+    if detail_result is not None:
+        return detail_result
 
     next_ctx = GroupAnchorContext(anchor=anchor)
     log_event(

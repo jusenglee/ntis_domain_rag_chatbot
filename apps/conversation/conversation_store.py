@@ -22,7 +22,6 @@ from apps.conversation.session_memory import (
     EmptyContext,
     SessionMemory,
     build_session_memory,
-    empty_session_memory,
     load_session_memory,
     view_state_from_current_context,
 )
@@ -126,9 +125,21 @@ async def load_conversation_memory_from_store(
     raw_session = await kv_store.get(_session_memory_key(conversation_id)) if kv_store else None
     session_payload = safe_json_loads(raw_session, logger=logger, truncate_text=truncate_text)
     session_memory = load_session_memory(session_payload)
-    if raw_session and session_payload and session_memory.current_context.context_type == "empty":
-        logger.warning("invalid v3 session payload; starting empty session (cid={cid})", cid=conversation_id)
-        session_memory = empty_session_memory()
+    # 빈 current_context는 정상 상태(예: 직전 턴이 manifest를 보류한 경우)이지 손상된 payload가
+    # 아니다. 과거에는 이 경우 세션 전체를 empty로 덮어써 history/canonical_evidence/render_profile
+    # 까지 폐기 → 멀티턴 연속성이 끊겼다("3번 항목" 같은 ordinal 참조 실패의 직접 원인). 실제
+    # 역직렬화 실패는 load_session_memory 내부에서 SESSION_MEMORY.PARSE_FAILED로 별도 처리되므로,
+    # 여기서는 세션을 폐기하지 않고 진단 로그만 남긴다.
+    if (
+        raw_session
+        and isinstance(session_payload, dict)
+        and session_payload.get("current_context") is None
+        and session_memory.current_context.context_type == "empty"
+    ):
+        logger.debug(
+            "v3 session payload had no current_context; retaining history (cid={cid})",
+            cid=conversation_id,
+        )
 
     loaded_history = deserialize_history(session_memory.history_log)
     canonical_evidence = [item for item in (session_memory.canonical_evidence or []) if isinstance(item, dict)]

@@ -115,8 +115,10 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 ### Detail / Current-context 규칙
 
 *   `action=detail` 또는 `output_type=detail`은 단일 대상 답변 계약이다. Planner count validation은 `limit=1`, `display_limit=1`로 normalize해야 한다.
+*   detail 의도는 **앵커**(해소된 id 또는 `과제번호`류 후보 project/perf key)가 있을 때만 분류한다. 토픽/탐색 문구 안에 우연히 섞인 detail cue 단어(`상세`, `정보`, `설명`, `내용`, `보기`)만으로는 detail로 보지 않으며, 예컨대 "교육 정보 생성 및 검색 서비스 개발을 다루는 과제가 있는지?"는 topic/list 탐색으로 분류한다. 앵커 없는 cue-only detail은 어차피 단일 후보 가드에서 fail-closed되어 0건으로 끝나기 때문이다. (`apps/planner/query_intent.py`의 `classify_query` anchor-gated detail)
 *   count가 `1/1`이어도 단일 후보가 확정되지 않으면 detail을 실행하지 않는다. 단일 후보 검증은 `SessionMemory.current_context`, active result scope, visible answer manifest, explicit ID를 기준으로 수행한다.
 *   project detail에서 단일 `pjt_id`가 확정되면 runtime은 broad search가 아니라 lookup 정책(`LOOKUP_MISSING_RECOVERY`의 primary detail lookup)으로 실행한다.
+*   fresh 질문에 명시 과제명(`[과제] 제목`, `과제명: 제목`, `[[제목]]` 등)이 포함된 project detail 요청은 먼저 제목 해소 경로(`resolve_project_title` 또는 동등한 title-resolution)를 통해 후보 `pjt_id`를 확정한다. 단일 `pjt_id`가 확정되면 detail lookup으로 직접 컴파일하고, 후보가 여러 개이면 clarification으로 닫는다.
 *   화면 항목, 대괄호 제목, "상세정보", "그 과제", "2020년에 진행한 프로젝트" 같은 후속 표현은 먼저 current context에서 해소한다.
 *   current context에서 후보가 여러 개이면 broad search로 확장하지 않고 Agent clarification observation 또는 사용자 clarification으로 닫는다.
 *   detail-like query는 `SEARCH_RECOVERY`로 17건/20건 리스트를 만드는 경로로 내려가면 안 된다.

@@ -716,9 +716,11 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
     decision = getattr(state, "agent_decision", None)
     observation = getattr(state, "agent_observation", None)
     decision_type = str(getattr(decision, "decision_type", "") or "").strip()
+    observation_type = str(getattr(observation, "observation_type", "") or "")
+    tool_observation_clarification = observation_type == "clarification_required"
     
     # 예외 상황: 에이전트가 모호함 해소를 선택하지 않았는데 이 노드로 온 경우 에러 처리
-    if decision_type != "ask_clarification":
+    if decision_type != "ask_clarification" and not tool_observation_clarification:
         log_event(
             "AGENT.CLARIFICATION.BLOCKED",
             **merge_log_fields(
@@ -732,7 +734,6 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
         return await node_agent_internal_error(state)
 
     # 내부 도구 오류가 깔려있는 경우 모호함 해소 대신 에러 응답으로 전환 (사용자 탓이 아니므로)
-    observation_type = str(getattr(observation, "observation_type", "") or "")
     if _has_internal_tool_error_context(state, observation):
         log_event(
             "AGENT.CLARIFICATION.BLOCKED",
@@ -760,20 +761,29 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
     else:
         response_text = "조회 대상을 안전하게 특정하려면 대상 이름, ID, 기간 같은 조건을 더 구체적으로 알려 주세요."
 
-    tool_args = dict(getattr(decision, "tool_args", None) or {})
+    structured_refs = dict(getattr(observation, "structured_refs", None) or {})
+    if tool_observation_clarification and decision_type != "ask_clarification":
+        tool_args = structured_refs
+        clarification_candidates = list(structured_refs.get("candidates") or [])
+        clarification_source = "tool_clarification_required"
+    else:
+        tool_args = dict(getattr(decision, "tool_args", None) or {})
+        clarification_candidates = []
+        clarification_source = "agent_clarification"
+
     artifact = AnswerArtifact(
         text=response_text,
         answer_kind="clarification",
         stream_metrics={"content_chars": len(response_text), "stream_content_emitted_chunks": 1},
         user_visible_final_required=True,
         clarification=ClarificationRequest(
-            clarification_type="agent_clarification",
+            clarification_type=clarification_source,
             message=response_text,
-            candidates=[],
+            candidates=clarification_candidates,
             resume_token={"tool_args": tool_args} if tool_args else {},
         ),
         meta={
-            "answer_source": "agent_clarification",
+            "answer_source": clarification_source,
             "model_key": "agent",
             "agent_decision": _agent_decision_meta(decision),
             "agent_observation": _agent_observation_meta(observation),
@@ -806,13 +816,13 @@ async def node_agent_clarification(state: Any) -> Dict[str, Any]:
         "final_answer_artifact": artifact,
         "selected_answer_meta": artifact.to_meta_dict(),
         "next_current_context": ClarificationContext(
-            reason="agent_clarification",
+            reason=clarification_source,
             unresolved_question=str(getattr(state, "question", "") or ""),
             unresolved_constraints=tool_args,
         ),
         "merge_debug": {
             "selected_model": "agent",
-            "selected_answer_source": "agent_clarification",
+            "selected_answer_source": clarification_source,
             "selected_answer_kind": artifact.answer_kind,
         },
         "messages": [AIMessage(content=response_text)],

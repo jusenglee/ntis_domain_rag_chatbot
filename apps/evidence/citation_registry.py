@@ -4,8 +4,13 @@ LLM prompt에 박힌 prompt_units(envelope)와 SourceReference(SSOT) 사이를 r
 연결한 단일 진실 객체. reference.set 발행과 LLM `[N]` 검증이 모두 이 객체에서
 파생된다.
 
-- by_rank: rank(=identity.rank) → SourceReference 매핑.
+- by_rank: rank(=identity.rank, 패킹 최종 단계에서 dense 1..K로 재부여된 발행 번호) → SourceReference 매핑.
 - prompt_units: serialize_json 입력 그대로(LLM이 본 JSON envelope 리스트).
+
+스트리밍 정합 계약: LLM이 본문에 그대로 흘려보내는 인용 번호는 사후 재작성이 불가능하므로,
+프롬프트가 보여주는 번호(identity.rank=cite, dense 1..K)가 곧 reference.set의 발행 위치와
+1:1로 일치하도록 BudgetedContextPacker._finalize_context 가 직렬화 직전에 dense 번호를 부여한다.
+따라서 `all_refs_in_rank_order()`(rank 오름차순)가 곧 프론트가 1..K로 번호 매기는 발행 순서다.
 
 invariant: `set(by_rank.keys()) == {pu["identity"]["rank"] for pu in prompt_units}`.
 """
@@ -78,7 +83,11 @@ class CitationRegistry:
 
 
 def build_citation_registry(packed: "PackedContextResult") -> CitationRegistry:
-    """packed.prompt_units + packed.source_refs를 rank로 zip해 registry 생성."""
+    """packed.prompt_units + packed.source_refs를 rank로 zip해 registry 생성.
+
+    rank는 _finalize_context 가 직렬화 직전에 dense 1..K로 재부여한 발행 번호이므로,
+    by_rank 키는 곧 LLM이 보는 [cite] 번호이자 reference.set 의 발행 위치다.
+    """
     by_rank: Dict[int, SourceReference] = {}
     prompt_units = list(packed.prompt_units or [])
     source_refs = list(packed.source_refs or [])

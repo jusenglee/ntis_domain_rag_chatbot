@@ -604,15 +604,24 @@ def build_year_range_filter(
 
     should: List[Any] = []
 
-    # --- (A) year_keys: match_any for closed ranges only ---
-    # Open-range queries (year_from only = "이후", year_to only = "이전") rely solely on
-    # the integer range filter in Section B to avoid collapsing semantics to a single year.
+    # --- (A) year_keys: string match_any (closed AND open ranges) ---
+    # stan_yr / meta_basic.stan_yr are stored as YYYY *strings*, so the integer Range in
+    # Section (B) matches nothing. An open range (year_from only) previously emitted no
+    # string clause; because this whole year group is should-only and gets AND-combined onto
+    # the people/org must-filter, a non-matching int-range zeroed the entire result. Emit a
+    # bounded string match_any for open ranges too:
+    #   year_from only -> [y_from .. y_from+60];  year_to only -> [y_to-60 .. y_to].
     if y_from is not None and y_to is not None:
-        span = max(0, min(60, y_to - y_from))
-        y_values = [str(y_from + i) for i in range(span + 1)]
-        if y_values:
-            for key in year_keys:
-                should.append(qmodels.FieldCondition(key=key, match=make_match_any(y_values)))
+        span_lo, span_hi = y_from, y_to
+    elif y_from is not None:
+        span_lo, span_hi = y_from, y_from + 60
+    else:
+        span_lo, span_hi = y_to - 60, y_to
+    span = max(0, min(60, span_hi - span_lo))
+    y_values = [str(span_lo + i) for i in range(span + 1)]
+    if y_values:
+        for key in year_keys:
+            should.append(qmodels.FieldCondition(key=key, match=make_match_any(y_values)))
 
     # --- (B) year_keys: integer-like range fields ---
     year_range = _make_range_filter(y_from, y_to)

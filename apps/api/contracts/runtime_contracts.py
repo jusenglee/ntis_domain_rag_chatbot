@@ -281,6 +281,25 @@ def friendly_strategy_violation_message(
         if action == "detail" or has_explicit_id:
             return "조건에 맞는 조회 결과를 찾지 못했습니다. 식별자나 질문 조건이 정확한지 다시 확인해 주세요."
         if action == "list":
+            # 단일 연구자가 확정된 활동 조회(search_subject_activity 등)에서 0건이면,
+            # 일반 검색 실패 안내 대신 그 연구자 기준의 확정적 음성 답변을 돌려준다.
+            people_terms = [
+                str(term).strip()
+                for term in (getattr(question_analysis, "people_terms", None) or [])
+                if str(term).strip()
+            ]
+            if len(people_terms) == 1:
+                subject = people_terms[0]
+                org_terms = [
+                    str(term).strip()
+                    for term in (getattr(question_analysis, "people_affiliation_org_terms", None) or [])
+                    if str(term).strip()
+                ]
+                subject_label = f"{subject}({org_terms[0]})" if org_terms else subject
+                return (
+                    f"{subject_label} 연구자가 수행·참여한 과제 중 해당 조건에 맞는 과제는 확인되지 않았습니다. "
+                    "연도나 주제 등 조건을 조정하면 다시 찾아볼 수 있습니다."
+                )
             return "조건에 맞는 목록 결과를 찾지 못했습니다. 기관명, 연구자명, 연도 같은 조건을 조금 더 조정해 다시 시도해 주세요."
 
     if error_code == "RAG_EMPTY_RESULT_CONTRACT" and mode == "JOIN":

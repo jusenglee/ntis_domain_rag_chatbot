@@ -86,6 +86,9 @@ def route_after_agent_tool(state: Any) -> str:
     if observation_type == "participant_extraction":
         return "render_participant_answer"
 
+    if observation_type == "clarification_required":
+        return "agent_clarification"
+
     retry_count = int(getattr(state, "agent_tool_retry_count", 0) or 0)
     if retry_count < 1:
         return "retry_agent_after_tool_error"
@@ -192,6 +195,7 @@ def build_request_workflow() -> Any:
             "judge_knowledge_sufficiency": "judge_knowledge_sufficiency",
             "render_anchor_answer": "render_anchor_answer",
             "render_participant_answer": "render_participant_answer",
+            "agent_clarification": "agent_clarification",
             "retry_agent_after_tool_error": "retry_agent_after_tool_error",
             "agent_internal_error": "agent_internal_error",
         },

@@ -1644,17 +1644,17 @@ async def merge_answers(state: Any) -> Dict[str, Any]:
         selected_references = list(selected_artifact.references or [])
         if not selected_references:
             selected_references = _collect_state_references(state)
-        # SSOT source_refs: artifact가 비어 있으면 state.citation_registry로부터 LLM 본문 [N] 기준 도출.
+        # 스트리밍 정합 계약(Option: 안정 번호 마커):
+        # LLM은 프롬프트가 보여준 dense 인용 번호 [N](=identity.rank=cite, _stamp_citation_numbers)을
+        # 본문에 그대로 흘려보내고, 그 번호는 사후 재작성 없이 사용자에게 노출된다. 따라서 reference.set 은
+        # 반드시 같은 dense 순서의 **전체** 집합(all_refs_in_rank_order)으로 발행해 "본문 [N] == 목록 N번"을
+        # 구조적으로 보장한다. (인용한 일부만 추려 재번호하면 라이브 스트림의 마커와 어긋나므로 금지.)
         selected_source_refs = list(getattr(selected_artifact, "source_refs", []) or [])
-        if not selected_source_refs:
-            _state_registry_repack = getattr(state, "citation_registry", None)
-            if isinstance(_state_registry_repack, CitationRegistry):
-                selected_source_refs = derive_cited_source_refs(
-                    _state_registry_repack,
-                    answer_text=selected_artifact.text,
-                    request_id=str(getattr(state, "request_id", "") or ""),
-                    conversation_id=str(getattr(state, "conversation_id", "") or ""),
-                )
+        _state_registry_repack = getattr(state, "citation_registry", None)
+        if isinstance(_state_registry_repack, CitationRegistry):
+            registry_full_refs = _state_registry_repack.all_refs_in_rank_order()
+            if registry_full_refs:
+                selected_source_refs = registry_full_refs
         snapshot_payload = _snapshot_to_payload(active_result_snapshot) if active_result_snapshot is not None else None
         publication_groundedness = selected_groundedness
         publication_state_consistency = selected_state_consistency

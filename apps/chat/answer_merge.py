@@ -405,10 +405,28 @@ def select_final_answer(
             solar_severity >= _STATE_CONSISTENCY_MAX_SEVERITY
             and gemma_severity >= _STATE_CONSISTENCY_MAX_SEVERITY
         )
-        if both_at_max or not (solar_valid or gemma_valid):
+        if not (solar_valid or gemma_valid):
             selected_model = "fallback"
             selected_answer = fallback_message
-            selection_reason = "both_models_state_inconsistent"
+            selection_reason = "both_models_invalid"
+        elif both_at_max:
+            # 둘 다 state_consistency 최고 severity(=unsupported_item_identity)지만 답변 자체는
+            # 유효(grounded)하다. 검색 결과 중 일부만 선별/재정렬한 동향·요약형 답변이 화면 상위
+            # N행과 정확히 일치하지 않는 것은 정상이므로(ADR-0017), 무의미한 canned fallback 대신
+            # 정책 우선 모델의 유효 답변을 제공한다. 인용 [N]↔reference.set 무결성은
+            # citation_registry가 독립 보장하고, 다음 턴 ordinal용 visible_answer_manifest는
+            # state_consistency가 supported가 아니면 어차피 보류되므로(blocked_state_consistency)
+            # 잘못된 manifest가 발행되지 않는다.
+            if normalized_policy == "gemma_first" and gemma_valid:
+                selected_model = "gemma"
+                selected_answer = gemma_answer
+            elif solar_valid:
+                selected_model = "solar"
+                selected_answer = solar_answer
+            else:
+                selected_model = "gemma"
+                selected_answer = gemma_answer
+            selection_reason = "state_inconsistent_served_manifest_withheld"
         elif solar_severity < gemma_severity and solar_valid:
             selected_model = "solar"
             selected_answer = solar_answer

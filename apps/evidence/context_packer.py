@@ -47,6 +47,27 @@ class PackedContextResult:
         return asdict(self)
 
 
+def _stamp_citation_numbers(prompt_units: List[Dict[str, Any]]) -> None:
+    """직렬화 직전 최종 프롬프트 순서 기준으로 dense 인용 번호(1..K)를 부여한다.
+
+    스트리밍 정합 계약: LLM은 본문에 인용 번호를 그대로 흘려보내므로 사후 재작성이 불가능하다.
+    따라서 LLM이 보는 번호가 곧 reference.set 의 발행 위치여야 한다. retrieval rank 는 gate 탈락으로
+    sparse 해질 수 있어(예: 1,2,3,5,6) "rank == 발행 위치"가 깨진다. 여기서 최종 순서대로 1..K 를
+    다시 매겨, 각 항목 top-level `cite`(LLM 인용 토큰)와 `identity.rank`(registry 발행 키)를 동일한
+    dense 번호로 일치시킨다. 결과적으로 [cite] == reference.set 위치가 항상 성립한다.
+    """
+    for position, unit in enumerate(prompt_units):
+        index = position + 1
+        if not isinstance(unit, dict):
+            continue
+        identity = unit.get("identity")
+        if isinstance(identity, dict):
+            identity["rank"] = index
+        # cite 를 항목의 첫 키로 재배치 → 직렬화 시 각 항목 맨 앞에 노출되어 모델이 복사하기 쉽다(salient).
+        rest = {key: value for key, value in unit.items() if key != "cite"}
+        prompt_units[position] = {"cite": index, **rest}
+
+
 class BudgetedContextPacker:
     def __init__(
         self,
@@ -116,6 +137,7 @@ class BudgetedContextPacker:
                 refs.pop()
             if source_refs:
                 source_refs.pop()
+        _stamp_citation_numbers(prompt_units)
         context = serialize_json(prompt_units)
         used_tokens = self._exact_used_tokens(prompt_units)
         return context, used_tokens

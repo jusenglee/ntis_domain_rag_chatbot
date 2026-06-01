@@ -779,6 +779,11 @@ class CustomRAGRetriever(BaseModel):
                         mode=mode,
                         action=action,
                         ids_map=dict(getattr(normalized_intent, "ids_map", {}) or {}),
+                        base_route=str(getattr(normalized_intent, "base_route", "") or ""),
+                        people_terms=list(getattr(normalized_intent, "people_terms", []) or []),
+                        people_affiliation_org_terms=list(
+                            getattr(normalized_intent, "people_affiliation_org_terms", []) or []
+                        ),
                     ),
                 )
 

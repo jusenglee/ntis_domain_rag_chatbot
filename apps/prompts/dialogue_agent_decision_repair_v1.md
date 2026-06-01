@@ -24,6 +24,8 @@ Allowed `tool_name` values:
 - `search_subject_activity`
 - `refine_current_subject`
 - `lookup_specific_entity`
+- `resolve_project_title`
+- `extract_project_participants`
 - `join_project_perf`
 - `ask_user_for_clarification`
 
