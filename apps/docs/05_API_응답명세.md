@@ -80,6 +80,7 @@
 - 최종 사용자 가시 본문은 `answer.chunk`로만 전달한다. 정합성 보완이 필요하면 `done.meta.verified_projection_summary`를 별도 보완 레이어로 표시한다.
 - `reference.set`과 `done`은 정상/오류/강등(degraded) 종료 모두에서 내려보내는 것이 원칙이다.
 - `done`은 단순 종료 신호가 아니라 terminal metadata carrier다. clarification, no-result, degraded/error, publication guard 결과는 `done.meta`에 실린다.
+- `done`은 모든 종료 사례에서 `event.model_key="solar"`와 `event.model_key="gemma"` 두 프레임으로 fan-out한다. 두 프레임의 `meta`는 동일하며, 프론트엔드는 각 모델 패널에 같은 terminal state를 반영한다.
 - `contract-invalid` 상태에서는 LLM `answer.chunk`를 시작하지 않는다. route는 deterministic terminal message를 `done.meta.output_message`와 `done.meta.clarification`로 내보낸다.
 - 모델 provider가 reasoning만 내보내고 content를 만들지 못하면 provider failure로 간주한다. 이 상태는 사용자 모호성 clarification이 아니다.
 
@@ -92,7 +93,7 @@
     "kind": "done",
     "request_id": "cid-1234-abcd1234",
     "seq": 4,
-    "model_key": null,
+    "model_key": "solar",
     "content": null,
     "references": null,
     "meta": {
@@ -108,7 +109,7 @@
 | `event.kind` | string | 아래 event kind 표 참고 |
 | `event.request_id` | string | route가 생성한 request id |
 | `event.seq` | integer | route 기준 순번 |
-| `event.model_key` | string \| null | `answer.chunk` 등 모델 종속 event에서만 사용 |
+| `event.model_key` | string \| null | `answer.chunk`는 실제 모델 키, `done`은 항상 `"solar"`/`"gemma"` fan-out 키. `conversation`, `status`, `reference.set`은 `null` |
 | `event.content` | string \| null | 사용자 가시 텍스트 |
 | `event.references` | array \| null | `reference.set`에서 사용하며, 다른 event에서는 `null` |
 | `event.meta` | object | event별 추가 payload |
@@ -129,17 +130,17 @@
 2. `status`
 3. `answer.chunk` 0회 이상
 4. `reference.set`
-5. `done`
+5. `done` 2회 (`event.model_key="solar"`, `event.model_key="gemma"`)
 
 ### 예외 종료 규칙
 
 - graph 미준비:
-  - `reference.set` -> `done`
+  - `reference.set` -> `done(solar)` -> `done(gemma)`
 - 전략 위반을 사용자 메시지로 강등한 경우:
-  - `reference.set` -> `done`
+  - `reference.set` -> `done(solar)` -> `done(gemma)`
   - 이 경로는 `done.meta.output_message`에 사용자 가시 fallback 문장을 싣는다.
 - 내부 예외:
-  - `reference.set` -> `done`
+  - `reference.set` -> `done(solar)` -> `done(gemma)`
 - 최종 답변이 비어 있는 비정상 종료:
   - route guard가 `done.meta.output_message`를 강제로 생성한다.
   - `done.meta.error_code="MISSING_FINAL_ANSWER"`가 포함된다.
@@ -190,7 +191,7 @@
 | `ttft_content_ms` | number | 모델 경로 | 유효 텍스트 첫 청크 수신까지의 시간(ms) |
 | `content_chars` | integer | 모델 경로 | 최종 생성 답변 글자 수 |
 | `answer_source` | string | 대부분 | 선택된 답변 소스 (예: `solar`, `gemma`, `cache`) |
-| `model_key` | string | 모델 기반 | 사용된 LLM 모델 키 |
+| `model_key` | string | 모델 기반 | `done.meta` 내부의 선택 모델 키. top-level `event.model_key`는 모든 `done`에서 별도로 `"solar"`/`"gemma"` 두 프레임으로 fan-out된다. |
 | `groundedness_status` | string | 검증 경로 | 답변의 근거 정합성 상태 (`success`, `fail`, `not_applicable`) |
 | `visible_answer_manifest` | object | 목록 응답 | 다음 턴 참조용 엔티티 맵 (ordinal, id, title 포함) |
 | `visible_answer_manifest_publication` | object | 목록 발행 | 발행된 매니페스트 상세 정보 및 상태 |

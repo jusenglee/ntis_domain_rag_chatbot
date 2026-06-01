@@ -19,7 +19,18 @@ Planner는 Agent의 L1 의도에 종속(Subordinate)되며, 이를 달성하기 
 *   **식별자 맵 (`ids_map`):** `pjt_id`, `pjt_no`, `perf_id` 등 도메인 고유 식별자.
 *   **필터 (`filters`):** 사용자 질문에서 명시된 검색 조건 (`lead_org_name` 등).
 *   **원시 검색어 (`retrieval_query`):** 검색 엔진에 전달할 핵심 키워드.
+*   **Qdrant 실행 계획 (`qdrant_query_plan`):** Agent/Planner 계약을 Qdrant에 넣을 검색어, canonical filter, target collection, 후처리 정책으로 낮춘 컴파일 결과.
 *   **표시 계약 (`limit`, `display_limit`, `output_type`):** 답변 형태와 표시 개수. Smart Coercion이 적용되는 주 영역이다.
+
+### Qdrant Query Compiler
+
+Planner는 사용자의 의도를 다시 판단하지 않는다. Stage 1 LLM은 제거되었으며, `AgentIntentAdapter`가 Dialogue Agent/NormalizedIntent truth를 planner gate contract로 deterministic 변환한다. 이후 Planner는 확정된 L1 의도와 Stage 1.5의 의미 보존 계획을 받아 Qdrant 실행 계획으로 번역한다.
+
+*   `people_terms_to_keep`에 확정 개인명이 있을 때만 `participant_researcher_name` 필터를 만든다.
+*   `people_terms_to_keep=[]`인 people discovery 질의에서는 전문가, 박사급, 후보, 수행 경험자 같은 역할/이력 표현을 사람명 필터로 승격하지 않는다.
+*   기술/산업/정책/이력 단어는 `retrieval_query` 의미 축으로 보존한다.
+*   기관 필터는 Stage 1.5의 `org_role_hint`에 따라 `lead_org_name`, `participant_org_name`, `people_affiliation_org_name`, `org_name`으로 canonicalize한다.
+*   Qdrant 실행 계획은 `target_collections`, `vector_query`, `filters`, `limit/display_limit`, `postprocess`를 노출한다. 현행 people discovery의 `postprocess.kind=people_discovery`는 컴파일/관측 신호이며, runtime은 project/perf 근거 문서를 검색하고 `people_preview`를 포함한 canonical evidence를 제공한다. 프로젝트/성과 결과를 별도 person-candidate 목록으로 투영하는 display/evidence 후처리는 아직 출력 계약으로 승격하지 않는다.
 
 ### Smart Coercion: 계층 간 정렬 (Alignment)
 
@@ -30,6 +41,7 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   `limit`, `display_limit` 같은 표시/개수 파라미터.
 *   Agent가 상세 조회를 결정(`action=detail`)했으나 Planner가 다수 결과(`limit > 1`)를 요청한 경우, 이를 `limit=1`, `display_limit=1`로 normalize.
 *   Parser 호환성을 위한 query materialization.
+*   L1 의미를 보존하는 범위에서 Stage 2 필터 환각을 canonical query plan으로 정제. 예를 들어 확정 개인명이 없는 people discovery에서 researcher-name 필터를 제거하고 해당 조건을 `retrieval_query` 축으로 유지한다.
 *   Agent tool call이 명시 연구자 anchor와 활동/참여이력 의도를 모두 갖춘 경우, stagewise planner LLM을 생략하고 `mode=LOOKUP`, `head=people`, `action=list`, `filters.participant_researcher_name=[name]`, `target_cols=[project, perf]` 계약으로 직접 컴파일.
 
 금지 (L1 의도 자체의 변조 금지):
@@ -96,8 +108,8 @@ Smart Coercion은 하위 계층(L2 Planner)의 기술적 파라미터 환각이 
 *   `refine_current_subject(subject_ref="current_subject", ...)`는 `SessionMemory.current_context`가 `SubjectQueryContext`일 때만 허용된다. current subject의 `subject_kind`, `subject_name`, `subject_ids_map`을 seed로 복원하고 stagewise planner LLM을 호출하지 않는다. ambiguity retained 상태라면 `subject_ids_map.person_no=[...]` 같은 후보군 전체를 유지한 채 refinement하며, org/affiliation disambiguation이 들어오기 전까지 단일 person으로 축소하지 않는다.
 *   `search_ntis_domain` people fast path는 하위 호환 경로로 유지하며 다음 세 조건이 모두 충족될 때만 적용한다: `people` 축, 명시 연구자 anchor, 활동/참여이력/성과/논문/특허/보고서 계열 의도.
 *   단순히 people cue만 있거나, 사람 anchor가 없는 "연구자 지원정책" 같은 broad topic search는 기존 generic planner path를 유지한다.
-*   subject activity direct compile과 current-subject refinement에서는 `run_question_analysis`, `run_planner_stage1`, `run_planner_stage15`, `run_planner_stage2`를 호출하지 않는다.
-*   자연어 query에는 `1 items`, `people 10 items` 같은 parser-incompatible suffix를 붙이지 않는다. 개수 제한은 구조화된 `limit` / `display_limit` 메타로 전달한다.
+*   subject activity direct compile과 current-subject refinement에서는 `run_question_analysis`, `run_planner_stage15`, `run_planner_stage2`를 호출하지 않는다.
+*   자연어 query에는 `1 items`, `people 10 items`, `people 10개` 같은 tool 구조 필드 suffix를 붙이지 않는다. `domain_head`는 `NormalizedIntent.base_route` / `QuestionAnalysis.head` / `qdrant_query_plan.target_collections`로, 개수 제한은 구조화된 `limit` / `display_limit` 메타로 전달한다.
 *   이 경로의 관측 로그는 `AGENT.TOOL_DIRECT_COMPILE`, `AGENT.REFINE_CURRENT_SUBJECT`, `AGENT.CLARIFICATION.RECOVERY`와 `strategy_meta.tool_execution_source`로 남긴다. `QuestionAnalysisV3.planner_source`는 기존 허용값(`legacy`, `stagewise`, `None`)만 사용한다.
 
 ### Detail / Current-context 규칙

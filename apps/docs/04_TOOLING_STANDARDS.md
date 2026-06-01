@@ -65,8 +65,9 @@ unknown tool name은 repairable validation error다. Registry에 선언되어 �
 Agent tool adapter는 구조화 인자를 우선한다.
 
 - `limit`은 tool args와 planner count contract에 구조화 필드로 전달한다.
-- 검색어 보강이 꼭 필요할 때만 한국어 parser가 인식하는 `1개`, `1건` 같은 token을 사용한다.
-- `1 items`, `10 items` 같은 parser-incompatible 영어 token을 검색어에 붙이면 안 된다.
+- `domain_head`는 자연어 검색어에 붙이지 않고 `NormalizedIntent.base_route`, `QuestionAnalysis.head`, `qdrant_query_plan.target_collections`로 전달한다.
+- 검색어 보강이 꼭 필요하더라도 `domain_head`와 count는 검색어 보강 재료가 아니다.
+- `1 items`, `10 items`, `people 10개` 같은 parser-incompatible 또는 구조 필드 token을 검색어에 붙이면 안 된다.
 - `action=detail` 또는 `output_type=detail`은 materialized query의 count token보다 system contract가 우선하며 `1/1`로 normalize한다.
 - count token은 대상 식별 근거가 아니다. 단일 후보 검증은 current context, active scope, visible manifest, explicit ID에서 별도로 수행한다.
 - `search_subject_activity` / `refine_current_subject` direct compile은 `QuestionAnalysisV3.planner_source`에 새 enum을 쓰지 않는다. 관측용 출처는 `strategy_meta.tool_execution_source`와 로그 필드에만 둔다.

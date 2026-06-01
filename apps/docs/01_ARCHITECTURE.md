@@ -44,7 +44,7 @@ ADR-0001에 따라 대화 제어권은 `Dialogue Agent`가 점진적으로 가�
 Planner / Contract / Retrieval은 삭제 대상이 아니라 Agent tool backend의 contract guard로 유지한다.
 현재 workflow graph는 `agentic front-controller`일 때 `rule_precheck` 이후 `Dialogue Agent` 경로로 진입한다. Agent의 `direct_answer` / `ask_clarification`은 바로 저장 가능한 답변 artifact를 만들고, `agent_internal_error`는 error artifact를 만들며, `call_tool`은 `agent_tool_executor`가 만든 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 기존 retrieval pipeline에 넘긴다. Tool backend의 planner/contract 오류는 사용자 모호성으로 노출하지 않고 compact observation으로 Agent에 1회 되돌린다. 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫으며 `ClarificationContext`를 저장하지 않는다.
 
-Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 제한된다. Agent는 DB filter, 식별자, JOIN 축을 직접 만들지 않고 의미 수준 tool call만 만든다. Tool backend는 이를 검증 가능한 planner/retrieval 계약으로 변환한다.
+Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 제한된다. Agent는 DB filter, 식별자, JOIN 축을 직접 만들지 않고 의미 수준 tool call만 만든다. Tool backend는 이를 검증 가능한 planner/retrieval 계약으로 변환한다. 기존 Stage 1 LLM 의도 분류는 제거되었고, Agent/NormalizedIntent truth를 `AgentIntentAdapter`가 planner gate contract 형태로 변환한다.
 
 명시 연구자/기관의 활동기록은 P1부터 `search_subject_activity`가 담당한다. 이 도구와 `refine_current_subject`는 generic stagewise planner로 재진입하지 않고 subject activity lookup 계약을 직접 컴파일한다. `search_ntis_domain` people activity fast path는 하위 호환으로 유지하되 정식 선택지는 아니다. direct compile은 Agent 결정을 우회하는 휴리스틱이 아니라 Agent가 선택한 tool 의미를 `QuestionAnalysisV3(mode=LOOKUP, head=people|org, action=list)`로 빠르게 변환하는 Tool Backend Guard 최적화다. P2부터 direct subject tool은 `next_current_context`에 subject continuity 후보를 stage하고, answer publication guard 이후에만 `SessionMemory.current_context`로 커밋한다.
 
@@ -52,7 +52,7 @@ Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 
 |---|---|---|---|
 | **Dialogue Agent** | 전략적 의도 결정 (**L1**) | `AgentDecision` | 사용자의 실질적 의도 진실 확정 |
 | **Tool Backend Guard** | L1/L2 완충 및 정렬 | `IntentPayloadV3` | Smart Coercion을 통해 L2를 L1에 정렬 |
-| **Planner / Contract** | 기술적 컴파일러 (**L2**) | `IntentContract` | L1 의도를 기술적 파라미터(필터, 축)로 번역 |
+| **Planner / Contract** | 기술적 컴파일러 (**L2**) | `IntentContract`, `QdrantQueryPlan` | L1 의도를 Qdrant 실행 쿼리(검색어, 필터, 제한, 후처리)로 번역 |
 | **Orchestrator / Retrieval** | 행동 실행 및 보정 (**L2**) | `ExecutionTrace`, `ToolResult` | 정책 기반 도구 실행과 bounded recovery |
 | **Evidence / Display** | 근거/화면 상태 조립 | `canonical_evidence`, `DisplaySnapshot` | raw payload를 prompt-safe evidence와 visible truth로 변환 |
 | **Answer Publication Guard** | 최종 검증 및 발행 | `FinalAnswer` | L1 의도와 실행 결과의 최종 정합성 확인 |
@@ -62,7 +62,7 @@ Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 
 | 패키지 | 역할 |
 |---|---|
 | `apps.api` | route, runtime wiring, transport, manifest |
-| `apps.planner` | query intent, planner stage/runtime/service |
+| `apps.planner` | query intent, planner stage/runtime/service, Qdrant query compiler |
 | `apps.conversation` | follow-up, scope, anchor, session/view-state |
 | `apps.retrieval` | retrieval/filter/compile/orchestration/runtime |
 | `apps.evidence` | canonical evidence, detail/context/render, result assembly |
@@ -84,7 +84,7 @@ Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 
    └─ Agent tool call을 `IntentPayloadV3` / `QuestionAnalysisV3`로 변환하고 parser-incompatible query token, count contract, tool schema를 검증. subject activity와 current-subject refinement direct compile은 여기서 수행된다.
 
 4. Planner / Contract Assembly
-   └─ L1 truth 생성. detail count는 `1/1`로 normalize하되 대상 단일성은 별도 guard로 검증.
+   └─ L1 truth를 실행 계약으로 컴파일한다. Stage 2 슬롯은 `QdrantQueryPlan`으로 재컴파일되어 필터 환각을 제거하고 detail count는 `1/1`로 normalize한다. 대상 단일성은 별도 guard로 검증.
 
 5. Retrieval Execution
    └─ `SEARCH/LOOKUP/JOIN` 의미를 유지하며 실행. detail-like 요청은 단일 `pjt_id` 후보가 있으면 lookup 정책으로 실행하고, 단일 후보가 없으면 broad `SEARCH_RECOVERY`로 확장하지 않음.

@@ -1,0 +1,30 @@
+flowchart TD
+    U[User] --> API[FastAPI routes]
+    API --> S[AgentPipelineState]
+    S --> L[load_session]
+
+    L --> P[PlannerAgent pass 1: action/tool]
+    P -->|call_tool| A[PlannerAgent pass 2: args]
+    A --> T[ToolExecutor]
+    T --> G[AdequacyGate]
+    G -->|insufficient| P
+    G -->|adequate| C[answer_curator]
+
+    P -->|clarify| CL[emit_agentic_clarify]
+    P -->|answer| C
+
+    T --> NTIS[NTIS tool backplane: search/lookup/manifest/response]
+    NTIS --> OBS[Observation]
+    OBS --> G
+
+    C -->|response.* final_text| SAVE[save_session]
+    C -->|CanonicalEvidence bundle| ANS[AnswerAgent]
+    ANS --> CRIT[CriticAgent + grounding judge]
+    CRIT -->|publish| SAVE
+    CRIT -->|repair_answer| ANS
+    CRIT -->|clarify| CL
+    CRIT -->|internal_error| ERR[emit_internal_error]
+
+    SAVE --> OUT[JSON/SSE answer]
+    CL --> SAVE
+    ERR --> OUT
