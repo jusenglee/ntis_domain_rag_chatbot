@@ -78,11 +78,12 @@ class AgentPipelineDeps:
         *,
         dialogue_agent: DialogueAgent,
         entity_resolver: EntityResolverAgent,
-        search_planner: SearchPlannerAgent,
-        retrieval_agent: RetrievalAgent,
-        evidence_curator: EvidenceCuratorAgent,
         answer_agent: AnswerAgent,
         critic_agent: CriticAgent,
+        # 정적 그래프 전용 (DEPRECATED — agentic_workflow가 ToolExecutor로 대체)
+        search_planner: Optional[SearchPlannerAgent] = None,
+        retrieval_agent: Optional[RetrievalAgent] = None,
+        evidence_curator: Optional[EvidenceCuratorAgent] = None,
         planner_agent: Any = None,
         tool_executor: Any = None,
         adequacy_gate: Any = None,
@@ -96,7 +97,6 @@ class AgentPipelineDeps:
         self.critic_agent = critic_agent
         self.planner_agent = planner_agent
         self.tool_executor = tool_executor
-        # Phase 5 (c1) — Adequacy Gate (옵셔널). 미주입 시 tool_executor→planner_loop 기존 흐름.
         self.adequacy_gate = adequacy_gate
 
 
@@ -1534,13 +1534,10 @@ def _build_focus_entity_from_manifest(
 # ============================================================================
 
 def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
-    """LangGraph StateGraph (7-agent flow) 컴파일.
+    """LangGraph StateGraph (정적 7-agent flow) 컴파일.
 
-    Args:
-        deps: 7개 에이전트 의존성 묶음.
-
-    Returns:
-        compiled LangGraph (ainvoke / astream 사용 가능).
+    DEPRECATED: agentic_workflow.build_agentic_pipeline_graph()로 대체됨.
+    RAG_AGENTIC_MODE 토글 폐기 완료 — 검증 후 삭제 예정.
     """
     from langgraph.graph import END, StateGraph
 
