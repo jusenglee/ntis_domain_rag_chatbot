@@ -72,10 +72,11 @@ from apps.pipeline.session_store import load_pipeline_session, save_pipeline_ses
 # ============================================================================
 
 class AgentPipelineDeps:
-    """7-agent workflow가 노드 내부에서 호출하는 컴포넌트 묶음.
+    """Agentic 파이프라인 노드가 사용하는 컴포넌트 묶음.
 
-    Phase 3 추가: planner_agent / tool_executor — RAG_AGENTIC_MODE=true 일 때만 사용.
-    None이면 정적 그래프(기존 흐름)만 동작.
+    ADR-0020: 정적 그래프 제거 후 agentic 전용 구조로 단순화.
+    search_planner / retrieval_agent / evidence_curator는 정적 그래프 전용이었으나
+    runtime 호환성을 위해 옵셔널로 유지 (None 허용, 실제 사용 안 함).
     """
 
     def __init__(
@@ -83,30 +84,29 @@ class AgentPipelineDeps:
         *,
         dialogue_agent: DialogueAgent,
         entity_resolver: EntityResolverAgent,
-        search_planner: SearchPlannerAgent,
-        retrieval_agent: RetrievalAgent,
-        evidence_curator: EvidenceCuratorAgent,
         answer_agent: AnswerAgent,
         critic_agent: CriticAgent,
         answer_agent_secondary: Optional[AnswerAgent] = None,
         planner_agent: Any = None,
         tool_executor: Any = None,
         adequacy_gate: Any = None,
+        # 하위 호환 — 정적 그래프 전용, 실제 사용 안 함
+        search_planner: Any = None,
+        retrieval_agent: Any = None,
+        evidence_curator: Any = None,
     ) -> None:
         self.dialogue_agent = dialogue_agent
         self.entity_resolver = entity_resolver
-        self.search_planner = search_planner
-        self.retrieval_agent = retrieval_agent
-        self.evidence_curator = evidence_curator
         self.answer_agent = answer_agent
         self.critic_agent = critic_agent
-        # 이중 모델 출력(2026-06-01) — 메인=answer_agent(Solar, 패널 A), 보조=answer_agent_secondary
-        # (Gemma, 패널 B). None이면 단일 모델(메인) 답변만 생성 (RAG_DUAL_ANSWER_ENABLED=false 롤백).
         self.answer_agent_secondary = answer_agent_secondary
         self.planner_agent = planner_agent
         self.tool_executor = tool_executor
-        # Phase 5 (c1) — Adequacy Gate (옵셔널). 미주입 시 tool_executor→planner_loop 기존 흐름.
         self.adequacy_gate = adequacy_gate
+        # 미사용 — 정적 그래프 삭제 후 제거 예정
+        self.search_planner = search_planner
+        self.retrieval_agent = retrieval_agent
+        self.evidence_curator = evidence_curator
 
 
 # ============================================================================
@@ -1603,100 +1603,7 @@ def _build_focus_entity_from_manifest(
 # ============================================================================
 # Workflow builder
 # ============================================================================
-
-def build_agent_pipeline_graph(deps: AgentPipelineDeps) -> Any:
-    """LangGraph StateGraph (7-agent flow) 컴파일.
-
-    Args:
-        deps: 7개 에이전트 의존성 묶음.
-
-    Returns:
-        compiled LangGraph (ainvoke / astream 사용 가능).
-    """
-    from langgraph.graph import END, StateGraph
-
-    graph = StateGraph(AgentPipelineState)
-
-    # 노드
-    graph.add_node("load_session", node_load_session)
-    graph.add_node("dialogue_agent", _make_node_dialogue(deps))
-    graph.add_node("entity_resolver", _make_node_entity_resolver(deps))
-    graph.add_node("search_planner", _make_node_search_planner(deps))
-    graph.add_node("retrieval_agent", _make_node_retrieval(deps))
-    graph.add_node("evidence_curator", _make_node_evidence_curator(deps))
-    graph.add_node("answer_agent", _make_node_answer(deps))
-    graph.add_node("critic_agent", _make_node_critic(deps))
-    graph.add_node("emit_direct_answer", node_emit_direct_answer)
-    graph.add_node("emit_clarification", node_emit_clarification)
-    graph.add_node("emit_meta_answer", node_emit_meta_answer)
-    graph.add_node("emit_children_list", node_emit_children_list)
-    graph.add_node("emit_internal_error", node_emit_internal_error)
-    graph.add_node("save_session", node_save_session)
-
-    # 엣지
-    graph.set_entry_point("load_session")
-    graph.add_edge("load_session", "dialogue_agent")
-
-    graph.add_conditional_edges(
-        "dialogue_agent",
-        route_after_dialogue,
-        {
-            "emit_direct_answer": "emit_direct_answer",
-            "emit_clarification": "emit_clarification",
-            "entity_resolver": "entity_resolver",
-            "emit_internal_error": "emit_internal_error",
-        },
-    )
-
-    graph.add_conditional_edges(
-        "entity_resolver",
-        route_after_entity_resolver,
-        {
-            "search_planner": "search_planner",
-            "emit_clarification": "emit_clarification",
-            "emit_internal_error": "emit_internal_error",
-        },
-    )
-
-    graph.add_conditional_edges(
-        "search_planner",
-        route_after_search_planner,
-        {
-            "retrieval_agent": "retrieval_agent",
-            "emit_clarification": "emit_clarification",
-            "emit_meta_answer": "emit_meta_answer",
-            "emit_children_list": "emit_children_list",
-        },
-    )
-
-    graph.add_conditional_edges(
-        "retrieval_agent",
-        route_after_retrieval,
-        {
-            "evidence_curator": "evidence_curator",
-            "emit_internal_error": "emit_internal_error",
-        },
-    )
-
-    graph.add_edge("evidence_curator", "answer_agent")
-    graph.add_edge("answer_agent", "critic_agent")
-
-    graph.add_conditional_edges(
-        "critic_agent",
-        route_after_critic,
-        {
-            "save_session": "save_session",
-            "answer_agent": "answer_agent",
-            "emit_clarification": "emit_clarification",
-            "emit_internal_error": "emit_internal_error",
-        },
-    )
-
-    graph.add_edge("emit_direct_answer", "save_session")
-    graph.add_edge("emit_clarification", "save_session")
-    graph.add_edge("emit_meta_answer", "save_session")
-    graph.add_edge("emit_children_list", "save_session")
-    graph.add_edge("emit_internal_error", "save_session")
-    graph.add_edge("save_session", END)
-
-    return graph.compile()
+# ADR-0020 Phase 5: build_agent_pipeline_graph (정적 7-agent 그래프) 삭제.
+# 단일 agentic 파이프라인(agentic_workflow.build_agentic_pipeline_graph)으로 통합.
+# 이 파일은 공유 노드(node_load_session, node_save_session, emit_*, _make_node_* 등)
+# 만을 제공하는 모듈로 역할이 축소됐다.

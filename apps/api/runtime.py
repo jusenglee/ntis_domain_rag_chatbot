@@ -27,15 +27,12 @@ from fastapi import FastAPI
 from loguru import logger
 
 from apps.chat.llm_runtime import build_llm
-from apps.pipeline.agent_workflow import AgentPipelineDeps, build_agent_pipeline_graph
+from apps.pipeline.agent_workflow import AgentPipelineDeps
 from apps.pipeline.agents import (
     AnswerAgent,
     CriticAgent,
     DialogueAgent,
     EntityResolverAgent,
-    EvidenceCuratorAgent,
-    RetrievalAgent,
-    SearchPlannerAgent,
 )
 from apps.pipeline.agents.grounding.llm_judge import LLMJudgeChecker
 from apps.pipeline.search_agent import SearchAgent
@@ -155,45 +152,32 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         f"CriticAgent grounding_checker={'enabled (LLMJudgeChecker on dialogue_llm)' if grounding_enabled else 'disabled (env override)'}"
     )
 
-    # Phase 5 Step 5 (2026-05-27): RAG_AGENTIC_MODE 기본 true로 격상 — 운영 진입.
-    # 회귀 시 RAG_AGENTIC_MODE=false 환경변수로 즉시 정적 7-agent 그래프로 롤백.
-    agentic_mode_raw = os.environ.get("RAG_AGENTIC_MODE", "true").strip().lower()
-    agentic_mode_enabled = agentic_mode_raw not in {"0", "false", "no", "off"}
+    # ADR-0020: 단일 Agentic 파이프라인. RAG_AGENTIC_MODE 토글 제거.
+    from apps.pipeline.agents.adequacy_gate import AdequacyGate
+    from apps.pipeline.agents.planner_agent import PlannerAgent
+    from apps.pipeline.tools.contracts import ToolContext, ToolExecutor as _ToolExecutor
+    from apps.pipeline.tools.registry import build_default_registry
 
-    planner_agent: Any = None
-    tool_executor: Any = None
-    adequacy_gate: Any = None
-    if agentic_mode_enabled:
-        from apps.pipeline.agents.adequacy_gate import AdequacyGate
-        from apps.pipeline.agents.planner_agent import PlannerAgent
-        from apps.pipeline.tools.contracts import ToolContext, ToolExecutor as _ToolExecutor
-        from apps.pipeline.tools.registry import build_default_registry
-
-        tool_ctx = ToolContext(
-            qdrant_client=rag_resources.qdrant_client,
-            embed_e5i=rag_resources.embed_e5i,
-            embed_e5=rag_resources.embed_e5,
-            dialogue_llm=dialogue_llm,
-            answer_llm=answer_llm,
-            search_agent=search_agent,
-        )
-        tool_executor = _ToolExecutor(
-            registry=build_default_registry(), context=tool_ctx,
-        )
-        planner_agent = PlannerAgent(llm=dialogue_llm)
-        # Phase 5 (c1) — AdequacyGate: Planner와 결과 적합성 판단을 분리. 환경변수
-        # RAG_ADEQUACY_GATE_ENABLED=false 시 비활성 → tool_executor→planner_loop 기존 흐름.
-        adequacy_enabled = os.environ.get("RAG_ADEQUACY_GATE_ENABLED", "true").strip().lower() not in {
-            "0", "false", "no", "off",
-        }
-        if adequacy_enabled:
-            adequacy_gate = AdequacyGate(llm=dialogue_llm)
-        logger.info(
-            f"Agentic mode ENABLED — PlannerAgent + ToolExecutor with "
-            f"{len(tool_executor.specs())} tools, adequacy_gate={'enabled' if adequacy_gate else 'disabled'}"
-        )
-    else:
-        logger.info("Agentic mode disabled (RAG_AGENTIC_MODE not set) — static graph")
+    tool_ctx = ToolContext(
+        qdrant_client=rag_resources.qdrant_client,
+        embed_e5i=rag_resources.embed_e5i,
+        embed_e5=rag_resources.embed_e5,
+        dialogue_llm=dialogue_llm,
+        answer_llm=answer_llm,
+        search_agent=search_agent,
+    )
+    tool_executor = _ToolExecutor(
+        registry=build_default_registry(), context=tool_ctx,
+    )
+    planner_agent = PlannerAgent(llm=dialogue_llm)
+    adequacy_enabled = os.environ.get("RAG_ADEQUACY_GATE_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    adequacy_gate = AdequacyGate(llm=dialogue_llm) if adequacy_enabled else None
+    logger.info(
+        f"Agentic mode ENABLED — PlannerAgent + ToolExecutor with "
+        f"{len(tool_executor.specs())} tools, adequacy_gate={'enabled' if adequacy_gate else 'disabled'}"
+    )
 
     # 이중 모델 답변(2026-06-01 사용자 확정): A=Solar(메인) / B=Gemma(비교).
     # 메인 답변(Solar)이 CriticAgent 검증·repair·references·세션 발행의 기준이 된다.
@@ -215,16 +199,7 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
 
     deps = AgentPipelineDeps(
         dialogue_agent=DialogueAgent(llm=dialogue_llm),
-        # 2026-05-27: qdrant_client 주입으로 subject 도메인 검증 단 활성화 (Phase B).
         entity_resolver=EntityResolverAgent(qdrant_client=rag_resources.qdrant_client),
-        search_planner=SearchPlannerAgent(),
-        retrieval_agent=RetrievalAgent(
-            qdrant_client=rag_resources.qdrant_client,
-            embed_e5i=rag_resources.embed_e5i,
-            embed_e5=rag_resources.embed_e5,
-            task_executor=search_agent,
-        ),
-        evidence_curator=EvidenceCuratorAgent(),
         answer_agent=primary_answer_agent,
         critic_agent=CriticAgent(grounding_checker=grounding_checker),
         answer_agent_secondary=secondary_answer_agent,
@@ -233,7 +208,6 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         adequacy_gate=adequacy_gate,
     )
     app.state.pipeline_deps = deps
-    app.state.agentic_mode_enabled = agentic_mode_enabled
 
     # 4) KV 스토어 초기화
     import redis.asyncio as redis
@@ -247,14 +221,10 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     # 5) 메트릭용 HTTP 클라이언트 (관측 외부 시스템 연동에 사용; 기본은 사용 안 함)
     app.state.metrics_http = httpx.AsyncClient(timeout=httpx.Timeout(config.metrics_timeout_seconds))
 
-    # 6) LangGraph 컴파일 — agentic 모드면 cyclic 그래프, 아니면 정적 7-agent 그래프.
-    if agentic_mode_enabled:
-        from apps.pipeline.agentic_workflow import build_agentic_pipeline_graph
-        app.state.graph = build_agentic_pipeline_graph(deps)
-        logger.info("Agentic pipeline (cyclic LangGraph) compiled successfully")
-    else:
-        app.state.graph = build_agent_pipeline_graph(deps)
-        logger.info("7-agent pipeline compiled successfully")
+    # 6) LangGraph 컴파일 — 단일 Agentic 파이프라인 (ADR-0020).
+    from apps.pipeline.agentic_workflow import build_agentic_pipeline_graph
+    app.state.graph = build_agentic_pipeline_graph(deps)
+    logger.info("Agentic pipeline (cyclic LangGraph) compiled successfully")
 
 
 async def shutdown_app_runtime(app: FastAPI) -> None:

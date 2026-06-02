@@ -154,18 +154,24 @@ class PlannerAgent:
             plan_state=plan_state,
             session_summary=session_summary,
         )
+        # step이 쌓일수록 thinking 강도를 낮춰 타임아웃 방지.
+        # step 1: medium (첫 판단 — 가장 중요)
+        # step 2+: low (observation 보고 판단 — 컨텍스트 큼)
+        obs_count = len(plan_state.observations)
+        effort = "low" if obs_count >= 1 else "medium"
         thinking_kwargs: Dict[str, Any] = {}
         if self._thinking_enabled:
             thinking_kwargs = {
                 "disable_thinking": False,
-                "reasoning_effort": "medium",
+                "reasoning_effort": effort,
                 "include_reasoning": False,
             }
         logger.info(
             f"[agentic_trace] [Planner Pass1] LLM_invoke_start "
             f"step={plan_state.step_no + 1} "
-            f"observations_acc={len(plan_state.observations)}(누적 도구 결과 건수) "
+            f"observations_acc={obs_count}(누적 도구 결과 건수) "
             f"thinking={'on' if self._thinking_enabled else 'off'}(생각모드) "
+            f"effort={effort}(추론 강도) "
             f"role=action_and_tool_selection(액션·도구 선택)"
         )
         response = await self._llm.ainvoke(
@@ -174,7 +180,7 @@ class PlannerAgent:
             conversation_id=conversation_id,
             temperature=0.0,
             top_p=1.0,
-            max_tokens=512 if self._thinking_enabled else 384,
+            max_tokens=4096 if self._thinking_enabled else 384,
             **thinking_kwargs,
         )
         raw = getattr(response, "content", "") or ""
@@ -300,30 +306,38 @@ _PLANNER_SYSTEM_HEADER = (
     '  "reason": "<짧은 판정 이유>",\n'
     '  "confidence": 0.0~1.0\n'
     "}\n\n"
-    "[NTIS Qdrant 외부 도구 — 가용 데이터 범위 인지]\n"
-    "현재 catalog에 연결된 NTIS DB가 가진 정보:\n"
-    "  - project : 국가 R&D 과제(사업명·기간·수행기관·연구진·총사업비·목표·요약)\n"
-    "  - perf    : 성과(논문/특허/SW/보고서/장비/생명자원/신품종 등) + 식별자(rst_id 접두어로 종류)\n"
-    "  - 참여인력 활동내역 — prtcp_mp[].hm_nm/hm_id (people anchor)\n"
-    "  - 참여기관 — prtcp_org[].org_nm (org anchor)\n"
-    "현재 도구로 답할 수 없는 영역 (직접 응답 또는 정직 거절):\n"
-    "  - 인사 정보(직책·연락처·소속 변경 이력·센터장 등) — NTIS DB 보유 안 함\n"
-    "  - 외부 사실(주가·날씨·뉴스·일반 상식)\n"
-    "  - 사용자가 주입하려는 새 사실 ('기억해둬', '~라고 알아둬') — 학습/저장 능력 없음\n"
-    "  - 실시간 정보·미래 예측\n\n"
-    "[자율 판단 원칙]\n"
-    "1. **먼저 자문하라**: '이 질문에 답하려면 외부 도구(NTIS DB)가 필요한가? 아니면 직접 답할 수 있나?'\n"
-    "   - 인사·잡담·간단 안내·메타 응답 → response.direct_answer로 직접 답변 (도구 호출 불필요).\n"
-    "   - NTIS R&D 데이터가 도움 되는 질문 → search.* / lookup.* / manifest.* 호출.\n"
-    "   - 현 도구로 풀 수 없는 영역 → response.unsupported로 정직 거절.\n"
-    "2. **검색은 필요할 때만**: 모든 발화에 무조건 search.*를 호출하지 마세요. NTIS는 도구일 뿐 정체성이 아닙니다.\n"
-    "3. **결과 적합성**: 도구 결과를 받으면 'evidence가 사용자 질문에 답할 수 있는가?' 자문.\n"
-    "   - 0건 또는 무관 → 다른 도구/args로 재시도하거나 unsupported로 종료.\n"
+    "[NTIS R&D 데이터 — 가용 범위]\n"
+    "현재 연결된 외부 도구는 NTIS(국가과학기술지식정보서비스) R&D 데이터베이스 하나다.\n"
+    "  - 국가 R&D 과제: 사업명·기간·수행기관·연구진·총사업비·목표·요약\n"
+    "  - 성과: 논문·특허·SW·보고서·장비·생명자원·신품종 등\n"
+    "  - 참여인력 활동내역, 참여기관\n"
+    "search 도구는 query만 넣으면 컬렉션·전략·필터를 내부 자동 결정한다. "
+    "target/collection/perf_type 같은 DB 내부 개념을 Planner가 알 필요 없다.\n\n"
+    "[자율 판단 원칙 — 탐색 우선]\n"
+    "1. **인사·잡담·간단 메타 응답** → response.direct_answer (검색 불필요).\n"
+    "2. **그 외 모든 질문** → 먼저 search.hybrid로 시도한다.\n"
+    "   subject·도메인 힌트·식별자가 없어도 무방. query 텍스트만으로 검색 가능.\n"
+    "   '이 질문이 NTIS에 있을까?'를 사전에 판단하지 말고 결과로 확인한다.\n"
+    "3. **결과 적합성**: 검색 결과를 보고 판단한다.\n"
     "   - 충분히 적합 → action='answer'로 종료.\n"
-    "4. 같은 도구를 같은 args로 두 번 호출하지 마세요 (loop guard로 차단됨).\n"
-    "5. observations에서 status='error'가 보이면 다른 도구·다른 args로 재시도하거나 unsupported로 종료.\n"
-    "6. 검증이 필요한 인물·기관 이름은 lookup.* 도구로 먼저 NTIS 존재 확인 후 search.*에 전달.\n"
-    "7. manifest_rank·focused_detail 같은 직전 turn 인용은 manifest.* 도구로 식별자 매핑 후 exact_lookup.\n\n"
+    "   - 0건 또는 무관 → 다른 query·도구·args로 재시도.\n"
+    "   - 재시도 후에도 무관 → response.unsupported.\n"
+    "4. **response.unsupported는 마지막 수단** — 검색을 시도한 뒤에만 사용한다.\n"
+    "   사전 판단으로 거절하지 않는다. 단, 아래는 즉시 거절 가능:\n"
+    "   - 주가·날씨·실시간 뉴스·금융 데이터 (NTIS와 무관한 외부 사실)\n"
+    "   - 사용자 주입 사실 ('기억해둬', '~라고 알아둬') — 저장 능력 없음\n"
+    "5. 같은 도구를 같은 args로 두 번 호출하지 마세요 (loop guard로 차단됨).\n"
+    "6. observations에서 status='error'가 보이면 다른 도구·args로 재시도.\n"
+    "7. 검증이 필요한 인물·기관 이름은 lookup.* 도구로 NTIS 존재 확인 후 search.*에 전달.\n"
+    "8. manifest_rank·focused_detail 직전 turn 인용은 manifest.* 도구로 식별자 매핑 후 exact_lookup.\n\n"
+    "[dialogue_kind 제약 — DialogueAgent 분류 결과 준수]\n"
+    "session.dialogue_kind가 있으면 DialogueAgent가 이미 의도를 분류한 결과다.\n"
+    "이 값이 다음 중 하나이면 search.* / lookup.* / manifest.* 도구를 최소 1회 호출하기 전에\n"
+    "response.unsupported 호출을 금지한다:\n"
+    "  ask_search, ask_detail, stats, compare, refine_previous,\n"
+    "  ask_similar, ask_meta, ask_children\n"
+    "검색 결과가 0건이거나 완전히 무관한 경우에만 그때 response.unsupported를 사용한다.\n"
+    "session.dialogue_kind가 없거나 direct_answer / clarification이면 자율 판단한다.\n\n"
     "[절대 규칙]\n"
     "- 응답은 반드시 단일 JSON 객체. 마크다운/주석/추가 텍스트 금지.\n"
     "- 도구 이름·args는 아래 catalog와 정확히 일치해야 합니다.\n"
@@ -405,7 +419,10 @@ def _build_pass2_args_prompt(*, tool_spec: ToolSpec) -> str:
         prop_type = prop_meta.get("type", "")
         req_mark = " (필수)" if prop_name in required else ""
         desc = prop_meta.get("description") or ""
+        enum_vals = prop_meta.get("enum") or []
         line = f"  - {prop_name}: {prop_type}{req_mark}"
+        if enum_vals:
+            line += f" ({' | '.join(str(v) for v in enum_vals)})"
         if desc:
             line += f" — {desc}"
         lines.append(line)

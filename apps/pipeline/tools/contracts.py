@@ -95,6 +95,11 @@ class ToolContext:
     request_id: str = ""
     turn_id: str = ""
     conversation_id: str = ""
+    # Phase 6 (ADR-0022): SearchAgent 자동 라우팅을 위한 턴 단위 컨텍스트.
+    # node_tool_executor가 매 turn 주입. SearchAgent handler가 target/subject/filters를
+    # 자동 결정할 때 참조한다 — Planner는 이 정보를 알 필요 없다.
+    entity_resolution: Any = None   # EntityResolution | None
+    dialogue_kind: str = ""          # DialogueAgent.kind ("ask_search" 등)
 
 
 # ============================================================================

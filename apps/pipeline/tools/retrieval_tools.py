@@ -88,7 +88,10 @@ async def search_hybrid_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[
         raise ValueError("search.hybrid: 'query' is required")
     target = str(args.get("target") or "project").strip()
     if target not in {"project", "perf", "people", "org", "support"}:
-        raise ValueError(f"search.hybrid: invalid 'target' = {target!r}")
+        raise ValueError(
+            f"search.hybrid: invalid 'target' = {target!r}. "
+            "유효값: project | perf | people | org | support"
+        )
 
     subject = _parse_subject(args.get("subject"))
     filters = _parse_filters(args.get("filters"))
@@ -382,12 +385,323 @@ def _infer_target_from_ids(ids: IdentifierBundle) -> str:
 
 
 # ============================================================================
+# ADR-0022: SearchAgent 자동 라우팅 도구 (Planner에 DB 스키마 노출 제거)
+#
+# 이전 도구(search.hybrid / search.exact_lookup / search.aggregate)는 Planner에
+# target enum / perf_type enum / aggregate_by enum 같은 DB 내부 개념을 노출했다.
+# Planner가 'target="research"' 같은 잘못된 값을 생성하는 근본 원인이었다.
+#
+# 새 도구는 query (+ 의미적 hint만) 받아 컬렉션·전략·필터를 SearchRouter가 자동 결정한다.
+# Planner 인터페이스:
+#   search(query, hint?)        — 일반 검색
+#   search.detail(query?)       — 단건 상세 (세션 컨텍스트 자동 사용)
+#   search.stats(query, axis?)  — 통계 집계
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# SearchRouter — ctx에서 라우팅 컨텍스트 읽어 target / subject / filters 결정
+# ----------------------------------------------------------------------------
+
+def _route_from_ctx(ctx: ToolContext):
+    """ToolContext의 entity_resolution + dialogue_kind → (target, subject, filters).
+
+    Planner가 DB 스키마를 알 필요 없도록 라우팅 판단을 전담한다.
+    우선순위:
+        1. entity_resolution.forced_target → 해당 컬렉션
+        2. entity_resolution.subject.kind=people/org → project (anchor 검색)
+        3. entity_resolution.identifiers에 rst_id → perf
+        4. 그 외 → project (가장 일반적인 R&D 쿼리 기본값)
+    """
+    er = getattr(ctx, "entity_resolution", None)
+
+    # target 결정
+    if er is not None and er.forced_target:
+        target = er.forced_target
+    elif er is not None and er.identifiers is not None and getattr(er.identifiers, "rst_id", None):
+        target = "perf"
+    else:
+        target = "project"
+
+    # subject anchor
+    subject: Optional[SubjectAnchor] = None
+    if er is not None and er.subject is not None:
+        sub = er.subject
+        subject = SubjectAnchor(
+            kind=sub.kind,  # type: ignore[arg-type]
+            display_name=getattr(sub, "display_name", "") or getattr(sub, "subject_name", ""),
+            person_no=getattr(sub, "person_no", None),
+            org_id=getattr(sub, "org_id", None),
+            identity_status=getattr(sub, "identity_status", "ambiguous_name_only"),  # type: ignore[arg-type]
+        )
+
+    # filters from EntityResolution
+    filters: Optional[FilterBundle] = None
+    if er is not None and er.filters is not None:
+        filters = er.filters
+
+    return target, subject, filters
+
+
+def _infer_aggregate_by(axis: Optional[str]) -> str:
+    """의미적 axis 힌트 → 내부 aggregate_by 값.
+
+    Planner는 "year"·"org"·"type"·null만 사용한다.
+    실제 DB 집계 축("lead_org", "perf_type" 등)은 여기서 매핑한다.
+    """
+    _MAP = {
+        "year": "year",
+        "org": "lead_org",
+        "type": "tag",       # project은 tag, perf는 perf_type — 기본 tag 사용
+        "participant_org": "participant_org",
+        "participant_person": "participant_person",
+        # 내부값 직접 전달 허용 (lookup.* 도구가 ctx 통해 사용하는 경로)
+        "lead_org": "lead_org",
+        "tag": "tag",
+        "perf_type": "perf_type",
+    }
+    return _MAP.get(str(axis or "").strip().lower(), "year")
+
+
+# ----------------------------------------------------------------------------
+# 새 도구 1: search
+# ----------------------------------------------------------------------------
+
+SEARCH_SPEC = ToolSpec(
+    name="search",
+    description=(
+        "NTIS R&D 데이터 검색. query만 입력하면 컬렉션·전략·필터를 자동 결정한다. "
+        "일반 검색·인물 활동내역·기관 활동내역·주제 검색 등 모든 목록 조회에 사용."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "자연어 검색 질의"},
+            "hint": {
+                "type": ["string", "null"],
+                "enum": ["recent", "brief", None],
+                "description": "선택적 힌트: recent=최신순 정렬, brief=간결 결과, null=기본",
+            },
+            "limit": {"type": "integer", "description": "반환 건수 (기본 10)", "default": 10},
+        },
+        "required": ["query"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidences": {"type": "array"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="medium",
+    preconditions=[],
+)
+
+
+async def search_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("search: 'query' is required")
+    hint = str(args.get("hint") or "").strip().lower() or None
+    limit = int(args.get("limit") or 10)
+    sort_by = "recent_desc" if hint == "recent" else "relevance"
+
+    target, subject, filters = _route_from_ctx(ctx)
+
+    task = build_search_task(
+        action="list",
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        retrieval_query=query,
+        subject=subject,
+        filters=filters,
+        limit=limit,
+        display_limit=limit,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        judgment_reason="tool:search",
+    )
+    if ctx.search_agent is None:
+        raise RuntimeError("search: ctx.search_agent is None")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ----------------------------------------------------------------------------
+# 새 도구 2: search.detail
+# ----------------------------------------------------------------------------
+
+SEARCH_DETAIL_SPEC = ToolSpec(
+    name="search.detail",
+    description=(
+        "세션 컨텍스트(EntityResolution 식별자 또는 manifest 인용)의 단건 상세 조회. "
+        "사용자가 특정 과제·성과를 지목했을 때 사용. 식별자는 세션에서 자동 읽힌다."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": ["string", "null"],
+                "description": "보조 검색어 (세션에 식별자가 없을 때 fallback용, 보통 null)",
+            },
+        },
+        "required": [],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidences": {"type": "array"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="fast",
+    preconditions=[],
+)
+
+
+async def search_detail_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    er = getattr(ctx, "entity_resolution", None)
+
+    # 세션의 식별자 우선
+    identifiers: Optional[IdentifierBundle] = None
+    if er is not None and er.identifiers is not None and er.identifiers.has_any():
+        identifiers = er.identifiers
+
+    # 식별자 없으면 query fallback
+    query = str(args.get("query") or "").strip() or None
+
+    if identifiers is None and query is None:
+        raise ValueError("search.detail: 세션에 식별자도 없고 query도 없음 — 상세 조회 불가")
+
+    target, subject, filters = _route_from_ctx(ctx)
+
+    if identifiers is not None:
+        task = build_search_task(
+            action="detail",
+            target=target,  # type: ignore[arg-type]
+            request_id=ctx.request_id,
+            turn_id=ctx.turn_id,
+            identifiers=identifiers,
+            limit=1,
+            display_limit=1,
+            judgment_reason="tool:search.detail",
+        )
+    else:
+        task = build_search_task(
+            action="detail",
+            target=target,  # type: ignore[arg-type]
+            request_id=ctx.request_id,
+            turn_id=ctx.turn_id,
+            retrieval_query=query,
+            subject=subject,
+            filters=filters,
+            limit=1,
+            display_limit=1,
+            judgment_reason="tool:search.detail(query_fallback)",
+        )
+    if ctx.search_agent is None:
+        raise RuntimeError("search.detail: ctx.search_agent is None")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ----------------------------------------------------------------------------
+# 새 도구 3: search.stats
+# ----------------------------------------------------------------------------
+
+SEARCH_STATS_SPEC = ToolSpec(
+    name="search.stats",
+    description=(
+        "NTIS 데이터 통계·집계. '연도별', '기관별', '유형별' 등 집계 질문에 사용. "
+        "axis는 의미 단위로만 지정 (year/org/type). 내부 집계 전략은 자동 결정."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "집계 기준 검색어"},
+            "axis": {
+                "type": ["string", "null"],
+                "enum": ["year", "org", "type", None],
+                "description": "집계 축: year=연도별, org=기관별, type=유형·분야별, null=자동(연도)",
+            },
+            "limit": {"type": "integer", "description": "그룹 반환 수 (기본 30)", "default": 30},
+        },
+        "required": ["query"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "evidences": {"type": "array"},
+            "total_hits": {"type": "integer"},
+        },
+    },
+    cost_hint="slow",
+    preconditions=[],
+)
+
+
+async def search_stats_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("search.stats: 'query' is required")
+    axis_hint = args.get("axis")
+    aggregate_by = _infer_aggregate_by(axis_hint)
+    limit = int(args.get("limit") or 30)
+
+    target, subject, filters = _route_from_ctx(ctx)
+
+    task = build_search_task(
+        action="stats",
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        retrieval_query=query,
+        subject=subject,
+        filters=filters,
+        aggregate_by=aggregate_by,  # type: ignore[arg-type]
+        limit=limit,
+        display_limit=limit,
+        judgment_reason="tool:search.stats",
+    )
+    if ctx.search_agent is None:
+        raise RuntimeError("search.stats: ctx.search_agent is None")
+
+    result = await ctx.search_agent.execute(task)
+    return {
+        "status": result.status,
+        "evidences": [ev.model_dump() for ev in (result.evidences or [])],
+        "total_hits": int(result.total_hits or 0),
+        "diagnostics": dict(result.diagnostics or {}),
+    }
+
+
+# ============================================================================
 # Registry entries
 # ============================================================================
 
 def retrieval_tool_entries() -> List[ToolEntry]:
+    """ADR-0022: 새 SearchRouter 기반 도구 3개.
+
+    구 도구(search.hybrid / search.exact_lookup / search.aggregate)는 제거.
+    Planner는 target/collection 같은 DB 스키마를 알 필요 없다.
+    """
     return [
-        ToolEntry(spec=SEARCH_HYBRID_SPEC, handler=search_hybrid_handler),
-        ToolEntry(spec=SEARCH_EXACT_LOOKUP_SPEC, handler=search_exact_lookup_handler),
-        ToolEntry(spec=SEARCH_AGGREGATE_SPEC, handler=search_aggregate_handler),
+        ToolEntry(spec=SEARCH_SPEC, handler=search_handler),
+        ToolEntry(spec=SEARCH_DETAIL_SPEC, handler=search_detail_handler),
+        ToolEntry(spec=SEARCH_STATS_SPEC, handler=search_stats_handler),
     ]

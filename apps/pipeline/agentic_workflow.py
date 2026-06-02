@@ -37,8 +37,10 @@ from apps.pipeline.agent_state import AgentPipelineState
 from apps.pipeline.agent_workflow import (
     AgentPipelineDeps,
     node_emit_clarification,
+    node_emit_children_list,
     node_emit_direct_answer,
     node_emit_internal_error,
+    node_emit_meta_answer,
     node_load_session,
     node_save_session,
     _make_node_answer,
@@ -161,12 +163,16 @@ def _make_node_tool_executor(deps: AgentPipelineDeps):
                 f"(action={decision.action}, tool={decision.tool!r})"
             )
 
-        # context에 현재 turn 식별자 + session 주입 (도구가 ctx.session_state 등을 사용)
+        # context에 현재 turn 식별자 + session + 라우팅 컨텍스트 주입.
+        # entity_resolution / dialogue_kind는 SearchRouter가 컬렉션·전략을 자동 결정할 때 사용.
+        # Planner는 이 정보를 args로 전달할 필요 없다 (ADR-0022).
         ctx = deps.tool_executor.context
         ctx.request_id = state.request_id
         ctx.turn_id = state.turn_id
         ctx.conversation_id = state.conversation_id
         ctx.session_state = state.session_state
+        ctx.entity_resolution = state.entity_resolution
+        ctx.dialogue_kind = state.dialogue_intent.kind if state.dialogue_intent else ""
 
         call = ToolCall(tool=decision.tool, args=dict(decision.args or {}), reason=decision.reason)
         t0 = time.perf_counter()
@@ -397,6 +403,14 @@ def _select_direct_response_text(plan_state: "PlanState") -> tuple[Optional[str]
     last_decision = plan_state.last_decision() if plan_state.decisions else None
     if last_decision is not None and last_decision.action == "answer":
         if last_decision.answer_text:
+            # 관측(ADR-0019 잔존) — 이 경로는 Planner가 직접 채운 answer_text를 CriticAgent
+            # grounding/cite 검증 없이 발행한다. 현재 Pass1은 answer_text=null 기본 유도라 드물지만,
+            # 발생 시 미검증 답변이므로 추적용 경고를 남긴다. 근본 차단은 ADR-0019 Future Work.
+            logger.warning(
+                f"[answer_curator] planner_answer_text_bypasses_critic(Planner 직답이 Critic 우회) "
+                f"step={plan_state.step_no} chars={len(last_decision.answer_text)} "
+                f"reason={last_decision.reason[:80]!r}(이유)"
+            )
             return last_decision.answer_text, "direct_answer"
     # 2) response.* 마지막 ok observation
     last_response_obs: Optional[Observation] = None
@@ -428,28 +442,46 @@ def _select_evidences_for_answer(
     last_exact: Optional[Observation] = None
     last_agg: Optional[Observation] = None
     last_hybrid: Optional[Observation] = None
+    # ADR-0022: 새 도구명 + 구 도구명 모두 인식 (하위 호환)
+    _EXACT_TOOLS = {"search.detail", "search.exact_lookup"}
+    _AGG_TOOLS = {"search.stats", "search.aggregate"}
+    _HYBRID_TOOLS = {"search", "search.hybrid"}
     for obs in observations:
         if obs.status != "ok":
             continue
-        if obs.tool == "search.exact_lookup":
+        if obs.tool in _EXACT_TOOLS:
             last_exact = obs
-        elif obs.tool == "search.aggregate":
+        elif obs.tool in _AGG_TOOLS:
             last_agg = obs
-        elif obs.tool == "search.hybrid":
+        elif obs.tool in _HYBRID_TOOLS:
             last_hybrid = obs
 
     if last_exact is not None:
-        evs = _deserialize_evidences(last_exact.result.get("evidences") or [])
+        evs = _renumber_evidences(_deserialize_evidences(last_exact.result.get("evidences") or []))
         view = "single_detail" if len(evs) <= 1 else "list_compact"
         return evs, view, last_exact
     if last_agg is not None:
-        evs = _deserialize_evidences(last_agg.result.get("evidences") or [])
+        evs = _renumber_evidences(_deserialize_evidences(last_agg.result.get("evidences") or []))
         return evs, "stats_summary", last_agg
     if last_hybrid is not None:
-        evs = _deserialize_evidences(last_hybrid.result.get("evidences") or [])
+        evs = _renumber_evidences(_deserialize_evidences(last_hybrid.result.get("evidences") or []))
         view = "single_detail" if len(evs) == 1 else "list_compact"
         return evs, view, last_hybrid
     return [], "empty", None
+
+
+def _renumber_evidences(evs: List[CanonicalEvidence]) -> List[CanonicalEvidence]:
+    """snapshot_rank를 1..N으로 재부여 — AnswerAgent 인용 범위 위반 방지.
+
+    Static 그래프의 EvidenceCuratorAgent는 display_rank를 1..N으로 보장했다.
+    Agentic 경로는 raw search 결과를 그대로 쓰므로 snapshot_rank가 비연속
+    (예: 1,4,7,12,13)일 수 있다. CriticAgent는 max_rank=len(items)로 검증하므로
+    [12] 인용이 10건 중 12번 → out_of_range 오류가 발생한다.
+    """
+    return [
+        ev.model_copy(update={"snapshot_rank": i})
+        for i, ev in enumerate(evs, start=1)
+    ]
 
 
 def _deserialize_evidences(raw_list: List[Dict[str, Any]]) -> List[CanonicalEvidence]:
@@ -525,17 +557,21 @@ def _route_after_dialogue(state: AgentPipelineState) -> str:
 
 
 def _route_after_entity_resolver(state: AgentPipelineState) -> str:
-    """entity_resolver 출력 → planner_loop / emit_clarification 분기.
+    """entity_resolver 출력 → planner_loop / fast-path / emit_clarification 분기.
 
-    정적 그래프의 route_after_entity_resolver는 search_planner로 진입하지만, agentic 모드는
-    PlannerAgent가 검색 전략을 동적으로 결정하므로 planner_loop로 진입한다.
-    동명이인 등 모호성으로 clarification_needed=True면 즉답 되묻기로 종료.
+    ask_meta / ask_children은 검색 없이 세션 캐시(manifest/focused_detail)로 즉답.
+    그 외는 PlannerAgent가 동적으로 도구 전략을 결정하는 planner_loop로 진입.
     """
     resolution = state.entity_resolution
     if resolution is None:
         return "emit_internal_error"
     if resolution.clarification_needed:
         return "emit_clarification"
+    intent = state.dialogue_intent
+    if intent is not None and intent.kind == "ask_meta":
+        return "emit_meta_answer"
+    if intent is not None and intent.kind == "ask_children":
+        return "emit_children_list"
     return "planner_loop"
 
 
@@ -730,6 +766,10 @@ def _summarize_session(state: AgentPipelineState) -> Dict[str, Any]:
             er["manifest_rank"] = res.manifest_rank
             er["manifest_resolved_target"] = res.manifest_resolved_target
         summary["entity_resolution"] = er
+    # DialogueAgent 분류 결과 — Planner가 dialogue_kind를 제약 조건으로 활용한다.
+    # ask_search 계열이면 search.* 시도 전 response.unsupported 금지 (ADR-0021 Issue 1).
+    if state.dialogue_intent is not None:
+        summary["dialogue_kind"] = state.dialogue_intent.kind
     return summary
 
 
@@ -773,11 +813,12 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     graph.add_node("answer_agent", _make_node_answer(deps))
     graph.add_node("critic_agent", _make_node_critic(deps))
     graph.add_node("emit_agentic_clarify", node_emit_agentic_clarify)
-    # Step 2: 정적 그래프의 emit_clarification / emit_internal_error 재사용 — critic 결정 분기.
     graph.add_node("emit_clarification", node_emit_clarification)
     graph.add_node("emit_internal_error", node_emit_internal_error)
-    # dialogue_agent가 direct_answer(인사/잡담)로 분류 시 즉답 (정적 그래프 node_emit_direct_answer 재사용).
     graph.add_node("emit_direct_answer", node_emit_direct_answer)
+    # ask_meta / ask_children fast-path — 검색 없이 세션 캐시(manifest/focused_detail)로 즉답.
+    graph.add_node("emit_meta_answer", node_emit_meta_answer)
+    graph.add_node("emit_children_list", node_emit_children_list)
     graph.add_node("save_session", node_save_session)
 
     graph.add_edge(START, "load_session")
@@ -793,11 +834,13 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
             "emit_internal_error": "emit_internal_error",
         },
     )
-    # 엔티티 해소 단: 모호성(동명이인 등)은 되묻기, 그 외는 planner_loop로 진입.
+    # 엔티티 해소 단: ask_meta/ask_children은 fast-path, 모호성은 되묻기, 그 외는 planner_loop.
     graph.add_conditional_edges(
         "entity_resolver", _route_after_entity_resolver,
         {
             "planner_loop": "planner_loop",
+            "emit_meta_answer": "emit_meta_answer",
+            "emit_children_list": "emit_children_list",
             "emit_clarification": "emit_clarification",
             "emit_internal_error": "emit_internal_error",
         },
@@ -841,6 +884,8 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     graph.add_edge("emit_agentic_clarify", "save_session")
     graph.add_edge("emit_clarification", "save_session")
     graph.add_edge("emit_direct_answer", "save_session")
+    graph.add_edge("emit_meta_answer", "save_session")
+    graph.add_edge("emit_children_list", "save_session")
     graph.add_edge("emit_internal_error", "save_session")
     graph.add_edge("save_session", END)
 
