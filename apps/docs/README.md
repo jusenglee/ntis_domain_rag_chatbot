@@ -54,6 +54,10 @@ current implementation, not historic intent.
   current authority separation decision.
 - [ADR/ADR-0019_Agentic_Chatbot_With_NTIS_Tool_Backplane.md](ADR/ADR-0019_Agentic_Chatbot_With_NTIS_Tool_Backplane.md):
   current agentic product decision.
+- [ADR/ADR-0020_Unified_Agentic_Pipeline.md](ADR/ADR-0020_Unified_Agentic_Pipeline.md):
+  unified pipeline decision (static + agentic convergence).
+- [ADR/ADR-0021_Dual_Model_Answer_Output.md](ADR/ADR-0021_Dual_Model_Answer_Output.md):
+  dual-model answer output — main Solar (A) + comparison Gemma (B).
 
 ## Current Default Runtime
 
@@ -62,9 +66,14 @@ As implemented in `apps/api/runtime.py`:
 - `RAG_AGENTIC_MODE` defaults to `true`.
 - `RAG_ADEQUACY_GATE_ENABLED` defaults to `true` when agentic mode is enabled.
 - `RAG_GROUNDING_CHECKER_ENABLED` defaults to `true`.
+- `RAG_DUAL_ANSWER_ENABLED` defaults to `true`: answers are dual-model — main
+  Solar (panel A, canonical) + comparison Gemma (panel B, raw). The answer-model
+  role is Solar, not Gemma (see ADR-0021).
 - Planner and critic grounding use Solar thinking mode by default; adequacy
   thinking is off by default.
 - `RAG_AGENTIC_MODE=false` rolls back to the static seven-agent graph.
+- `RAG_DUAL_ANSWER_ENABLED=false` rolls back to a single Solar answer fanned to
+  both panels.
 
 ## Non-Negotiable Rules
 

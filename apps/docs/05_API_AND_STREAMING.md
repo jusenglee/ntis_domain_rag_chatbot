@@ -66,6 +66,26 @@ decision, manifest publication, session slot presence, and artifact metadata.
 The route starts graph execution in the background, reads the emitter queue, and
 closes after the graph finishes.
 
+Public `answer.chunk` frames use frontend lane labels only — `model_key="solar"`
+(compare panel **A**) and `model_key="gemma"` (compare panel **B**). The
+translation happens at the HTTP streaming boundary
+(`apps/api/streaming/model_keys.py::stream_events_for_frontend`):
+
+- **Dual-model answers** (default, `RAG_DUAL_ANSWER_ENABLED=true`): the pipeline
+  generates two answers for the same evidence. The **main** answer (Solar /
+  `solar_vllm_0`) streams tagged `model_key="solar"` and routes to panel A only;
+  the **comparison** answer (Gemma / `gemma_triton_0`) streams tagged
+  `model_key="gemma"` and routes to panel B only. The main (Solar) answer is the
+  one CriticAgent validates and that drives `reference.set` + session state; the
+  comparison (Gemma) answer is shown raw. A chunk already tagged with a frontend
+  lane (`solar`/`gemma`) is forwarded to that single lane.
+- **Single message** — any chunk with an internal/deterministic `model_key`
+  (`solar_vllm_0`, `gemma_triton_0`, `no_result`, `internal_error`,
+  `agentic_direct_answer`, `clarification`, …) is fanned out into two frames
+  (`solar` + `gemma`) so the one message shows identically in both panels. This
+  covers deterministic branches and the single-model rollback
+  (`RAG_DUAL_ANSWER_ENABLED=false`).
+
 ## AnswerArtifact
 
 Source: `apps/api/streaming/contracts.py`

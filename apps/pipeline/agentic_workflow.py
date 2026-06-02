@@ -4,6 +4,8 @@
 
 흐름:
     load_session
+      → dialogue_agent  (의도 분류 — direct_answer/clarification은 Planner 없이 즉답 종료)
+      → entity_resolver  (person_no/org_id 등 식별자 해소 — 모호 시 clarification 즉답)
       → planner_loop  (LLM이 다음 step 결정)
         → tool_executor  (call_tool인 경우 → Observation 누적 → planner로 복귀)
         → answer_curator  (answer인 경우 → 누적 observation의 evidence를 EvidenceBundle로)
@@ -35,11 +37,14 @@ from apps.pipeline.agent_state import AgentPipelineState
 from apps.pipeline.agent_workflow import (
     AgentPipelineDeps,
     node_emit_clarification,
+    node_emit_direct_answer,
     node_emit_internal_error,
     node_load_session,
     node_save_session,
     _make_node_answer,
     _make_node_critic,
+    _make_node_dialogue,
+    _make_node_entity_resolver,
 )
 from apps.pipeline.log_helpers import short_id
 from apps.pipeline.agents.contracts import (
@@ -279,6 +284,15 @@ async def node_answer_curator(state: AgentPipelineState) -> Dict[str, Any]:
     # 1. response.* 도구 또는 step.answer_text를 직접 답변으로 흐름.
     direct_text, direct_kind = _select_direct_response_text(plan_state)
     if direct_text:
+        if state.stream_emitter is not None:
+            await state.stream_emitter.publish(
+                StreamEvent(
+                    kind="answer.chunk",
+                    request_id=state.request_id,
+                    content=direct_text,
+                    model_key=f"agentic_{direct_kind or 'direct_answer'}",
+                )
+            )
         artifact = AnswerArtifact(
             text=direct_text,
             answer_kind="direct_answer" if direct_kind != "unsupported" else "clarification",
@@ -349,12 +363,21 @@ async def node_answer_curator(state: AgentPipelineState) -> Dict[str, Any]:
         f"source_tool={source_obs.tool if source_obs else None!r}(근거 도구) "
         f"next=AnswerAgent(LLM 답변 생성으로 진입)"
     )
-    # 답변 흐름이 dialogue_intent를 참조하므로 가짜로 ask_search 의도를 채운다
-    # (실제 분류는 PlannerAgent가 했고, AnswerAgent는 query만 본다).
-    intent = state.dialogue_intent or DialogueIntent(
-        kind="ask_search", target_hint=None, query=state.question or "",
-        reason="agentic_synthetic_intent", confidence=0.8,
-    )
+    # Phase 1에서 load_session→dialogue_agent가 항상 먼저 실행돼 dialogue_intent를 세팅한다.
+    # 합성(synthetic) ask_search 의도로 덮어쓰지 않고 실제 분류 결과를 그대로 사용한다 —
+    # subject_name·action_hint·length_hint 등 실제 신호가 AnswerAgent prompt로 정상 전달된다.
+    intent = state.dialogue_intent
+    if intent is None:
+        # 방어 — agentic 모드에선 dialogue_agent가 항상 먼저 실행되므로 도달 시 그래프 배선 오류.
+        logger.error(
+            f"[agentic_trace] req={short_id(state.request_id)} step={plan_state.step_no} "
+            f"[answer_curator] dialogue_intent_missing(배선 오류 — dialogue_agent 미실행) "
+            f"fallback=synthetic_ask_search"
+        )
+        intent = DialogueIntent(
+            kind="ask_search", target_hint=None, query=state.question or "",
+            reason="agentic_fallback_intent", confidence=0.5,
+        )
     return {
         "evidence_bundle": bundle,
         "search_result": sr,
@@ -483,6 +506,38 @@ async def node_emit_agentic_clarify(state: AgentPipelineState) -> Dict[str, Any]
 # ============================================================================
 # Routers
 # ============================================================================
+
+def _route_after_dialogue(state: AgentPipelineState) -> str:
+    """dialogue_agent 출력 → 다음 노드 분기 (정적 그래프 route_after_dialogue와 동일 의미).
+
+    direct_answer / clarification은 Planner를 거치지 않고 즉답 종료한다.
+    그 외(ask_search/ask_detail/stats/ask_meta/ask_children/…)는 entity_resolver로 진행해
+    식별자(person_no/org_id 등)를 해소한 뒤 planner_loop가 도구 전략을 결정한다.
+    """
+    intent = state.dialogue_intent
+    if intent is None:
+        return "emit_internal_error"
+    if intent.kind == "direct_answer":
+        return "emit_direct_answer"
+    if intent.kind == "clarification":
+        return "emit_clarification"
+    return "entity_resolver"
+
+
+def _route_after_entity_resolver(state: AgentPipelineState) -> str:
+    """entity_resolver 출력 → planner_loop / emit_clarification 분기.
+
+    정적 그래프의 route_after_entity_resolver는 search_planner로 진입하지만, agentic 모드는
+    PlannerAgent가 검색 전략을 동적으로 결정하므로 planner_loop로 진입한다.
+    동명이인 등 모호성으로 clarification_needed=True면 즉답 되묻기로 종료.
+    """
+    resolution = state.entity_resolution
+    if resolution is None:
+        return "emit_internal_error"
+    if resolution.clarification_needed:
+        return "emit_clarification"
+    return "planner_loop"
+
 
 def _route_after_planner(state: AgentPipelineState) -> str:
     """planner_loop 출력 → 다음 노드 분기."""
@@ -647,6 +702,34 @@ def _summarize_session(state: AgentPipelineState) -> Dict[str, Any]:
             "context_kind": snap.context_kind,
             "item_count": len(snap.items or []),
         }
+    # EntityResolver 해소 결과 노출 — Planner가 raw 이름 대신 확정 식별자(person_no/org_id 등)를
+    # 도구 args에 쓰도록 한다. payload["session"]에 통째로 직렬화되어 양 pass prompt에 노출된다.
+    if state.entity_resolution is not None:
+        res = state.entity_resolution
+        er: Dict[str, Any] = {"resolution_source": res.resolution_source}
+        if res.subject is not None:
+            er["subject"] = {
+                "kind": res.subject.kind,
+                "display_name": res.subject.display_name,
+                "person_no": res.subject.person_no,
+                "org_id": res.subject.org_id,
+                "identity_status": res.subject.identity_status,
+            }
+        id_map: Dict[str, List[str]] = {}
+        ids = res.identifiers
+        if ids is not None:
+            for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id"):
+                values = getattr(ids, axis, None) or []
+                if values:
+                    id_map[axis] = list(values)
+        if id_map:
+            er["identifiers"] = id_map
+        if res.forced_target:
+            er["forced_target"] = res.forced_target
+        if res.manifest_rank:
+            er["manifest_rank"] = res.manifest_rank
+            er["manifest_resolved_target"] = res.manifest_resolved_target
+        summary["entity_resolution"] = er
     return summary
 
 
@@ -657,12 +740,16 @@ def _summarize_session(state: AgentPipelineState) -> Dict[str, Any]:
 def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     """RAG_AGENTIC_MODE=true 때 사용되는 cyclic LangGraph 빌더.
 
-    노드 7개:
-        load_session, planner_loop, tool_executor, answer_curator,
-        answer_agent, critic_agent, save_session,
-        emit_agentic_clarify (clarify 즉답 분기)
+    진입 단(정적 그래프와 공유):
+        load_session → dialogue_agent → entity_resolver → planner_loop
+        - dialogue_agent: direct_answer/clarification은 Planner 없이 즉답 종료.
+        - entity_resolver: person_no/org_id 등 식별자 해소(모호 시 clarification).
 
-    cycle: planner_loop ↔ tool_executor (action=call_tool 동안 반복).
+    동적 루프(agentic):
+        planner_loop ↔ tool_executor (action=call_tool 동안 반복, 사이에 adequacy_gate)
+        → answer_curator → answer_agent → critic_agent → save_session
+        clarify는 emit_agentic_clarify로 즉답 종료.
+
     종료: planner가 answer/clarify 결정 → answer_curator 또는 emit_agentic_clarify로 분기.
     """
     if StateGraph is None:
@@ -674,6 +761,10 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
 
     graph = StateGraph(AgentPipelineState)
     graph.add_node("load_session", node_load_session)
+    # 판단(DialogueAgent) → 엔티티 해소(EntityResolver) 단을 planner_loop 앞에 배치.
+    # direct_answer/clarification은 여기서 단락 종료, 그 외만 식별자 해소 후 planner_loop 진입.
+    graph.add_node("dialogue_agent", _make_node_dialogue(deps))
+    graph.add_node("entity_resolver", _make_node_entity_resolver(deps))
     graph.add_node("planner_loop", _make_node_planner(deps))
     graph.add_node("tool_executor", _make_node_tool_executor(deps))
     # Phase 5 (c1): adequacy_gate가 Planner와 결과 적합성 판단을 분리.
@@ -685,10 +776,32 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     # Step 2: 정적 그래프의 emit_clarification / emit_internal_error 재사용 — critic 결정 분기.
     graph.add_node("emit_clarification", node_emit_clarification)
     graph.add_node("emit_internal_error", node_emit_internal_error)
+    # dialogue_agent가 direct_answer(인사/잡담)로 분류 시 즉답 (정적 그래프 node_emit_direct_answer 재사용).
+    graph.add_node("emit_direct_answer", node_emit_direct_answer)
     graph.add_node("save_session", node_save_session)
 
     graph.add_edge(START, "load_session")
-    graph.add_edge("load_session", "planner_loop")
+    graph.add_edge("load_session", "dialogue_agent")
+
+    # 판단 단: direct_answer/clarification은 즉답 종료, 그 외는 entity_resolver로.
+    graph.add_conditional_edges(
+        "dialogue_agent", _route_after_dialogue,
+        {
+            "entity_resolver": "entity_resolver",
+            "emit_direct_answer": "emit_direct_answer",
+            "emit_clarification": "emit_clarification",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
+    # 엔티티 해소 단: 모호성(동명이인 등)은 되묻기, 그 외는 planner_loop로 진입.
+    graph.add_conditional_edges(
+        "entity_resolver", _route_after_entity_resolver,
+        {
+            "planner_loop": "planner_loop",
+            "emit_clarification": "emit_clarification",
+            "emit_internal_error": "emit_internal_error",
+        },
+    )
 
     graph.add_conditional_edges(
         "planner_loop", _route_after_planner,
@@ -727,6 +840,7 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     )
     graph.add_edge("emit_agentic_clarify", "save_session")
     graph.add_edge("emit_clarification", "save_session")
+    graph.add_edge("emit_direct_answer", "save_session")
     graph.add_edge("emit_internal_error", "save_session")
     graph.add_edge("save_session", END)
 

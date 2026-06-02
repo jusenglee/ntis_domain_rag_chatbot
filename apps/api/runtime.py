@@ -131,7 +131,9 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     app.state.embed_e5i = rag_resources.embed_e5i
     app.state.embed_e5 = rag_resources.embed_e5
 
-    # 2) LLM 어댑터 빌드 (Solar = DialogueAgent 분류, Gemma = AnswerAgent 답변)
+    # 2) LLM 어댑터 빌드.
+    #    Solar(solar_vllm_0) = DialogueAgent 분류 + Planner/Critic 판정 + **메인 답변(패널 A)**.
+    #    Gemma(gemma_triton_0) = 비교 답변(패널 B) + 도구(response.*)용.
     dialogue_llm = build_llm(model_name="solar_vllm_0")
     answer_llm = build_llm(model_name="gemma_triton_0")
     app.state.dialogue_llm = dialogue_llm
@@ -193,6 +195,24 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
     else:
         logger.info("Agentic mode disabled (RAG_AGENTIC_MODE not set) — static graph")
 
+    # 이중 모델 답변(2026-06-01 사용자 확정): A=Solar(메인) / B=Gemma(비교).
+    # 메인 답변(Solar)이 CriticAgent 검증·repair·references·세션 발행의 기준이 된다.
+    # 보조 답변(Gemma)은 패널 B로 동시 스트리밍되며 검증 없이 원문 비교용으로만 노출.
+    # 회귀 시 RAG_DUAL_ANSWER_ENABLED=false 로 단일 모델(메인 Solar) 답변으로 롤백.
+    dual_answer_enabled = os.environ.get("RAG_DUAL_ANSWER_ENABLED", "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    primary_answer_agent = AnswerAgent(llm=dialogue_llm)  # 메인 = Solar (패널 A)
+    secondary_answer_agent = (
+        AnswerAgent(llm=answer_llm) if dual_answer_enabled else None  # 비교 = Gemma (패널 B)
+    )
+    logger.info(
+        "Dual answer {} — primary=Solar(solar_vllm_0, 패널 A){}".format(
+            "ENABLED" if dual_answer_enabled else "disabled",
+            " + secondary=Gemma(gemma_triton_0, 패널 B)" if dual_answer_enabled else " (단일 모델)",
+        )
+    )
+
     deps = AgentPipelineDeps(
         dialogue_agent=DialogueAgent(llm=dialogue_llm),
         # 2026-05-27: qdrant_client 주입으로 subject 도메인 검증 단 활성화 (Phase B).
@@ -205,8 +225,9 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
             task_executor=search_agent,
         ),
         evidence_curator=EvidenceCuratorAgent(),
-        answer_agent=AnswerAgent(llm=answer_llm),
+        answer_agent=primary_answer_agent,
         critic_agent=CriticAgent(grounding_checker=grounding_checker),
+        answer_agent_secondary=secondary_answer_agent,
         planner_agent=planner_agent,
         tool_executor=tool_executor,
         adequacy_gate=adequacy_gate,

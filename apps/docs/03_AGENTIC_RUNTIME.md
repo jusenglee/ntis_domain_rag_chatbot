@@ -102,6 +102,32 @@ Source: `apps/pipeline/agents/answer_agent.py`
 `AnswerAgent` generates an answer from an `EvidenceBundle`. It should only see
 canonical evidence, not raw vector payloads.
 
+### Dual-model output (A=Solar main, B=Gemma comparison)
+
+`node_answer` (`apps/pipeline/agent_workflow.py`) runs two `AnswerAgent`
+instances over the *same* `EvidenceBundle`/`DialogueIntent`:
+
+- **Main = Solar** (`deps.answer_agent`, `solar_vllm_0`): streams chunks tagged
+  `model_key="solar"` (frontend panel A) and is stored as `state.answer_draft`.
+  This is the canonical draft `CriticAgent` validates; it drives `repair_answer`,
+  `reference.set`, and session writes.
+- **Comparison = Gemma** (`deps.answer_agent_secondary`, `gemma_triton_0`):
+  streams chunks tagged `model_key="gemma"` (frontend panel B) and is stored as
+  `state.secondary_answer_draft`. It is shown raw — no grounding/citation gate,
+  no repair, not persisted to session.
+
+Both run concurrently (`asyncio.gather`). The comparison draft is generated only
+on the first pass over a non-empty bundle; a `repair_answer` re-pass regenerates
+the main (Solar) draft only, and a comparison failure is isolated (it never
+blocks the main answer). `[N]` citations reference the shared evidence bundle, so
+one `reference.set` applies to both panels.
+
+Disabled with `RAG_DUAL_ANSWER_ENABLED=false`: only the main (Solar) answer is
+generated and is fanned out to both panels. The `solar_vllm_0`/`gemma_triton_0`
+binding and the streaming lane contract are described in
+[ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md) and
+[05_API_AND_STREAMING](05_API_AND_STREAMING.md).
+
 ## CriticAgent
 
 Sources:

@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from apps.api.streaming.contracts import StreamEvent
 from apps.api.streaming.emitter import AsyncStreamEmitter
+from apps.api.streaming.model_keys import stream_events_for_frontend
 from apps.api.streaming.sse_encoder import encode_stream_event
 from apps.pipeline.agent_state import AgentPipelineState
 
@@ -69,6 +70,9 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
     def _build_response_payload(final_state: Any) -> dict[str, Any]:
         artifact = _get(final_state, "answer_artifact")
         text = str(_get(final_state, "final_answer_text", "") or "").strip()
+        # 이중 모델 출력 — A=Solar(메인, output_message), B=Gemma(비교, secondary_output_message).
+        secondary_draft = _get(final_state, "secondary_answer_draft")
+        secondary_text = str(getattr(secondary_draft, "text", "") or "").strip()
         references = []
         if artifact is not None and getattr(artifact, "references", None):
             references = list(artifact.references)
@@ -77,6 +81,8 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
             "conversation_id": _get(final_state, "conversation_id", ""),
             "request_id": _get(final_state, "request_id", ""),
             "output_message": text,
+            "secondary_output_message": secondary_text,
+            "model_answers": _build_model_answers(text, secondary_text),
             "answer_kind": answer_kind,
             "references": references,
             "latencies": dict(_get(final_state, "latencies", {}) or {}),
@@ -178,7 +184,8 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
                         continue
                     if event is None:
                         break
-                    yield encode_stream_event(event)
+                    for frontend_event in stream_events_for_frontend(event):
+                        yield encode_stream_event(frontend_event)
 
                 final_state = await task
 
@@ -216,6 +223,21 @@ def register_routes(app: FastAPI, *, template_index_path: Path) -> None:
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+
+def _build_model_answers(primary_text: str, secondary_text: str) -> list[dict[str, Any]]:
+    """이중 모델 출력을 슬롯별로 구조화 (A=Solar 메인 / B=Gemma 비교).
+
+    스트리밍 경로는 answer.chunk(model_key)로 각 패널에 직접 흐른다. 이 목록은
+    /query(비스트리밍) JSON 응답과 done 메타의 관측·디버깅 용도다. 비교 답변이
+    없으면(단일 모델 롤백·즉답·결정적 메시지) A 슬롯만 포함한다.
+    """
+    answers: list[dict[str, Any]] = [
+        {"slot": "A", "model_key": "solar", "text": primary_text},
+    ]
+    if secondary_text:
+        answers.append({"slot": "B", "model_key": "gemma", "text": secondary_text})
+    return answers
+
 
 def _get(state: Any, key: str, default: Any = None) -> Any:
     if state is None:

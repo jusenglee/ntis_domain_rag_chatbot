@@ -30,12 +30,17 @@ save 시 SessionState → SessionMemory 변환.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from apps.api.streaming.contracts import AnswerArtifact, ErrorArtifact, StreamEvent
+from apps.api.streaming.model_keys import (
+    PRIMARY_FRONTEND_KEY,
+    SECONDARY_FRONTEND_KEY,
+)
 from apps.conversation.session_memory import (
     PublishedManifestContext,
     SessionMemory,
@@ -83,6 +88,7 @@ class AgentPipelineDeps:
         evidence_curator: EvidenceCuratorAgent,
         answer_agent: AnswerAgent,
         critic_agent: CriticAgent,
+        answer_agent_secondary: Optional[AnswerAgent] = None,
         planner_agent: Any = None,
         tool_executor: Any = None,
         adequacy_gate: Any = None,
@@ -94,6 +100,9 @@ class AgentPipelineDeps:
         self.evidence_curator = evidence_curator
         self.answer_agent = answer_agent
         self.critic_agent = critic_agent
+        # 이중 모델 출력(2026-06-01) — 메인=answer_agent(Solar, 패널 A), 보조=answer_agent_secondary
+        # (Gemma, 패널 B). None이면 단일 모델(메인) 답변만 생성 (RAG_DUAL_ANSWER_ENABLED=false 롤백).
+        self.answer_agent_secondary = answer_agent_secondary
         self.planner_agent = planner_agent
         self.tool_executor = tool_executor
         # Phase 5 (c1) — Adequacy Gate (옵셔널). 미주입 시 tool_executor→planner_loop 기존 흐름.
@@ -430,34 +439,89 @@ def _make_node_evidence_curator(deps: AgentPipelineDeps):
 
 def _make_node_answer(deps: AgentPipelineDeps):
     async def node_answer(state: AgentPipelineState) -> Dict[str, Any]:
+        """메인(Solar) 답변 + 선택적 보조(Gemma) 비교 답변을 생성한다.
+
+        - 메인 답변(`deps.answer_agent`, Solar)은 패널 A 레인("solar")으로 스트리밍되고
+          `state.answer_draft`로 저장돼 CriticAgent 검증·repair·references·세션 발행의 기준이 된다.
+        - 보조 답변(`deps.answer_agent_secondary`, Gemma)이 주입돼 있고 결과가 비어있지 않으며
+          repair 패스가 아니면, 동일 EvidenceBundle/Intent로 패널 B 레인("gemma")에 동시 스트리밍하고
+          `state.secondary_answer_draft`로 보관한다 (검증 없이 원문 비교용).
+        - repair 패스(`state.repair_attempted`)에서는 메인만 재생성한다 — 보조 패널 B는 1회차
+          답변을 유지하고, 메인 패널 A에만 재작성 결과가 이어진다.
+        - 보조 생성 실패는 메인 답변을 막지 않는다 (격리).
+        """
         if state.evidence_bundle is None or state.dialogue_intent is None:
             return {}
-        t0 = time.perf_counter()
+        bundle = state.evidence_bundle
+        intent = state.dialogue_intent
+        emitter = state.stream_emitter
+
         repair_hint: Optional[str] = None
         if state.repair_attempted and state.guard_decision is not None:
             repair_hint = state.guard_decision.repair_hint
-        draft = await deps.answer_agent.generate(
-            bundle=state.evidence_bundle,
-            intent=state.dialogue_intent,
-            request_id=state.request_id,
-            emitter=state.stream_emitter,
-            repair_hint=repair_hint,
-        )
+
+        # 이중 출력 활성 여부: 보조 에이전트 주입 + 비어있지 않은 결과(empty면 결정적 no_result 단일 메시지).
+        dual_feature = deps.answer_agent_secondary is not None and bundle.view != "empty"
+        run_secondary = dual_feature and not state.repair_attempted
+        # dual이면 메인은 패널 A 레인("solar")로만 라우팅. 아니면(롤백/empty) 양 패널 fan-out 키.
+        primary_stream_key = PRIMARY_FRONTEND_KEY if dual_feature else "solar_vllm_0"
+
+        async def _gen_primary() -> Any:
+            return await deps.answer_agent.generate(
+                bundle=bundle,
+                intent=intent,
+                request_id=state.request_id,
+                emitter=emitter,
+                model_key=primary_stream_key,
+                repair_hint=repair_hint,
+            )
+
+        async def _gen_secondary() -> Any:
+            # 보조(Gemma) 실패는 무시 — 메인 답변/그래프를 막지 않는다.
+            try:
+                return await deps.answer_agent_secondary.generate(
+                    bundle=bundle,
+                    intent=intent,
+                    request_id=state.request_id,
+                    emitter=emitter,
+                    model_key=SECONDARY_FRONTEND_KEY,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[answer] secondary_failed(보조 Gemma 답변 생성 실패 — 무시) "
+                    f"req={short_id(state.request_id)} error={exc}"
+                )
+                return None
+
+        t0 = time.perf_counter()
+        if run_secondary:
+            draft, secondary_draft = await asyncio.gather(_gen_primary(), _gen_secondary())
+        else:
+            draft = await _gen_primary()
+            secondary_draft = None
         latency = (time.perf_counter() - t0) * 1000.0
+
+        sec_chars = len(secondary_draft.text) if secondary_draft is not None else None
         logger.info(
             f"[answer] draft_ready(답변 초안 완료) "
             f"req={short_id(state.request_id)} "
             f"template={draft.template}(템플릿) "
-            f"chars={len(draft.text)}(길이) "
+            f"chars={len(draft.text)}(메인 길이) "
             f"citations={len(draft.citations)}(인용 개수) "
             f"truncated={draft.truncated}(잘림 여부) "
             f"repair_hint={bool(repair_hint)}(재작성 힌트 적용) "
+            f"dual={run_secondary}(이중 출력) "
+            f"secondary_chars={sec_chars}(비교 Gemma 길이) "
             f"latency_ms={latency:.1f}(소요시간)"
         )
-        return {
+        update: Dict[str, Any] = {
             "answer_draft": draft,
             "latencies": {"answer_agent": latency / 1000.0},
         }
+        # repair 패스에서는 secondary_draft를 덮어쓰지 않는다 (1회차 보조 답변 유지).
+        if secondary_draft is not None:
+            update["secondary_answer_draft"] = secondary_draft
+        return update
 
     return node_answer
 

@@ -7,6 +7,7 @@ This document reflects current source defaults as of 2026-05-27.
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `RAG_AGENTIC_MODE` | `true` | enables agentic graph; `false` uses static seven-agent graph |
+| `RAG_DUAL_ANSWER_ENABLED` | `true` | dual-model answer: main Solar (panel A) + comparison Gemma (panel B); `false` = single Solar answer fanned to both panels |
 | `RAG_ADEQUACY_GATE_ENABLED` | `true` | enables adequacy judge after tool calls |
 | `RAG_GROUNDING_CHECKER_ENABLED` | `true` | enables critic grounding judge |
 | `RAG_PLANNER_THINKING_ENABLED` | `true` | enables Solar thinking for Planner pass 1 |
@@ -39,12 +40,27 @@ $env:RAG_PLANNER_THINKING_ENABLED = "false"
 $env:RAG_CRITIC_THINKING_ENABLED = "false"
 ```
 
+To rollback to a single answer (no comparison panel):
+
+```powershell
+$env:RAG_DUAL_ANSWER_ENABLED = "false"
+```
+
+Only the main (Solar) answer is generated; it is fanned out to both compare
+panels.
+
 ## Model Roles
 
 Current runtime construction:
 
-- `solar_vllm_0`: dialogue/planner/adequacy/critic judge style decisions.
-- `gemma_triton_0`: answer generation.
+- `solar_vllm_0`: dialogue/planner/adequacy/critic judge style decisions, and
+  the **main answer** (compare panel A) — the draft `CriticAgent` validates and
+  that drives `reference.set` and session state.
+- `gemma_triton_0`: the **comparison answer** (compare panel B, raw — not
+  validated, not persisted) and the `response.*` direct-answer tools.
+
+The answer-model role moved from Gemma to Solar; see
+[ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md).
 
 Thinking mode should stay selective. It is useful for action selection and
 grounding judgment, but not for every NER or args composition call.

@@ -83,6 +83,9 @@ class AgentPipelineState(BaseModel):
     search_result: Optional[SearchResult] = None
     evidence_bundle: Optional[EvidenceBundle] = None
     answer_draft: Optional[AnswerDraft] = None
+    # 비교 답변 초안 (이중 모델 출력). 메인=Solar(answer_draft), 보조=Gemma(secondary_answer_draft).
+    # 보조는 프론트 패널 B로만 스트리밍되며 Critic 검증·세션·references 발행 대상이 아니다 (원문 비교용).
+    secondary_answer_draft: Optional[AnswerDraft] = None
     guard_decision: Optional[GuardDecision] = None
 
     # ── 발행 산출물 ──────────────────────────────────────────────────────

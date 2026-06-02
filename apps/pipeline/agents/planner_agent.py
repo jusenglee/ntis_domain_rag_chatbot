@@ -417,6 +417,8 @@ def _build_pass2_args_prompt(*, tool_spec: ToolSpec) -> str:
     lines.append("")
     lines.append("[NER 규칙]")
     lines.append("- 사용자 발화의 인물·기관·연도·식별자는 args의 적절한 필드에 채웁니다.")
+    lines.append("- session.entity_resolution에 확정된 식별자(subject.person_no/org_id, identifiers.*)가 있으면, "
+                 "raw 이름·텍스트 대신 그 확정값을 해당 args 필드(person_no/org_id/pjt_id 등)에 우선 사용합니다.")
     lines.append("- 기술 약어·일반명사(LLM, AI, 빅데이터, ML 등)는 subject_name·perf_type 같은 식별자 필드에 박지 마세요.")
     lines.append("- 사용자가 명시 안 한 값은 null·빈 배열로 둡니다.")
     lines.append("")

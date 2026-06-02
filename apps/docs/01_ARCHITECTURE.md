@@ -10,8 +10,15 @@ tool, not the central workflow identity.
 `apps/api/runtime.py` builds shared resources:
 
 - Qdrant clients and embedding models from `apps.retrieval.rag_store`.
-- `solar_vllm_0` for dialogue, planning, adequacy, and grounding judgments.
-- `gemma_triton_0` for answer generation.
+- `solar_vllm_0` for dialogue, planning, adequacy, grounding judgments, and the
+  **main answer** (compare panel A).
+- `gemma_triton_0` for the **comparison answer** (compare panel B) and the
+  `response.*` direct-answer tools.
+
+Answer generation is dual-model by default (`RAG_DUAL_ANSWER_ENABLED=true`): the
+main answer (Solar) is the canonical one that `CriticAgent` validates and that
+drives `reference.set` and session state; the comparison answer (Gemma) is shown
+raw. See [ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md).
 - `SearchAgent` as the NTIS vector DB executor.
 - `ToolExecutor` and default tool registry when agentic mode is enabled.
 - `AdequacyGate` when `RAG_ADEQUACY_GATE_ENABLED` is enabled.
