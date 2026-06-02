@@ -24,7 +24,6 @@ When enabled, runtime wires:
 - `PlannerAgent`
 - `ToolExecutor`
 - default registry with search, lookup, manifest, and response tools
-- optional `AdequacyGate`
 - existing `AnswerAgent`
 - existing `CriticAgent`
 
@@ -33,8 +32,9 @@ The Planner uses two passes:
 1. action/tool selection with thinking mode,
 2. args composition without thinking mode.
 
-The adequacy gate separates "did the result answer the question?" from tool
-selection.
+> **Superseded (ADR-0023):** `AdequacyGate` was removed. Adequacy ("did the
+> result answer the question?") is now decided solely by the Planner. See
+> ADR-0023.
 
 ## Why
 
@@ -53,7 +53,8 @@ a capability it can call.
 - Agentic mode adds LLM calls and latency.
 - Direct response tools can bypass `AnswerAgent` and `CriticAgent`; this must
   stay restricted to direct/unsupported response paths.
-- Adequacy gate adds one optional judge call after tool execution.
+- ~~Adequacy gate adds one optional judge call after tool execution.~~
+  (Removed in ADR-0023 — caused over-search churn; Planner now sole authority.)
 - A static seven-agent graph remains as rollback.
 
 ## Required Future Work

@@ -10,7 +10,7 @@ tool, not the central workflow identity.
 `apps/api/runtime.py` builds shared resources:
 
 - Qdrant clients and embedding models from `apps.retrieval.rag_store`.
-- `solar_vllm_0` for dialogue, planning, adequacy, grounding judgments, and the
+- `solar_vllm_0` for dialogue, planning, grounding judgments, and the
   **main answer** (compare panel A).
 - `gemma_triton_0` for the **comparison answer** (compare panel B) and the
   `response.*` direct-answer tools.
@@ -20,66 +20,46 @@ main answer (Solar) is the canonical one that `CriticAgent` validates and that
 drives `reference.set` and session state; the comparison answer (Gemma) is shown
 raw. See [ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md).
 - `SearchAgent` as the NTIS vector DB executor.
-- `ToolExecutor` and default tool registry when agentic mode is enabled.
-- `AdequacyGate` when `RAG_ADEQUACY_GATE_ENABLED` is enabled.
+- `ToolExecutor` and default tool registry.
 - LangGraph compiled graph.
 
-## Two Graphs
+## Single Agentic Pipeline
 
-### Agentic Graph
-
-Default when `RAG_AGENTIC_MODE` is not set or is truthy.
+ADR-0020 removed the static graph; there is one pipeline. ADR-0023 removed the
+AdequacyGate; adequacy is the Planner's sole authority.
 
 Flow:
 
 ```text
 load_session
+  -> dialogue_agent          (direct_answer / clarification -> emit, no Planner)
+  -> entity_resolver         (ask_meta / ask_children -> fast-path emit)
   -> planner_loop
   -> tool_executor
-  -> adequacy_gate
-  -> planner_loop | answer_curator
+       -> answer_curator     (last obs = response.* terminal)
+       -> planner_loop       (everything else -> Planner decides answer/refine)
+  -> answer_curator
   -> answer_agent
   -> critic_agent
   -> save_session | answer_agent | emit_clarification | emit_internal_error
 ```
 
-Direct response tools can short-circuit:
+Direct response tools short-circuit:
 
 ```text
-planner_loop -> response.* tool -> adequacy_gate -> answer_curator -> save_session
+planner_loop -> response.* tool -> tool_executor -> answer_curator -> save_session
 ```
 
 In that path the output is already final text, so `AnswerAgent` and
 `CriticAgent` are skipped.
-
-### Static Seven-Agent Graph
-
-Enabled with `RAG_AGENTIC_MODE=false`.
-
-Flow:
-
-```text
-load_session
-  -> dialogue_agent
-  -> entity_resolver
-  -> search_planner
-  -> retrieval_agent
-  -> evidence_curator
-  -> answer_agent
-  -> critic_agent
-  -> save_session | repair | clarify | error
-```
-
-This graph remains the rollback path and preserves deterministic responsibility
-boundaries.
 
 ## Authority Separation
 
 The current implementation keeps three layers separate:
 
 1. Interaction and intent authority:
-   `DialogueAgent`, `PlannerAgent`, and `AdequacyGate` decide what should
-   happen next.
+   `DialogueAgent` and `PlannerAgent` decide what should happen next.
+   The Planner is the single adequacy authority (ADR-0023).
 2. Evidence authority:
    `ToolExecutor`, NTIS tools, and `SearchAgent` retrieve or transform data but
    do not reinterpret the user.
@@ -91,9 +71,10 @@ The current implementation keeps three layers separate:
 
 The NTIS vector DB is a tool backplane.
 
-It is used through tools such as `search.hybrid`, `search.exact_lookup`, and
-`search.aggregate`. It supplies canonical evidence for NTIS-backed answers. It
-does not define all conversational behavior.
+It is used through tools such as `search`, `search.detail`, and `search.stats`
+(ADR-0022 — the Planner does not see DB schema; the SearchRouter resolves
+collection/strategy/filters internally). It supplies canonical evidence for
+NTIS-backed answers. It does not define all conversational behavior.
 
 The agent may avoid NTIS access for:
 

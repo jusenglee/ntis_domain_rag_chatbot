@@ -89,7 +89,6 @@ class AgentPipelineDeps:
         answer_agent_secondary: Optional[AnswerAgent] = None,
         planner_agent: Any = None,
         tool_executor: Any = None,
-        adequacy_gate: Any = None,
         # 하위 호환 — 정적 그래프 전용, 실제 사용 안 함
         search_planner: Any = None,
         retrieval_agent: Any = None,
@@ -102,7 +101,6 @@ class AgentPipelineDeps:
         self.answer_agent_secondary = answer_agent_secondary
         self.planner_agent = planner_agent
         self.tool_executor = tool_executor
-        self.adequacy_gate = adequacy_gate
         # 미사용 — 정적 그래프 삭제 후 제거 예정
         self.search_planner = search_planner
         self.retrieval_agent = retrieval_agent

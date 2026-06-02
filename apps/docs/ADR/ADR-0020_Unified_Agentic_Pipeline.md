@@ -107,16 +107,14 @@ stored in `AgentPipelineState.entity_resolution` and included in the session
 summary passed to `PlannerAgent`. Pass 2 uses resolved `person_no` / `org_id`
 instead of raw `subject_name`.
 
-### AdequacyGate retained
+### AdequacyGate — superseded by ADR-0023
 
-`AdequacyGate` remains as a second-opinion judge after each tool execution.
-Its role is complementary to, not competing with, the Planner:
-
-- Planner decides *which tool* to call next.
-- AdequacyGate decides *whether further tool calls are needed at all*.
-
-The Planner operates inside the loop; AdequacyGate provides a global view of
-accumulated observations.
+This ADR originally retained `AdequacyGate` as a second-opinion judge. In
+practice the gate's LLM judge over-judged successful searches as "insufficient"
+and forced re-search churn, competing with the Planner for the same decision.
+**ADR-0023 removed `AdequacyGate` entirely** — adequacy is now the Planner's
+sole authority, with `tool_executor` routing deterministically to
+`answer_curator` (response.* terminal) or `planner_loop` (everything else).
 
 ### `answer_curator` scope reduced
 

@@ -152,8 +152,7 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         f"CriticAgent grounding_checker={'enabled (LLMJudgeChecker on dialogue_llm)' if grounding_enabled else 'disabled (env override)'}"
     )
 
-    # ADR-0020: 단일 Agentic 파이프라인. RAG_AGENTIC_MODE 토글 제거.
-    from apps.pipeline.agents.adequacy_gate import AdequacyGate
+    # ADR-0020: 단일 Agentic 파이프라인. ADR-0023: AdequacyGate 제거 — 충분성 판단은 Planner 단일 권한.
     from apps.pipeline.agents.planner_agent import PlannerAgent
     from apps.pipeline.tools.contracts import ToolContext, ToolExecutor as _ToolExecutor
     from apps.pipeline.tools.registry import build_default_registry
@@ -170,13 +169,9 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         registry=build_default_registry(), context=tool_ctx,
     )
     planner_agent = PlannerAgent(llm=dialogue_llm)
-    adequacy_enabled = os.environ.get("RAG_ADEQUACY_GATE_ENABLED", "true").strip().lower() not in {
-        "0", "false", "no", "off",
-    }
-    adequacy_gate = AdequacyGate(llm=dialogue_llm) if adequacy_enabled else None
     logger.info(
         f"Agentic mode ENABLED — PlannerAgent + ToolExecutor with "
-        f"{len(tool_executor.specs())} tools, adequacy_gate={'enabled' if adequacy_gate else 'disabled'}"
+        f"{len(tool_executor.specs())} tools (충분성 판단=Planner 단일 권한, AdequacyGate 폐기)"
     )
 
     # 이중 모델 답변(2026-06-01 사용자 확정): A=Solar(메인) / B=Gemma(비교).
@@ -205,7 +200,6 @@ async def initialize_app_runtime(app: FastAPI, *, config: AppRuntimeConfig) -> N
         answer_agent_secondary=secondary_answer_agent,
         planner_agent=planner_agent,
         tool_executor=tool_executor,
-        adequacy_gate=adequacy_gate,
     )
     app.state.pipeline_deps = deps
 

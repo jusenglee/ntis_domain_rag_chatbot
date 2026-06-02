@@ -20,8 +20,7 @@ Keep three authority layers separate.
 Owners:
 
 - `DialogueAgent`
-- `PlannerAgent`
-- `AdequacyGate`
+- `PlannerAgent` (also the sole adequacy authority — ADR-0023)
 - routing functions in LangGraph
 
 Responsibilities:

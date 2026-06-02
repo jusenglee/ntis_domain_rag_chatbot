@@ -14,36 +14,13 @@ from __future__ import annotations
 """
 
 import os
-import logging
 from pathlib import Path
 from dataclasses import dataclass
 
-import sys
 from loguru import logger
 
-# 로깅 설정: 표준 logging 라이브러리의 출력을 Loguru로 통합하여 일관된 로그 형식을 유지합니다.
-class InterceptHandler(logging.Handler):
-    def emit(self, record):
-        try:
-            level = logger.level(record.levelname).name
-        except ValueError:
-            level = record.levelno
-
-        frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
-            depth += 1
-
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
-
-def setup_logging():
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="INFO",
-    )
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+# 로깅 설정: 가독성 높은 콘솔 포맷 + 표준 logging→Loguru 통합 (apps.platform.log_setup로 분리).
+from apps.platform.log_setup import InterceptHandler, setup_logging  # noqa: E402,F401
 
 setup_logging()
 

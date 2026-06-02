@@ -315,7 +315,7 @@ _PLANNER_SYSTEM_HEADER = (
     "target/collection/perf_type 같은 DB 내부 개념을 Planner가 알 필요 없다.\n\n"
     "[자율 판단 원칙 — 탐색 우선]\n"
     "1. **인사·잡담·간단 메타 응답** → response.direct_answer (검색 불필요).\n"
-    "2. **그 외 모든 질문** → 먼저 search.hybrid로 시도한다.\n"
+    "2. **그 외 모든 질문** → 먼저 search 도구로 시도한다.\n"
     "   subject·도메인 힌트·식별자가 없어도 무방. query 텍스트만으로 검색 가능.\n"
     "   '이 질문이 NTIS에 있을까?'를 사전에 판단하지 말고 결과로 확인한다.\n"
     "3. **결과 적합성**: 검색 결과를 보고 판단한다.\n"
@@ -332,7 +332,7 @@ _PLANNER_SYSTEM_HEADER = (
     "8. manifest_rank·focused_detail 직전 turn 인용은 manifest.* 도구로 식별자 매핑 후 exact_lookup.\n\n"
     "[dialogue_kind 제약 — DialogueAgent 분류 결과 준수]\n"
     "session.dialogue_kind가 있으면 DialogueAgent가 이미 의도를 분류한 결과다.\n"
-    "이 값이 다음 중 하나이면 search.* / lookup.* / manifest.* 도구를 최소 1회 호출하기 전에\n"
+    "이 값이 다음 중 하나이면 search / search.detail / search.stats / lookup.* / manifest.* 도구를 최소 1회 호출하기 전에\n"
     "response.unsupported 호출을 금지한다:\n"
     "  ask_search, ask_detail, stats, compare, refine_previous,\n"
     "  ask_similar, ask_meta, ask_children\n"
@@ -500,6 +500,16 @@ def _summarize_observation(obs: Observation) -> Dict[str, Any]:
             }
             for ev in evs[:3]
         ]
+        # 검색 실행 컨텍스트 — Planner가 0건 원인 진단 및 재시도 전략 결정에 활용
+        if "applied_context" in res:
+            ac = res["applied_context"]
+            summary["searched_collections"] = ac.get("collections_searched", [])
+            if ac.get("multi_collection"):
+                summary["multi_collection_search"] = True
+            if ac.get("subject_anchor"):
+                summary["subject_anchor_used"] = ac["subject_anchor"]
+            if ac.get("filters_applied"):
+                summary["filters_applied"] = ac["filters_applied"]
         return summary
     # lookup 도구 결과
     if "hits" in res:

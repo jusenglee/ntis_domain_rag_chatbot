@@ -10,7 +10,6 @@ Run targeted tests first:
 python -m pytest tests/pipeline/test_planner_phase2.py -q
 python -m pytest tests/pipeline/test_tools_phase1.py -q
 python -m pytest tests/pipeline/test_agentic_workflow_phase3.py -q
-python -m pytest tests/pipeline/test_adequacy_gate_phase5.py -q
 python -m pytest tests/pipeline/test_thinking_mode_phase5.py -q
 python -m pytest tests/pipeline/test_session_state.py -q
 ```
@@ -29,7 +28,6 @@ Important files:
 
 - `test_planner_phase2.py`
 - `test_active_planner_phase5.py`
-- `test_adequacy_gate_phase5.py`
 - `test_agentic_workflow_phase3.py`
 - `test_agentic_golden_suite.py`
 - `test_tools_phase1.py`

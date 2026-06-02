@@ -16,6 +16,7 @@ ToolExecutor가 처리하기 쉽게 dict로 변환해 반환.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from apps.pipeline.contracts import (
@@ -403,6 +404,125 @@ def _infer_target_from_ids(ids: IdentifierBundle) -> str:
 # SearchRouter — ctx에서 라우팅 컨텍스트 읽어 target / subject / filters 결정
 # ----------------------------------------------------------------------------
 
+# Target → Qdrant 컬렉션명 매핑 (Planner에 노출 안 함 — SearchRouter 내부 전용)
+_TARGET_TO_COLLECTION: Dict[str, str] = {
+    "project": "ntis_project_v1",
+    "perf":    "ntis_perf_v1",
+    "support": "ntis_supports",
+    "people":  "ntis_project_v1",  # anchor 검색
+    "org":     "ntis_project_v1",  # anchor 검색
+}
+
+
+def _is_multi_collection_candidate(ctx: ToolContext) -> bool:
+    """forced_target/subject/identifiers가 모두 없을 때 project+perf 병렬 검색 후보.
+
+    topic 쿼리("LLM 연구동향" 등)는 도메인 힌트가 없어 project만 검색하면 perf(논문/특허) 누락.
+    이 경우 두 컬렉션을 병렬 검색해 결과를 통합한다.
+    """
+    er = getattr(ctx, "entity_resolution", None)
+    if er is None:
+        return True
+    if getattr(er, "forced_target", None):
+        return False
+    if getattr(er, "subject", None):
+        return False  # 인물/기관 anchor이 있으면 단일 컬렉션 집중
+    ids = getattr(er, "identifiers", None)
+    if ids is not None and ids.has_any():
+        return False  # 식별자가 있으면 단일 컬렉션
+    return True
+
+
+def _build_applied_context(
+    *,
+    targets: List[str],
+    subject: Optional["SubjectAnchor"],
+    filters: Optional["FilterBundle"],
+    sort_by: str,
+    multi_collection: bool = False,
+) -> Dict[str, Any]:
+    """Planner observation에 노출할 검색 실행 컨텍스트 요약."""
+    ctx_out: Dict[str, Any] = {
+        "collections_searched": [_TARGET_TO_COLLECTION.get(t, t) for t in targets],
+        "multi_collection": multi_collection,
+        "sort_by": sort_by,
+    }
+    if subject:
+        ctx_out["subject_anchor"] = getattr(subject, "display_name", None)
+    if filters:
+        applied: Dict[str, Any] = {}
+        for field in ("year_from", "year_to", "perf_type", "lead_org_name",
+                      "participant_person_name", "exclude_org_name", "exclude_perf_type"):
+            val = getattr(filters, field, None)
+            if val:
+                applied[field] = val
+        if applied:
+            ctx_out["filters_applied"] = applied
+    return ctx_out
+
+
+async def _run_single_search(
+    *,
+    query: str,
+    target: str,
+    subject: Optional["SubjectAnchor"],
+    filters: Optional["FilterBundle"],
+    limit: int,
+    sort_by: str,
+    ctx: ToolContext,
+    judgment_reason: str = "tool:search",
+) -> "Any":
+    """단일 컬렉션 hybrid search 실행."""
+    task = build_search_task(
+        action="list",
+        target=target,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        turn_id=ctx.turn_id,
+        retrieval_query=query,
+        subject=subject,
+        filters=filters,
+        limit=limit,
+        display_limit=limit,
+        sort_by=sort_by,  # type: ignore[arg-type]
+        judgment_reason=judgment_reason,
+    )
+    return await ctx.search_agent.execute(task)
+
+
+def _merge_multi_results(results: List[Any], limit: int) -> Any:
+    """두 컬렉션 결과를 score 기준 병합·정렬·탈중복."""
+    from apps.pipeline.contracts import SearchResult
+
+    all_evidences = []
+    seen_ids: set = set()
+    total = 0
+
+    for result in results:
+        if result is None or result.status == "error":
+            continue
+        total += int(result.total_hits or 0)
+        for ev in (result.evidences or []):
+            # 식별자 기준 중복 제거
+            dedup_key = (
+                (ev.ids.get("pjt_id") or ev.ids.get("pjt_no") or "")
+                + (ev.ids.get("rst_id") or "")
+            ) if ev.ids else str(id(ev))
+            if dedup_key and dedup_key in seen_ids:
+                continue
+            if dedup_key:
+                seen_ids.add(dedup_key)
+            all_evidences.append(ev)
+
+    # score 내림차순 정렬
+    all_evidences.sort(key=lambda e: getattr(e, "score", 0.0), reverse=True)
+    top = all_evidences[:limit]
+
+    if not top:
+        return SearchResult(status="empty", evidences=[], total_hits=0)
+    status = "single" if len(top) == 1 else "multiple"
+    return SearchResult(status=status, evidences=top, total_hits=total)
+
+
 def _route_from_ctx(ctx: ToolContext):
     """ToolContext의 entity_resolution + dialogue_kind → (target, subject, filters).
 
@@ -416,10 +536,17 @@ def _route_from_ctx(ctx: ToolContext):
     er = getattr(ctx, "entity_resolution", None)
 
     # target 결정
+    ids = getattr(er, "identifiers", None) if er is not None else None
     if er is not None and er.forced_target:
         target = er.forced_target
-    elif er is not None and er.identifiers is not None and getattr(er.identifiers, "rst_id", None):
+    elif ids is not None and getattr(ids, "rst_id", None):
         target = "perf"
+    elif ids is not None and getattr(ids, "person_no", None):
+        target = "people"
+    elif ids is not None and getattr(ids, "org_id", None):
+        target = "org"
+    elif ids is not None and (getattr(ids, "pjt_id", None) or getattr(ids, "pjt_no", None)):
+        target = "project"
     else:
         target = "project"
 
@@ -432,6 +559,9 @@ def _route_from_ctx(ctx: ToolContext):
             display_name=getattr(sub, "display_name", "") or getattr(sub, "subject_name", ""),
             person_no=getattr(sub, "person_no", None),
             org_id=getattr(sub, "org_id", None),
+            org_code=getattr(sub, "org_code", None),
+            biz_no=getattr(sub, "biz_no", None),
+            affiliation_org_name=getattr(sub, "affiliation_org_name", None),
             identity_status=getattr(sub, "identity_status", "ambiguous_name_only"),  # type: ignore[arg-type]
         )
 
@@ -507,29 +637,44 @@ async def search_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, An
     limit = int(args.get("limit") or 10)
     sort_by = "recent_desc" if hint == "recent" else "relevance"
 
-    target, subject, filters = _route_from_ctx(ctx)
-
-    task = build_search_task(
-        action="list",
-        target=target,  # type: ignore[arg-type]
-        request_id=ctx.request_id,
-        turn_id=ctx.turn_id,
-        retrieval_query=query,
-        subject=subject,
-        filters=filters,
-        limit=limit,
-        display_limit=limit,
-        sort_by=sort_by,  # type: ignore[arg-type]
-        judgment_reason="tool:search",
-    )
     if ctx.search_agent is None:
         raise RuntimeError("search: ctx.search_agent is None")
 
-    result = await ctx.search_agent.execute(task)
+    target, subject, filters = _route_from_ctx(ctx)
+
+    # 도메인 힌트 없음 → project + perf 병렬 검색 후 통합 (topic 쿼리 커버리지 향상)
+    if _is_multi_collection_candidate(ctx):
+        results = await asyncio.gather(
+            _run_single_search(
+                query=query, target="project", subject=subject, filters=filters,
+                limit=limit, sort_by=sort_by, ctx=ctx, judgment_reason="tool:search/project",
+            ),
+            _run_single_search(
+                query=query, target="perf", subject=subject, filters=filters,
+                limit=limit, sort_by=sort_by, ctx=ctx, judgment_reason="tool:search/perf",
+            ),
+            return_exceptions=True,
+        )
+        valid = [r for r in results if not isinstance(r, Exception)]
+        result = _merge_multi_results(valid, limit)
+        applied_ctx = _build_applied_context(
+            targets=["project", "perf"], subject=subject, filters=filters,
+            sort_by=sort_by, multi_collection=True,
+        )
+    else:
+        result = await _run_single_search(
+            query=query, target=target, subject=subject, filters=filters,
+            limit=limit, sort_by=sort_by, ctx=ctx,
+        )
+        applied_ctx = _build_applied_context(
+            targets=[target], subject=subject, filters=filters, sort_by=sort_by,
+        )
+
     return {
         "status": result.status,
         "evidences": [ev.model_dump() for ev in (result.evidences or [])],
         "total_hits": int(result.total_hits or 0),
+        "applied_context": applied_ctx,
         "diagnostics": dict(result.diagnostics or {}),
     }
 
@@ -611,10 +756,16 @@ async def search_detail_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[
         raise RuntimeError("search.detail: ctx.search_agent is None")
 
     result = await ctx.search_agent.execute(task)
+    applied_ctx = _build_applied_context(
+        targets=[target], subject=subject, filters=filters, sort_by="relevance",
+    )
+    if identifiers is not None:
+        applied_ctx["identifier_used"] = True
     return {
         "status": result.status,
         "evidences": [ev.model_dump() for ev in (result.evidences or [])],
         "total_hits": int(result.total_hits or 0),
+        "applied_context": applied_ctx,
         "diagnostics": dict(result.diagnostics or {}),
     }
 
@@ -682,10 +833,15 @@ async def search_stats_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[s
         raise RuntimeError("search.stats: ctx.search_agent is None")
 
     result = await ctx.search_agent.execute(task)
+    applied_ctx = _build_applied_context(
+        targets=[target], subject=subject, filters=filters, sort_by="relevance",
+    )
+    applied_ctx["aggregate_by"] = aggregate_by
     return {
         "status": result.status,
         "evidences": [ev.model_dump() for ev in (result.evidences or [])],
         "total_hits": int(result.total_hits or 0),
+        "applied_context": applied_ctx,
         "diagnostics": dict(result.diagnostics or {}),
     }
 

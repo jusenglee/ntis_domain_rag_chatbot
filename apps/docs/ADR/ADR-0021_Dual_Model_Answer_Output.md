@@ -6,8 +6,7 @@ Status: accepted, 2026-06-02
 
 Until now the pipeline produced a single answer. `runtime.py` bound
 `AnswerAgent` to `gemma_triton_0`, so `gemma_triton_0` was the answer model and
-`solar_vllm_0` was used only for dialogue/planner/adequacy/critic-grounding
-judgments.
+`solar_vllm_0` was used only for dialogue/planner/critic-grounding judgments.
 
 The frontend (`templates/index.html`) already ships a two-panel compare UI. It
 consumes `POST /query/stream` and demultiplexes `answer.chunk` frames by a

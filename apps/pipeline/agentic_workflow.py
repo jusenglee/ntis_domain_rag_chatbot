@@ -1,17 +1,18 @@
-"""Phase 3 — Cyclic LangGraph (agentic loop).
+"""단일 Agentic 파이프라인 — Cyclic LangGraph (ADR-0020/0022/0023).
 
-기존 정적 그래프와 별개로 PlannerAgent + ToolExecutor 기반 동적 그래프를 빌드한다.
+PlannerAgent + ToolExecutor 기반 동적 그래프. 정적 그래프는 폐기됨(ADR-0020).
 
 흐름:
     load_session
       → dialogue_agent  (의도 분류 — direct_answer/clarification은 Planner 없이 즉답 종료)
-      → entity_resolver  (person_no/org_id 등 식별자 해소 — 모호 시 clarification 즉답)
-      → planner_loop  (LLM이 다음 step 결정)
-        → tool_executor  (call_tool인 경우 → Observation 누적 → planner로 복귀)
+      → entity_resolver  (person_no/org_id 등 식별자 해소 — 모호 시 clarification 즉답,
+                          ask_meta/ask_children은 fast-path 즉답)
+      → planner_loop  (LLM이 다음 step 결정 — 충분성 판단의 단일 권한)
+        → tool_executor  (call_tool인 경우 → Observation 누적)
+            → answer_curator  (마지막 obs가 response.* 종결인 경우 직접응답)
+            → planner_loop    (그 외 → Planner가 answer/추가도구/unsupported 결정)
         → answer_curator  (answer인 경우 → 누적 observation의 evidence를 EvidenceBundle로)
-          → answer_agent  (기존 그대로)
-            → critic_agent  (기존 그대로)
-              → save_session
+          → answer_agent → critic_agent → save_session
         → emit_agentic_clarify  (clarify인 경우 → 즉답 종료)
           → save_session
 
@@ -20,7 +21,8 @@
     - plan_state.step_no >= planner.max_steps  (Planner 내부에서 answer로 강제 종료)
     - 동일 ToolCall 반복(loop guard) — answer로 강제 종료
 
-기존 정적 그래프는 그대로 둔다. runtime이 환경변수 RAG_AGENTIC_MODE로 토글.
+ADR-0023: AdequacyGate(LLM judge) 제거 — 검색 성공 후에도 insufficient 과판정으로
+재검색 churn을 유발하던 제2 심판을 폐기하고, 충분성 판단을 Planner로 일원화.
 """
 
 from __future__ import annotations
@@ -118,7 +120,12 @@ def _make_node_planner(deps: AgentPipelineDeps):
         next_state = plan_state.with_decision(step)
         # 즉시 종료 액션은 terminated 플래그도 같이 세팅 (라우터가 분기)
         if step.action == "answer":
-            next_state = next_state.with_termination("answer")
+            termination_reason = "answer"
+            if step.reason.startswith("max_steps_exceeded"):
+                termination_reason = "max_steps"
+            elif _planner_answer_is_internal_error(step=step, plan_state=plan_state):
+                termination_reason = "error"
+            next_state = next_state.with_termination(termination_reason)
         elif step.action == "clarify":
             next_state = next_state.with_termination("clarify")
         args_keys = list((step.args or {}).keys()) if step.action == "call_tool" else []
@@ -143,6 +150,22 @@ def _make_node_planner(deps: AgentPipelineDeps):
         }
 
     return node_planner
+
+
+def _planner_answer_is_internal_error(*, step: PlannerStep, plan_state: PlanState) -> bool:
+    """Planner failure must not be published as no_result."""
+    reason = step.reason or ""
+    internal_prefixes = (
+        "llm_failure",
+        "planner_parse_failure",
+        "pass1_unknown_tool",
+        "missing_tool_in_call_tool",
+    )
+    if reason.startswith(internal_prefixes):
+        return True
+    if plan_state.observations and not any(obs.status == "ok" for obs in plan_state.observations):
+        return True
+    return False
 
 
 # ============================================================================
@@ -200,78 +223,11 @@ def _make_node_tool_executor(deps: AgentPipelineDeps):
 
 
 # ============================================================================
-# Node: adequacy_gate — Planner와 분리된 LLM judge (c1)
-# ============================================================================
-
-def _make_node_adequacy_gate(deps: AgentPipelineDeps):
-    async def node_adequacy_gate(state: AgentPipelineState) -> Dict[str, Any]:
-        """tool_executor 후 'answer 가능한가' 판정. 결과를 state.diagnostics에 기록.
-
-        adequacy_gate 미주입 시 자동 통과 (insufficient로 설정 → planner_loop 복귀, 기존 흐름).
-        주입 시 LLM judge로 verdict 결정 → 라우터가 answer_curator/planner_loop 분기.
-        """
-        if deps.adequacy_gate is None:
-            # 미주입 — 결정적 default(insufficient)로 통과해 planner_loop 복귀
-            verdict_dict = {
-                "verdict": "insufficient", "reason": "gate_not_injected",
-                "confidence": 1.0, "source": "deterministic",
-            }
-            return {
-                "diagnostics": {**(state.diagnostics or {}), "last_adequacy_verdict": verdict_dict},
-            }
-        plan_state = state.plan_state
-        if plan_state is None:
-            return {
-                "diagnostics": {
-                    **(state.diagnostics or {}),
-                    "last_adequacy_verdict": {
-                        "verdict": "insufficient", "reason": "no_plan_state",
-                        "confidence": 1.0, "source": "deterministic",
-                    },
-                },
-            }
-        t0 = time.perf_counter()
-        verdict = await deps.adequacy_gate.check(
-            question=state.question or "",
-            plan_state=plan_state,
-            request_id=state.request_id,
-            conversation_id=state.conversation_id,
-        )
-        latency = (time.perf_counter() - t0) * 1000.0
-        verdict_kr = {
-            "adequate": "충분, 답변 가능",
-            "insufficient": "부족, 추가 도구 필요",
-            "error": "판정 오류",
-        }.get(verdict.verdict, "알 수 없음")
-        source_kr = {
-            "deterministic": "결정적 규칙",
-            "llm_judge": "LLM 판정",
-            "fallback": "안전 fallback",
-        }.get(verdict.source, "알 수 없음")
-        logger.info(
-            f"[agentic_trace] req={short_id(state.request_id)} step={plan_state.step_no} "
-            f"[adequacy_gate] verdict_ready "
-            f"verdict={verdict.verdict}({verdict_kr}) "
-            f"source={verdict.source}({source_kr}) "
-            f"reason={verdict.reason[:80]!r}(이유) latency_ms={latency:.1f}(소요시간)"
-        )
-        return {
-            "diagnostics": {
-                **(state.diagnostics or {}),
-                "last_adequacy_verdict": {
-                    "verdict": verdict.verdict, "reason": verdict.reason,
-                    "confidence": verdict.confidence, "source": verdict.source,
-                },
-            },
-            "latencies": {f"adequacy_step_{plan_state.step_no}": latency / 1000.0},
-        }
-
-    return node_adequacy_gate
-
-
-# ============================================================================
 # Node: answer_curator — 누적 observations에서 EvidenceBundle 빌드
 # ============================================================================
+#
+# ADR-0023: AdequacyGate(LLM judge) 제거. 충분성 판단은 Planner 단일 권한.
+# tool_executor → (response.* 종결이면 answer_curator, 그 외 planner_loop) 결정적 라우팅.
 
 async def node_answer_curator(state: AgentPipelineState) -> Dict[str, Any]:
     """누적 observations에서 답변 흐름을 결정.
@@ -403,15 +359,13 @@ def _select_direct_response_text(plan_state: "PlanState") -> tuple[Optional[str]
     last_decision = plan_state.last_decision() if plan_state.decisions else None
     if last_decision is not None and last_decision.action == "answer":
         if last_decision.answer_text:
-            # 관측(ADR-0019 잔존) — 이 경로는 Planner가 직접 채운 answer_text를 CriticAgent
-            # grounding/cite 검증 없이 발행한다. 현재 Pass1은 answer_text=null 기본 유도라 드물지만,
-            # 발생 시 미검증 답변이므로 추적용 경고를 남긴다. 근본 차단은 ADR-0019 Future Work.
+            # Planner는 publication authority가 아니다. answer_text는 과거 ADR-0019 잔존
+            # 필드이므로 발행하지 않고 AnswerAgent/Critic 경로로 넘긴다.
             logger.warning(
-                f"[answer_curator] planner_answer_text_bypasses_critic(Planner 직답이 Critic 우회) "
+                f"[answer_curator] planner_answer_text_ignored(Planner 직답 폐기) "
                 f"step={plan_state.step_no} chars={len(last_decision.answer_text)} "
                 f"reason={last_decision.reason[:80]!r}(이유)"
             )
-            return last_decision.answer_text, "direct_answer"
     # 2) response.* 마지막 ok observation
     last_response_obs: Optional[Observation] = None
     for obs in plan_state.observations:
@@ -465,6 +419,25 @@ def _select_evidences_for_answer(
         return evs, "stats_summary", last_agg
     if last_hybrid is not None:
         evs = _renumber_evidences(_deserialize_evidences(last_hybrid.result.get("evidences") or []))
+        # 마지막 검색이 0건이면 이전 OK 검색 중 가장 많은 hits를 가진 것으로 fallback.
+        # 예: step1=10건(관련), step2=0건(재시도 실패) → step1 결과 사용.
+        if not evs:
+            best_fallback = max(
+                (
+                    obs for obs in observations
+                    if obs.status == "ok"
+                    and obs.tool in _HYBRID_TOOLS
+                    and obs is not last_hybrid
+                    and (obs.result.get("total_hits") or 0) > 0
+                ),
+                key=lambda o: o.result.get("total_hits", 0),
+                default=None,
+            )
+            if best_fallback is not None:
+                evs = _renumber_evidences(
+                    _deserialize_evidences(best_fallback.result.get("evidences") or [])
+                )
+                last_hybrid = best_fallback
         view = "single_detail" if len(evs) == 1 else "list_compact"
         return evs, view, last_hybrid
     return [], "empty", None
@@ -584,7 +557,8 @@ def _route_after_planner(state: AgentPipelineState) -> str:
         reason = plan_state.termination_reason
         if reason == "clarify":
             return "emit_agentic_clarify"
-        # answer / max_steps / duplicate_call / error → answer 흐름
+        if reason == "error":
+            return "emit_internal_error"
         return "answer_curator"
     last = plan_state.last_decision()
     if last is None:
@@ -597,28 +571,25 @@ def _route_after_planner(state: AgentPipelineState) -> str:
 
 
 def _route_after_tool_executor(state: AgentPipelineState) -> str:
-    """tool_executor → adequacy_gate (or planner_loop if gate 미주입).
+    """tool_executor → answer_curator / planner_loop 결정적 분기 (ADR-0023).
 
-    2026-05-27 (c1): adequacy_gate가 deps에 주입돼 있으면 거기서 답 가능 여부 판정.
+    AdequacyGate(LLM judge) 제거 후, 충분성 판단은 Planner 단일 권한이 된다.
+    이 라우터는 결정적 규칙만 적용한다:
+        - plan_state None / step_no>=50 → answer_curator (안전판)
+        - 마지막 observation이 response.direct_answer/response.unsupported + ok
+          → answer_curator (직접응답 종결 — final_text를 answer_curator가 발행)
+        - 그 외(검색 결과·error 포함) → planner_loop
+          (Planner가 observation+applied_context 보고 answer/추가도구/unsupported 결정)
     """
-    # 안전 가드 — 비정상 상태면 종료로 흐름
     plan_state = state.plan_state
     if plan_state is None or plan_state.step_no >= 50:
         return "answer_curator"
-    return "adequacy_gate"
-
-
-def _route_after_adequacy_gate(state: AgentPipelineState) -> str:
-    """adequacy_gate → planner_loop / answer_curator 분기.
-
-    diagnostics["last_adequacy_verdict"]를 보고:
-        adequate    → answer_curator (Planner를 더 호출하지 않고 답변 흐름 진입)
-        insufficient→ planner_loop (다음 step 결정)
-        그 외       → planner_loop (안전 fallback)
-    """
-    diag = (state.diagnostics or {}).get("last_adequacy_verdict") or {}
-    verdict = diag.get("verdict") if isinstance(diag, dict) else None
-    if verdict == "adequate":
+    last_obs = plan_state.last_observation()
+    if (
+        last_obs is not None
+        and last_obs.status == "ok"
+        and last_obs.tool in {"response.direct_answer", "response.unsupported"}
+    ):
         return "answer_curator"
     return "planner_loop"
 
@@ -778,19 +749,22 @@ def _summarize_session(state: AgentPipelineState) -> Dict[str, Any]:
 # ============================================================================
 
 def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
-    """RAG_AGENTIC_MODE=true 때 사용되는 cyclic LangGraph 빌더.
+    """단일 Agentic 파이프라인 cyclic LangGraph 빌더 (ADR-0020/0023).
 
-    진입 단(정적 그래프와 공유):
+    진입 단:
         load_session → dialogue_agent → entity_resolver → planner_loop
         - dialogue_agent: direct_answer/clarification은 Planner 없이 즉답 종료.
         - entity_resolver: person_no/org_id 등 식별자 해소(모호 시 clarification).
+          ask_meta/ask_children은 fast-path 즉답.
 
     동적 루프(agentic):
-        planner_loop ↔ tool_executor (action=call_tool 동안 반복, 사이에 adequacy_gate)
+        planner_loop ↔ tool_executor (action=call_tool 동안 반복)
+        tool_executor → answer_curator(response.* 종결) / planner_loop(그 외).
         → answer_curator → answer_agent → critic_agent → save_session
         clarify는 emit_agentic_clarify로 즉답 종료.
 
-    종료: planner가 answer/clarify 결정 → answer_curator 또는 emit_agentic_clarify로 분기.
+    충분성 판단은 Planner 단일 권한 (ADR-0023: AdequacyGate 제거).
+    종료: planner가 answer/clarify 결정, max_steps, duplicate_call 가드.
     """
     if StateGraph is None:
         raise RuntimeError("langgraph not available — install langgraph to use agentic mode")
@@ -807,8 +781,7 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     graph.add_node("entity_resolver", _make_node_entity_resolver(deps))
     graph.add_node("planner_loop", _make_node_planner(deps))
     graph.add_node("tool_executor", _make_node_tool_executor(deps))
-    # Phase 5 (c1): adequacy_gate가 Planner와 결과 적합성 판단을 분리.
-    graph.add_node("adequacy_gate", _make_node_adequacy_gate(deps))
+    # ADR-0023: adequacy_gate 노드 제거. 충분성 판단은 Planner 단일 권한.
     graph.add_node("answer_curator", node_answer_curator)
     graph.add_node("answer_agent", _make_node_answer(deps))
     graph.add_node("critic_agent", _make_node_critic(deps))
@@ -852,17 +825,13 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
             "tool_executor": "tool_executor",
             "answer_curator": "answer_curator",
             "emit_agentic_clarify": "emit_agentic_clarify",
+            "emit_internal_error": "emit_internal_error",
         },
     )
-    # tool_executor → adequacy_gate (gate 미주입이어도 노드 자체는 안전 통과)
+    # ADR-0023: tool_executor → answer_curator(response.* 종결) / planner_loop(그 외) 결정적 분기.
     graph.add_conditional_edges(
         "tool_executor", _route_after_tool_executor,
-        {"adequacy_gate": "adequacy_gate", "answer_curator": "answer_curator"},
-    )
-    # adequacy_gate → planner_loop (insufficient) / answer_curator (adequate)
-    graph.add_conditional_edges(
-        "adequacy_gate", _route_after_adequacy_gate,
-        {"planner_loop": "planner_loop", "answer_curator": "answer_curator"},
+        {"answer_curator": "answer_curator", "planner_loop": "planner_loop"},
     )
 
     # Step 4: answer_curator → answer_agent 직결 제거. direct_response면 save_session 곧장.

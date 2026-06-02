@@ -58,23 +58,21 @@ Observation(status="error", error_code=..., error_message=...)
 
 The Planner sees prior observations in the next step.
 
-## AdequacyGate
+## Adequacy — Planner single authority (ADR-0023)
 
-Source: `apps/pipeline/agents/adequacy_gate.py`
+`AdequacyGate` was removed in ADR-0023. There is no separate adequacy judge.
+After each tool call, `_route_after_tool_executor` routes deterministically:
 
-After each tool call, the adequacy gate judges whether the accumulated
-observations can answer the user question.
+- `plan_state` None or `step_no >= 50` -> `answer_curator` (safety)
+- last observation is `response.direct_answer` / `response.unsupported` and
+  `status=ok` -> `answer_curator` (direct-answer terminal)
+- everything else (search results, errors) -> `planner_loop`
 
-Deterministic cases:
-
-- no observations -> insufficient
-- last observation error -> insufficient
-- `response.direct_answer` or `response.unsupported` success -> adequate
-
-Otherwise it uses an LLM judge on summarized observations, not raw evidence.
-
-`RAG_ADEQUACY_GATE_ENABLED` defaults to `true`.
-`RAG_ADEQUACY_THINKING_ENABLED` defaults to `false`.
+Control returns to the Planner, which decides `answer` (sufficient), another
+`call_tool` (refine), or `response.unsupported` (out of scope) per its
+system-prompt rule #3, using the observations and `applied_context` (ADR-0022).
+Termination is bounded by the duplicate_call guard, `max_steps` (8), and the
+`step_no >= 50` safety branch.
 
 ## Answer Curator
 

@@ -179,30 +179,28 @@ Planner → action=answer + answer_text 직접 채움
 
 ---
 
-## Issue 5 — AdequacyGate와 answer_curator의 중복 판단
+## Issue 5 — AdequacyGate와 answer_curator의 중복 판단 ✅ 해결 (ADR-0023)
 
-**심각도: Important**
+**심각도: Important — 2026-06-02 AdequacyGate 제거로 해소**
 
-### 현상
+### 현상 (해결 전)
 
-`response.*` 도구 결과에 대해 두 곳에서 동일한 판단을 한다.
+`response.*` 도구 결과에 대해 두 곳에서 동일한 판단을 했다.
 
 ```
 AdequacyGate:   last obs = response.* → verdict=adequate (deterministic)
 answer_curator: direct_text 있음     → final_answer_text 직접 설정
 ```
 
-두 판단 모두 "이 결과는 직접 응답이다"를 결론짓는다.
+또한 AdequacyGate의 LLM judge가 검색 성공 후에도 "insufficient" 과판정 →
+Planner 동일 query 재시도 → duplicate_call 강제종료 churn을 유발했다.
 
-### 근본 원인
+### 해결 (ADR-0023)
 
-`response.*` 도구의 특수 처리 로직이 AdequacyGate와 answer_curator 양쪽에 흩어져 있다.
-
-### 권장 조치
-
-단일 판단 지점으로 통합. Issue 3 해결(emit_planner_response 신설) 시 자연스럽게 해소됨.
-AdequacyGate의 `response_tool_already_emitted` 결정적 판정은 유지하되,
-answer_curator에서 `_select_direct_response_text` 로직 제거.
+AdequacyGate(LLM judge) 전체 제거. 충분성 판단을 Planner 단일 권한으로 일원화.
+`_route_after_tool_executor`를 결정적 라우터로 교체:
+`response.* + ok → answer_curator`, 그 외 → `planner_loop`.
+`response.*` final_text 발행은 원래부터 answer_curator 소유였으므로 영향 없음.
 
 ---
 
@@ -316,7 +314,7 @@ Planner가 "최신 도구 결과 우선"을 기대하지만, answer_curator는
 | 2d | 정적/Agentic 이중 파이프라인 | Important | ✅ 완료 (ADR-0020 Phase 5, 단일 통합) |
 | 3 | answer_curator Layer 위반 | Important | 미완료 |
 | 4 | CriticAgent 우회 경로 2개 | Important | 미완료 |
-| 5 | AdequacyGate-answer_curator 중복 판단 | Important | 미완료 |
+| 5 | AdequacyGate-answer_curator 중복 판단 | Important | ✅ 완료 (ADR-0023 AdequacyGate 제거) |
 | 6 | clarification emit 노드 2개 혼용 | Important | 미완료 |
 | 7 | EntityResolver 무음 실패 | Minor | 미완료 |
 | 8 | evidence 선택 우선순위 암묵적 커플링 | Minor | 미완료 (장기) |
