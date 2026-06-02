@@ -216,6 +216,13 @@ def _make_node_dialogue(deps: AgentPipelineDeps):
 def _make_node_entity_resolver(deps: AgentPipelineDeps):
     async def node_entity_resolver(state: AgentPipelineState) -> Dict[str, Any]:
         if state.dialogue_intent is None:
+            # 방어 — dialogue_agent가 intent를 세팅하지 않은 비정상 상태. entity_resolution이
+            # None인 채 라우터에 도달해 emit_internal_error로 분기되므로 원인 추적용 로그 필수.
+            logger.error(
+                f"[entity_resolver] dialogue_intent_missing(판단 결과 없음 — 배선 오류) "
+                f"req={short_id(state.request_id)} cid={short_id(state.conversation_id)} "
+                f"→ entity_resolution=None → 라우터가 emit_internal_error로 분기"
+            )
             return {}
         t0 = time.perf_counter()
         resolution = deps.entity_resolver.resolve(
