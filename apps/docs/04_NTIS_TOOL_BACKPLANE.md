@@ -10,19 +10,24 @@ turn and does not force RAG retrieval.
 
 Source: `apps/pipeline/tools/registry.py`
 
-The default registry currently contains nine tools:
+The default registry currently contains nine tools. The Planner sees only the
+intent-level interface; the SearchRouter resolves collection/strategy/filters
+internally from `EntityResolution` (ADR-0022 — no DB schema in the Planner args):
 
 | Tool | Purpose |
 | --- | --- |
-| `search.hybrid` | semantic/vector search over NTIS collections |
-| `search.exact_lookup` | by-id lookup using structured identifiers |
-| `search.aggregate` | grouped counts/stat summaries |
+| `search` | general NTIS search; collection/strategy/filters auto-routed from session context |
+| `search.detail` | single-item detail using session identifiers (or query fallback) |
+| `search.stats` | grouped counts / stat summaries (`axis`: year / org / type) |
 | `lookup.person_by_name` | resolve a person name to NTIS candidates |
 | `lookup.org_by_name` | resolve an organization name to NTIS candidates |
 | `manifest.get_item` | resolve a visible list rank to item identifiers |
 | `manifest.filter` | filter current visible manifest |
-| `response.direct_answer` | direct answer without NTIS retrieval |
-| `response.unsupported` | honest refusal for unsupported requests |
+| `response.direct_answer` | direct answer without NTIS retrieval (terminal intent tool) |
+| `response.unsupported` | honest refusal for unsupported requests (terminal intent tool) |
+
+`response.*` results are published by the `emit_tool_response` node, not the
+evidence curator (ADR-0024).
 
 ## Search Execution
 
@@ -36,6 +41,11 @@ It may execute:
 - hybrid search,
 - subject-anchored hybrid search,
 - aggregate scroll and Python grouping.
+
+When no domain target is resolved (a topic query with no subject/identifier),
+the `search` tool runs `project` + `perf` in parallel and merges results
+(ADR-0022). `applied_context` (searched collections, filters) is returned to the
+Planner so it can diagnose zero-hit causes.
 
 It does not reinterpret user intent.
 It does not fix Planner mistakes by reading raw question text.

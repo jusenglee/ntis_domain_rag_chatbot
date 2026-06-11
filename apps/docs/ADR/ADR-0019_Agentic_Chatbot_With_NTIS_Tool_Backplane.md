@@ -17,6 +17,10 @@ tool catalog.
 
 ## Current Implementation
 
+> **Superseded (ADR-0020):** `RAG_AGENTIC_MODE` and the static-graph rollback
+> were removed. The agentic pipeline is the only pipeline. The description below
+> reflects the original 2026-05-27 state.
+
 `RAG_AGENTIC_MODE` defaults to `true`.
 
 When enabled, runtime wires:
@@ -55,7 +59,8 @@ a capability it can call.
   stay restricted to direct/unsupported response paths.
 - ~~Adequacy gate adds one optional judge call after tool execution.~~
   (Removed in ADR-0023 — caused over-search churn; Planner now sole authority.)
-- A static seven-agent graph remains as rollback.
+- ~~A static seven-agent graph remains as rollback.~~
+  (Removed in ADR-0020 — single agentic pipeline, no static rollback.)
 
 ## Required Future Work
 

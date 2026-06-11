@@ -24,7 +24,7 @@ step2: Planner → re-issued the SAME search (no better move available)
 
 `AdequacyGate` and `PlannerAgent` were two judges competing over the same
 decision ("is this enough to answer?"). The gate's over-eager "insufficient"
-verdict forced wasteful re-search loops. This is ADR-0021 Issue 5 and the
+verdict forced wasteful re-search loops. This is ADR-0025 Issue 5 and the
 efficiency review's priority-1 item.
 
 ## Decision
@@ -114,5 +114,5 @@ of gate-induced over-search.
 ## Consequences
 
 - One agent removed; single adequacy authority (Planner).
-- Resolves ADR-0021 Issue 5 and the over-search churn.
+- Resolves ADR-0025 Issue 5 and the over-search churn.
 - Rollback requires a code-level revert (no toggle).

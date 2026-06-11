@@ -23,7 +23,8 @@ MANIFEST_GET_ITEM_SPEC = ToolSpec(
     name="manifest.get_item",
     description=(
         "직전 발행된 manifest의 1-indexed rank에 해당하는 항목을 조회. "
-        "사용자가 'N번 항목'을 가리킬 때 PlannerAgent가 호출 → 결과 identifiers를 search.exact_lookup으로 위임."
+        "사용자가 'N번 항목'을 가리키는데 세션에 식별자가 해소되지 않은 경우에만 호출 → "
+        "결과 identifiers를 search.detail의 identifiers 인자로 넘겨 단건 조회."
     ),
     input_schema={
         "type": "object",
@@ -87,8 +88,8 @@ MANIFEST_FILTER_SPEC = ToolSpec(
     name="manifest.filter",
     description=(
         "직전 manifest의 모든 항목 식별자를 axis별로 수집. 사용자가 'X 관련만 골라줘' 같은 "
-        "manifest 부분집합 의도일 때 PlannerAgent가 호출 → search.exact_lookup으로 위임 후 "
-        "AnswerAgent가 자연어 reranking."
+        "manifest 부분집합 의도일 때 PlannerAgent가 호출 → 결과 identifiers를 "
+        "search.detail의 identifiers 인자로 넘겨 재조회 후 AnswerAgent가 자연어 reranking."
     ),
     input_schema={
         "type": "object",

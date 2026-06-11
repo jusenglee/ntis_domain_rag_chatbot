@@ -61,6 +61,10 @@ current implementation, not historic intent.
   SearchRouter — Planner sees `search/search.detail/search.stats`; DB schema hidden.
 - [ADR/ADR-0023_AdequacyGate_Removal.md](ADR/ADR-0023_AdequacyGate_Removal.md):
   AdequacyGate removed — Planner is sole adequacy authority.
+- [ADR/ADR-0024_Publication_Layer_Separation.md](ADR/ADR-0024_Publication_Layer_Separation.md):
+  answer_curator is evidence-only; response.* publication moved to emit_tool_response.
+- [ADR/ADR-0025_Architecture_Design_Issues.md](ADR/ADR-0025_Architecture_Design_Issues.md):
+  design issues register (findings after ADR-0020 and the ADRs that resolved them).
 
 ## Current Default Runtime
 

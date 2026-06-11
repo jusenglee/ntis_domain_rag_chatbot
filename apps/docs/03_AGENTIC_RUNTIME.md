@@ -78,20 +78,22 @@ Termination is bounded by the duplicate_call guard, `max_steps` (8), and the
 
 Source: `apps/pipeline/agentic_workflow.py`
 
-`node_answer_curator` turns accumulated observations into either:
-
-- final text from `response.*` tools or `PlannerStep.answer_text`, or
-- an `EvidenceBundle` for `AnswerAgent`.
+`node_answer_curator` is evidence-only (ADR-0024): it turns accumulated
+observations into an `EvidenceBundle` and always flows to `AnswerAgent`.
+`response.*` terminal-tool publication is handled by `emit_tool_response`, not
+the curator; `PlannerStep.answer_text` is not published.
 
 Current evidence selection priority is:
 
-1. last successful `search.exact_lookup`
-2. last successful `search.aggregate`
-3. last successful `search.hybrid`
+1. last successful `search.detail`
+2. last successful `search.stats`
+3. last successful `search` (with fallback to the prior non-empty `search`)
 4. empty
 
-This is not a full multi-observation ranking system yet. It is a priority
-selector over accumulated observations.
+(Old tool names `search.exact_lookup` / `search.aggregate` / `search.hybrid` are
+still recognized for backward compatibility — ADR-0022.) This is not a full
+multi-observation ranking system yet; it is a priority selector over accumulated
+observations.
 
 ## AnswerAgent
 

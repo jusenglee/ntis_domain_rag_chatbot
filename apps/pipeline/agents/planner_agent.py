@@ -322,6 +322,9 @@ _PLANNER_SYSTEM_HEADER = (
     "   - 충분히 적합 → action='answer'로 종료.\n"
     "   - 0건 또는 무관 → 다른 query·도구·args로 재시도.\n"
     "   - 재시도 후에도 무관 → response.unsupported.\n"
+    "   - **목록·요약·레포트 요청은 search의 목록 결과만으로 answer한다** — 개별 항목을\n"
+    "     search.detail로 다시 조회하지 마라 (마지막 detail 결과 1건이 답변 근거를 덮어쓴다).\n"
+    "     search.detail은 사용자가 특정 단일 항목을 지목(식별자·순번 인용·'이 항목' 지시어)했을 때만 사용한다.\n"
     "4. **response.unsupported는 마지막 수단** — 검색을 시도한 뒤에만 사용한다.\n"
     "   사전 판단으로 거절하지 않는다. 단, 아래는 즉시 거절 가능:\n"
     "   - 주가·날씨·실시간 뉴스·금융 데이터 (NTIS와 무관한 외부 사실)\n"
@@ -329,7 +332,9 @@ _PLANNER_SYSTEM_HEADER = (
     "5. 같은 도구를 같은 args로 두 번 호출하지 마세요 (loop guard로 차단됨).\n"
     "6. observations에서 status='error'가 보이면 다른 도구·args로 재시도.\n"
     "7. 검증이 필요한 인물·기관 이름은 lookup.* 도구로 NTIS 존재 확인 후 search.*에 전달.\n"
-    "8. manifest_rank·focused_detail 직전 turn 인용은 manifest.* 도구로 식별자 매핑 후 exact_lookup.\n\n"
+    "8. manifest_rank·focused_detail 직전 turn 인용은 보통 세션(entity_resolution)에 식별자가\n"
+    "   이미 해소되어 있다 — search.detail로 바로 단건 조회한다. 세션 해소가 안 된 경우에만\n"
+    "   manifest.* 도구로 식별자를 매핑한 뒤 그 identifiers를 search.detail에 넘긴다.\n\n"
     "[dialogue_kind 제약 — DialogueAgent 분류 결과 준수]\n"
     "session.dialogue_kind가 있으면 DialogueAgent가 이미 의도를 분류한 결과다.\n"
     "이 값이 다음 중 하나이면 search / search.detail / search.stats / lookup.* / manifest.* 도구를 최소 1회 호출하기 전에\n"
@@ -473,6 +478,20 @@ def _build_planner_user_payload(
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _primary_axis_ids(ids: Dict[str, Any]) -> Dict[str, Any]:
+    """evidence ids에서 항목 자신의 정체성 축 1개만 선택.
+
+    우선순위 rst_id > pjt_id > pjt_no > person_no > org_id — perf의 부모 pjt_id,
+    project의 참여자 person_no/org_id 같은 부수 식별자가 detail 조회 축으로
+    오용되는 것을 차단한다.
+    """
+    for axis in ("rst_id", "pjt_id", "pjt_no", "person_no", "org_id"):
+        val = ids.get(axis)
+        if val:
+            return {axis: val}
+    return {}
+
+
 def _summarize_observation(obs: Observation) -> Dict[str, Any]:
     """관측 결과를 prompt에 노출할 압축 형태로 변환 — 큰 evidence는 핵심만."""
     summary: Dict[str, Any] = {
@@ -491,12 +510,17 @@ def _summarize_observation(obs: Observation) -> Dict[str, Any]:
         summary["evidence_count"] = len(evs)
         summary["search_status"] = res.get("status")
         summary["total_hits"] = res.get("total_hits", 0)
-        # 처음 3건의 title + identity만
+        # 처음 3건의 title + identity + 항목 자신의 식별자 1축만 — ids는 search.detail
+        # args로 복사 가능한 형태 (identity는 doc_id일 수 있어 exact_lookup 불가).
+        # perf evidence의 ids에는 부모 과제 pjt_id, project evidence에는 참여자 person_no가
+        # 함께 실리므로 다축 전체를 노출하면 detail 조회가 엉뚱한 항목을 반환한다 —
+        # 항목 정체성 축(rst_id > pjt_id > pjt_no > person_no > org_id) 하나만 노출.
         summary["evidences_preview"] = [
             {
                 "rank": ev.get("snapshot_rank"),
                 "title": (ev.get("title") or "")[:80],
                 "identity": ev.get("identity"),
+                "ids": _primary_axis_ids(ev.get("ids") or {}),
             }
             for ev in evs[:3]
         ]
@@ -510,6 +534,9 @@ def _summarize_observation(obs: Observation) -> Dict[str, Any]:
                 summary["subject_anchor_used"] = ac["subject_anchor"]
             if ac.get("filters_applied"):
                 summary["filters_applied"] = ac["filters_applied"]
+            # search.detail이 어떤 식별자로 조회했는지 ("session"=세션 우선, args는 무시됨).
+            if ac.get("identifier_source"):
+                summary["identifier_source"] = ac["identifier_source"]
         return summary
     # lookup 도구 결과
     if "hits" in res:

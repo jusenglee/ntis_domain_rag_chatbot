@@ -9,9 +9,9 @@ PlannerAgent + ToolExecutor 기반 동적 그래프. 정적 그래프는 폐기�
                           ask_meta/ask_children은 fast-path 즉답)
       → planner_loop  (LLM이 다음 step 결정 — 충분성 판단의 단일 권한)
         → tool_executor  (call_tool인 경우 → Observation 누적)
-            → answer_curator  (마지막 obs가 response.* 종결인 경우 직접응답)
-            → planner_loop    (그 외 → Planner가 answer/추가도구/unsupported 결정)
-        → answer_curator  (answer인 경우 → 누적 observation의 evidence를 EvidenceBundle로)
+            → emit_tool_response  (마지막 obs가 response.* terminal → Publication layer 발행)
+            → planner_loop        (그 외 → Planner가 answer/추가도구/unsupported 결정)
+        → answer_curator  (answer인 경우 → 누적 observation의 evidence를 EvidenceBundle로, evidence-only)
           → answer_agent → critic_agent → save_session
         → emit_agentic_clarify  (clarify인 경우 → 즉답 종료)
           → save_session
@@ -153,7 +153,12 @@ def _make_node_planner(deps: AgentPipelineDeps):
 
 
 def _planner_answer_is_internal_error(*, step: PlannerStep, plan_state: PlanState) -> bool:
-    """Planner failure must not be published as no_result."""
+    """Planner failure must not be published as no_result.
+
+    단, 누적 observation에 성공 검색이 있으면 internal error로 단정하지 않는다 —
+    answer_curator가 그 evidence로 답변할 수 있는데 '내부 오류'로 턴을 죽이는 것이
+    더 나쁜 결과다 (예: 검색 성공 후 Pass1이 미등록 도구 이름을 내는 경우).
+    """
     reason = step.reason or ""
     internal_prefixes = (
         "llm_failure",
@@ -161,9 +166,10 @@ def _planner_answer_is_internal_error(*, step: PlannerStep, plan_state: PlanStat
         "pass1_unknown_tool",
         "missing_tool_in_call_tool",
     )
+    has_ok_obs = any(obs.status == "ok" for obs in plan_state.observations)
     if reason.startswith(internal_prefixes):
-        return True
-    if plan_state.observations and not any(obs.status == "ok" for obs in plan_state.observations):
+        return not has_ok_obs
+    if plan_state.observations and not has_ok_obs:
         return True
     return False
 
@@ -227,69 +233,25 @@ def _make_node_tool_executor(deps: AgentPipelineDeps):
 # ============================================================================
 #
 # ADR-0023: AdequacyGate(LLM judge) 제거. 충분성 판단은 Planner 단일 권한.
-# tool_executor → (response.* 종결이면 answer_curator, 그 외 planner_loop) 결정적 라우팅.
+# ADR-0024: answer_curator는 evidence-only. response.* terminal tool 발행은
+#           emit_tool_response(Publication layer)로 분리. tool_executor 라우팅:
+#           response.* 종결 → emit_tool_response, 그 외 → planner_loop.
 
 async def node_answer_curator(state: AgentPipelineState) -> Dict[str, Any]:
-    """누적 observations에서 답변 흐름을 결정.
+    """누적 observations에서 답변용 evidence만 선택해 EvidenceBundle을 만든다 (ADR-0024).
 
-    2026-05-27 Step 4 확장:
-        - **response.* 도구 결과** (`final_text` 보유) 또는 **Planner step.answer_text** 가 있으면
-          AnswerAgent/Critic을 건너뛰고 그 텍스트를 final_answer_text로 직접 적용 (능동 응답).
-        - 그 외엔 누적 search.* observations에서 evidence 선택 후 EvidenceBundle 빌드 → AnswerAgent 흐름.
-        - 검색 observation도 없고 직접 응답도 없으면 표준 거절 텍스트로 최종 답변 (empty bundle 회피).
+    책임 경계 (evidence-only):
+        O search.* observations → CanonicalEvidence 선택 → EvidenceBundle (+ SearchResult)
+        X 직접응답(response.*) 발행 — emit_tool_response 노드가 담당 (Publication layer)
+        X final_answer_text / AnswerArtifact / stream 발행 — Publication layer 전담
+
+    이 노드는 항상 answer_agent로 흐른다. evidence가 0건이면 empty bundle →
+    AnswerAgent가 결정적 no_result 메시지를 생성한다.
     """
     plan_state = state.plan_state
     if plan_state is None:
         bundle = EvidenceBundle(view="empty", items=[], groups=[])
         return {"evidence_bundle": bundle}
-
-    # 1. response.* 도구 또는 step.answer_text를 직접 답변으로 흐름.
-    direct_text, direct_kind = _select_direct_response_text(plan_state)
-    if direct_text:
-        if state.stream_emitter is not None:
-            await state.stream_emitter.publish(
-                StreamEvent(
-                    kind="answer.chunk",
-                    request_id=state.request_id,
-                    content=direct_text,
-                    model_key=f"agentic_{direct_kind or 'direct_answer'}",
-                )
-            )
-        artifact = AnswerArtifact(
-            text=direct_text,
-            answer_kind="direct_answer" if direct_kind != "unsupported" else "clarification",
-            references=[],
-            source_refs=[],
-            meta={
-                "kind": f"agentic_{direct_kind}",
-                "step_count": plan_state.step_no,
-                "termination_reason": plan_state.termination_reason,
-            },
-        )
-        kind_kr = {
-            "direct_answer": "직접 응답·인사·간단 안내",
-            "unsupported": "정직 거절·NTIS 범위 외",
-        }.get(direct_kind or "", "알 수 없음")
-        logger.info(
-            f"[agentic_trace] req={short_id(state.request_id)} step={plan_state.step_no} "
-            f"[answer_curator] direct_response_selected "
-            f"kind={direct_kind!r}({kind_kr}) chars={len(direct_text)}(답변 길이) "
-            f"skip=AnswerAgent+Critic(생성·검증 건너뜀)"
-        )
-        # AnswerAgent/Critic을 건너뛰기 위해 evidence_bundle을 empty + final_answer_text 직접 채움.
-        bundle = EvidenceBundle(
-            view="empty", items=[], groups=[],
-            diagnostics={"agentic_direct_response": True, "kind": direct_kind},
-        )
-        return {
-            "evidence_bundle": bundle,
-            "final_answer_text": direct_text,
-            "answer_artifact": artifact,
-            "dialogue_intent": state.dialogue_intent or DialogueIntent(
-                kind="direct_answer", target_hint=None, query=state.question or "",
-                direct_text=direct_text, reason="agentic_direct", confidence=0.9,
-            ),
-        }
 
     evidences, view, source_obs = _select_evidences_for_answer(plan_state.observations)
     bundle = EvidenceBundle(
@@ -347,26 +309,16 @@ async def node_answer_curator(state: AgentPipelineState) -> Dict[str, Any]:
     }
 
 
-def _select_direct_response_text(plan_state: "PlanState") -> tuple[Optional[str], Optional[str]]:
-    """response.* 도구 또는 Planner step.answer_text → (final_text, kind).
+def _select_terminal_response_text(plan_state: "PlanState") -> tuple[Optional[str], Optional[str]]:
+    """response.* terminal tool observation → (final_text, kind).
 
-    우선순위:
-        1. plan_state.decisions의 마지막 PlannerStep이 action='answer' + answer_text 채워짐 → 그 텍스트.
-        2. plan_state.observations에 status='ok'인 response.* 마지막 observation의 result.final_text.
-        3. 없으면 (None, None).
+    response.direct_answer / response.unsupported는 evidence가 아니라 **terminal intent
+    tool**이다. handler가 result.final_text에 최종 텍스트를 이미 확정해 둔다.
+    emit_tool_response(Publication layer)가 이 헬퍼로 텍스트를 꺼내 발행한다.
+
+    PlannerStep.answer_text는 발행하지 않는다 (Planner는 publication authority 아님,
+    grounding/citation 검증 우회 — ADR-0024). action=answer는 evidence 기반 흐름으로 간다.
     """
-    # 1) 마지막 decision의 answer_text
-    last_decision = plan_state.last_decision() if plan_state.decisions else None
-    if last_decision is not None and last_decision.action == "answer":
-        if last_decision.answer_text:
-            # Planner는 publication authority가 아니다. answer_text는 과거 ADR-0019 잔존
-            # 필드이므로 발행하지 않고 AnswerAgent/Critic 경로로 넘긴다.
-            logger.warning(
-                f"[answer_curator] planner_answer_text_ignored(Planner 직답 폐기) "
-                f"step={plan_state.step_no} chars={len(last_decision.answer_text)} "
-                f"reason={last_decision.reason[:80]!r}(이유)"
-            )
-    # 2) response.* 마지막 ok observation
     last_response_obs: Optional[Observation] = None
     for obs in plan_state.observations:
         if obs.status != "ok":
@@ -380,6 +332,62 @@ def _select_direct_response_text(plan_state: "PlanState") -> tuple[Optional[str]
             kind = str(res.get("kind") or "direct_answer")
             return text, kind
     return None, None
+
+
+# ============================================================================
+# Node: emit_tool_response — response.* terminal tool 결과 발행 (Publication layer)
+# ============================================================================
+
+async def node_emit_tool_response(state: AgentPipelineState) -> Dict[str, Any]:
+    """response.direct_answer / response.unsupported observation을 사용자에게 발행한다.
+
+    ADR-0024: 이전엔 answer_curator가 이 발행까지 했으나(계층 위반), Publication layer
+    전담 노드로 분리. final_text는 도구 handler가 이미 확정했으므로 AnswerAgent/Critic을
+    거치지 않는다 (이미 최종 텍스트인 응답의 publication path).
+    """
+    plan_state = state.plan_state
+    text, kind = _select_terminal_response_text(plan_state) if plan_state else (None, None)
+    if not text:
+        # 방어 — 라우터가 response.* ok observation을 확인하고 보냈으므로 도달하면 배선 오류.
+        logger.error(
+            f"[agentic_trace] req={short_id(state.request_id)} "
+            f"[emit_tool_response] terminal_text_missing(배선 오류 — response.* 결과 없음)"
+        )
+        text = "요청을 처리하지 못했습니다. 다시 시도해 주세요."
+        kind = "direct_answer"
+
+    if state.stream_emitter is not None:
+        await state.stream_emitter.publish(
+            StreamEvent(
+                kind="answer.chunk",
+                request_id=state.request_id,
+                content=text,
+                model_key=f"agentic_{kind or 'direct_answer'}",
+            )
+        )
+    artifact = AnswerArtifact(
+        text=text,
+        answer_kind="direct_answer" if kind != "unsupported" else "clarification",
+        references=[],
+        source_refs=[],
+        meta={
+            "kind": f"agentic_{kind}",
+            "step_count": plan_state.step_no if plan_state else 0,
+            "termination_reason": plan_state.termination_reason if plan_state else None,
+        },
+    )
+    kind_kr = {
+        "direct_answer": "직접 응답·인사·간단 안내",
+        "unsupported": "정직 거절·NTIS 범위 외",
+    }.get(kind or "", "알 수 없음")
+    logger.info(
+        f"[agentic_trace] req={short_id(state.request_id)} "
+        f"[emit_tool_response] terminal_response_published "
+        f"kind={kind!r}({kind_kr}) chars={len(text)}(답변 길이) "
+        f"skip=AnswerAgent+Critic(이미 최종 텍스트)"
+    )
+    # emit_direct_answer와 동일 패턴 — evidence_bundle 미설정 → save_session이 view=None 처리.
+    return {"answer_artifact": artifact, "final_answer_text": text}
 
 
 def _select_evidences_for_answer(
@@ -412,8 +420,11 @@ def _select_evidences_for_answer(
 
     if last_exact is not None:
         evs = _renumber_evidences(_deserialize_evidences(last_exact.result.get("evidences") or []))
-        view = "single_detail" if len(evs) <= 1 else "list_compact"
-        return evs, view, last_exact
+        if evs:
+            view = "single_detail" if len(evs) == 1 else "list_compact"
+            return evs, view, last_exact
+        # ok-but-empty detail(잘못된 식별자 등)은 무시 — 이전 성공 검색 결과로 fallback.
+        # 그대로 쓰면 view=single_detail(0건)이 앞선 목록 evidence를 가린다.
     if last_agg is not None:
         evs = _renumber_evidences(_deserialize_evidences(last_agg.result.get("evidences") or []))
         return evs, "stats_summary", last_agg
@@ -532,7 +543,10 @@ def _route_after_dialogue(state: AgentPipelineState) -> str:
 def _route_after_entity_resolver(state: AgentPipelineState) -> str:
     """entity_resolver 출력 → planner_loop / fast-path / emit_clarification 분기.
 
-    ask_meta / ask_children은 검색 없이 세션 캐시(manifest/focused_detail)로 즉답.
+    ask_meta는 검색 없이 세션 캐시(manifest/focused_detail)로 즉답.
+    ask_children은 focused_detail 캐시가 실제로 그 항목을 가리킬 때만 즉답 —
+    캐시가 없거나 사용자가 다른 manifest 항목을 인용했으면 planner_loop로 보내
+    EntityResolver가 해소한 식별자(rst_id 등)로 search.detail이 본문을 가져와 답한다.
     그 외는 PlannerAgent가 동적으로 도구 전략을 결정하는 planner_loop로 진입.
     """
     resolution = state.entity_resolution
@@ -544,8 +558,56 @@ def _route_after_entity_resolver(state: AgentPipelineState) -> str:
     if intent is not None and intent.kind == "ask_meta":
         return "emit_meta_answer"
     if intent is not None and intent.kind == "ask_children":
+        if _children_fast_path_available(state):
+            return "emit_children_list"
+        # 해소된 식별자가 있을 때만 planner_loop — search.detail로 그 항목을 가져올 수 있다.
+        ids = resolution.identifiers
+        if ids is not None and ids.has_any():
+            return "planner_loop"
+        # 사용자가 N번을 인용했는데 해소도 실패하고 식별자도 없음 — emit_children_list로
+        # 보내면 focused_detail(다른 항목) 캐시로 오답을 확신 발행하므로 되묻기가 정직하다.
+        if intent.manifest_rank is not None:
+            return "emit_clarification"
+        # 인용 없는 명단 요청 + 빈 세션 — 기존 emit_children_list의 안내 메시지가 정답.
         return "emit_children_list"
     return "planner_loop"
+
+
+def _children_fast_path_available(state: AgentPipelineState) -> bool:
+    """ask_children을 focused_detail 캐시로 즉답 가능한지 판정.
+
+    조건 (모두 만족):
+        - session_state.focused_detail 존재 (child_entities 캐시 보유 슬롯)
+        - 사용자가 manifest_rank를 인용했다면(intent 기준 — 해소 실패해도 인용은 인용),
+          해소된 식별자가 focused_detail anchor와 같은 항목이어야 함. 다른 항목이거나
+          해소 실패면 캐시 즉답은 오답이므로 라우터가 planner_loop/되묻기로 처리한다.
+
+    항목 동일성 판정은 양쪽 모두 값이 있는 가장 구체적인 축 하나로 결정한다 —
+    perf 항목은 부모 과제의 pjt_id를 함께 들고 다닐 수 있어, any-axis 겹침 판정은
+    같은 과제의 다른 성과를 같은 항목으로 오판한다 (rst_id가 진실원).
+    """
+    session = state.session_state
+    if session is None or not session.has_focused_detail():
+        return False
+    intent = state.dialogue_intent
+    cited_rank = intent.manifest_rank if intent is not None else None
+    resolution = state.entity_resolution
+    resolved_rank = resolution.manifest_rank if resolution is not None else None
+    if cited_rank is None and resolved_rank is None:
+        return True  # "이 항목" anaphora — focused_detail 자신을 가리킴
+    if resolved_rank is None:
+        # 인용은 있으나 해소 실패(manifest 부재/범위 초과) — 캐시가 그 항목이라는 보장 없음.
+        return False
+    ids = resolution.identifiers
+    if ids is None:
+        return False
+    anchor = session.focused_detail.anchor
+    for axis in ("rst_id", "pjt_id", "pjt_no", "person_no", "org_id"):
+        values = getattr(ids, axis, None) or []
+        anchor_val = (getattr(anchor, axis, None) or "").strip()
+        if anchor_val and values:
+            return anchor_val in values
+    return False
 
 
 def _route_after_planner(state: AgentPipelineState) -> str:
@@ -571,13 +633,12 @@ def _route_after_planner(state: AgentPipelineState) -> str:
 
 
 def _route_after_tool_executor(state: AgentPipelineState) -> str:
-    """tool_executor → answer_curator / planner_loop 결정적 분기 (ADR-0023).
+    """tool_executor → emit_tool_response / planner_loop / answer_curator 결정적 분기.
 
-    AdequacyGate(LLM judge) 제거 후, 충분성 판단은 Planner 단일 권한이 된다.
-    이 라우터는 결정적 규칙만 적용한다:
+    충분성 판단은 Planner 단일 권한 (ADR-0023). 이 라우터는 결정적 규칙만 적용:
         - plan_state None / step_no>=50 → answer_curator (안전판)
         - 마지막 observation이 response.direct_answer/response.unsupported + ok
-          → answer_curator (직접응답 종결 — final_text를 answer_curator가 발행)
+          → emit_tool_response (Publication layer가 terminal 텍스트 발행 — ADR-0024)
         - 그 외(검색 결과·error 포함) → planner_loop
           (Planner가 observation+applied_context 보고 answer/추가도구/unsupported 결정)
     """
@@ -590,20 +651,9 @@ def _route_after_tool_executor(state: AgentPipelineState) -> str:
         and last_obs.status == "ok"
         and last_obs.tool in {"response.direct_answer", "response.unsupported"}
     ):
-        return "answer_curator"
+        # ADR-0024: terminal intent tool 결과는 Publication layer 노드가 발행 (curator 아님).
+        return "emit_tool_response"
     return "planner_loop"
-
-
-def _route_after_answer_curator(state: AgentPipelineState) -> str:
-    """answer_curator 출력 → 다음 노드 분기.
-
-    Step 4 (2026-05-27): answer_curator가 response.* 도구 결과를 final_answer_text로 직접 채웠으면
-    AnswerAgent/Critic을 건너뛰고 save_session으로 곧장 (능동 직접 응답).
-    그 외(evidence 기반)는 기존 answer_agent → critic_agent 흐름.
-    """
-    if state.final_answer_text and state.answer_artifact is not None:
-        return "save_session"
-    return "answer_agent"
 
 
 def _route_after_agentic_critic(state: AgentPipelineState) -> str:
@@ -738,7 +788,7 @@ def _summarize_session(state: AgentPipelineState) -> Dict[str, Any]:
             er["manifest_resolved_target"] = res.manifest_resolved_target
         summary["entity_resolution"] = er
     # DialogueAgent 분류 결과 — Planner가 dialogue_kind를 제약 조건으로 활용한다.
-    # ask_search 계열이면 search.* 시도 전 response.unsupported 금지 (ADR-0021 Issue 1).
+    # ask_search 계열이면 search.* 시도 전 response.unsupported 금지 (ADR-0025 Issue 1).
     if state.dialogue_intent is not None:
         summary["dialogue_kind"] = state.dialogue_intent.kind
     return summary
@@ -759,11 +809,12 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
 
     동적 루프(agentic):
         planner_loop ↔ tool_executor (action=call_tool 동안 반복)
-        tool_executor → answer_curator(response.* 종결) / planner_loop(그 외).
-        → answer_curator → answer_agent → critic_agent → save_session
+        tool_executor → emit_tool_response(response.* terminal) / planner_loop(그 외).
+        answer는 answer_curator(evidence-only) → answer_agent → critic_agent → save_session.
         clarify는 emit_agentic_clarify로 즉답 종료.
 
     충분성 판단은 Planner 단일 권한 (ADR-0023: AdequacyGate 제거).
+    publication 계층 분리 (ADR-0024): curator=evidence, emit_*=최종 텍스트 발행.
     종료: planner가 answer/clarify 결정, max_steps, duplicate_call 가드.
     """
     if StateGraph is None:
@@ -789,6 +840,8 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     graph.add_node("emit_clarification", node_emit_clarification)
     graph.add_node("emit_internal_error", node_emit_internal_error)
     graph.add_node("emit_direct_answer", node_emit_direct_answer)
+    # ADR-0024: response.* terminal tool 결과 발행 (Publication layer, curator에서 분리).
+    graph.add_node("emit_tool_response", node_emit_tool_response)
     # ask_meta / ask_children fast-path — 검색 없이 세션 캐시(manifest/focused_detail)로 즉답.
     graph.add_node("emit_meta_answer", node_emit_meta_answer)
     graph.add_node("emit_children_list", node_emit_children_list)
@@ -828,17 +881,18 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
             "emit_internal_error": "emit_internal_error",
         },
     )
-    # ADR-0023: tool_executor → answer_curator(response.* 종결) / planner_loop(그 외) 결정적 분기.
+    # tool_executor → emit_tool_response(response.* 종결) / planner_loop(그 외) / answer_curator(안전판).
     graph.add_conditional_edges(
         "tool_executor", _route_after_tool_executor,
-        {"answer_curator": "answer_curator", "planner_loop": "planner_loop"},
+        {
+            "emit_tool_response": "emit_tool_response",
+            "planner_loop": "planner_loop",
+            "answer_curator": "answer_curator",
+        },
     )
 
-    # Step 4: answer_curator → answer_agent 직결 제거. direct_response면 save_session 곧장.
-    graph.add_conditional_edges(
-        "answer_curator", _route_after_answer_curator,
-        {"save_session": "save_session", "answer_agent": "answer_agent"},
-    )
+    # ADR-0024: answer_curator는 evidence-only — 항상 answer_agent로 (직접응답 발행 분기 제거).
+    graph.add_edge("answer_curator", "answer_agent")
     graph.add_edge("answer_agent", "critic_agent")
     # Step 2: critic_agent → save_session 직결 제거. publish/repair/clarify/internal_error 분기.
     graph.add_conditional_edges(
@@ -853,6 +907,7 @@ def build_agentic_pipeline_graph(deps: AgentPipelineDeps):
     graph.add_edge("emit_agentic_clarify", "save_session")
     graph.add_edge("emit_clarification", "save_session")
     graph.add_edge("emit_direct_answer", "save_session")
+    graph.add_edge("emit_tool_response", "save_session")
     graph.add_edge("emit_meta_answer", "save_session")
     graph.add_edge("emit_children_list", "save_session")
     graph.add_edge("emit_internal_error", "save_session")

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -134,6 +135,61 @@ class DialogueAgent:
         return intent
 
     # ------------------------------------------------------------------
+    # LLM 호출 — vLLM guided_json (출력 schema 강제)
+    # ------------------------------------------------------------------
+
+    async def _ainvoke_structured(
+        self,
+        messages: List[Any],
+        *,
+        schema: Optional[Dict[str, Any]],
+        request_id: str,
+        conversation_id: str,
+        max_tokens: int,
+    ) -> Any:
+        """schema가 있으면 vLLM guided_json으로 출력 문법을 강제해 호출한다.
+
+        - JSON 파싱 실패·필드 누락·enum 이탈이 디코딩 레벨에서 차단된다.
+        - 서버가 guided_json을 미지원(400 등)하면 process 수명 동안 비활성화하고
+          평문 모드로 즉시 fallback — 기존 동작과 완전 동일하게 degrade.
+        - 그 외 일시 오류는 이번 호출만 평문으로 재시도 (재시도도 실패하면 호출자
+          안전망이 처리).
+        """
+        global _guided_json_runtime_disabled
+        if schema is not None and _guided_json_enabled():
+            try:
+                return await self._llm.ainvoke(
+                    messages,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    temperature=0.0,
+                    top_p=1.0,
+                    max_tokens=max_tokens,
+                    extra_body={"guided_json": schema},
+                )
+            except Exception as exc:  # noqa: BLE001
+                status = getattr(exc, "status_code", None)
+                if status == 400 or "guided" in str(exc).lower():
+                    _guided_json_runtime_disabled = True
+                    logger.warning(
+                        f"[DialogueAgent] guided_json_unsupported(서버 미지원 감지 — "
+                        f"프로세스 수명 동안 비활성화) status={status} error={exc}"
+                    )
+                else:
+                    logger.warning(
+                        f"[DialogueAgent] guided_json_call_failed(일시 오류 — "
+                        f"이번 호출만 평문 재시도) error={exc}"
+                    )
+        return await self._llm.ainvoke(
+            messages,
+            request_id=request_id,
+            conversation_id=conversation_id,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=max_tokens,
+        )
+
+    # ------------------------------------------------------------------
     # Pass 1 — 의도 분류
     # ------------------------------------------------------------------
 
@@ -148,12 +204,11 @@ class DialogueAgent:
         """Pass 1: kind + manifest_rank + direct/clarification 즉답."""
         system_prompt = _build_classification_prompt()
         user_payload = _build_user_payload(question=question, session=session)
-        response = await self._llm.ainvoke(
+        response = await self._ainvoke_structured(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_payload)],
+            schema=_PASS1_SCHEMA,  # 분류는 결정적 — guided_json으로 schema 강제
             request_id=request_id,
             conversation_id=conversation_id,
-            temperature=0.0,  # 분류는 결정적
-            top_p=1.0,
             max_tokens=384,
         )
         raw = getattr(response, "content", "") or ""
@@ -195,12 +250,11 @@ class DialogueAgent:
         user_payload = _build_extraction_user_payload(
             question=question, session=session, classification=classification,
         )
-        response = await self._llm.ainvoke(
+        response = await self._ainvoke_structured(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_payload)],
+            schema=_build_extraction_schema(classification.kind),
             request_id=request_id,
             conversation_id=conversation_id,
-            temperature=0.0,
-            top_p=1.0,
             max_tokens=512,
         )
         raw = getattr(response, "content", "") or ""
@@ -252,15 +306,20 @@ def _build_classification_prompt() -> str:
         "[kind 정의]\n"
         "1. ask_search   — 일반 검색 (사람/기관/주제로 목록 조회). 예: \"신동구 활동내역\"\n"
         "2. ask_detail   — 단일 대상 상세. 예: \"9번 항목 상세\", \"K-20-... 정보\"\n"
+        "                  항목의 **내용·주제·관련성** 질문/이의 제기도 ask_detail + manifest_rank=N:\n"
+        "                    - \"6번 항목은 LLM과 연관이 없지 않나?\" → ask_detail (manifest_rank=6)\n"
+        "                    - \"N번이 왜 포함됐어?\", \"N번 내용이 뭐야?\" → ask_detail (manifest_rank=N)\n"
         "3. ask_meta     — 직전 항목(또는 manifest 전체)의 유형/분류/통계만.\n"
         "                  허용: \"이게 과제야 성과야?\", \"이 항목 유형은?\", \"전부 같은 인물이야?\"\n"
         "                  **detail 본문 요청은 ask_detail. 인물 검증(\"X 책임자?\")은 ask_children.**\n"
         "4. ask_children — 직전 1개 항목의 자식 엔티티 명단 또는 인물·기관 검증.\n"
         "                  명단 예: \"참여자 목록\", \"이 과제 참여한 사람들\"\n"
         "                  검증 예: \"김수빈 연구책임자?\", \"KISTI 참여했어?\"\n"
-        "                  **금지 (이런 경우는 ask_search로):**\n"
+        "                  **금지 (이런 경우는 다른 kind로):**\n"
         "                    - \"X 연구자의 다른 활동/연구\" → ask_search\n"
         "                    - \"이 사람이 참여한 다른 항목\" → ask_search\n"
+        "                    - \"N번은 X와 연관 없지 않나?\" 같은 항목 내용·관련성 질문/이의\n"
+        "                      → ask_detail (manifest_rank=N). 참여자·기관 검증이 아니다.\n"
         "                  즉 ask_children은 \"이 항목 안의 자식\"이지 \"이 자식이 참여한 다른 항목\"이 아니다.\n"
         "                  예: \"유재수 다른 참여연구는?\" → ask_search (subject 활동 검색)\n"
         "5. ask_similar  — 직전 항목과 유사한 다른 항목. focused_detail 필수.\n"
@@ -291,6 +350,8 @@ def _build_classification_prompt() -> str:
         "**ask_search** 조건 — refine_previous로 분류하지 마세요:\n"
         "  - 사용자가 직전 결과의 적합성에 대해 **불만·재요청** 표시\n"
         "    예: \"그게 아니라 LLM 관련을 원했어\", \"이게 아니야\", \"다시 검색해줘\"\n"
+        "    단, **특정 N번 항목만 지목한** 내용·관련성 이의(\"6번은 LLM과 관련 없지 않나?\")는\n"
+        "    ask_detail(manifest_rank=N) — 목록 전체에 대한 불만·재검색 요청만 ask_search.\n"
         "  - 사용자가 previous_manifest와 **무관한 새 주제·키워드를 도입**\n"
         "  - 사용자가 명시적으로 \"다시 / 새로 / 처음부터\" 요청\n"
         "\n"
@@ -918,6 +979,140 @@ _VALID_KINDS = {
 }
 _VALID_TARGETS = {"project", "perf", "people", "org", "support"}
 _VALID_ACTIONS = {"list", "detail", "stats", "topic", "download"}
+
+
+# ============================================================================
+# Guided decoding — vLLM guided_json schemas
+# ============================================================================
+# vLLM(OpenAI-compat)의 guided_json으로 LLM 출력 문법을 schema에 강제한다.
+# 효과: JSON 파싱 실패·필드 누락·kind enum 이탈이 디코딩 레벨에서 구조적으로 차단.
+# - 환경변수 DIALOGUE_GUIDED_JSON=0 으로 수동 비활성화.
+# - 서버 미지원(400) 감지 시 process 수명 동안 자동 비활성화 (평문 모드 degrade).
+# - schema는 xgrammar/outlines 호환성을 위해 type/enum/array/object만 사용
+#   (pattern·minimum 등 고급 키워드 금지).
+
+_GUIDED_JSON_ENV = "DIALOGUE_GUIDED_JSON"
+_guided_json_runtime_disabled = False
+
+
+def _guided_json_enabled() -> bool:
+    if _guided_json_runtime_disabled:
+        return False
+    return os.getenv(_GUIDED_JSON_ENV, "1").strip().lower() not in {"0", "false", "off"}
+
+
+_NULLABLE_STR: Dict[str, Any] = {"type": ["string", "null"]}
+_NULLABLE_INT: Dict[str, Any] = {"type": ["integer", "null"]}
+_STR_LIST: Dict[str, Any] = {"type": "array", "items": {"type": "string"}}
+
+_PERF_TYPES = [
+    "PAPER", "PATENT", "SOFTWARE", "REPORT", "EQUIPMENT",
+    "COMPOUND", "ORGSM_INFO", "ORGSM_RESOURCE", "TECH_INFO", "NVR",
+]
+_PERF_TYPE_LIST: Dict[str, Any] = {"type": "array", "items": {"enum": _PERF_TYPES}}
+
+_SUBJECT_KIND: Dict[str, Any] = {"enum": ["people", "org", None]}
+
+_IDENTIFIER_HINTS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"pjt_id": _STR_LIST, "pjt_no": _STR_LIST, "rst_id": _STR_LIST},
+    "additionalProperties": False,
+}
+
+_SORT_BY: Dict[str, Any] = {"enum": ["relevance", "recent_desc", "recent_asc"]}
+_LENGTH_HINT: Dict[str, Any] = {"enum": ["brief", "default", "detailed"]}
+
+
+def _schema(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """모든 property를 required로 강제하는 object schema — '필드 누락' 차단."""
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties.keys()),
+        "additionalProperties": False,
+    }
+
+
+_PASS1_SCHEMA: Dict[str, Any] = _schema({
+    "kind": {"enum": sorted(_VALID_KINDS)},
+    "target_hint": {"enum": sorted(_VALID_TARGETS) + [None]},
+    "action_hint": {"enum": sorted(_VALID_ACTIONS) + [None]},
+    "manifest_rank": _NULLABLE_INT,
+    "direct_text": _NULLABLE_STR,
+    "clarification_question": _NULLABLE_STR,
+    "clarification_options": _STR_LIST,
+    "reason": {"type": "string"},
+    "confidence": {"type": "number"},
+})
+
+# kind별 Pass 2 schema — _build_extraction_prompt의 출력 schema와 1:1 대응.
+_EXTRACTION_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
+    "ask_search": _schema({
+        "subject_name": _NULLABLE_STR,
+        "subject_kind": _SUBJECT_KIND,
+        "subject_affiliation_hint": _NULLABLE_STR,
+        "coparticipants": _STR_LIST,
+        "exclude_org_name": _STR_LIST,
+        "exclude_perf_type": _PERF_TYPE_LIST,
+        "exclude_person_name": _STR_LIST,
+        "identifier_hints": _IDENTIFIER_HINTS_SCHEMA,
+        "year_from": _NULLABLE_INT,
+        "year_to": _NULLABLE_INT,
+        "perf_type_hint": _PERF_TYPE_LIST,
+        "sort_by": _SORT_BY,
+        "length_hint": _LENGTH_HINT,
+    }),
+    "ask_detail": _schema({
+        "identifier_hints": _IDENTIFIER_HINTS_SCHEMA,
+        "length_hint": _LENGTH_HINT,
+    }),
+    "ask_meta": _schema({
+        "subject_name": _NULLABLE_STR,
+        "subject_kind": _SUBJECT_KIND,
+    }),
+    "ask_children": _schema({
+        "subject_name": _NULLABLE_STR,
+        "subject_kind": _SUBJECT_KIND,
+    }),
+    "refine_previous": _schema({
+        "subject_name": _NULLABLE_STR,
+        "subject_kind": _SUBJECT_KIND,
+        "year_from": _NULLABLE_INT,
+        "year_to": _NULLABLE_INT,
+        "perf_type_hint": _PERF_TYPE_LIST,
+        "exclude_org_name": _STR_LIST,
+        "exclude_perf_type": _PERF_TYPE_LIST,
+        "exclude_person_name": _STR_LIST,
+        "coparticipants": _STR_LIST,
+        "sort_by": _SORT_BY,
+        "length_hint": _LENGTH_HINT,
+    }),
+    "compare": _schema({
+        "compare_targets": {
+            "type": "array",
+            "items": _schema({
+                "name": {"type": "string"},
+                "kind": {"enum": ["people", "org", "project", "perf"]},
+            }),
+        },
+        "length_hint": _LENGTH_HINT,
+    }),
+    "stats": _schema({
+        "subject_name": _NULLABLE_STR,
+        "subject_kind": _SUBJECT_KIND,
+        "aggregate_hint": {"enum": [
+            "year", "lead_org", "tag", "perf_type",
+            "participant_org", "participant_person", None,
+        ]},
+        "year_from": _NULLABLE_INT,
+        "year_to": _NULLABLE_INT,
+    }),
+}
+
+
+def _build_extraction_schema(kind: DialogueKind) -> Optional[Dict[str, Any]]:
+    """Pass 2 guided_json schema. 슬롯 추출이 없는 kind는 None (guided 미적용)."""
+    return _EXTRACTION_SCHEMA_MAP.get(kind)
 
 
 def _build_intent_from_llm(parsed: Dict[str, Any], question: str) -> DialogueIntent:

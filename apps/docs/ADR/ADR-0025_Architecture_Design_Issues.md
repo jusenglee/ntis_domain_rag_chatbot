@@ -1,10 +1,15 @@
-# ADR-0021: Architecture Design Issues — Unified Agentic Pipeline
+# ADR-0025: Architecture Design Issues (Register) — Unified Agentic Pipeline
 
 Status: active, 2026-06-02
 
+> 번호 정정 (2026-06-02): 본 문서는 처음 ADR-0021로 만들어졌으나 ADR-0021
+> (Dual-Model Answer Output)과 번호가 충돌해 ADR-0025로 재번호했다. 이 문서는
+> 결정 기록(ADR)이라기보다 **설계 이슈 레지스터**다 — 발견된 문제와 그것을 해소한
+> ADR(0022/0023/0024)을 추적한다.
+
 이 문서는 ADR-0020 통합 Agentic 파이프라인 구현 이후 발견된 설계 오류와
 기술 부채를 기록한다. 각 이슈는 심각도(Critical / Important / Minor)로 분류하고
-근본 원인과 권장 조치를 명시한다.
+근본 원인과 해소 ADR을 명시한다.
 
 ---
 
@@ -88,94 +93,44 @@ max_tokens=4096 if self._thinking_enabled else 384,  # 512 → 4096
 
 ---
 
-## Issue 3 — answer_curator의 Layer 위반
+## Issue 3 — answer_curator의 Layer 위반 ✅ 해결 (ADR-0024)
 
-**심각도: Important**
+**심각도: Important — 2026-06-02 Publication layer 분리로 해소**
 
-### 현상
+### 현상 (해결 전)
 
 `node_answer_curator`(Layer 2 — Evidence Authority)가 스트리밍 발행(Layer 3 행위)을
-직접 수행한다.
+직접 수행했다 — `response.*` 결과를 감지해 `final_answer_text`/`AnswerArtifact`/stream을
+직접 만들었다.
 
-```python
-# agentic_workflow.py — node_answer_curator
-if direct_text:
-    await state.stream_emitter.publish(StreamEvent(...))   # ← Layer 3 행위
-    return {
-        "final_answer_text": direct_text,   # ← CriticAgent 없이 발행
-        "answer_artifact": artifact,
-    }
-```
+### 해결 (ADR-0024)
 
-### 근본 원인
-
-Planner가 `response.*` 도구를 호출하는 경로(ask_search → scope 판단 → unsupported)의
-응답 발행 로직이 answer_curator에 남아있다. ADR-0020에서 제거하기로 했으나 미완료.
-
-### 영향
-
-- Layer 1이 분리해준 `direct_answer` 경로(emit_direct_answer 노드)와
-  Layer 2 answer_curator의 `direct_response` 경로가 공존
-- CriticAgent 없이 발행되는 응답이 두 가지 경로에서 나올 수 있음
-
-### 권장 조치
-
-answer_curator에서 스트리밍 발행 코드 제거.
-`response.*` 도구 결과 처리를 위한 `emit_planner_response` 노드를 신설하고,
-`_route_after_answer_curator`에서 이 노드로 분기한다.
-
-```
-현재: answer_curator → (direct_text 있으면) → save_session
-변경: answer_curator → (direct_text 있으면) → emit_planner_response → save_session
-     emit_planner_response: 스트리밍 발행 + artifact 생성 (Layer 3)
-```
+answer_curator를 evidence-only로 축소(항상 answer_agent로 흐름). `response.*` terminal
+tool 발행을 신규 `emit_tool_response`(Publication layer) 노드로 분리.
+`_route_after_tool_executor`가 `response.* + ok → emit_tool_response`로 결정적 라우팅.
+`answer_curator → answer_agent`는 무조건 엣지가 됐다.
 
 ---
 
-## Issue 4 — CriticAgent 우회 경로 2개
+## Issue 4 — CriticAgent 우회 경로 2개 ✅ 해결 (ADR-0024)
 
-**심각도: Important**
+**심각도: Important — 2026-06-02 해소**
 
-### 현상
+### 현상 (해결 전)
 
-다음 두 경로에서 CriticAgent(검증자)를 완전히 건너뛴다.
+두 경로가 CriticAgent를 우회했다:
+- **경로 A** — `response.*` 도구 결과 (terminal intent tool의 final_text)
+- **경로 B** — `PlannerStep.answer_text` (Planner 직답)
 
-**경로 A — response.* 도구 결과:**
-```
-Planner → response.direct_answer/unsupported → ToolExecutor
-→ AdequacyGate(adequate, deterministic)
-→ answer_curator(direct_text 감지)
-→ final_answer_text 직접 설정 → save_session
-```
+### 해결 (ADR-0024)
 
-**경로 B — PlannerStep.answer_text:**
-```
-Planner → action=answer + answer_text 직접 채움
-→ answer_curator(_select_direct_response_text 감지)
-→ final_answer_text 직접 설정 → save_session
-```
-
-### 근본 원인
-
-`response.*` 도구와 `PlannerStep.answer_text`는 의도적으로 AnswerAgent/Critic을
-우회하도록 설계됐다(ADR-0019 "능동 직접 응답"). 그러나 ADR-0019 Required Future Work에
-"이 경로가 Critic을 우회해도 되는가"가 미결로 남아있다.
-
-### 영향
-
-- `response.unsupported`의 표준 문구는 Critic 검증 없이 발행됨
-- PlannerStep.answer_text는 어떤 내용이든 그대로 사용자에게 노출될 수 있음
-
-### 권장 조치
-
-**단기:** PlannerStep.answer_text 경로 제거 (가장 위험한 경로)
-
-```python
-# _select_direct_response_text에서 answer_text 경로 제거
-# Planner가 action=answer를 선택하면 항상 evidence 기반 흐름으로
-```
-
-**중기:** `response.*` 도구 결과도 경량 CriticAgent 검증 통과 후 발행
+- **경로 B 제거**: `PlannerStep.answer_text` 발행 경로 삭제. `action=answer`는 항상
+  evidence 기반 흐름(answer_curator → answer_agent → critic)으로 간다. Planner는
+  publication authority가 아니다. (필드는 inert로 남김.)
+- **경로 A 정당화**: `response.*`는 handler가 이미 최종 텍스트를 확정한 terminal
+  intent tool이다. `emit_tool_response`(Publication layer)가 발행하며, 이는 "이미 최종
+  텍스트인 응답"의 정당한 publication path다. emit_clarification/emit_internal_error와
+  동일 성격. evidence-grounded 답변만 CriticAgent를 거친다.
 
 ---
 
@@ -312,8 +267,8 @@ Planner가 "최신 도구 결과 우선"을 기대하지만, answer_curator는
 | 2b | search.hybrid target="research" 무한 루프 | **Critical** | ✅ 완료 (ADR-0022 SearchRouter) |
 | 2c | AnswerAgent 인용 범위 위반 (snapshot_rank 비연속) | **Critical** | ✅ 완료 (_renumber_evidences) |
 | 2d | 정적/Agentic 이중 파이프라인 | Important | ✅ 완료 (ADR-0020 Phase 5, 단일 통합) |
-| 3 | answer_curator Layer 위반 | Important | 미완료 |
-| 4 | CriticAgent 우회 경로 2개 | Important | 미완료 |
+| 3 | answer_curator Layer 위반 | Important | ✅ 완료 (ADR-0024 emit_tool_response 분리) |
+| 4 | CriticAgent 우회 경로 2개 | Important | ✅ 완료 (ADR-0024 answer_text 제거 + response.* 정당화) |
 | 5 | AdequacyGate-answer_curator 중복 판단 | Important | ✅ 완료 (ADR-0023 AdequacyGate 제거) |
 | 6 | clarification emit 노드 2개 혼용 | Important | 미완료 |
 | 7 | EntityResolver 무음 실패 | Minor | 미완료 |
@@ -321,22 +276,10 @@ Planner가 "최신 도구 결과 우선"을 기대하지만, answer_curator는
 
 ---
 
-## 조치 순서 권장
+## 남은 작업
 
-### 즉시 (Critical)
+대부분 해소됨 (ADR-0020/0022/0023/0024). 잔여:
 
-1. **Issue 1** — `_summarize_session`에 `dialogue_kind` 추가 + Planner 프롬프트 하드 규칙
-
-### 단기 (Important, 구현 영향 작음)
-
-2. **Issue 7** — EntityResolver 무음 실패 로그 추가 (1줄)
-3. **Issue 4** — PlannerStep.answer_text 경로 제거
-
-### 중기 (Important, 구조 변경 필요)
-
-4. **Issue 3 + 5** — answer_curator 역할 축소 + emit_planner_response 신설
-5. **Issue 6** — clarification emit 노드 통합
-
-### 장기 (Minor, 안정화 후)
-
-6. **Issue 8** — 다중 observation evidence selector
+- **Issue 6** — clarification emit 노드 2개(emit_agentic_clarify / emit_clarification) 통합 (Important)
+- **Issue 7** — EntityResolver 무음 실패 로그 추가 (Minor, 1줄)
+- **Issue 8** — 다중 observation evidence selector (Minor, 장기)

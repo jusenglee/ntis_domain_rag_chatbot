@@ -36,22 +36,24 @@ load_session
   -> entity_resolver         (ask_meta / ask_children -> fast-path emit)
   -> planner_loop
   -> tool_executor
-       -> answer_curator     (last obs = response.* terminal)
+       -> emit_tool_response (last obs = response.* terminal -> publish)
        -> planner_loop       (everything else -> Planner decides answer/refine)
-  -> answer_curator
+  (answer)
+  -> answer_curator          (evidence only)
   -> answer_agent
   -> critic_agent
   -> save_session | answer_agent | emit_clarification | emit_internal_error
 ```
 
-Direct response tools short-circuit:
+Direct response tools short-circuit (ADR-0024):
 
 ```text
-planner_loop -> response.* tool -> tool_executor -> answer_curator -> save_session
+planner_loop -> response.* tool -> tool_executor -> emit_tool_response -> save_session
 ```
 
-In that path the output is already final text, so `AnswerAgent` and
-`CriticAgent` are skipped.
+The `response.*` handler already produced the final text, so `emit_tool_response`
+(Publication layer) publishes it directly; `AnswerAgent` and `CriticAgent` are
+skipped. `answer_curator` is evidence-only and always flows to `answer_agent`.
 
 ## Authority Separation
 

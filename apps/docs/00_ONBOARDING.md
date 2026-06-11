@@ -11,9 +11,9 @@ runtime, graph, tool layer, and response surface.
 1. `apps/api/routes.py` receives `/query` or `/query/stream`.
 2. `QueryRequest` is converted into `AgentPipelineState`.
 3. The compiled graph from `app.state.graph` runs.
-4. `apps/api/runtime.py` decides whether that graph is:
-   - `build_agentic_pipeline_graph` when `RAG_AGENTIC_MODE` is enabled.
-   - `build_agent_pipeline_graph` when disabled.
+4. `apps/api/runtime.py` compiles the single agentic pipeline via
+   `build_agentic_pipeline_graph` (ADR-0020 removed the static graph and the
+   `RAG_AGENTIC_MODE` toggle).
 5. The graph publishes an `AnswerArtifact` and optional references.
 6. Routes return JSON or SSE frames.
 
@@ -37,8 +37,8 @@ It should behave like an agent:
 | Runtime composition | `apps/api/runtime.py` |
 | Request/response schema | `apps/api/routes.py` |
 | Shared state object | `apps/pipeline/agent_state.py` |
-| Static graph | `apps/pipeline/agent_workflow.py` |
-| Agentic graph | `apps/pipeline/agentic_workflow.py` |
+| Shared nodes / deps | `apps/pipeline/agent_workflow.py` |
+| Agentic graph (live) | `apps/pipeline/agentic_workflow.py` |
 | Planner decisions | `apps/pipeline/agents/planner_agent.py` |
 | Tool contracts | `apps/pipeline/tools/contracts.py` |
 | Tool catalog | `apps/pipeline/tools/registry.py` |

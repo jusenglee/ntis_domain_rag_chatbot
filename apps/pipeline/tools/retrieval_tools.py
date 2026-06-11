@@ -687,14 +687,25 @@ SEARCH_DETAIL_SPEC = ToolSpec(
     name="search.detail",
     description=(
         "세션 컨텍스트(EntityResolution 식별자 또는 manifest 인용)의 단건 상세 조회. "
-        "사용자가 특정 과제·성과를 지목했을 때 사용. 식별자는 세션에서 자동 읽힌다."
+        "사용자가 특정 과제·성과를 지목했을 때 사용. 식별자는 세션에서 자동 읽히며 "
+        "**세션 식별자가 있으면 그것이 우선하고 args.identifiers는 무시된다**. "
+        "세션에 식별자가 없을 때만 직전 search observation의 evidences_preview[].ids를 "
+        "identifiers 인자로 복사해 특정 항목을 지정할 수 있다."
     ),
     input_schema={
         "type": "object",
         "properties": {
+            "identifiers": {
+                "type": ["object", "null"],
+                "description": (
+                    "{pjt_id?:[...], pjt_no?:[...], rst_id?:[...], person_no?:[...], org_id?:[...]} — "
+                    "직전 검색 observation의 evidences_preview[].ids에서 그대로 복사. "
+                    "세션에 식별자가 없을 때 특정 항목 단건 조회용 (보통 null)."
+                ),
+            },
             "query": {
                 "type": ["string", "null"],
-                "description": "보조 검색어 (세션에 식별자가 없을 때 fallback용, 보통 null)",
+                "description": "보조 검색어 (세션·args 모두 식별자가 없을 때 fallback용, 보통 null)",
             },
         },
         "required": [],
@@ -715,28 +726,57 @@ SEARCH_DETAIL_SPEC = ToolSpec(
 async def search_detail_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[str, Any]:
     er = getattr(ctx, "entity_resolution", None)
 
-    # 세션의 식별자 우선
+    # 세션의 식별자 우선 (EntityResolver가 사용자의 이번 턴 지시를 결정적으로 해소한 값)
     identifiers: Optional[IdentifierBundle] = None
+    args_identifiers_used = False
     if er is not None and er.identifiers is not None and er.identifiers.has_any():
         identifiers = er.identifiers
+
+    # 세션에 없으면 Planner가 observation preview에서 복사한 args.identifiers 사용.
+    # 가장 구체적인 정체성 축 1개만 채택 — perf evidence의 ids에는 부모 과제 pjt_id가
+    # 함께 실릴 수 있고, exact_lookup 축 우선순위(pjt_id>rst_id)가 그 축으로 먼저
+    # 매칭하면 같은 과제의 다른 성과(sibling)를 반환하는 오답이 된다.
+    if identifiers is None:
+        raw_ids = args.get("identifiers")
+        if isinstance(raw_ids, dict):
+            for axis in ("rst_id", "pjt_id", "pjt_no", "person_no", "org_id"):
+                values = _clean_list(raw_ids.get(axis))
+                if values:
+                    identifiers = IdentifierBundle(**{axis: values})
+                    args_identifiers_used = True
+                    break
 
     # 식별자 없으면 query fallback
     query = str(args.get("query") or "").strip() or None
 
     if identifiers is None and query is None:
-        raise ValueError("search.detail: 세션에 식별자도 없고 query도 없음 — 상세 조회 불가")
+        raise ValueError(
+            "search.detail: 세션·args 모두 식별자가 없고 query도 없음 — 상세 조회 불가. "
+            "직전 search observation의 evidences_preview[].ids를 identifiers로 넘기세요."
+        )
 
     target, subject, filters = _route_from_ctx(ctx)
+    # args 식별자 사용 시 세션 라우팅 기본값(project) 대신 식별자 축으로 target 추론.
+    if args_identifiers_used:
+        target = _infer_target_from_ids(identifiers)
 
     if identifiers is not None:
+        # 식별자가 여러 건이면(manifest 부분집합 재조회 등) 그 수만큼 반환 한도를 잡는다.
+        # SearchTask validator가 action="detail"이면 limit=1을 강제하므로 다건은 action="list"
+        # (전략은 동일하게 exact_lookup — ids.has_any() 기준).
+        id_count = sum(
+            len(getattr(identifiers, axis) or [])
+            for axis in ("pjt_id", "pjt_no", "rst_id", "person_no", "org_id")
+        )
+        limit = max(1, min(id_count, 20))
         task = build_search_task(
-            action="detail",
+            action="detail" if limit == 1 else "list",
             target=target,  # type: ignore[arg-type]
             request_id=ctx.request_id,
             turn_id=ctx.turn_id,
             identifiers=identifiers,
-            limit=1,
-            display_limit=1,
+            limit=limit,
+            display_limit=limit,
             judgment_reason="tool:search.detail",
         )
     else:
@@ -756,11 +796,17 @@ async def search_detail_handler(args: Dict[str, Any], ctx: ToolContext) -> Dict[
         raise RuntimeError("search.detail: ctx.search_agent is None")
 
     result = await ctx.search_agent.execute(task)
+    # 식별자 경로는 subject/filters를 task에 적용하지 않으므로 관측에도 보고하지 않는다
+    # (미적용 필터를 보고하면 Planner의 0건 원인 진단이 오염된다).
     applied_ctx = _build_applied_context(
-        targets=[target], subject=subject, filters=filters, sort_by="relevance",
+        targets=[target],
+        subject=None if identifiers is not None else subject,
+        filters=None if identifiers is not None else filters,
+        sort_by="relevance",
     )
     if identifiers is not None:
         applied_ctx["identifier_used"] = True
+        applied_ctx["identifier_source"] = "args" if args_identifiers_used else "session"
     return {
         "status": result.status,
         "evidences": [ev.model_dump() for ev in (result.evidences or [])],
