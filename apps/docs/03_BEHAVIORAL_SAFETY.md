@@ -1,183 +1,53 @@
-# 03 행동안전(L2) 정책과 보정
+# 03. 행동 안전 (검색 실패·오류 시 어떻게 복구하나)
 
-이 문서는 `ExecutionManager`가 소유하는 L2 행동안전 정책과 bounded recovery 규칙을 정의한다.
-L2의 역할은 L1(`QuestionAnalysisV3`)이 고정한 의도와 식별자 의미를 보존하면서,
-정책으로 허용된 범위 안에서만 실행 순서와 보정을 제어하는 것이다.
+> 검색이 0건이거나 도구가 오류를 낼 때 시스템이 무엇을 하는지(그리고 **무엇을 하면 안 되는지**)를 다룬다. §1~§2가 개념, §3 이후는 정밀 참조다. 소유 코드: `apps/retrieval/execution_manager.py`의 `ExecutionManager`.
 
----
+## 1. 핵심 원칙 두 가지
 
-## 원칙
+1. **결과 0건은 오류가 아니다.** 진짜로 데이터가 없을 수 있다. 억지로 답을 만들지 않는다.
+2. **복구는 '정해진 범위 안에서만'.** 검색이 빈손이라고 조건을 마음대로 풀어 더 넓게 긁으면, *엉뚱한 대상*이 답에 섞인다. 그래서 복구는 "이 정책에선 이것만 1회 허용" 식으로 **경계가 박혀 있다.**
 
-- L2는 L1의 `mode`, `head`, `ids_map`, `join_key_mode`, `target_cols` 의미를 재해석하지 않는다.
-- 보정은 항상 bounded rule로만 허용한다.
-- raw retrieval payload는 그대로 prompt에 올리지 않는다.
-- full `execution_trace`는 state/log 전용이고, `selected_answer_meta`에는 summary만 남긴다.
-- legacy retry는 legacy SEARCH 전용이며, orchestrator-owned 요청은 재진입하지 않는다.
-- Shock Absorber는 L2가 L1을 고치는 권한이 아니라, 부수 파라미터와 오류 처리 경계를 안전하게 흡수하는 원칙이다.
-- `action=detail` 또는 `output_type=detail`은 count를 `1/1`로 normalize하더라도 단일 후보 guard를 통과하기 전에는 실행하지 않는다.
+비유: 도서관에서 책을 못 찾았을 때, "비슷한 거 아무거나 들고 오기"가 아니라 "철자 한 글자만 바꿔 다시 한 번 찾아보기"까지만 허용하는 식이다.
 
----
+## 2. 가장 자주 만나는 안전장치 — Detail Guard
 
-## 현재 ownership 경계
+"상세 보여줘"인데 대상이 하나로 확정 안 되면:
 
-다음 경로는 `ExecutionManager`가 소유한다.
+- 하나로 확정됨 → 상세 조회 진행.
+- 여럿 → 되묻거나 짧은 관찰(observation)로 닫는다.
+- 없음 → "없음" 또는 되묻기.
+- **절대 금지:** 상세 요청을 17~20건짜리 넓은 검색으로 바꾸는 것(`SEARCH_RECOVERY`). 차단되면 `RAG.DETAIL.SINGLE_CANDIDATE_GUARD` 로그 + `detail_guard_blocked=true`.
 
-- `project LOOKUP`
-- `project SEARCH`
-- `project JOIN`
-- `people SEARCH`
-- `org SEARCH`
-- `perf SEARCH`
+## 3. 정밀 참조 — 복구 정책표
 
-다음 경로는 아직 legacy retriever에 남겨둔다.
+각 검색 상황마다 "1차/2차로 뭘 시도하고, 무엇이 허용/금지인지"가 정책으로 박혀 있다.
 
-- `support SEARCH`
-- unsupported/deferred `JOIN`
-- 별도 contract가 없는 specialist flow
+| 정책 | 적용 | 허용된 복구 | 금지 |
+|---|---|---|---|
+| `LOOKUP_MISSING_RECOVERY` | project LOOKUP | 같은 필터 유지한 SEARCH 1회 | 정확 ID 질의의 임의 완화 |
+| `SEARCH_RECOVERY` | project SEARCH | people/org 필터 완화 1회 | 모드 변경, `pjt_id`/`pjt_no` 축 drift, 활성 anchor 무시, detail류 broad 확장, 단일후보 미확정 first-candidate detail |
+| `PEOPLE_SEARCH_OBSERVATION` | people SEARCH | `max_steps=1`, 관찰만 | 자동 교정 (근거는 project+perf) |
+| `ORG_SEARCH_OBSERVATION` | org SEARCH | 동일 | 동일 |
+| `PERF_SEARCH_OBSERVATION` | perf SEARCH | 동일, `target_cols=[COL_PERF]` | `display_source`는 항상 `docs` |
+| `JOIN_QUALITY_RECOVERY` | project JOIN | instance JOIN 0행 + anchor에 `pjt_no` 존재 + 명시 `pjt_id` 없음 → `group` 1회 재시도 | 키 날조, 축 자유 재해석, 관계 변경, 2회 이상 재시도 |
 
----
+> 아직 레거시(이 틀 밖)인 경로: `support SEARCH`, 미지원/지연(deferred) `JOIN`, 계약 없는 specialist flow.
 
-## 구현된 정책
+`SEARCH_RECOVERY` 관찰 코드: `empty_primary_search`, `filter_gate_too_strict`, `candidate_underflow`, `relax_budget_exhausted`, `search_recovery_succeeded`.
 
-### 1. `LOOKUP_MISSING_RECOVERY`
+## 4. 정밀 참조 — 내부 오류 루프 (Internal Error Loop)
 
-- 대상: `project LOOKUP`
-- primary: `fetch_project_detail`
-- secondary: `search_projects_by_text`
-- 허용 보정: 동일 filter를 유지한 SEARCH 1회
-- 금지: exact ID 질의의 임의 완화
+도구·플래너·스키마가 *내부적으로* 깨졌을 때(사용자 모호성과 다름):
 
-### 2. `SEARCH_RECOVERY`
+- 원본 덤프가 아니라 **짧은 관찰**로 만들어 Agent에 1회 되돌린다 → 그래도 안 되면 `agent_internal_error`로 종료.
+- 진짜로 사용자 대상이 여러 개라 모호할 때만 → 되묻기(clarification).
+- **내부/파서/스키마 오류를 `ClarificationContext`(되묻기 맥락)로 저장하지 않는다.** ("시스템이 고장난 것"을 "사용자가 애매한 것"으로 위장 금지.) — 근거: ADR-0015.
+- 정상 순서: `AGENT.TOOL_OBSERVATION(error)` → `AGENT.TOOL_RETRY.START` → `AGENT.TOOL_RETRY.DECISION` → (여전히 실패) `AGENT.INTERNAL_ERROR`.
 
-- 대상: `project SEARCH`
-- primary/secondary: 모두 `search_projects_by_text`
-- 허용 보정: 사람/기관 계열 filter 1회 완화
-- 금지:
-  - top-level mode 변경
-  - `pjt_id` / `pjt_no` 축 drift
-  - active anchor truth 무시
-  - detail-like 요청의 broad search 확장
-  - 단일 후보 미확정 상태에서 임의 첫 후보 상세 조회
-- observation codes:
-  - `empty_primary_search`
-  - `filter_gate_too_strict`
-  - `candidate_underflow`
-  - `relax_budget_exhausted`
-  - `search_recovery_succeeded`
+## 5. 정밀 참조 — 관찰 메타 필드
 
-### 3. `PEOPLE_SEARCH_OBSERVATION`
+- `execution_trace`(스텝별): `policy`, `tool_name`, `status`, `reason`, `observation_codes`, `diagnostics`.
+- `retrieval_runtime_meta`(최소): `runtime_owner`, `policy_name`, `orchestrator_owned`, `legacy_retry_allowed`, `execution_kind`, `base_route`, `observation_only`. JOIN 복구 시 `group_recovery_attempted`, `group_recovery_applied`, `recovery_join_axis`, `recovery_source` 추가.
+- `selected_answer_meta`(사용자용 요약): `recovery_applied`, `recovery_policy`, `recovery_steps`, `recovery_user_notice`.
 
-- 대상: `people SEARCH`
-- `max_steps=1`
-- `retry_mode=observation_only`
-- 자동 보정 없음
-- 근거 수집은 `project + perf` 축을 유지한다.
-
-### 4. `ORG_SEARCH_OBSERVATION`
-
-- 대상: `org SEARCH`
-- `max_steps=1`
-- `retry_mode=observation_only`
-- 자동 보정 없음
-- 근거 수집은 `project + perf` 축을 유지한다.
-
-### 5. `PERF_SEARCH_OBSERVATION`
-
-- 대상: `perf SEARCH`
-- `max_steps=1`
-- `retry_mode=observation_only`
-- 자동 보정 없음
-- `target_cols=[COL_PERF]`를 기본값으로 사용한다.
-- `display_source`는 항상 `docs` 기준으로 유지한다.
-
-### 6. `JOIN_QUALITY_RECOVERY`
-
-- 대상: `project JOIN`
-- primary: 현재 contract 그대로 `fetch_project_performance(..., join_key_mode="instance" | "group")`
-- 유일한 자동 보정:
-  - `instance JOIN`이 0건이고
-  - active anchor에 이미 `pjt_no`가 있으며
-  - explicit `pjt_id` / hard axis lock이 없는 경우
-  - `group` retry 1회를 수행한다.
-- 금지:
-  - invented key 사용
-  - free-text `pjt_id` / `pjt_no` 재해석
-  - relation 변경
-  - 1회 초과 retry
-
----
-
-## Shock Absorber 적용 규칙 (ADR-0016)
-
-### Smart Coercion
-
-L2에서 허용되는 Smart Coercion은 실행 의미를 바꾸지 않는 표시/개수 파라미터에 한정한다. 세부 원칙은 [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md)을 따른다.
-
-- `limit` / `display_limit` 누락 또는 LLM 부수 오류는 planner-validated count contract로 normalize할 수 있다.
-- `action=detail` 또는 `output_type=detail`은 `limit=1`, `display_limit=1`로 normalize한다.
-- **교정 금지:** 대상 식별, `pjt_id`/`pjt_no`, `target_cols`, 기관 역할 필터, `SEARCH/LOOKUP/JOIN` 모드는 normalize하지 않는다.
-
-### Detail Guard
-
-Detail guard는 count normalization과 별개로 동작하는 안전장치다.
-
-- 단일 후보가 explicit ID, current context, active scope, visible manifest 중 하나에서 확인되면 detail lookup으로 진행한다.
-- 후보가 여러 개이면 Agent에게 compact observation 또는 사용자 clarification으로 닫는다.
-- 후보가 없으면 no-result 또는 clarification으로 닫는다.
-- **Fail-closed:** 어떤 경우에도 detail-like 요청을 `SEARCH_RECOVERY` list 결과로 확장하여 임의의 결과를 노출하지 않는다.
-
-### Internal Error Loop
-
-Tool backend, planner, schema validation 오류는 사용자 모호성이 아니다.
-
-- 오류 payload는 raw dump가 아니라 compact observation으로 Agent에 최대 1회 반환한다.
-- Agent가 corrected tool call을 만들면 같은 guarded pipeline으로 재시도한다.
-- 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫는다.
-- 실제 사용자 대상이 복수라서 모호한 경우에만 clarification으로 닫는다. (ADR-0015 준수)
-
----
-
-## Trace와 runtime meta
-
-### `execution_trace`
-
-L2는 step마다 다음 정보를 남긴다.
-
-- `policy`
-- `tool_name`
-- `status`
-- `reason`
-- `observation_codes`
-- `diagnostics`
-
-### `retrieval_runtime_meta`
-
-state에는 최소한 아래 경계를 남긴다.
-
-- `runtime_owner`
-- `policy_name`
-- `orchestrator_owned`
-- `legacy_retry_allowed`
-- `execution_kind`
-- `base_route`
-- `observation_only`
-
-JOIN 보정이 개입한 경우에는 아래 필드도 남긴다.
-
-- `group_recovery_attempted`
-- `group_recovery_applied`
-- `recovery_join_axis`
-- `recovery_source`
-
----
-
-## 사용자 노출 경계
-
-- `selected_answer_meta`에는 다음 요약만 남긴다.
-  - `recovery_applied`
-  - `recovery_policy`
-  - `recovery_steps`
-  - `recovery_user_notice`
-- full trace, raw observation dump, runtime diagnostics 전체를 prompt나 사용자 응답에 직접 노출하지 않는다.
-- contract-invalid 상태에서는 LLM 답변 스트리밍을 시작하지 않는다.
-- detail guard 실패는 무관 후보를 context에 넣는 대신 deterministic terminal message 또는 Agent clarification observation으로 닫는다.
+contract-invalid → LLM 답변 스트리밍 없음. detail-guard 실패 → 결정적 종료 메시지 또는 Agent 명확화 관찰.

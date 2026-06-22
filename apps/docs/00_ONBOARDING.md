@@ -1,103 +1,91 @@
-# NTIS RAG 챗봇 온보딩
+# 00. 온보딩 — 이 시스템을 처음 보는 사람을 위한 안내
 
-이 문서는 신규 기여자가 10분 안에 시스템의 진입점, 핵심 계약, 운영 점검 순서를 잡기 위한 입구 문서다.
+이 문서만 끝까지 읽으면 "이게 뭘 하는 물건이고, 코드 어디를 봐야 하는지"가 잡힌다. 전문 용어는 처음 나올 때 풀어서 쓴다.
 
-## Source of Truth
+## 1. 이게 무슨 시스템인가요?
 
-- 문서 루트: `apps/docs`
-- 코드 진입점: `apps/api/routes.py`
-- 함께 읽을 문서: `README.md`, `01_ARCHITECTURE.md`, `02_CONTRACTS_AND_RULES.md`, `07_회귀기준과_점검.md`
+**NTIS**는 국가 R&D(연구개발) 정보를 모아둔 정부 포털이다. 이 프로젝트는 그 방대한 **과제·성과 데이터를 자연어로 묻고, 출처와 함께 답을 받는 챗봇**이다. 흔한 ChatGPT류와 다른 점은 *아는 척하지 않는다*는 것 — 검색된 실제 데이터에 있는 내용만 답하고 문장마다 출처 번호를 단다.
 
-## 시스템 한 줄 요약
+### 실제로 이렇게 동작한다
 
-`사용자 질문 -> Dialogue Agent 판단 (L1) -> guarded tool adapter -> planner/contract assembly (L2) -> retrieval 실행 -> canonical evidence/display snapshot -> answer publication guard`
+> **사용자:** "신동구 연구자(한국과학기술정보연구원)의 2014~2020년 활동 내역"
+>
+> **챗봇:** 그 연구자가 참여한 과제를 연도별로 정리해서 답한다. 각 항목 끝에 `[1]`, `[2]` 같은 **출처 번호**가 붙고, 그 번호는 화면 하단 출처 목록의 같은 번호와 정확히 일치한다.
+>
+> **사용자(이어서):** "그럼 2020년 이후에 수행한 과제는?"
+>
+> **챗봇:** 앞 대화의 "신동구 연구자"를 **기억하고 이어받아서**, 조건만 바꿔 다시 답한다. ("그 연구자"가 누구인지 다시 안 물어본다.)
 
-핵심 원칙은 **Agent freedom with contract guard**다. Agent는 사용자의 전략적 의도(L1)를 결정하고, 하위 계층은 이를 기술적 계약(L2)으로 구체화하여 실행한다.
+### 이 시스템이 특히 신경 쓰는 두 가지
 
-## 가장 먼저 알아야 할 용어
+1. **환각(없는 사실을 지어내기) 방지.** 근거에 없는 과제번호·연도·기관명을 답에 넣지 않는다. 근거와 안 맞으면 차라리 "답을 보류"한다.
+2. **엉뚱한 대상 섞기 방지.** 동명이인, 비슷한 과제번호, 기관 역할 차이(수행기관 ≠ 참여기관) 같은 함정에서 잘못된 데이터를 섞지 않도록 코드가 막는다.
 
-| 용어 | 의미 |
-|---|---|
-| `SEARCH / LOOKUP / JOIN` | 검색 모드. retrieval 전략의 최상위 계약 |
-| `canonical evidence` | raw 검색 결과를 prompt-safe 근거로 정규화한 결과 |
-| `output_type` | `summary/detail/list/stats/relation/comparison/series` 표현 계약 |
-| `follow-up` | 이전 턴의 대상이나 맥락을 이어받는 후속 질의 |
-| `active_scope` | 현재 보고 있는 목록/상세/하위 엔티티 상태 |
-| `visible_answer_manifest` | 사용자가 실제로 본 목록 순서와 항목의 truth |
-| `Shock Absorber` | LLM 비결정성과 엄격 계약 사이의 완충 원칙 |
-| `Smart Coercion` | `limit/display_limit` 같은 부수 파라미터만 제한적으로 교정하는 규칙 |
-| `single-candidate guard` | detail 실행 전에 대상이 정확히 하나인지 확인하는 guard |
-| `contract-invalid` | 실행 계약이 깨져 LLM 답변 생성을 시작하면 안 되는 상태 |
-| `pjt_id` | 과제 instance key |
-| `pjt_no` | 과제 group key |
+이 두 가지가 사실상 이 코드베이스 복잡도의 대부분을 차지한다. "왜 이렇게 복잡하지?" 싶을 때 답은 거의 항상 *위 두 사고를 막으려고* 다.
 
-## 추천 읽기 순서
+## 2. 한눈에 보는 동작 흐름
 
-1. `README.md`
-2. `01_ARCHITECTURE.md`
-3. `02_CONTRACTS_AND_RULES.md`
-4. `03_BEHAVIORAL_SAFETY.md`
-5. `04_TOOLING_STANDARDS.md`
-6. `06_운영과_환경.md`
-7. `07_회귀기준과_점검.md`
+질문 하나가 답이 되어 나오기까지, 평이하게:
 
-코드 읽기 순서:
-
-1. `apps/api/routes.py`
-2. `apps/conversation/request_facade.py`
-3. `apps/retrieval/retrieval_workflow.py`
-4. `apps/conversation/view_state.py`
-5. `apps/chat/answer_generation.py`
-
-## 요청 1건 흐름
-
-```text
+```
 사용자 질문
-  -> Dialogue Agent가 사용자의 전략적 의도(L1)와 도구 선택을 확정
-  -> agent tool adapter가 L1 의도에 기반한 guarded IntentPayloadV3 생성
-  -> planner/contract assembly가 L1 의도를 기술적 계약(L2)으로 컴파일하고 Smart Coercion 적용
-  -> retrieval이 L1/L2 계약을 준수하여 실행
-  -> evidence가 raw payload를 canonical evidence와 display snapshot으로 정규화
-  -> answer publication guard가 L1 의도와 최종 결과의 정합성 검증
-  -> REQ.SUMMARY와 각 단계 운영 로그 기록
+  1. [판단]  무엇을 원하는 질문인가? (새 검색? 앞 대화 이어가기? 특정 항목 상세?)
+  2. [검색]  그 의도에 맞는 조건으로 DB(Qdrant)에서 근거 문서를 찾는다
+  3. [정리]  찾은 원본을 답변에 쓰기 안전한 형태(= 근거)로 다듬는다
+  4. [답변]  두 LLM(Solar·Gemma)이 그 근거만 보고 답을 쓴다
+  5. [검증]  답이 근거/화면 목록과 어긋나면 발행하지 않고 보류한다
+  → 사용자에게 답 + 출처 목록 전달
 ```
 
-## 기준 파일 지도
+이 5단계를 코드에서는 **LangGraph**(노드들을 이어 붙인 실행 그래프)로 구현한다. 그래프 정의는 `apps/api/workflow_builder.py`의 `build_request_workflow()`.
 
-| 확인하고 싶은 것 | 파일 |
+## 3. 핵심 용어 빠른 사전
+
+처음 마주칠 단어만. 정밀한 정의는 01~03 문서에 있다.
+
+| 용어 | 한 줄 설명 |
 |---|---|
-| 라우트와 응답 surface | `apps/api/routes.py` |
-| follow-up / scope orchestration | `apps/conversation/request_facade.py` |
-| Agent decision / tool adapter | `apps/conversation/agent_dialogue_router.py`, `apps/conversation/agent_tool_executor.py` |
-| scope 분류 | `apps/conversation/scope_resolver.py` |
-| anchor/ordinal/source-reference 해석 | `apps/conversation/followup_anchor.py` |
-| planner runtime | `apps/planner/planner_runtime.py` |
-| retrieval 전체 흐름 | `apps/retrieval/retrieval_workflow.py` |
-| canonical evidence 조립 | `apps/evidence/canonical_evidence.py` |
-| prompt envelope / packing | `apps/evidence/prompt_evidence_envelope.py`, `apps/evidence/context_packer.py` |
-| 대화 상태와 visible manifest | `apps/conversation/view_state.py` |
-| answer generation / merge | `apps/chat/answer_generation.py`, `apps/chat/answer_merge.py` |
-| 환경값 | `apps/platform/settings.py` |
+| **L1 / L2** | L1 = "사용자가 무엇을 원하는가"(의도). L2 = "그걸 기술적으로 어떻게 실행하는가"(검색 조건·필터). **하위 단계가 L1을 바꾸지 못한다**는 게 핵심 원칙. |
+| **Dialogue Agent** | 맨 앞에서 "이 질문이 무슨 의도인가"를 판단하는 LLM. 직접 답할지, 검색 도구를 부를지, 되물을지 결정한다. |
+| **SEARCH / LOOKUP / JOIN** | 검색 방식 3종. SEARCH=의미 기반 폭넓게, LOOKUP=ID로 콕 집어, JOIN=과제↔성과 연결. |
+| **canonical evidence** | DB 원본을 답변에 안전하게 쓸 수 있도록 정리한 "근거". **원본을 LLM에 그대로 주지 않는다**(환각·오염 방지). |
+| **Detail Guard** | "상세 보여줘"인데 대상이 하나로 확정 안 되면, 엉뚱한 걸 상세로 보여주지 않게 막는 안전장치. |
+| **pjt_id / pjt_no** | 과제 식별자. `pjt_id`=개별 과제, `pjt_no`=다년도 묶음. **둘은 다르다, 절대 혼용 금지**(자주 나오는 버그 원인). |
 
-## 문제 진단 순서
+## 4. 코드는 어디부터 보나
 
-1. `REQ.START`에서 질문, override, conversation id를 확인한다.
-2. `AGENT.STATE_CARD.BUILT`, `AGENT.DECISION`, `AGENT.TOOL_CALL`에서 Agent가 새 검색인지 current-context refinement인지 판단했는지 본다.
-3. `PLANNER.COUNT_CONTRACT`, `PLANNER.*`에서 `action/output_type`, count normalization, strategy drift 여부를 본다.
-4. `RAG.EXECUTION_MANAGER.RESULT`, `RAG.RETRIEVAL_QUERY.ACTUAL`, `RAG.RESULT`, `RAG.CONTEXT`에서 detail 요청이 broad `SEARCH_RECOVERY`로 새지 않았는지 확인한다.
-5. `DISPLAY.SNAPSHOT.BUILT`에서 visible/canonical order와 count가 맞는지 본다.
-6. `LLM.RESULT`, `ANSWER.STATE_DIAG`에서 groundedness, answer-state consistency, degraded 여부를 본다.
-7. `REQ.SUMMARY`에서 최종 latency, fallback, output_type, count 관련 요약을 확인한다.
+아래 순서대로 따라가면 "요청 하나의 일생"이 보인다.
 
-## 절대 잊지 말아야 할 규칙
+1. `apps/api/main.py` — 서버 기동(uvicorn, 포트 **8008**)
+2. `apps/api/app_factory.py` — `create_app()`이 라우트·런타임을 조립
+3. `apps/api/routes.py` — `/query/stream`(스트리밍 응답)이 그래프를 돌린다
+4. `apps/api/workflow_builder.py` — 위 2번 흐름도가 실제 그래프로 정의된 곳
+5. `apps/conversation/agent_dialogue_router.py` — `run_dialogue_agent()` (1단계 판단)
+6. `apps/planner/planner_runtime.py` — 검색 조건 컴파일(L2)
+7. `apps/retrieval/retrieval_workflow.py` → `execution_manager.py` — 2단계 검색
+8. `apps/evidence/canonical_evidence.py` — 3단계 근거 정리
+9. `apps/chat/answer_generation.py` — 4·5단계 답변 생성 + 검증
+10. `apps/platform/settings.py` — 환경변수·외부 서버 주소
 
-| 규칙 | 이유 |
+## 5. 딱 이것만은 기억하세요
+
+| 규칙 | 왜 |
 |---|---|
-| Dialogue Agent가 정한 전략적 의도(Action, Subject)는 하위 계층에서 바꾸지 않는다 | L1 의도 진실 보호 |
-| `pjt_id`와 `pjt_no`는 섞지 않는다 | instance/group 의미가 다르다 |
-| `lead_org_name`, `participant_org_name`, `people_affiliation_org_name`는 다른 역할이다 | 조직 의미 보존 |
-| raw payload를 LLM에 직접 넣지 않는다 | canonical evidence와 render profile을 반드시 거친다 |
-| retrieval metadata 전체를 답변 프롬프트에 노출하지 않는다 | prompt-safe 사실 필드만 사용한다 |
-| `action=detail` 또는 `output_type=detail`은 `limit/display_limit=1/1`로 normalize한다 | detail은 단일 대상 답변 계약이다 (Smart Coercion) |
-| 단일 후보가 확인되지 않은 detail은 broad search로 확장하지 않는다 | 엉뚱한 후보 컨텍스트 투입 방지 (Detail Guard) |
-| 시스템/tool 오류는 사용자 모호성 clarification으로 위장하지 않는다 | 내부 오류와 사용자 모호성 분리 (Internal Error Loop) |
+| 맨 앞 판단(Dialogue Agent)이 정한 "의도"를 뒷단계가 바꾸지 않는다 | 사용자가 원한 것과 다른 답이 나가는 걸 막는다 |
+| `pjt_id` ≠ `pjt_no` — 섞지 않는다 | 개별 과제와 다년도 묶음은 다른 것 |
+| 수행기관 / 참여기관 / 인력 소속기관은 서로 다르다 | 기관 역할을 섞으면 틀린 답이 된다 |
+| DB 원본을 LLM 프롬프트에 직접 넣지 않는다(근거 경유) | 환각·데이터 오염 방지 |
+| "상세 보여줘"는 대상이 하나로 확정될 때만 실행 | 엉뚱한 과제를 상세로 보여주는 사고 방지 |
+
+## 6. 더 깊이 — 각 문서가 답하는 질문
+
+| 문서 | 답해주는 질문 |
+|---|---|
+| [01 아키텍처](./01_ARCHITECTURE.md) | 위 5단계가 어떤 계층으로 나뉘고, 각 계층이 뭘 책임지나? |
+| [02 계약과 도메인 규칙](./02_CONTRACTS_AND_RULES.md) | 데이터의 함정(식별자·기관역할·이어가기)을 코드가 어떻게 막나? |
+| [03 행동 안전](./03_BEHAVIORAL_SAFETY.md) | 검색이 0건이거나 오류일 때 어떻게 복구하나(그리고 뭘 하면 안 되나)? |
+| [04 API와 스트리밍](./04_API_AND_STREAMING.md) | 프런트엔드는 어떤 이벤트를 받나(Solar·Gemma 두 답변 포함)? |
+| [05 운영과 환경](./05_OPERATIONS.md) | 어떻게 실행하고, 로그로 어떻게 문제를 추적하나? |
+| [06 테스트와 회귀](./06_TESTING.md) | 뭘 돌려야 "안 깨졌다"가 보장되나? |
+
+> 디버깅하다 막히면: 05 운영 문서의 "로그 triage 순서"가 어느 로그 키부터 볼지 알려준다.

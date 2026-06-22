@@ -8,9 +8,11 @@
 
 시스템의 설계 원칙과 비즈니스 로직은 아래 문서를 최우선 진실원(Source of Truth)으로 삼는다. 작업 전 반드시 해당 문서를 먼저 읽고 맥락을 파악한다.
 
+*   **[`HANDOVER.md`](./HANDOVER.md)**: 인수인계 — 현재 상태·진입점·즉시 처리 이슈 (신규 진입 시 먼저)
 *   **[`apps/docs/README.md`](./apps/docs/README.md)**: 전체 문서 인덱스
 *   **[`apps/docs/01_ARCHITECTURE.md`](./apps/docs/01_ARCHITECTURE.md)**: 2층 계약 및 4계층 구조
 *   **[`apps/docs/02_CONTRACTS_AND_RULES.md`](./apps/docs/02_CONTRACTS_AND_RULES.md)**: 식별자(pjt_id/no) 및 실행 규칙
+*   **[`apps/docs/06_TESTING.md`](./apps/docs/06_TESTING.md)**: 검증 게이트와 회귀 불변식 (Validation First의 실제 명령)
 
 ---
 

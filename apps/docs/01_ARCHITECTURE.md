@@ -1,126 +1,114 @@
-# 01 아키텍처와 흐름 (Architecture & Flow)
+# 01. 아키텍처
 
-이 문서는 NTIS RAG 시스템의 **2층 계약(2-Layer Contract)** 아키텍처 철학과 이를 구현하는 **Agentic RAG 실행 구조**, 그리고 실제 **데이터 흐름**을 정의한다.
+> 이 문서는 [00 온보딩](./00_ONBOARDING.md)의 "5단계 흐름"을 **"누가 무엇을 책임지나"** 관점으로 한 단계 더 들어간다. 앞부분(§1~§3)은 개념, 뒤(§4~)는 정밀 참조다.
 
----
+## 1. 가장 중요한 한 가지: "의도는 위에서, 실행은 아래에서"
 
-## 1. 아키텍처 철학: "2층 계약 (2-Layer Contract)"
+이 시스템의 모든 설계는 한 문장으로 요약된다:
 
-본 시스템은 **"의도의 진실(L1)"**이라는 견고한 선로 위에, **"행동의 안전(L2)"**이라는 유연한 환승 규칙을 얹은 구조다. 단순히 답을 내는 것을 넘어, 왜 이 답이 나왔는지(L1)와 어떤 보정을 거쳤는지(L2)를 명확히 분리하여 관리한다.
+> **맨 앞 LLM이 "사용자가 무엇을 원하는지"를 정하면, 그 아래 단계들은 그걸 *바꾸지 않고* 기술적으로 실행만 한다.**
 
-### 1층: 의미적 의도 진실 (L1 Semantic Intent Truth)
-*   **정의:** Dialogue Agent가 확정한 사용자의 전략적 대화 의도 및 도구 선택.
-*   **불변성:** 시스템 실행의 최상위 기준점으로서, 하위 계층에 의해 기각되거나 수정될 수 없다.
-*   **내용:** 조회 대상(Subject), 실행 액션(`action`), 도메인 축(Axes).
-*   **목적:** "사용자가 무엇을 원하는가?"에 대한 실질적인 판단 기준(Source of Truth) 제공.
+이걸 두 층으로 부른다.
 
-### 2층: 기술적/행동적 실행 계약 (L2 Technical/Behavioral Contract)
-*   **정의:** L1 의도를 달성하기 위해 Planner가 생성한 기술적 파라미터와 Orchestrator의 반응 정책.
-*   **유연성:** L1의 전략적 방향을 유지하는 범위 내에서 기술적 수단(필터, 검색어)을 최적화하거나 동적으로 경로를 선택.
-*   **내용:** Planner의 `IntentContract`(필터, 검색어), Orchestrator의 보정 정책(Fuzzy Fallback 등).
-*   **목적:** L1 의도를 실제 데이터 쿼리로 번역하고 실행 불확실성에 대응하는 신뢰 가드레일 유지.
+- **L1 (의도) =** "신동구 연구자의 활동을 *목록으로* 보여줘" 같은 **사용자의 뜻**. 맨 앞 LLM(Dialogue Agent)이 정한다.
+- **L2 (실행) =** 그 뜻을 이루기 위한 **검색 조건·필터·개수** 같은 기술 디테일. 아래 단계(Planner 등)가 만든다.
 
-### 완충 원칙: Shock Absorber (ADR-0016)
+**왜 굳이 나누나?** LLM은 똑똑하지만 가끔 흔들린다("10개"라고 했다가 갑자기 "20개"를 만든다든지). 이때 *사용자가 원한 핵심(누구를, 무엇을)*까지 흔들리면 엉뚱한 답이 나간다. 그래서 **핵심(L1)은 잠가두고, 사소한 디테일(L2)만 아래에서 손본다.**
 
-LLM Dialogue Agent는 자연어 대화 흐름을 유연하게 판단하지만, LLM 출력에는 사소한 부수 파라미터 오류가 섞일 수 있다. 시스템은 이를 새로운 물리 계층으로 처리하지 않고, `Tool Backend Guard`, `Planner Assembly`, `Retrieval Guard`, `Answer Publication Guard` 전반에 적용되는 **완충 원칙(Shock Absorber)**으로 흡수한다. 세부 결정 사항은 [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md)을 따른다.
+### Shock Absorber — "사소한 것만 고쳐주는 완충장치"
 
-Shock Absorber는 두 가지 핵심 규칙을 갖는다.
+`Shock Absorber`(완충기)는 위 원칙을 실제로 강제하는 장치다. 이름 그대로, LLM의 잔진동을 흡수한다.
 
-*   **Smart Coercion:** `limit`, `display_limit`처럼 표시 형태를 정하는 부수 파라미터만 도메인 규칙에 맞게 좁게 교정한다. 예를 들어 `action=detail` 또는 `output_type=detail`은 `limit=1`, `display_limit=1`로 normalize한다.
-*   **L1 불변 보호:** 대상 식별, `pjt_id`/`pjt_no` 축, 도메인 필터, 기관 역할, `SEARCH/LOOKUP/JOIN` 의미는 교정하지 않는다. 이 값이 모호하거나 충돌하면 실행하지 않고 bounded clarification 또는 internal error path로 닫는다.
+- **고쳐주는 것 (Smart Coercion):** 표시 개수 같은 부수 파라미터만. 예) "상세히 보여줘"인데 개수가 5로 왔으면 → **1개로 바로잡음**(상세는 원래 한 대상이니까).
+- **절대 안 고치는 것:** 누구를 찾는지(대상), `pjt_id`/`pjt_no` 같은 식별자 축, 검색 방식(SEARCH/LOOKUP/JOIN). 여기서 충돌이 나면 **고치지 않고 멈춘다** — 되묻거나 내부오류로 닫는다. (틀린 걸 몰래 고쳐서 그럴듯한 오답을 내느니, 차라리 안 한다.)
 
-Smart Coercion은 오류를 숨기는 장치가 아니다. 단일 후보가 확인되지 않은 detail 요청은 `1/1`로 count를 normalize해도 실행하지 않으며, broad `SEARCH_RECOVERY`로 확장하지 않는다.
+근거 결정 기록: [ADR-0016](./ADR/ADR-0016_Agent_Contract_Shock_Absorber.md).
 
----
+## 2. 플래너인가, 에이전트인가? — 세 개의 뇌
 
-## 2. 시스템 4계층 구조
+자주 헷갈리는 질문이다. 답: **둘 중 하나가 아니라 "에이전트가 위에, 플래너가 아래에" 있는 하이브리드**다. 한 요청은 세 개의 뇌를 순서대로 지난다.
 
-시스템은 2층 계약 철학을 실현하기 위해 다음과 같은 논리 계층으로 구성된다.
-
-### Agentic migration note
-
-ADR-0001에 따라 대화 제어권은 `Dialogue Agent`가 점진적으로 가져간다.
-신규 agent 경로에서는 이전 front-controller 경로 decision을 두지 않는다. 사용자 대상이 실제로 모호할 때만 clarification으로 fail-closed 하고, LLM 출력 parse/schema 오류나 invoke 오류는 사용자 모호성으로 위장하지 않고 `agent_internal_error`로 닫는다.
-Planner / Contract / Retrieval은 삭제 대상이 아니라 Agent tool backend의 contract guard로 유지한다.
-현재 workflow graph는 `agentic front-controller`일 때 `rule_precheck` 이후 `Dialogue Agent` 경로로 진입한다. Agent의 `direct_answer` / `ask_clarification`은 바로 저장 가능한 답변 artifact를 만들고, `agent_internal_error`는 error artifact를 만들며, `call_tool`은 `agent_tool_executor`가 만든 guarded `IntentPayloadV3` / `QuestionAnalysisV3`를 기존 retrieval pipeline에 넘긴다. Tool backend의 planner/contract 오류는 사용자 모호성으로 노출하지 않고 compact observation으로 Agent에 1회 되돌린다. 재시도 후에도 guarded intent가 없으면 `agent_internal_error`로 닫으며 `ClarificationContext`를 저장하지 않는다.
-
-Agent의 자유도는 대화 판단에 있다. 실행 자유도는 계약으로 제한된다. Agent는 DB filter, 식별자, JOIN 축을 직접 만들지 않고 의미 수준 tool call만 만든다. Tool backend는 이를 검증 가능한 planner/retrieval 계약으로 변환한다. 기존 Stage 1 LLM 의도 분류는 제거되었고, Agent/NormalizedIntent truth를 `AgentIntentAdapter`가 planner gate contract 형태로 변환한다.
-
-명시 연구자/기관의 활동기록은 P1부터 `search_subject_activity`가 담당한다. 이 도구와 `refine_current_subject`는 generic stagewise planner로 재진입하지 않고 subject activity lookup 계약을 직접 컴파일한다. `search_ntis_domain` people activity fast path는 하위 호환으로 유지하되 정식 선택지는 아니다. direct compile은 Agent 결정을 우회하는 휴리스틱이 아니라 Agent가 선택한 tool 의미를 `QuestionAnalysisV3(mode=LOOKUP, head=people|org, action=list)`로 빠르게 변환하는 Tool Backend Guard 최적화다. P2부터 direct subject tool은 `next_current_context`에 subject continuity 후보를 stage하고, answer publication guard 이후에만 `SessionMemory.current_context`로 커밋한다.
-
-| 계층 | 역할 | 주요 산출물 | 비고 |
+| 순서 | 누구 | 성격 | 결정하는 것 |
 |---|---|---|---|
-| **Dialogue Agent** | 전략적 의도 결정 (**L1**) | `AgentDecision` | 사용자의 실질적 의도 진실 확정 |
-| **Tool Backend Guard** | L1/L2 완충 및 정렬 | `IntentPayloadV3` | Smart Coercion을 통해 L2를 L1에 정렬 |
-| **Planner / Contract** | 기술적 컴파일러 (**L2**) | `IntentContract`, `QdrantQueryPlan` | L1 의도를 Qdrant 실행 쿼리(검색어, 필터, 제한, 후처리)로 번역 |
-| **Orchestrator / Retrieval** | 행동 실행 및 보정 (**L2**) | `ExecutionTrace`, `ToolResult` | 정책 기반 도구 실행과 bounded recovery |
-| **Evidence / Display** | 근거/화면 상태 조립 | `canonical_evidence`, `DisplaySnapshot` | raw payload를 prompt-safe evidence와 visible truth로 변환 |
-| **Answer Publication Guard** | 최종 검증 및 발행 | `FinalAnswer` | L1 의도와 실행 결과의 최종 정합성 확인 |
+| 1 | `rule_precheck` | 결정적 규칙 | LLM 없이 끝낼 수 있는 건 바로 처리 |
+| 2 | `run_dialogue_agent` | **LLM 에이전트** | 이번 턴에 뭘 할까(직접답변/도구호출/되묻기/에러) |
+| 3 | `execute_agent_tool` → Planner → `ExecutionManager` | 결정적 컴파일러+파이프라인 | 그 의도를 검색조건·쿼리·복구로 변환·실행 |
 
-### 패키지 구조 (Package Structure)
+- **2번이 "에이전트"** — LLM이 전략적 결정을 내리는 곳은 여기 *한 군데*뿐이다. 도구 실행 후 흐름은 앞(검색→답변)으로 갈 뿐 에이전트로 되돌아오지 않는다(되돌아오는 유일한 경로 = 도구 에러 시 1회 재시도). 즉 ReAct식 자율 루프가 아니라 **턴당 1회 판단하는 프런트 컨트롤러**다. `AGENTIC_MAX_STEPS`는 예약만 돼 있고 미적용.
+- **3번이 "플래너"** — 단, 이 코드의 `Planner`는 *여러 단계를 계획하는* 고전적 플래너가 아니라 **의도 → Qdrant 쿼리플랜으로 번역하는 컴파일러**이며, 그래프 노드가 아니라 `execute_agent_tool` 안에서 돈다. 검색 복구 루프(`rag_search ↔ relax_and_retry`)에도 LLM은 없다(규칙 기반).
+- 그 아래 LLM(Solar/Gemma)은 결정을 내리는 게 아니라 **답을 생성·검증하는 일꾼**이다.
 
-| 패키지 | 역할 |
+**한 문장:** 계약으로 묶인 파이프라인 위에 *한 번만 판단하는* LLM 프런트 컨트롤러를 얹은 것 — **에이전트로 제어하고, 플래너로 실행한다.** 이게 §1의 L1/L2 경계이며, 결정적 파이프라인 → 에이전트형으로 옮기는 **과도기 설계**다(ADR-0001 "In Progress").
+
+> **디버깅 지침:** *결정*이 틀리면(엉뚱한 도구·불필요한 되묻기) → 에이전트(`run_dialogue_agent`, `AGENT.DECISION` 로그). 결정은 맞는데 *실행*이 틀리면(필터·개수·`pjt_id`/`pjt_no` 혼용) → 플래너/파이프라인(`PLANNER.*`, `RAG.EXECUTION_MANAGER.RESULT` 로그).
+
+## 3. 계층 — 누가 무엇을 책임지나
+
+00의 5단계를 코드 계층으로 풀면 이렇다. (왼쪽이 위, 즉 의도에 가깝다.)
+
+| 계층 | 쉬운 말로 | 산출물 | 핵심 코드 |
+|---|---|---|---|
+| **Dialogue Agent** | "무슨 의도지?" 판단 (L1) | `AgentDecision` | `apps/conversation/agent_dialogue_router.py` |
+| **Tool Backend Guard** | 의도를 도구 입력으로 안전 변환 | `IntentPayloadV3` | `apps/conversation/agent_tool_executor.py` |
+| **Planner / Contract** | 검색 조건으로 컴파일 (L2) | `IntentContract`, `QdrantQueryPlan` | `apps/planner/planner_runtime.py` |
+| **Orchestrator / Retrieval** | 실제 검색 + 실패 시 복구 | `ExecutionTrace`, `ToolResult` | `apps/retrieval/execution_manager.py` |
+| **Evidence / Display** | 원본을 답변용 근거로 정리 | `canonical_evidence`, `DisplaySnapshot` | `apps/evidence/canonical_evidence.py` |
+| **Answer Publication Guard** | 답이 근거와 맞나 최종 점검 후 발행 | `FinalAnswer` | `apps/chat/answer_generation.py` |
+
+**경계 규칙(위반하면 버그):** 각 계층은 자기 윗 계층이 정한 걸 못 바꾼다.
+- Agent는 DB 필터·식별자를 직접 만들지 않는다(의미 수준의 말만 한다).
+- 검색 계층은 "상세 요청"을 마음대로 "넓은 검색"으로 바꾸지 않는다.
+- 도구(tool)는 전체 대화 상태를 들여다보지 않는다(필요한 입력만 받는다 — 상태 격리).
+- 답변 계층은 점검에 실패한 컨텍스트를 LLM에 슬쩍 넣지 않는다.
+
+## 4. 검색 방식 3종 (SEARCH / LOOKUP / JOIN)
+
+질문 성격에 따라 검색 방법이 다르다. 이 셋은 아래 단계가 함부로 못 바꾼다.
+
+| 방식 | 언제 | 비유 |
+|---|---|---|
+| **SEARCH** | "AI 관련 과제 찾아줘"처럼 폭넓게 | 도서관에서 주제로 책 더미 찾기 (recall 우선) |
+| **LOOKUP** | "과제번호 X의 상세"처럼 콕 집어 | 청구기호로 책 한 권 꺼내기 (정확도 우선) |
+| **JOIN** | "이 과제의 성과 전부"처럼 연결해서 | 책에 딸린 부록·논문 묶어오기 (관계) |
+
+## 5. 패키지 지도 (정밀 참조)
+
+| 패키지 | 책임 |
 |---|---|
-| `apps.api` | route, runtime wiring, transport, manifest |
-| `apps.planner` | query intent, planner stage/runtime/service, Qdrant query compiler |
-| `apps.conversation` | follow-up, scope, anchor, session/view-state |
-| `apps.retrieval` | retrieval/filter/compile/orchestration/runtime |
-| `apps.evidence` | canonical evidence, detail/context/render, result assembly |
-| `apps.chat` | answer generation, llm runtime, streaming runner |
-| `apps.platform` | shared settings, schemas, storage, provider clients |
+| `apps/api` | FastAPI 라우트, 런타임 배선, 워크플로 빌드(`workflow_builder.py`/`workflow_nodes.py`), 스트리밍, 도메인 매퍼 |
+| `apps/conversation` | Dialogue Agent, 세션/대화 메모리, follow-up·anchor·scope 해석, state card |
+| `apps/planner` | 질의 분석 → 실행 전략 컴파일(단계별 플래너, Qdrant 컴파일러, intent adapter) |
+| `apps/retrieval` | RAG 실행(dense/sparse/JOIN), `ExecutionManager` 복구 정책, 검색 그래프 노드 |
+| `apps/evidence` | canonical evidence, context/prompt packing, citation, detail contract, render profile |
+| `apps/chat` | Solar/Gemma 답변 생성·merge, LLM 런타임, 스트리밍, groundedness 가드 |
+| `apps/platform` | 설정/스키마/스토리지/메트릭/추론 클라이언트(공통 인프라) |
+| `apps/prompts` | 런타임 로드되는 마크다운 프롬프트 자산 |
 
----
+## 6. 요청 실행 흐름 (정밀 참조)
 
-## 3. 요청 실행 흐름 (Execution Flow)
-
-```text
-1. Request Ingress
-   └─ API route가 workflow seed와 SessionMemory view를 생성.
-
-2. Dialogue Agent Decision
-   └─ Agent가 direct_answer / call_tool / ask_clarification / agent_internal_error를 선택.
-
-3. Guarded Tool Adapter
-   └─ Agent tool call을 `IntentPayloadV3` / `QuestionAnalysisV3`로 변환하고 parser-incompatible query token, count contract, tool schema를 검증. subject activity와 current-subject refinement direct compile은 여기서 수행된다.
-
-4. Planner / Contract Assembly
-   └─ L1 truth를 실행 계약으로 컴파일한다. Stage 2 슬롯은 `QdrantQueryPlan`으로 재컴파일되어 필터 환각을 제거하고 detail count는 `1/1`로 normalize한다. 대상 단일성은 별도 guard로 검증.
-
-5. Retrieval Execution
-   └─ `SEARCH/LOOKUP/JOIN` 의미를 유지하며 실행. detail-like 요청은 단일 `pjt_id` 후보가 있으면 lookup 정책으로 실행하고, 단일 후보가 없으면 broad `SEARCH_RECOVERY`로 확장하지 않음.
-
-6. Evidence / Display Snapshot
-   └─ raw retrieval payload -> canonical_evidence + render_profile + display snapshot 변환. visible order와 canonical identifier 축 정합성 확인.
-
-7. Answer Publication Guard
-   └─ groundedness, answer-state consistency, contract-invalid 상태를 검증. contract-invalid이면 LLM 답변 스트리밍 대신 deterministic terminal message.
-
-8. Response / Ops Summary
-   └─ 최종 응답 전송 및 REQ.SUMMARY 기록.
+```mermaid
+flowchart TD
+    Q[사용자 질문] --> A[Dialogue Agent · L1]
+    A -->|direct_answer| ANS
+    A -->|ask_clarification| CLR[되묻기]
+    A -->|agent_internal_error| ERR[내부오류 종료]
+    A -->|call_tool| TA[Guarded Tool Adapter]
+    TA --> P[Planner/Contract · L2]
+    P --> R[Retrieval / ExecutionManager]
+    R --> E[Evidence · canonical_evidence + DisplaySnapshot]
+    E --> G[Answer Publication Guard]
+    G -->|valid| ANS[Solar/Gemma 듀얼 답변]
+    G -->|contract-invalid| ERR
+    ANS --> S[REQ.SUMMARY]
 ```
 
----
+1. **Request Ingress** — API 라우트가 워크플로 시드 + SessionMemory 뷰 생성
+2. **Dialogue Agent Decision** — `direct_answer`/`call_tool`/`ask_clarification`/`agent_internal_error`
+3. **Guarded Tool Adapter** — `IntentPayloadV3`/`QuestionAnalysisV3` 생성, 파서 비호환 토큰·count 계약·도구 스키마 검증
+4. **Planner/Contract Assembly** — Stage 2 슬롯을 `QdrantQueryPlan`으로 재컴파일, 필터 환각 제거, detail count → `1/1`
+5. **Retrieval Execution** — `SEARCH/LOOKUP/JOIN` 보존. 단일 `pjt_id` detail은 lookup 정책, 단일후보 없으면 broad `SEARCH_RECOVERY` 금지
+6. **Evidence/Display Snapshot** — raw → `canonical_evidence` + render_profile + display snapshot
+7. **Answer Publication Guard** — groundedness·answer-state 정합성 검증. contract-invalid → LLM 스트림 대신 결정적 종료 메시지
+8. **Response/Ops Summary** — `REQ.SUMMARY` 기록
 
-## 4. 운영 및 디버깅 신호 (Observability)
-
-문제가 발생했을 때 로그에서 확인해야 할 주요 신호들이다.
-
-*   **요청 시작:** `REQ.START`
-*   **Agent 판단:** `AGENT.STATE_CARD.BUILT`, `AGENT.DECISION`, `AGENT.TOOL_CALL`, `AGENT.TOOL_DIRECT_COMPILE`, `AGENT.REFINE_CURRENT_SUBJECT`, `AGENT.CLARIFICATION.RECOVERY`, `AGENT.TOOL_OBSERVATION`
-*   **질의 해석:** `PLANNER.COUNT_CONTRACT`, `PLANNER.PIPELINE`, `PLANNER.ASSEMBLE`
-*   **실행 전략:** `RAG.EXECUTION_MANAGER.RESULT`, `RAG.PLAN`, `RAG.RETRIEVE`, `RAG.JOIN.POLICY`
-*   **데이터 근거:** `RAG.RESULT.TOP`, `RAG.CONTEXT`, `RAG.CTX`, `DISPLAY.SNAPSHOT.BUILT`
-*   **답변 및 종료:** `LLM.RESULT`, `ANSWER.STATE_DIAG`, `REQ.SUMMARY`, `REQ.END`
-
----
-
-## 5. 계층별 제약 및 금지 사항
-
-| 계층 | 할 수 있는 일 | 하면 안 되는 일 |
-|---|---|---|
-| **Dialogue Agent** | 대화 의도 판단, tool 선택, 자연스러운 clarification 문구 생성 | DB filter, 식별자, JOIN 축 생성 |
-| **Tool Backend Guard** | tool schema 검증, parser-safe query materialization, Smart Coercion | L1 대상/축/필터 교정 |
-| **Planner** | 질문 의도 분석, 식별자 추출, detail count normalization | 실행 도중의 보정 정책 결정 |
-| **Orchestrator** | 도구 체이닝, 정책 기반 회복 | L1이 정한 식별자나 필터의 임의 변경, detail broad search fallback |
-| **Tools** | 명시적 인자에 따른 데이터 조회 | 전체 에이전트 상태(State) 참조 |
-| **Answer** | 근거 기반 답변, 검증, publication guard | 검색 계약(Contract)의 사후 변경, contract-invalid 컨텍스트의 LLM 답변 노출 |
+> 데이터 함정과 규칙 → [02 계약과 도메인 규칙](./02_CONTRACTS_AND_RULES.md) · 검색 실패 시 복구 → [03 행동 안전](./03_BEHAVIORAL_SAFETY.md)
