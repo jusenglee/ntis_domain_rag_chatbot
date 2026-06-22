@@ -40,13 +40,11 @@ from apps.conversation.view_state import (
 from apps.planner.planner_contract import StrategyViolation
 from apps.planner.planner_context_cards import build_planner_domain_cards
 from apps.planner.planner_defaults import (
-    PLANNER_DISABLE_THINKING,
     PLANNER_RUNTIME_MAX_TOP_K_SIZE,
     PLANNER_RUNTIME_SCHEMA_VERSION,
     PLANNER_STAGE15_PROMPT_VERSION,
     PLANNER_STAGE2_PROMPT_VERSION,
     PLANNER_STAGE2_REGATE_SEED_ALLOWED_KEYS,
-    PLANNER_STAGEWISE_ENABLED,
     PLANNER_TEMPERATURE,
 )
 from apps.planner.agent_intent_adapter import build_agent_intent_gate
@@ -58,7 +56,6 @@ from apps.planner.planner_staged import (
     compose_locked_strategy,
     extract_single_project_seed,
     merge_locked_strategy_slots,
-    regate_locked_strategy,
 )
 from apps.planner.planner_surface_signals import SurfaceSignals, collect_surface_signals
 from apps.planner.planner_validation import Stage2ValidationResult, validate_stage2_slots

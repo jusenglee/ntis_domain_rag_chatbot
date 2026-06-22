@@ -4,7 +4,6 @@ import time
 from functools import wraps
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from loguru import logger
 from apps.platform.langchain_compat import BaseMessage
 try:
     from langgraph.graph.message import add_messages

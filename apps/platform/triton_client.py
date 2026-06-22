@@ -23,7 +23,6 @@ except ModuleNotFoundError:
 
 from apps.platform.settings import (
     TRITON_URL,
-    TOKENIZER_MAP,
     TEMPERATURE,
     TOP_P,
     CTX_SAFETY_MARGIN,

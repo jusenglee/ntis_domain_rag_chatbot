@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, fields, replace
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from apps.platform.pipeline_steps import NormalizedIntent
 from apps.conversation.anchor_resolution import build_anchor_execution_inputs

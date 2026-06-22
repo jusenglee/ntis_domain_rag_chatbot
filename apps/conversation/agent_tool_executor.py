@@ -36,7 +36,6 @@ from apps.conversation.request_facade import (
 )
 from apps.conversation.session_memory import (
     ClarificationContext,
-    DetailAnchorContext,
     FollowupRights,
     GroupAnchorContext,
     ProjectGroupAnchor,

@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel, ConfigDict
 
-from apps.platform.pipeline_steps import NormalizedIntent
 from apps.platform.schemas import IntentPayloadV3
 from apps.conversation.followup_resolution import (
     build_followup_clarification_message,

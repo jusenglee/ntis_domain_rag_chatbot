@@ -9,8 +9,6 @@ from apps.platform.rag_constants import (
     COL_PERF,
     COL_PROJECT,
     PERF_TAGS,
-    PROJECT_TAGS,
-    RARE_TOKEN_RE,
     TAG_PJT_INFO,
     TAG_RI_COMPOUND,
     TAG_RI_FCLT_EQUIP,

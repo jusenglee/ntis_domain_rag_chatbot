@@ -4,16 +4,12 @@ import re
 from typing import Any, Dict, Optional
 
 from apps.conversation.view_state import (
-    ConversationViewState,
     DisplaySnapshot,
     FocusEntity,
     RecentMentionRecord,
     SubjectIndexEntry,
     focus_entity_from_item,
     focus_entity_subject_id,
-    get_active_child_anchor,
-    get_active_focus_entity,
-    get_recent_mentions,
 )
 
 # Removed per ADR-0015 Stage 4: the legacy `turn_interpreter.TurnCandidate`

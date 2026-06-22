@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.evidence.canonical_evidence import build_canonical_evidence, build_canonical_evidence_bundle
+from apps.evidence.canonical_evidence import build_canonical_evidence
 
 # 프롬프트에 표시될 필드들의 한글 라벨 설정입니다.
 # 사용자가 답변의 근거를 쉽게 이해할 수 있도록 친숙한 용어를 사용합니다.

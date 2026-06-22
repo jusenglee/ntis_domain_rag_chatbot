@@ -9,23 +9,18 @@ from collections.abc import Mapping
 import os
 import re
 import time
-from dataclasses import fields, replace
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from dataclasses import replace
+from typing import Any, Dict, List, Optional, Tuple
 from apps.platform.pipeline_steps import NormalizedIntent
 from apps.platform.schemas import (
-    ExecutionContext,
     QueryPlan,
-    StrategySpec,
     build_query_plan as _build_query_plan_policy,
     default_target_collections as _default_target_collections_policy,
-    default_target_collections_for_route as _default_target_collections_for_route_policy,
     select_mode_policy as _select_mode_policy_policy,
 )
 from apps.platform.settings import (
     DEFAULT_MODEL_NAME,
     logger,
-    get_ctx_token_budget,
-    get_model_max_output_tokens,
     RAG_COLLECTION_ALLOWLIST,
 )
 from apps.platform.rag_types import RagResult
@@ -33,21 +28,12 @@ from apps.retrieval.rag_store import build_rag_objects
 from apps.retrieval.retrieval import (
     normalize_query,
     dense_retrieve_hybrid_multi,
-    build_context_mixed,
     _payload_get,
 )
-from apps.planner.planner_locking import resolve_planner_locked_plan
 from apps.retrieval.rag_strategy_guard import (
-    derive_planner_locks,
     normalize_strategy_target_cols,
-    strategy_consistency_or_violation,
-    strategy_field_diff,
-    strategy_must_match_or_violation,
-    validate_project_key_exclusive,
 )
-from apps.retrieval.rag_compile_runtime import assemble_runtime_compile_policy
 from apps.retrieval.rag_execution_policy import resolve_join_execution_policy
-from apps.retrieval.rag_collection_retrieval import retrieve_collections
 from apps.retrieval.rag_base_orchestration import (
     BaseFilterPolicyInputs,
     BaseOrchestrationRequest,
@@ -66,8 +52,6 @@ from apps.retrieval.rag_dispatch_runtime import build_join_runtime, resolve_perf
 from apps.retrieval.rag_hydration_runtime import hydrate_points_payload
 from apps.retrieval.rag_runtime_safety import (
     build_multi_hop_bundle_payload as _build_multi_hop_bundle_payload,
-    build_pattern_analysis_payload as _build_pattern_analysis_payload,
-    build_people_superlative_aggregation as _build_people_superlative_aggregation,
     build_project_series_payload as _build_project_series_payload,
     debug_force_join_keys_enabled as _debug_force_join_keys_enabled,
     get_ctx_hard_limit as _get_ctx_hard_limit,
@@ -80,43 +64,25 @@ from apps.retrieval.rag_join_orchestration import (
 )
 from apps.evidence.context_build_policy import (
     build_context_with_output_type,
-    normalize_output_type,
-    resolve_output_fieldset,
 )
 
 # -------------------------
 # core/runtime 관련 import
 # -------------------------
 from apps.platform.rag_constants import (
-    COL_SUPPORT,
     COL_PROJECT,
     COL_PERF,
     TAG_PJT_INFO,
     TAG_PJT_MP,
     TAG_PJT_ORG,
-    normalize_perf_types,
 )
 from apps.planner.query_intent import (
     get_relation_route,
-    relation_target_collections,
-    normalize_categories,
-    normalize_org_terms,
-    pick_perf_tag_filters,
 )
 from apps.retrieval.rag_search_policy import (
-    SearchPreset as _SearchPreset,
-    build_search_preset as _build_search_preset,
-    build_topk_spec as _build_topk_spec,
-    resolve_sparse_vector_name as _resolve_sparse_vector_name,
-    SEARCH_POLICY_VERSION,
-    build_strategy_key,
-    build_rerank_spec as _build_rerank_spec,
     named_vectors_in_collection as _named_vectors_in_collection,
 )
 from apps.planner.planner_contract import (
-    planner_contract_mode,
-    validate_planner_contract,
-    normalize_stats_policy_value,
     StrategyViolation,
 )
 
@@ -155,45 +121,28 @@ def _pick_first(*values: Any) -> str:
 from apps.retrieval.rag_rank_runtime import (
     dedup_by_doc_id as _dedup_by_doc_id,
     RankSource as _RankSource,
-    hit_key as _hit_key,
     resolve_collection as _resolve_collection,
     rrf_merge as _rrf_merge,
-    classify_tag_family as _classify_tag_family,
     normalize_tag_value as _normalize_tag_value,
-    split_tag_filters_by_family as _split_tag_filters_by_family, PROJECT_TAGS_NORM, PERF_TAGS_NORM,
+    PROJECT_TAGS_NORM, PERF_TAGS_NORM,
 )
-from apps.retrieval.result_contract import enforce_reranked_contract as _enforce_reranked_contract
 from apps.platform.log_keys import (
     LOG_KEY_CHANGED_BY,
-    LOG_KEY_FORCE_FALLBACK_CHAT,
-    LOG_KEY_POLICY_MODE,
-    LOG_KEY_EXECUTION_MODE,
-    LOG_KEY_STRATEGY_MUTATION_STAGE,
-    LOG_KEY_STRICT_STRATEGY_CONSISTENCY,
     CHANGED_BY_EXECUTOR,
 )
 from apps.retrieval.rag_join_runtime import (
     extract_join_keys as _extract_join_keys,
-    is_valid_join_key as _is_valid_join_key,
-    normalize_relation_hint as _normalize_relation_hint,
 )
 from apps.retrieval.filters import (
     build_tag_only_filter as _build_tag_only_filter,
     build_collection_join_filter,
     build_perf_filter_by_pjt_id,
-    build_year_range_filter,
-    build_perf_type_filter,
-    and_filter as _and_filter, build_org_filter, build_prtcp_org_nested_filter, build_people_filter,
-    make_match_any,
+    and_filter as _and_filter, build_people_filter,
     build_project_id_filter,
-    build_title_exact_filter,
-    build_title_text_filter,
-    TITLE_MATCH_MODE_EXACT,
-    TITLE_MATCH_MODE_TEXT,
     TITLE_MATCH_MODE_CONTAINS,
     validate_resolved_join_keys,
     JoinFilterInput,
-    PeopleFilterInput, OrgFilterInput,
+    PeopleFilterInput,
 )
 
 try:

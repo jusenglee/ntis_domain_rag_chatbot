@@ -67,7 +67,7 @@ from apps.chat.llm_json import sanitize_llm_json
 from apps.chat.llm_runtime import build_llm
 from apps.planner.planner_contract import StrategyViolation
 from apps.platform.rag_constants import COL_PROJECT
-from apps.retrieval.execution_manager import ExecutionInput, ExecutionManager
+from apps.retrieval.execution_manager import ExecutionInput, ExecutionManager, ExecutionOutcome
 from apps.retrieval.runtime_routing import build_runtime_dispatch_plan, can_use_legacy_retry
 from apps.platform.settings import MAX_TOP_K_SIZE
 from langchain_core.output_parsers import PydanticOutputParser

@@ -50,7 +50,7 @@ from apps.chat.execution_trace_summary import summarize_execution_trace
 from apps.chat.llm_runtime import build_llm, load_system_prompt, resolve_system_prompt_path
 from apps.chat.llm_streaming import run_llm_streaming
 from apps.evidence.context_renderer import split_sentences
-from apps.planner.prompt_asset_paths import planner_card_path, planner_prompt_path
+from apps.planner.prompt_asset_paths import planner_prompt_path
 from apps.platform.settings import MAX_DOC_SENTENCES, MAX_DOC_TOKENS
 
 

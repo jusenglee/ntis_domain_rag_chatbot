@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from apps.platform.rag_constants import COL_PERF
 
-from apps.retrieval.filters import validate_resolved_join_keys
+
 from apps.planner.planner_contract import StrategyViolation
 
 

@@ -7,11 +7,9 @@
 
 from __future__ import annotations
 
-import os
 import re
 
 from dataclasses import is_dataclass, replace
-from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -19,7 +17,6 @@ if TYPE_CHECKING:
 else:
     BaseMessage = Any
 
-from apps.conversation.anchor_constraint_compiler import apply_anchor_lock as _apply_anchor_lock, apply_resolved_anchor_seed as _apply_resolved_anchor_seed
 from apps.conversation.followup_anchor import (
     anchor_to_seed_map,
     is_child_anchor_source,
@@ -27,10 +24,9 @@ from apps.conversation.followup_anchor import (
     parse_ordinal_reference,
     parse_source_reference,
 )
-from apps.conversation.scope_resolver import resolve_scope_decision
 from apps.conversation.session_memory import ClarificationContext, SessionMemory, SubjectQueryContext, view_state_from_current_context
 from apps.platform.settings import MAX_TOP_K_SIZE
-from apps.api.runtime_helpers import log_event, merge_log_fields
+from apps.api.runtime_helpers import log_event
 from apps.api.contracts.workflow_models import HardContractV1, QuestionAnalysis, SoftStrategyHintsV1
 from apps.planner.planner_defaults import (
     PLANNER_STAGE15_PROMPT_VERSION,
@@ -39,7 +35,6 @@ from apps.planner.planner_defaults import (
 from apps.planner.planner_service import apply_question_analysis_v3
 from apps.planner.query_analysis import run_question_analysis
 from apps.planner.query_intent import (
-    _cheap_precheck,
     classify_query as classify_query_intent,
     extract_perf_types,
     extract_title_terms,
@@ -51,8 +46,6 @@ from apps.conversation.view_state import (
     ConversationViewState,
     clear_view_state_scope,
     get_active_subject_entity,
-    get_recent_mentions,
-    set_visible_answer_manifest,
 )
 
 
