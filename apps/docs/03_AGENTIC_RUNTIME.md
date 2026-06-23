@@ -1,172 +1,68 @@
-# Agentic Runtime
+# 03. 에이전트 런타임 (이 브랜치의 심장)
 
-Agentic mode is the current default. It makes the chatbot decide turn by turn
-whether to call NTIS tools, answer directly, clarify, or refuse.
+> "에이전트가 어떻게 도구를 부르고, 언제 멈추고, 답을 어떻게 검증하나"를 다룬다. 이 브랜치를 *진짜 에이전트*로 만드는 부분이다. §1이 개념, §2 이후가 정밀 참조.
 
-## PlannerAgent
+## 1. 핵심: 플래너가 루프를 돈다
 
-Source: `apps/pipeline/agents/planner_agent.py`
+고정 RAG 체인과 가장 다른 점 — **LLM 플래너가 도구를 반복해서 부르며 스스로 끝낼 때를 정한다.**
 
-`PlannerAgent.decide_next` is a two-pass planner.
-
-### Pass 1: Action And Tool
-
-Pass 1 chooses:
-
-- `action`
-- optional `tool`
-- `reason`
-- `confidence`
-- optional clarification/direct answer fields
-
-It sees only tool names and one-line descriptions. It does not see full args
-schemas. This keeps the main decision focused on capability, domain fit, and
-next action.
-
-Thinking mode:
-
-- controlled by `RAG_PLANNER_THINKING_ENABLED`
-- default: enabled
-- call kwargs when enabled: `disable_thinking=False`,
-  `reasoning_effort="medium"`, `include_reasoning=False`
-
-### Pass 2: Tool Args
-
-Pass 2 runs only for `action="call_tool"` and only if the selected tool exists
-in the catalog.
-
-It sees only the selected tool's schema and fills args. Thinking is intentionally
-not enabled in this pass.
-
-Fallbacks:
-
-- unknown tool from Pass 1 -> `answer` fallback, no Pass 2 call.
-- Pass 2 failure -> preserve selected tool and use `args={}`.
-
-## Tool Execution
-
-Source: `apps/pipeline/tools/contracts.py`
-
-`ToolExecutor` dispatches the chosen tool and wraps the result into an
-`Observation`.
-
-Failures are not thrown through the graph. They become:
-
-```text
-Observation(status="error", error_code=..., error_message=...)
+```
+planner_loop:  "도구 부를까 / 이제 답할까 / 되물을까?"  ← LLM이 매 스텝 결정
+   ↓ call_tool
+tool_executor: 도구 실행 → 관찰(Observation)
+   ↓ (response.* 종결이면 발행, 아니면)
+planner_loop:  관찰을 보고 다시 결정 ...  (반복)
 ```
 
-The Planner sees prior observations in the next step.
+- 플래너가 `action=answer`를 내면 → 근거 정리(answer_curator) → 답변 생성.
+- **최대 8스텝**(`_DEFAULT_MAX_STEPS = 8`, `apps/pipeline/agents/planner_agent.py:31`)이 안전망. 종료 결정 자체는 LLM이 한다(시스템 프롬프트 규칙 #3).
+- 추가 종료 가드: `duplicate_call`(같은 도구 반복 호출 방지), 라우터 안전 분기 `step_no >= 50`.
 
-## Adequacy — Planner single authority (ADR-0023)
+> **왜 이렇게?** 예전엔 별도 `AdequacyGate`(LLM 판정자)가 "근거 충분한가"를 따로 판정했는데, 성공한 검색도 "불충분"으로 과판정해 중복검색이 폭주했다. ADR-0023이 그걸 제거하고 **Planner를 유일한 충분성 판정자**로 만들었다.
 
-`AdequacyGate` was removed in ADR-0023. There is no separate adequacy judge.
-After each tool call, `_route_after_tool_executor` routes deterministically:
+## 2. 정밀 참조 — PlannerAgent (2-pass)
 
-- `plan_state` None or `step_no >= 50` -> `answer_curator` (safety)
-- last observation is `response.direct_answer` / `response.unsupported` and
-  `status=ok` -> `answer_curator` (direct-answer terminal)
-- everything else (search results, errors) -> `planner_loop`
+`PlannerAgent.decide_next`는 **두 번에 나눠** LLM을 부른다:
 
-Control returns to the Planner, which decides `answer` (sufficient), another
-`call_tool` (refine), or `response.unsupported` (out of scope) per its
-system-prompt rule #3, using the observations and `applied_context` (ADR-0022).
-Termination is bounded by the duplicate_call guard, `max_steps` (8), and the
-`step_no >= 50` safety branch.
+- **Pass 1 (행동·도구 선택):** `action`, 선택적 `tool`, `reason`, `confidence` 결정. **도구 이름 + 한 줄 설명만** 본다(전체 인자 스키마 안 봄). thinking: `RAG_PLANNER_THINKING_ENABLED`(기본 on) → `disable_thinking=False`, `reasoning_effort="medium"`, `max_tokens=4096`(thinking 시) / `384`.
+- **Pass 2 (도구 인자):** `action="call_tool"`이고 선택된 도구가 카탈로그에 있을 때만. **선택된 도구의 스키마만** 본다. thinking 미적용.
+- 폴백: Pass 1이 모르는 도구 → `answer` 폴백(Pass 2 생략) · Pass 2 실패 → 도구는 유지하고 `args={}`.
+- max_steps 초과 → `PlannerStep(action="answer", reason="max_steps_exceeded(...)", confidence=0.3)`.
 
-## Answer Curator
+## 3. 정밀 참조 — tool_executor 라우팅 (ADR-0023)
 
-Source: `apps/pipeline/agentic_workflow.py`
+`_route_after_tool_executor`가 **결정적으로** 라우팅한다(LLM 판정 없음):
 
-`node_answer_curator` is evidence-only (ADR-0024): it turns accumulated
-observations into an `EvidenceBundle` and always flows to `AnswerAgent`.
-`response.*` terminal-tool publication is handled by `emit_tool_response`, not
-the curator; `PlannerStep.answer_text` is not published.
+- `plan_state`가 None 또는 `step_no >= 50` → `answer_curator`(안전판).
+- 마지막 관찰이 `response.direct_answer`/`response.unsupported` + `status=ok` → `emit_tool_response`(직접답변 종결, ADR-0024).
+- 그 외 전부 → `planner_loop`(다시 판단).
 
-Current evidence selection priority is:
+## 4. 정밀 참조 — answer_curator는 evidence-only (ADR-0024)
 
-1. last successful `search.detail`
-2. last successful `search.stats`
-3. last successful `search` (with fallback to the prior non-empty `search`)
-4. empty
+`node_answer_curator`는 **근거만** 만든다(`EvidenceBundle` 빌드) → 항상 `answer_agent`로. `response.*` 발행은 별도 `emit_tool_response` 노드 담당. `PlannerStep.answer_text`는 발행되지 않는다(필드는 남아 있으나 비활성).
 
-(Old tool names `search.exact_lookup` / `search.aggregate` / `search.hybrid` are
-still recognized for backward compatibility — ADR-0022.) This is not a full
-multi-observation ranking system yet; it is a priority selector over accumulated
-observations.
+근거 선택 우선순위: ① 마지막 성공 `search.detail` → ② 마지막 성공 `search.stats` → ③ 마지막 성공 `search`(비면 직전 비어있지 않은 search) → ④ 빈 근거. (구 이름 `search.exact_lookup`/`search.aggregate`/`search.hybrid`도 호환 인식 — ADR-0022)
 
-## AnswerAgent
+## 5. 정밀 참조 — 듀얼 답변 (Solar A / Gemma B, ADR-0021)
 
-Source: `apps/pipeline/agents/answer_agent.py`
+`node_answer`가 **같은** `EvidenceBundle`에 대해 두 `AnswerAgent`를 `asyncio.gather`로 동시 실행:
 
-`AnswerAgent` generates an answer from an `EvidenceBundle`. It should only see
-canonical evidence, not raw vector payloads.
+- **메인 = Solar** (`solar_vllm_0`, `model_key="solar"`, 패널 A): `state.answer_draft`. **canonical** — CriticAgent가 검증하고, `repair_answer`·`reference.set`·세션 저장을 구동.
+- **비교 = Gemma** (`gemma_triton_0`, `model_key="gemma"`, 패널 B): `state.secondary_answer_draft`. **raw로 노출** — groundedness/citation 게이트·repair 없음, 저장 안 함.
+- 비교 답변은 비어있지 않은 근거 첫 패스에서만 생성. `repair_answer` 재패스는 메인(Solar)만 재생성. `reference.set` 하나가 두 패널에 적용.
+- `RAG_DUAL_ANSWER_ENABLED=false` → 메인(Solar)만 생성해 두 패널에 동일 표시.
 
-### Dual-model output (A=Solar main, B=Gemma comparison)
+## 6. 정밀 참조 — CriticAgent 라우팅
 
-`node_answer` (`apps/pipeline/agent_workflow.py`) runs two `AnswerAgent`
-instances over the *same* `EvidenceBundle`/`DialogueIntent`:
+`critic_agent`(+ `grounding/llm_judge.py`)가 메인(Solar) 답을 검증하고 반환: `publish`/`repair_answer`/`clarify`/`internal_error`.
 
-- **Main = Solar** (`deps.answer_agent`, `solar_vllm_0`): streams chunks tagged
-  `model_key="solar"` (frontend panel A) and is stored as `state.answer_draft`.
-  This is the canonical draft `CriticAgent` validates; it drives `repair_answer`,
-  `reference.set`, and session writes.
-- **Comparison = Gemma** (`deps.answer_agent_secondary`, `gemma_triton_0`):
-  streams chunks tagged `model_key="gemma"` (frontend panel B) and is stored as
-  `state.secondary_answer_draft`. It is shown raw — no grounding/citation gate,
-  no repair, not persisted to session.
+- `publish` → `save_session`
+- `repair_answer` → `answer_agent` (**1회만** — answer_agent 내부 `repair_attempted` 가드로 무한루프 차단)
+- `clarify` → `emit_clarification`
+- 그 외/없음 → `emit_internal_error`
 
-Both run concurrently (`asyncio.gather`). The comparison draft is generated only
-on the first pass over a non-empty bundle; a `repair_answer` re-pass regenerates
-the main (Solar) draft only, and a comparison failure is isolated (it never
-blocks the main answer). `[N]` citations reference the shared evidence bundle, so
-one `reference.set` applies to both panels.
+grounding checker 기본 on(`RAG_GROUNDING_CHECKER_ENABLED=true`). critic thinking: `RAG_CRITIC_THINKING_ENABLED`(기본 on), max token 512(on)/256(off), 스레드 타임아웃 `RAG_CRITIC_THREAD_TIMEOUT_SECONDS=600`.
 
-Disabled with `RAG_DUAL_ANSWER_ENABLED=false`: only the main (Solar) answer is
-generated and is fanned out to both panels. The `solar_vllm_0`/`gemma_triton_0`
-binding and the streaming lane contract are described in
-[ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md) and
-[05_API_AND_STREAMING](05_API_AND_STREAMING.md).
+## 7. 정밀 참조 — 직접 응답 도구
 
-## CriticAgent
-
-Sources:
-
-- `apps/pipeline/agents/critic_agent.py`
-- `apps/pipeline/agents/grounding/llm_judge.py`
-
-`CriticAgent` can return:
-
-- `publish`
-- `repair_answer`
-- `clarify`
-- `internal_error`
-
-In agentic mode, critic routing now honors those decisions:
-
-- `publish` -> `save_session`
-- `repair_answer` -> `answer_agent`
-- `clarify` -> `emit_clarification`
-- other/none -> `emit_internal_error`
-
-Grounding checker is enabled by default through
-`RAG_GROUNDING_CHECKER_ENABLED=true`.
-
-Critic thinking mode:
-
-- controlled by `RAG_CRITIC_THINKING_ENABLED`
-- default: enabled
-- max token budget: 512 when enabled, 256 when disabled
-- thread timeout default: `RAG_CRITIC_THREAD_TIMEOUT_SECONDS=600`
-
-## Direct Response Tools
-
-Source: `apps/pipeline/tools/response_tools.py`
-
-`response.direct_answer` is for greetings, capability explanations, and simple
-agent interactions where NTIS evidence is not needed.
-
-`response.unsupported` is for honest refusal when the request is outside NTIS
-R&D evidence scope.
-
-These are tools so the Planner can explicitly decide "do not retrieve".
+`apps/pipeline/tools/response_tools.py`: `response.direct_answer`(인사·능력설명 등 NTIS 근거 불필요) · `response.unsupported`(NTIS R&D 범위 밖 정직한 거절). 플래너가 "검색하지 않겠다"를 *명시적으로* 정할 수 있게 하는 도구.

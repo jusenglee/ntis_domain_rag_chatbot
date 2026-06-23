@@ -1,104 +1,69 @@
-# Architecture
+# 01. 아키텍처
 
-The product architecture is agent-first.
+> [00 온보딩](./00_ONBOARDING.md)의 흐름을 "누가 무엇을 책임지나"로 한 단계 더 들어간다. §1~§2가 개념, §3~가 정밀 참조다.
 
-The chatbot owns the interaction. NTIS vector search is a callable evidence
-tool, not the central workflow identity.
+## 1. 큰 그림: agent-first + 도구 backplane
 
-## Runtime Topology
+이 시스템의 정체성은 한 문장이다:
 
-`apps/api/runtime.py` builds shared resources:
+> **챗봇(에이전트)이 대화를 주도하고, NTIS 벡터 검색은 에이전트가 *필요할 때 부르는 도구* 일 뿐이다.**
 
-- Qdrant clients and embedding models from `apps.retrieval.rag_store`.
-- `solar_vllm_0` for dialogue, planning, grounding judgments, and the
-  **main answer** (compare panel A).
-- `gemma_triton_0` for the **comparison answer** (compare panel B) and the
-  `response.*` direct-answer tools.
+NTIS 벡터 DB가 제품의 경계가 아니다. MCP 서버처럼 "근거가 필요할 때 호출하는 backplane"이다. 그래서 에이전트는 인사·능력설명엔 검색을 안 쓰고, 범위 밖 질문은 정직하게 거절하고, 모호하면 되묻고, NTIS 근거가 필요할 때만 검색한다. (ADR-0019)
 
-Answer generation is dual-model by default (`RAG_DUAL_ANSWER_ENABLED=true`): the
-main answer (Solar) is the canonical one that `CriticAgent` validates and that
-drives `reference.set` and session state; the comparison answer (Gemma) is shown
-raw. See [ADR-0021](ADR/ADR-0021_Dual_Model_Answer_Output.md).
-- `SearchAgent` as the NTIS vector DB executor.
-- `ToolExecutor` and default tool registry.
-- LangGraph compiled graph.
+## 2. 3계층 권한분리 (ADR-0018) — 가장 중요한 구조 원칙
 
-## Single Agentic Pipeline
+세 가지 권한을 **서로 다른 컴포넌트가** 갖고, **서로 침범하지 않는다.** 버그의 상당수가 "한 계층이 남의 일을 할 때" 생긴다.
 
-ADR-0020 removed the static graph; there is one pipeline. ADR-0023 removed the
-AdequacyGate; adequacy is the Planner's sole authority.
+| 계층 | 권한 | 누가 | 하는 일 |
+|---|---|---|---|
+| **L1 판단(Interaction)** | "무엇을 할지" | `DialogueAgent`, `PlannerAgent`, LangGraph 라우팅 | 의도 분류, NTIS 필요 여부, 직접답변/되묻기/거절/도구호출 결정. **Planner가 유일한 충분성(adequacy) 판정자**(ADR-0023). |
+| **L2 근거(Evidence)** | "데이터를 가져오기" | `ToolExecutor`, `apps/pipeline/tools/*`, `SearchAgent`, `apps/pipeline/retrieval/*` | 도구 실행, `CanonicalEvidence`로 정규화, `Observation`/`SearchResult` 반환. **사용자 의도를 재해석하지 않는다.** |
+| **L3 발행(Publication)** | "사용자에게 내보내기" | `AnswerAgent`, `CriticAgent`, grounding checker, terminal emit 노드, API serializer | 답 생성, groundedness 검증, 출처 발행. |
 
-Flow:
+## 3. 단일 agentic 파이프라인 (ADR-0020)
 
-```text
-load_session
-  -> dialogue_agent          (direct_answer / clarification -> emit, no Planner)
-  -> entity_resolver         (ask_meta / ask_children -> fast-path emit)
-  -> planner_loop
-  -> tool_executor
-       -> emit_tool_response (last obs = response.* terminal -> publish)
-       -> planner_loop       (everything else -> Planner decides answer/refine)
-  (answer)
-  -> answer_curator          (evidence only)
-  -> answer_agent
-  -> critic_agent
-  -> save_session | answer_agent | emit_clarification | emit_internal_error
+예전엔 그래프가 둘(정적 + agentic)이었으나, ADR-0020이 **정적 그래프를 삭제하고 하나로 통일**했다(`RAG_AGENTIC_MODE` 토글도 제거). 지금은 파이프라인이 하나뿐이다.
+
+```mermaid
+flowchart TD
+    LS[load_session] --> DA[dialogue_agent]
+    DA -->|direct/clarify/error| EMIT1[즉답 종료]
+    DA -->|진행| ER[entity_resolver]
+    ER -->|ask_meta/children| EMIT2[fast-path 종료]
+    ER -->|모호| CLR[되묻기]
+    ER --> PL[planner_loop]
+    PL -->|call_tool| TE[tool_executor]
+    TE -->|response.* 종결| ETR[emit_tool_response]
+    TE -->|그 외| PL
+    PL -->|answer| AC[answer_curator · evidence-only]
+    PL -->|clarify| CLR
+    AC --> AA[answer_agent · Solar+Gemma]
+    AA --> CA[critic_agent]
+    CA -->|publish| SS[save_session]
+    CA -->|repair ×1| AA
+    CA -->|clarify/error| CLR
+    ETR --> SS
 ```
 
-Direct response tools short-circuit (ADR-0024):
+핵심은 **`planner_loop ⇄ tool_executor` 되먹임**이다. 플래너(LLM)가 도구를 부르고, 결과를 보고 다시 판단하고, "이제 답하자"를 스스로 결정한다. 상세는 [03 에이전트 런타임](./03_AGENTIC_RUNTIME.md).
 
-```text
-planner_loop -> response.* tool -> tool_executor -> emit_tool_response -> save_session
-```
+## 4. 런타임 구성 (정밀 참조)
 
-The `response.*` handler already produced the final text, so `emit_tool_response`
-(Publication layer) publishes it directly; `AnswerAgent` and `CriticAgent` are
-skipped. `answer_curator` is evidence-only and always flows to `answer_agent`.
+`apps/api/runtime.py`가 공유 자원을 조립한다:
 
-## Authority Separation
+- Qdrant 클라이언트·임베딩 모델 (`apps.retrieval.rag_store` — 옛 패키지를 빌딩블록으로 재사용).
+- **`solar_vllm_0`**: dialogue/planner/critic 판단 + **메인 답변**(패널 A).
+- **`gemma_triton_0`**: **비교 답변**(패널 B) + `response.*` 직접답변 도구.
+- `SearchAgent`(NTIS 벡터 DB 실행기), `ToolExecutor` + 기본 도구 레지스트리, LangGraph 컴파일 그래프.
 
-The current implementation keeps three layers separate:
+> 참고: 이 브랜치는 `apps/pipeline`(라이브)와 옛 패키지(`apps/{retrieval,chat,evidence,planner,conversation}`)가 **공존**한다. 옛 패키지는 죽은 코드가 아니라 pipeline이 재사용하는 하위 빌딩블록이다(예: `apps.retrieval.rag_store`, `apps.chat.llm_runtime`).
 
-1. Interaction and intent authority:
-   `DialogueAgent` and `PlannerAgent` decide what should happen next.
-   The Planner is the single adequacy authority (ADR-0023).
-2. Evidence authority:
-   `ToolExecutor`, NTIS tools, and `SearchAgent` retrieve or transform data but
-   do not reinterpret the user.
-3. Publication authority:
-   `AnswerAgent` drafts, `CriticAgent` validates, and terminal emit nodes decide
-   what reaches the user.
+## 5. 세션 모델 (정밀 참조)
 
-## NTIS Vector DB Role
+`SessionState`는 개념적으로 세 슬롯을 갖는다:
 
-The NTIS vector DB is a tool backplane.
+- `current_subject` — 사람/기관 앵커.
+- `published_manifest` — 직전 턴에 사용자에게 보인 목록.
+- `focused_detail` — 가장 최근 상세 엔티티(이어묻기용 캐시 근거 포함).
 
-It is used through tools such as `search`, `search.detail`, and `search.stats`
-(ADR-0022 — the Planner does not see DB schema; the SearchRouter resolves
-collection/strategy/filters internally). It supplies canonical evidence for
-NTIS-backed answers. It does not define all conversational behavior.
-
-The agent may avoid NTIS access for:
-
-- greetings,
-- capability explanations,
-- simple meta answers,
-- clarification,
-- unsupported or out-of-domain requests.
-
-## Session Model
-
-The agentic pipeline uses `SessionState` with three conceptual slots:
-
-- `current_subject`: person or organization anchor.
-- `published_manifest`: the list visible to the user in a previous turn.
-- `focused_detail`: the most recent detailed entity, including cached evidence
-  fields for follow-up answers.
-
-The persistence adapter still writes through `SessionMemory.current_context`.
-This means in-memory state is richer than the current KV storage format. See
-[02_CONTRACTS_AND_RULES.md](02_CONTRACTS_AND_RULES.md) for the exact constraint.
-
-## Architecture Diagram
-
-See [architecture_flow.mermaid](architecture_flow.mermaid).
+지속화 어댑터는 여전히 `SessionMemory.current_context`를 통해 KV에 쓴다 → **인메모리 상태가 KV 저장 포맷보다 풍부하다**(세 슬롯이 KV에선 하나로 압축됨). 정확한 제약은 [02 계약과 규칙](./02_CONTRACTS_AND_RULES.md) §세션 계약. KV 키: `pipeline:v1:{conversation_id}:session`.
