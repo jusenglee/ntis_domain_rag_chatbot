@@ -1,9 +1,31 @@
+# === IDE / 에디터 ===
 .idea/
 *.iml
+
+# === 파이썬 캐시/빌드 ===
 __pycache__/
 *.py[cod]
+
+# === 테스트/도구 캐시 ===
+.pytest_cache/
+pytest-cache-files-*/
+.ruff_cache/
+
+# === 에이전트 워크트리 / 로컬 Claude 상태 (저장소에 포함 금지) ===
+.claude/
+apps/.claude/
+
+# === 모델 가중치 (로컬 배치) ===
 Models/
+
+# === 런타임 데이터 / 로그 ===
 logs/
 local_kvstore/
+local_kvstore_test/
 rag_bench_logs/
+
+# === 테스트 트리 (버전관리 정책 미확정 — 인계 후 결정) ===
 tests/
+
+# === Office 임시 잠금 파일 ===
+~$*
