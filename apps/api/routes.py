@@ -14,7 +14,6 @@ ADR-0018 적용 후 슬림 버전. 다음 엔드포인트만 노출한다:
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
 from pathlib import Path

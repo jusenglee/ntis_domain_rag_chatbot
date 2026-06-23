@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from loguru import logger
 
 from apps.pipeline.agents.contracts import SearchPlan
 from apps.pipeline.contracts import (

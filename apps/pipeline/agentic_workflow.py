@@ -27,7 +27,6 @@ ADR-0023: AdequacyGate(LLM judge) 제거 — 검색 성공 후에도 insufficien
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
@@ -52,7 +51,6 @@ from apps.pipeline.agent_workflow import (
 )
 from apps.pipeline.log_helpers import short_id
 from apps.pipeline.agents.contracts import (
-    AnswerDraft,
     DialogueIntent,
     EvidenceBundle,
 )

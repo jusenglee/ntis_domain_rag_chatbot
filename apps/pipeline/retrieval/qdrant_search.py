@@ -20,7 +20,6 @@ from qdrant_client.models import (
     FusionQuery,
     MatchAny,
     Prefetch,
-    Range,
 )
 
 from apps.pipeline.contracts import FilterBundle, IdentifierBundle, SubjectAnchor

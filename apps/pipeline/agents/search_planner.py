@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from loguru import logger
 
@@ -28,10 +28,7 @@ from apps.pipeline.contracts import (
     Action,
     AggregateBy,
     Axis,
-    Collection,
-    FilterBundle,
     IdentifierBundle,
-    SearchStrategy,
     SearchTask,
     SubjectAnchor,
     Target,

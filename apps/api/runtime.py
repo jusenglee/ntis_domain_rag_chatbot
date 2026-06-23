@@ -15,7 +15,6 @@ ADR-0018 적용 후 슬림 버전. 다음 책임만 갖는다:
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import os
 from dataclasses import dataclass

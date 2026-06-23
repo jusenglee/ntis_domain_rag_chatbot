@@ -22,7 +22,6 @@ from loguru import logger
 from apps.pipeline.contracts import (
     AXIS_PRIORITY,
     CanonicalEvidence,
-    Collection,
     SearchResult,
     SearchResultStatus,
     SearchTask,

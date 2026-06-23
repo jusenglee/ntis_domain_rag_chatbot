@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
