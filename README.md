@@ -30,4 +30,4 @@ python apps/api/main.py
 
 외부 의존(Qdrant/Triton/Solar vLLM/Redis) 엔드포인트 기본값은 코드에 하드코딩되어 있으나 환경변수로 오버라이드된다. 인수 인프라 이전 시 교체 필요 → [06 운영과 환경](./apps/docs/06_OPERATIONS_AND_ENV.md), [`HANDOVER.md`](./HANDOVER.md).
 
-> ⚠️ 이 저장소엔 여러 브랜치(`판단-검색-에이전트`·`고도화`·`main` 등)가 구조가 다르게 존재한다. 이 README는 `판단-검색-에이전트` 기준이다.
+> ⚠️ 이 저장소는 **v1 = `고도화`(현재 운영 중, `apps/api` 계열)** 와 **v2 = `판단-검색-에이전트`(개발 중, `apps/pipeline` agentic — 이 README 기준)** 로 나뉜다. v2가 v1을 대체할 예정. 상세 → [`HANDOVER.md`](./HANDOVER.md).
